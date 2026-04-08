@@ -1,0 +1,49 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this?
+      placeholder: |
+        1. Go to...
+        2. Click on...
+        3. See error...
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Web (browser)
+        - Desktop (Tauri)
+        - Mobile (iOS)
+        - Mobile (Android)
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser / OS Version
+      placeholder: e.g. Chrome 120 on macOS 14.2
+  - type: textarea
+    id: relays
+    attributes:
+      label: Relay URLs (if relay-specific)
+      description: If the bug is relay-specific, list the relay URLs involved
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console Logs
+      description: Open browser dev tools, reproduce the bug, and paste any errors. Enable verbose logging with `VITE_DEBUG=true` in your `.env` file.
+      render: shell

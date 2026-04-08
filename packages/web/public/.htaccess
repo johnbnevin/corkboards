@@ -1,0 +1,12 @@
+RewriteEngine On
+
+# If the requested file or directory exists, serve it directly
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Don't rewrite PHP files (e.g. rss-proxy.php)
+RewriteRule \.php$ - [L]
+
+# Otherwise, serve index.html (SPA client-side routing)
+RewriteRule ^ index.html [L]

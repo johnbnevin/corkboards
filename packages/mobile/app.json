@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Corkboards",
+    "slug": "corkboards",
+    "version": "0.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "plugins": [
+      "expo-dev-client"
+    ],
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1f1f1f"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "me.corkboards.mobile"
+    },
+    "android": {
+      "package": "me.corkboards.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1f1f1f"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}

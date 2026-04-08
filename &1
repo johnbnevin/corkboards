@@ -1,0 +1,61 @@
+commit 7c9af53fe7e26c77fd8f3713e234ab4403d74e2d
+parent 9cdcf38e6566a71585bb5830f976bd3035f952b0
+Author: shakespeare.diy <assistant@shakespeare.diy>
+Date:   Thu, 08 Jan 2026 20:16:16 GMT
+
+    Update SmartNoteContent to work with new parser
+    
+    - Fixes loading state issues by ensuring nevent IDs are removed from loading after fetch attempts
+    - Updates EmbeddedEventsContent to handle enhanced HTML format
+    - Extracts nevent IDs from parsed HTML instead of raw content to avoid unnecessary fetches
+    - Shows styled placeholder instead of loading spinner when fetch returns no results
+    - Adds fallback links to damus.io for failed nevent loads
+    
+    Co-authored-by: shakespeare.diy <assistant@shakespeare.diy>
+    
+
+
+Changes: 1 file modified
+
+Modified files:
+  modified: src/components/SmartNoteContent.tsx
+
+Diffs:
+
+diff --git a/src/components/SmartNoteContent.tsx b/src/components/SmartNoteContent.tsx
+--- a/src/components/SmartNoteContent.tsx
++++ b/src/components/SmartNoteContent.tsx
+@@ -149,6 +149,10 @@ }
+           }
+         });
+ 
++        // Remove all attempted neventIds from loading state
++        // Whether found, not found, or error - we don't want infinite loading
++        neventIds.forEach(id => newLoading.delete(id));
++
+~
+         setEmbeddedEvents(newEmbeddedEvents);
+         setLoadingEvents(newLoading);
+       } catch (error) {
+@@ -246,11 +250,17 @@ </div>
+         </div>
+       );
+     } else {
+-      // Failed to load or no event - just show placeholder
++      // Failed to load or no event - show link to damus.io
+       parts.push(
+-        <span key={`failed-${neventId}`} className="text-gray-500 italic">
++        <a
++          key={`failed-${neventId}`}
++          href={`https://damus.io/${neventId}`}
++          target="_blank"
++          rel="noopener noreferrer"
++          className="text-blue-500 hover:underline"
++        >
+           {placeholderText}
+-        </span>
++        </a>
+       );
+     }
+ 
+

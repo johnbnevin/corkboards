@@ -12,12 +12,11 @@ Build social feeds by arranging posts from friends or news sources like notecard
 - **Collapsible cards** — collapse notecards to scan feeds faster
 - **Multi-column layout** — 1 to 5 columns, responsive across screen sizes
 - **Dark and light mode** — automatic system detection or manual toggle
-- **Encrypted messaging** — private direct messages (NIP-04 legacy + NIP-17 sealed sender)
 - **Lightning zaps** — send payments via Nostr Wallet Connect (NIP-57)
-- **Encrypted cloud backup** — AES-256-GCM encrypted settings backup to Blossom servers
+- **Encrypted blossom backup** — AES-256-GCM encrypted settings backup to Blossom servers
 - **Multi-account** — switch between accounts with per-user data isolation
 - **Cross-platform** — web PWA, desktop (Tauri), mobile (Expo)
-- **Uncensorable** — built on Nostr, no central authority
+- **Censorship resistant** — built on Nostr, no central authority
 
 ## Architecture
 
@@ -51,22 +50,25 @@ All data is stored locally in IndexedDB (web) or MMKV (mobile). The only externa
 |-----|-------------|
 | 01 | Basic protocol (events, signatures, relay communication) |
 | 02 | Contact list / follows |
-| 04 | Encrypted direct messages (legacy) |
 | 05 | DNS-based identity verification |
 | 10 | Reply threading conventions |
-| 17 | Sealed sender direct messages (gift-wrapped) |
+| 17 | Sealed sender direct messages (gift-wrapped) | Not implemented
 | 18 | Reposts |
 | 19 | Bech32-encoded entities (npub, note, nevent, nprofile, naddr) |
 | 23 | Long-form content (articles) |
 | 25 | Reactions |
 | 46 | Remote signing / Nostr Connect (QR code login, Amber) |
-| 50 | Full-text search (profile discovery) |
-| 51 | Lists (bookmarks, mute list) |
+| 50 | Full-text search (profile discovery) | Not implemented
+| 51 | Lists (bookmarks, mute list) | Importable into private custom corkboards
 | 57 | Lightning zaps |
 | 65 | Relay list metadata (outbox model) |
 | 71 | Video events |
 | 78 | App-specific data (backup metadata) |
 | 94 | File metadata (Blossom uploads) |
+
+## RSS Protocol Support
+
+Optional hostable RSS proxy allows feeds to include RSS sources chronologically with NOstr notes
 
 ## Setup
 
@@ -78,7 +80,7 @@ cd corkboards
 npm install
 ```
 
-### Web
+### Web | Working, Tested
 
 ```bash
 npm run dev      # Dev server on port 3000
@@ -86,7 +88,7 @@ npm run test     # Full suite: tsc + eslint + vitest + build
 npm run build    # Production build
 ```
 
-### Desktop (Tauri)
+### Desktop (Tauri) | Working, Tested
 
 Requires Rust toolchain. See [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
@@ -96,13 +98,13 @@ npx @tauri-apps/cli dev      # Dev mode (needs web dev server on port 3000)
 npx @tauri-apps/cli build    # Production build
 ```
 
-### Mobile (Expo)
+### Mobile (Expo) | In testing
 
 ```bash
 cd packages/mobile
 npx expo start               # Expo dev client
-npx expo run:ios              # iOS simulator
-npx expo run:android          # Android emulator
+npx expo run:ios              # iOS simulator | Haven't looked
+npx expo run:android          # Android emulator | In testing
 ```
 
 ## Self-Hosting

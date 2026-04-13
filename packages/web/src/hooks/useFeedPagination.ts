@@ -559,6 +559,49 @@ export function useFeedPagination({
 
       if (trulyNew.length > 0) {
         const sortedNew = trulyNew.sort((a, b) => b.created_at - a.created_at);
+
+        // ─── Gap detection & backfill ───────────────────────────────────
+        // If the oldest newly fetched note is much newer than our anchor,
+        // there's likely a gap (e.g. relay connections were dead for hours).
+        // Backfill the gap so the feed is continuous.
+        const oldestNew = sortedNew[sortedNew.length - 1].created_at;
+        const gapSeconds = oldestNew - (newestTimestamp ?? oldestNew);
+        const GAP_THRESHOLD = 10 * 60; // 10 minutes
+
+        if (gapSeconds > GAP_THRESHOLD && newestTimestamp) {
+          if (import.meta.env.DEV) console.log('[loadNewer] Gap detected:', Math.round(gapSeconds / 60), 'min — backfilling');
+          try {
+            let gapEvents: NostrEvent[] = [];
+            const gapAuthors = isAllFollowsTab ? contacts ?? [] :
+              isCustomFeedTab && activeCustomFeed ? activeCustomFeed.pubkeys :
+              isFriendTab ? [activeTab] :
+              activeTab === 'me' && userPubkey ? [userPubkey] : [];
+
+            if (gapAuthors.length > 0) {
+              gapEvents = await nostr.query([{
+                kinds: [...FEED_KINDS],
+                authors: gapAuthors,
+                since: newestTimestamp + 1,
+                until: oldestNew,
+                limit: limit * 2,
+              }], { signal: AbortSignal.timeout(15000) });
+            }
+
+            if (gapEvents.length > 0) {
+              const gapNew = gapEvents.filter(e => !existingIds.has(e.id) && !sortedNew.some(n => n.id === e.id));
+              if (gapNew.length > 0) {
+                sortedNew.push(...gapNew);
+                sortedNew.sort((a, b) => b.created_at - a.created_at);
+                if (import.meta.env.DEV) console.log('[loadNewer] Backfilled', gapNew.length, 'gap notes');
+              }
+            }
+          } catch (err) {
+            if (import.meta.env.DEV) console.warn('[loadNewer] Gap backfill failed:', err);
+            // Non-fatal — continue with what we have
+          }
+        }
+        // ────────────────────────────────────────────────────────────────
+
         const newIds = sortedNew.map(n => n.id);
 
         setFreshNoteIds(prev => {
@@ -575,10 +618,12 @@ export function useFeedPagination({
         // Scroll to oldest newly loaded note (bottom of the new batch)
         const oldest = sortedNew[sortedNew.length - 1];
         setScrollTargetNoteId(oldest.id);
-        showBriefMessage(`${trulyNew.length} new notes loaded`);
+        showBriefMessage(`${sortedNew.length} new notes loaded`);
       } else {
-        // No new notes found - reset timestamp to now so "time since" indicator resets
-        setNewestTimestamp(Math.floor(Date.now() / 1000));
+        // No new notes found — only update lastFetchTime (for the UI indicator).
+        // Do NOT advance newestTimestamp: if the fetch returned empty because relay
+        // connections were dead (e.g. after idle), advancing the timestamp would
+        // skip the entire gap and make those notes unreachable on the next fetch.
         setLastFetchTime(Math.floor(Date.now() / 1000));
         showBriefMessage('No new notes found');
       }

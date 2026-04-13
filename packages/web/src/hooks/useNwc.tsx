@@ -224,6 +224,7 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
   return <NwcContext.Provider value={value}>{children}</NwcContext.Provider>;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useNwc(): NwcContextValue {
   const ctx = useContext(NwcContext);
   if (!ctx) throw new Error('useNwc must be used within NwcProvider');

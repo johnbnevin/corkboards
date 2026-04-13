@@ -546,9 +546,251 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
       <div className="w-full max-w-md mx-auto space-y-8">
         <div className="text-center space-y-2">
           <h2 className="text-2xl font-bold">Add another account</h2>
-          <p className="text-muted-foreground">Create a new account.</p>
+          <p className="text-muted-foreground">Create a new account or log in with an existing one.</p>
         </div>
-        {nameScreen}
+
+        {loginView === 'main' && extensionError && !isTauri && (
+          <div className="p-3 bg-red-50 dark:bg-red-950/20 rounded-lg border border-red-200 dark:border-red-800">
+            <p className="text-sm text-red-600 dark:text-red-400">{extensionError}</p>
+          </div>
+        )}
+
+        {loginView === 'main' && nameScreen}
+
+        {/* Login options — main view */}
+        {loginView === 'main' && (
+          <div className="space-y-1">
+            {!isTauri && (
+            <button
+              type="button"
+              onClick={handleExtensionLogin}
+              disabled={extensionLoading}
+              className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-2 disabled:opacity-50"
+            >
+              <ShieldCheck className="h-3 w-3 inline mr-1" />{extensionLoading ? 'Connecting...' : 'Log in with browser extension'}
+            </button>
+            )}
+            <button
+              type="button"
+              onClick={() => { setLoginView('signer'); generateConnectQR(); }}
+              className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-2"
+            >
+              <QrCode className="h-3 w-3 inline mr-1" />Log in with signer (QR code) or bunker
+            </button>
+            <button
+              type="button"
+              onClick={() => { setLoginView('mnemonic'); setSeedLoginError(null); }}
+              className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-2"
+            >
+              <BookKey className="h-3 w-3 inline mr-1" />Log in with 12 word mnemonic
+            </button>
+            <button
+              type="button"
+              onClick={() => setLoginView('nsec')}
+              className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-2"
+            >
+              <KeyRound className="h-3 w-3 inline mr-1" />Log in with nsec password
+            </button>
+          </div>
+        )}
+
+        {/* Signer (QR code / bunker) view */}
+        {loginView === 'signer' && (
+          <div className="space-y-4 pt-2 border-t">
+            <button
+              type="button"
+              onClick={() => { connectAbortRef.current?.abort(); setConnectWaiting(false); setQrDataUrl(''); setConnectUri(''); setConnectError(null); setLoginView('main'); }}
+              className="flex items-center justify-center w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+            >
+              <ChevronLeft className="h-3 w-3 mr-1" />Back
+            </button>
+
+            <div className="space-y-2">
+              {qrDataUrl && (
+                <div className="flex flex-col items-center gap-2">
+                  <p className="text-xs text-muted-foreground text-center">
+                    Scan with your signer app (Amber, Alby Go, etc.)
+                  </p>
+                  <div className="bg-white p-2 rounded-lg">
+                    <img src={qrDataUrl} alt="Scan with signer app" className="w-56 h-56" />
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-xs gap-1"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(connectUri);
+                        setConnectCopied(true);
+                        setTimeout(() => setConnectCopied(false), 2000);
+                      } catch {
+                        toast({ title: 'Copy failed', variant: 'destructive' });
+                      }
+                    }}
+                  >
+                    {connectCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    {connectCopied ? 'Copied' : 'Copy URI'}
+                  </Button>
+                </div>
+              )}
+              {connectWaiting && (
+                <p className="text-xs text-center text-muted-foreground animate-pulse">
+                  Waiting for signer to respond...
+                </p>
+              )}
+              {connectError && (
+                <p className="text-xs text-red-500 text-center">{connectError}</p>
+              )}
+            </div>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-background px-2 text-muted-foreground">Or paste URI</span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="bunker-dialog-input" className="text-xs font-medium flex items-center gap-1">
+                <Link2 className="h-3 w-3" />Bunker / Remote Signer URI
+              </label>
+              <div className="flex gap-2">
+                <Input
+                  id="bunker-dialog-input"
+                  value={bunkerUrl}
+                  onChange={(e) => setBunkerUrl(e.target.value)}
+                  placeholder="bunker://... or nostrconnect://..."
+                  className="text-sm font-mono"
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleBunkerLogin(); }}
+                />
+                <Button
+                  onClick={handleBunkerLogin}
+                  disabled={bunkerLoading}
+                  size="sm"
+                >
+                  {bunkerLoading ? '...' : 'Go'}
+                </Button>
+              </div>
+              {bunkerError && (
+                <p className="text-xs text-red-500">{bunkerError}</p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Mnemonic (NIP-06) view */}
+        {loginView === 'mnemonic' && (
+          <div className="space-y-4 pt-2 border-t">
+            <button
+              type="button"
+              onClick={() => setLoginView('main')}
+              className="flex items-center justify-center w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+            >
+              <ChevronLeft className="h-3 w-3 mr-1" />Back
+            </button>
+
+            <div className="p-3 bg-amber-50 dark:bg-amber-950/20 rounded-lg border border-amber-200 dark:border-amber-800">
+              <p className="text-xs text-amber-900 dark:text-amber-300">
+                <span className="font-semibold">Less secure:</span> Typing your seed phrase into a web page exposes it to any code running on this site.
+                For better security, try using a browser extension or other external signer.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <div className="space-y-1">
+                <Label htmlFor="seed-phrase-dialog-input" className="text-xs font-medium">Seed phrase (12 or 24 words)</Label>
+                <textarea
+                  id="seed-phrase-dialog-input"
+                  value={seedPhrase}
+                  onChange={(e) => setSeedPhrase(e.target.value)}
+                  placeholder="word1 word2 word3 ..."
+                  rows={3}
+                  spellCheck={false}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="seed-passphrase-dialog-input" className="text-xs font-medium text-muted-foreground">
+                  Passphrase <span className="font-normal">(optional, only if you set one)</span>
+                </Label>
+                <div className="relative">
+                  <Input
+                    id="seed-passphrase-dialog-input"
+                    type={showSeedPassphrase ? 'text' : 'password'}
+                    value={seedPassphrase}
+                    onChange={(e) => setSeedPassphrase(e.target.value)}
+                    placeholder="Leave blank if none"
+                    autoComplete="off"
+                    className="pr-9 text-sm"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute right-0 top-0 h-full w-9 hover:bg-transparent"
+                    onClick={() => setShowSeedPassphrase(!showSeedPassphrase)}
+                  >
+                    {showSeedPassphrase ? <EyeOff className="h-4 w-4 text-muted-foreground" /> : <Eye className="h-4 w-4 text-muted-foreground" />}
+                  </Button>
+                </div>
+              </div>
+              {seedLoginError && <p className="text-xs text-red-500">{seedLoginError}</p>}
+              <Button className="w-full" onClick={handleSeedLogin} disabled={seedLoginLoading}>
+                {seedLoginLoading ? 'Deriving key...' : 'Log in'}
+              </Button>
+              <p className="text-xs text-muted-foreground text-center">
+                Uses derivation path m/44'/1237'/0'/0/0 (NIP-06)
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Nsec password view */}
+        {loginView === 'nsec' && (
+          <div className="space-y-4 pt-2 border-t">
+            <button
+              type="button"
+              onClick={() => setLoginView('main')}
+              className="flex items-center justify-center w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+            >
+              <ChevronLeft className="h-3 w-3 mr-1" />Back
+            </button>
+
+            <div className="p-3 bg-amber-50 dark:bg-amber-950/20 rounded-lg border border-amber-200 dark:border-amber-800">
+              <p className="text-xs text-amber-900 dark:text-amber-300">
+                <span className="font-semibold">Less secure:</span> Pasting your key into a web page exposes it to any code running on this site.
+                For better security, try using a browser extension or other external signer.
+              </p>
+            </div>
+
+            <form onSubmit={(e) => { e.preventDefault(); handleNsecDirectLogin(); }} className="space-y-2" autoComplete="off">
+              <Label htmlFor="nsec-dialog-login-input" className="text-xs font-medium">Secret key (nsec)</Label>
+              <Input
+                id="nsec-dialog-login-input"
+                name="nsec-dialog-login"
+                type="password"
+                autoComplete="off"
+                data-1p-ignore
+                data-lpignore="true"
+                value={loginNsec}
+                onChange={(e) => setLoginNsec(e.target.value)}
+                placeholder="nsec1..."
+                className="font-mono text-sm"
+              />
+              {nsecLoginError && (
+                <p className="text-xs text-red-500">{nsecLoginError}</p>
+              )}
+              <Button type="submit" className="w-full" disabled={nsecLoginLoading}>
+                {nsecLoginLoading ? 'Logging in...' : 'Log in'}
+              </Button>
+            </form>
+          </div>
+        )}
       </div>
     );
   }

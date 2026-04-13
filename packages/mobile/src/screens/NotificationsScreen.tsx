@@ -1,94 +1,150 @@
-import { useMemo } from 'react';
+/**
+ * Notifications screen -- displays Nostr notifications with filter toggles,
+ * dismiss/collapse support, and explicit "Load more" pagination.
+ *
+ * Uses NotificationCard component for each notification.
+ * Mirrors web's NotificationsCorkboard filter and dismiss patterns.
+ */
+import { useState, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
   FlatList,
-  Image,
   StyleSheet,
   ActivityIndicator,
   RefreshControl,
+  TouchableOpacity,
 } from 'react-native';
 import { useAuth } from '../lib/AuthContext';
-import { useNotifications, getZapAmountSats, type NotificationItem } from '../hooks/useNotifications';
+import { useNotifications, type NotificationType } from '../hooks/useNotifications';
 import { useMuteList } from '../hooks/useMuteList';
-import { useAuthor } from '../hooks/useAuthor';
-import { formatTimeAgo } from '@core/formatTimeAgo';
-import { genUserName } from '@core/genUserName';
-import { SizeGuardedImage } from '../components/SizeGuardedImage';
+import { useCollapsedNotes } from '../hooks/useCollapsedNotes';
+import { NotificationCard } from '../components/NotificationCard';
 
-const TYPE_LABELS: Record<NotificationItem['type'], string> = {
-  reply: 'replied',
-  mention: 'mentioned you',
-  repost: 'reposted',
-  reaction: 'reacted',
-  zap: 'zapped',
-};
+// ---- Filter config ----
 
-const TYPE_ICONS: Record<NotificationItem['type'], string> = {
-  reply: '💬',
-  mention: '📢',
-  repost: '↻',
-  reaction: '♥',
-  zap: '⚡',
-};
+type NotifFilter = NotificationType;
 
-const TYPE_COLORS: Record<NotificationItem['type'], string> = {
-  reply: '#3b82f6',
-  mention: '#a855f7',
-  repost: '#22c55e',
-  reaction: '#ec4899',
-  zap: '#f59e0b',
-};
+const FILTER_DEFS: { kind: NotifFilter; icon: string; label: string; color: string }[] = [
+  { kind: 'reply',    icon: '\u{1F4AC}', label: 'Replies',   color: '#3b82f6' },
+  { kind: 'mention',  icon: '\u{1F4E2}', label: 'Mentions',  color: '#a855f7' },
+  { kind: 'repost',   icon: '\u21BB',    label: 'Reposts',   color: '#22c55e' },
+  { kind: 'reaction', icon: '\u2665',    label: 'Reactions', color: '#ec4899' },
+  { kind: 'zap',      icon: '\u26A1',    label: 'Zaps',      color: '#f59e0b' },
+];
 
-function NotificationRow({ notification }: { notification: NotificationItem }) {
-  const { event, type, senderPubkey } = notification;
-  // For zaps, show the real sender (from zap request), not the LNURL server
-  const displayPubkey = senderPubkey ?? event.pubkey;
-  const { data } = useAuthor(displayPubkey);
-  const displayName = data?.metadata?.display_name || data?.metadata?.name || genUserName(displayPubkey);
-  const avatar = data?.metadata?.picture;
+// ---- Filter toggle bar ----
 
-  // For reactions, show the reaction content
-  const extra = type === 'reaction' && event.content && event.content !== '+' ? ` ${event.content}` : '';
-
-  // For zaps, show the amount
-  const zapAmount = type === 'zap' ? getZapAmountSats(event) : null;
-  const zapLabel = zapAmount ? ` ${zapAmount.toLocaleString()} sats` : '';
-
+function FilterBar({
+  counts,
+  hiddenTypes,
+  onToggle,
+}: {
+  counts: Record<NotifFilter, number>;
+  hiddenTypes: Set<NotifFilter>;
+  onToggle: (kind: NotifFilter) => void;
+}) {
   return (
-    <View style={styles.row}>
-      {avatar ? (
-        <SizeGuardedImage uri={avatar} style={styles.avatar} type="avatar" />
-      ) : (
-        <View style={[styles.avatar, styles.avatarPlaceholder]}>
-          <Text style={styles.avatarLetter}>{displayName[0]?.toUpperCase()}</Text>
-        </View>
-      )}
-      <View style={styles.rowContent}>
-        <Text style={styles.rowText} numberOfLines={2}>
-          <Text style={styles.name}>{displayName}</Text>
-          {' '}<Text style={{ color: TYPE_COLORS[type] }}>{TYPE_ICONS[type]}</Text>{' '}{TYPE_LABELS[type]}{extra}{zapLabel}
-        </Text>
-        <Text style={styles.time}>{formatTimeAgo(event.created_at)}</Text>
-      </View>
+    <View style={filterStyles.bar}>
+      {FILTER_DEFS.map(({ kind, icon, label, color }) => {
+        const active = !hiddenTypes.has(kind);
+        return (
+          <TouchableOpacity
+            key={kind}
+            style={[filterStyles.chip, active && { borderColor: color }]}
+            onPress={() => onToggle(kind)}
+            activeOpacity={0.7}
+          >
+            <Text style={[filterStyles.chipIcon, { color: active ? color : '#666' }]}>{icon}</Text>
+            <Text style={[filterStyles.chipCount, active ? { color: '#f2f2f2' } : { color: '#666' }]}>
+              {counts[kind]}
+            </Text>
+            <Text style={[filterStyles.chipLabel, active ? { color: '#b3b3b3' } : { color: '#555' }]}>
+              {label}
+            </Text>
+          </TouchableOpacity>
+        );
+      })}
     </View>
   );
 }
 
+const filterStyles = StyleSheet.create({
+  bar: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#404040',
+    backgroundColor: '#2a2a2a',
+  },
+  chipIcon: { fontSize: 12 },
+  chipCount: { fontSize: 12, fontWeight: '600' },
+  chipLabel: { fontSize: 11 },
+});
+
+// ---- Main component ----
+
 export function NotificationsScreen() {
   const { pubkey } = useAuth();
-  const { notifications: rawNotifications, isLoading, refetch } = useNotifications();
+  const { notifications: rawNotifications, isLoading, refetch, loadMore, hasMore } = useNotifications();
   const { mutedPubkeys } = useMuteList();
+  const { isDismissed } = useCollapsedNotes();
+  const [hiddenTypes, setHiddenTypes] = useState<Set<NotifFilter>>(new Set());
+  const [loadingMore, setLoadingMore] = useState(false);
 
-  // Filter muted users from notifications (check both event pubkey and real sender for zaps)
+  const toggleFilter = useCallback((kind: NotifFilter) => {
+    setHiddenTypes(prev => {
+      const next = new Set(prev);
+      if (next.has(kind)) next.delete(kind);
+      else next.add(kind);
+      return next;
+    });
+  }, []);
+
+  // Filter muted users
   const notifications = useMemo(() => {
-    if (!rawNotifications || mutedPubkeys.size === 0) return rawNotifications;
+    if (!rawNotifications) return [];
     return rawNotifications.filter(n => {
-      if (mutedPubkeys.has(n.event.pubkey)) return false;
-      if (n.senderPubkey && mutedPubkeys.has(n.senderPubkey)) return false;
+      if (mutedPubkeys.size > 0) {
+        if (mutedPubkeys.has(n.event.pubkey)) return false;
+        if (n.senderPubkey && mutedPubkeys.has(n.senderPubkey)) return false;
+      }
       return true;
     });
   }, [rawNotifications, mutedPubkeys]);
+
+  // Count by type (before type filtering)
+  const counts = useMemo((): Record<NotifFilter, number> => {
+    const c: Record<NotifFilter, number> = {
+      reaction: 0, reply: 0, mention: 0, repost: 0, zap: 0,
+    };
+    for (const n of notifications) c[n.type]++;
+    return c;
+  }, [notifications]);
+
+  // Apply type filters and dismissed status
+  const filtered = useMemo(
+    () => notifications.filter(n => !hiddenTypes.has(n.type) && !isDismissed(n.event.id)),
+    [notifications, hiddenTypes, isDismissed],
+  );
+
+  const handleLoadMore = useCallback(async () => {
+    setLoadingMore(true);
+    loadMore();
+    // Small delay for UI feedback
+    setTimeout(() => setLoadingMore(false), 500);
+  }, [loadMore]);
 
   if (!pubkey) {
     return (
@@ -99,10 +155,11 @@ export function NotificationsScreen() {
     );
   }
 
-  if (isLoading) {
+  if (isLoading && notifications.length === 0) {
     return (
       <View style={styles.center}>
         <ActivityIndicator color="#b3b3b3" size="large" />
+        <Text style={styles.loadingText}>Loading notifications...</Text>
       </View>
     );
   }
@@ -111,11 +168,47 @@ export function NotificationsScreen() {
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>Notifications</Text>
+        {notifications.length > 0 && (
+          <Text style={styles.subtitle}>{notifications.length} total</Text>
+        )}
       </View>
+
+      {/* Filter toggles */}
+      {notifications.length > 0 && (
+        <FilterBar counts={counts} hiddenTypes={hiddenTypes} onToggle={toggleFilter} />
+      )}
+
+      {/* Clear filters button */}
+      {hiddenTypes.size > 0 && (
+        <TouchableOpacity
+          style={styles.clearFilters}
+          onPress={() => setHiddenTypes(new Set())}
+        >
+          <Text style={styles.clearFiltersText}>Show all types</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Empty filtered state */}
+      {notifications.length > 0 && filtered.length === 0 && (
+        <View style={styles.center}>
+          <Text style={styles.emptyText}>
+            All notification types are hidden
+          </Text>
+          <TouchableOpacity
+            style={styles.showAllBtn}
+            onPress={() => setHiddenTypes(new Set())}
+          >
+            <Text style={styles.showAllText}>Show all</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       <FlatList
-        data={notifications ?? []}
+        data={filtered}
         keyExtractor={item => item.event.id}
-        renderItem={({ item }) => <NotificationRow notification={item} />}
+        renderItem={({ item }) => (
+          <NotificationCard notification={item} />
+        )}
         contentContainerStyle={styles.list}
         refreshControl={
           <RefreshControl
@@ -124,7 +217,28 @@ export function NotificationsScreen() {
             tintColor="#b3b3b3"
           />
         }
-        ListEmptyComponent={<Text style={styles.emptyText}>No notifications yet</Text>}
+        ListEmptyComponent={
+          notifications.length === 0 ? (
+            <Text style={styles.emptyText}>No notifications yet</Text>
+          ) : null
+        }
+        ListFooterComponent={
+          hasMore ? (
+            <TouchableOpacity
+              style={styles.loadMoreBtn}
+              onPress={handleLoadMore}
+              disabled={loadingMore}
+            >
+              {loadingMore ? (
+                <ActivityIndicator color="#f97316" size="small" />
+              ) : (
+                <Text style={styles.loadMoreText}>Load more notifications</Text>
+              )}
+            </TouchableOpacity>
+          ) : filtered.length > 0 ? (
+            <Text style={styles.endText}>No more notifications</Text>
+          ) : null
+        }
       />
     </View>
   );
@@ -133,16 +247,42 @@ export function NotificationsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#1f1f1f' },
   center: { flex: 1, backgroundColor: '#1f1f1f', alignItems: 'center', justifyContent: 'center', gap: 12 },
-  header: { paddingHorizontal: 16, paddingTop: 60, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: '#404040' },
+  header: {
+    paddingHorizontal: 16,
+    paddingTop: 60,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#404040',
+  },
   title: { fontSize: 24, fontWeight: 'bold', color: '#f2f2f2' },
-  list: { padding: 8 },
-  row: { flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12, borderBottomWidth: 1, borderBottomColor: '#404040' },
-  avatar: { width: 36, height: 36, borderRadius: 18 },
-  avatarPlaceholder: { backgroundColor: '#333', alignItems: 'center', justifyContent: 'center' },
-  avatarLetter: { color: '#b3b3b3', fontSize: 14, fontWeight: '600' },
-  rowContent: { flex: 1 },
-  rowText: { fontSize: 14, color: '#b3b3b3', lineHeight: 19 },
-  name: { fontWeight: '600', color: '#f2f2f2' },
-  time: { fontSize: 11, color: '#b3b3b3', marginTop: 3 },
+  subtitle: { fontSize: 12, color: '#b3b3b3', marginTop: 2 },
+  loadingText: { color: '#b3b3b3', fontSize: 14 },
+  list: { padding: 8, gap: 8 },
   emptyText: { color: '#666', textAlign: 'center', marginTop: 60, fontSize: 15 },
+  clearFilters: {
+    alignSelf: 'flex-start',
+    marginLeft: 16,
+    marginBottom: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    backgroundColor: '#333',
+    borderRadius: 12,
+  },
+  clearFiltersText: { color: '#b3b3b3', fontSize: 11 },
+  showAllBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#404040',
+    marginTop: 8,
+  },
+  showAllText: { color: '#f2f2f2', fontSize: 13 },
+  loadMoreBtn: {
+    alignItems: 'center',
+    padding: 16,
+    marginTop: 4,
+  },
+  loadMoreText: { color: '#f97316', fontSize: 14, fontWeight: '500' },
+  endText: { color: '#555', fontSize: 12, textAlign: 'center', paddingVertical: 16 },
 });

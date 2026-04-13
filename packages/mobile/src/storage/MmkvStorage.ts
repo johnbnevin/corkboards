@@ -7,7 +7,21 @@
 import { MMKV } from 'react-native-mmkv';
 import type { KVStorage } from '@core/storage';
 
-const mmkv = new MMKV();
+let mmkv: MMKV;
+try {
+  mmkv = new MMKV();
+} catch (e) {
+  console.error('[MmkvStorage] Failed to initialize MMKV:', e);
+  // Fallback: in-memory storage so the app can at least launch
+  const fallback = new Map<string, string>();
+  mmkv = {
+    getString: (key: string) => fallback.get(key),
+    set: (key: string, value: string) => { fallback.set(key, value); },
+    delete: (key: string) => { fallback.delete(key); },
+    clearAll: () => { fallback.clear(); },
+    getAllKeys: () => [...fallback.keys()],
+  } as unknown as MMKV;
+}
 
 export const mobileStorage: KVStorage = {
   // Async methods (delegate to sync — MMKV is already synchronous)

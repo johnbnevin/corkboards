@@ -915,6 +915,7 @@ export function MultiColumnClient() {
 
   const doLogout = useCallback(async () => {
     setShowLogoutSaveWarning(false);
+    setLogoutStep('Preparing logout...');
     const forceReload = setTimeout(() => window.location.reload(), 20000);
     try {
       await loginActions.nuclearWipe(logLogout);
@@ -929,6 +930,7 @@ export function MultiColumnClient() {
 
   const handleLogout = useCallback(async () => {
     setLogoutLog([]);
+    setLogoutStep('Preparing logout...');
     const forceReload = setTimeout(() => window.location.reload(), 20000);
     try {
       if (hasUnsavedChanges()) {
@@ -2663,10 +2665,27 @@ export function MultiColumnClient() {
 
     const seen = new Set<string>();
     const seenRepostedIds = new Set<string>();
+    // Track which original note IDs are referenced by reactions/reposts/zaps
+    // so we can suppress the wrapper when the original is already in the feed.
+    const referencedOriginalIds = new Set<string>();
+    for (const note of displayableNotes) {
+      if (note.kind === 6 || note.kind === 16) {
+        let origId: string | undefined;
+        if (note.content && note.content.startsWith('{')) {
+          try { origId = JSON.parse(note.content).id; } catch { /* ignore */ }
+        }
+        if (!origId) origId = note.tags.find(t => t[0] === 'e')?.[1];
+        if (origId) referencedOriginalIds.add(origId);
+      } else if (note.kind === 7 || note.kind === 9735) {
+        const eTag = note.tags.find(t => t[0] === 'e');
+        if (eTag?.[1]) referencedOriginalIds.add(eTag[1]);
+      }
+    }
     const deduped = displayableNotes.filter(note => {
       if (seen.has(note.id)) return false;
       seen.add(note.id);
-      if (note.kind === 6) {
+      // Repost dedup: if we already have the original note in the feed, skip the repost
+      if (note.kind === 6 || note.kind === 16) {
         let originalId: string | undefined;
         if (note.content && note.content.startsWith('{')) {
           try { originalId = JSON.parse(note.content).id; } catch { /* ignore */ }
@@ -2678,6 +2697,15 @@ export function MultiColumnClient() {
         if (originalId) {
           if (seen.has(originalId) || seenRepostedIds.has(originalId)) return false;
           seenRepostedIds.add(originalId);
+        }
+      }
+      // Reaction/zap dedup: if the original note they reference is already in the
+      // feed as a kind-1 post, suppress the reaction/zap wrapper to avoid showing
+      // the same content twice (once as the original, once embedded in the reaction).
+      if (note.kind === 7 || note.kind === 9735) {
+        const targetId = note.tags.find(t => t[0] === 'e')?.[1];
+        if (targetId && eventLookup.has(targetId) && (eventLookup.get(targetId)!.kind === 1 || eventLookup.get(targetId)!.kind === 30023)) {
+          return false;
         }
       }
       if (note.kind === 1 && seenRepostedIds.has(note.id)) return false;

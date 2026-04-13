@@ -6,7 +6,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { NostrProvider } from './src/lib/NostrProvider';
 import { AuthProvider } from './src/lib/AuthContext';
 import { NwcProvider } from './src/hooks/useNwc';
+import { AppProvider } from './src/lib/AppContext';
+import { ToastProvider } from './src/hooks/useToast';
+import { ErrorBoundary } from './src/components/ErrorBoundary';
+import { NostrSync } from './src/components/NostrSync';
 import { HomeScreen } from './src/screens/HomeScreen';
+import { DiscoverScreen } from './src/screens/DiscoverScreen';
+import { SavedScreen } from './src/screens/SavedScreen';
 import { MessagesScreen } from './src/screens/MessagesScreen';
 import { NotificationsScreen } from './src/screens/NotificationsScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
@@ -24,10 +30,14 @@ const queryClient = new QueryClient({
 
 export default function App() {
   return (
+    <ErrorBoundary>
+    <AppProvider>
+    <ToastProvider>
     <QueryClientProvider client={queryClient}>
       <NostrProvider>
       <AuthProvider>
       <NwcProvider>
+      <NostrSync />
       <NavigationContainer>
         <Tab.Navigator
           screenOptions={{
@@ -44,6 +54,16 @@ export default function App() {
             name="Feed"
             component={HomeScreen}
             options={{ tabBarLabel: 'Feed' }}
+          />
+          <Tab.Screen
+            name="Discover"
+            component={DiscoverScreen}
+            options={{ tabBarLabel: 'Discover' }}
+          />
+          <Tab.Screen
+            name="Saved"
+            component={SavedScreen}
+            options={{ tabBarLabel: 'Saved' }}
           />
           <Tab.Screen
             name="Notifications"
@@ -67,5 +87,8 @@ export default function App() {
       </AuthProvider>
       </NostrProvider>
     </QueryClientProvider>
+    </ToastProvider>
+    </AppProvider>
+    </ErrorBoundary>
   );
 }

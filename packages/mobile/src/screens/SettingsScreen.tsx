@@ -24,6 +24,15 @@ import {
 } from '../lib/NostrProvider';
 import { getCurrentPlatform, STORAGE_KEYS } from '../lib/storageKeys';
 import { SignupFlow } from '../components/SignupFlow';
+import { AccountSwitcher } from '../components/AccountSwitcher';
+import { AddAccountModal } from '../components/AddAccountModal';
+import { ProfileCacheSettings } from '../components/ProfileCacheSettings';
+import { ThroughputSettings } from '../components/ThroughputSettings';
+import { EmojiSetEditor } from '../components/EmojiSetEditor';
+import { useAppContext } from '../hooks/useAppContext';
+import { useFeedLimit } from '../hooks/useFeedLimit';
+import { useImageSizeLimitSetting, useAvatarSizeLimitSetting } from '../hooks/useImageSizeLimit';
+import { usePlatformStorage } from '../hooks/usePlatformStorage';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { formatTimeAgo } from '@core/formatTimeAgo';
 import type { NSecSigner } from '@nostrify/nostrify';
@@ -177,10 +186,22 @@ function EditProfileModal({
 // ============================================================================
 
 export function SettingsScreen() {
-  const { pubkey, loginWithNsec, logout, loading: authLoading } = useAuth();
+  const { pubkey, loginWithNsec, logout, accounts, loading: authLoading } = useAuth();
   const { signer } = useAuth();
   const { data: author } = useAuthor(pubkey ?? undefined);
   const { mutateAsync: publish } = useNostrPublish();
+
+  // AppContext for client tag
+  const { config, updateConfig } = useAppContext();
+
+  // Throughput settings hooks
+  const { multiplier, setMultiplier } = useFeedLimit();
+  const [avatarSizeLimit, setAvatarSizeLimit] = useAvatarSizeLimitSetting();
+  const [imageSizeLimit, setImageSizeLimit] = useImageSizeLimitSetting();
+  const [autofetchInterval, setAutofetchInterval] = usePlatformStorage<number>(
+    STORAGE_KEYS.AUTOFETCH_INTERVAL_SECS,
+    120,
+  );
 
   // Auth UI state
   const [nsecInput, setNsecInput] = useState('');
@@ -188,6 +209,9 @@ export function SettingsScreen() {
   const [showLogin, setShowLogin] = useState(false);
   const [showSignup, setShowSignup] = useState(false);
   const [showEditProfile, setShowEditProfile] = useState(false);
+  const [showAddAccount, setShowAddAccount] = useState(false);
+  const [showEmojiEditor, setShowEmojiEditor] = useState(false);
+  const [showProfileCache, setShowProfileCache] = useState(false);
 
   // Theme
   const [theme, setThemeState] = useState<ThemeMode>(
@@ -339,6 +363,14 @@ export function SettingsScreen() {
 
         {pubkey ? (
           <>
+            {/* Account switcher (shows current + other accounts + add/logout) */}
+            {accounts.length > 0 && (
+              <AccountSwitcher
+                onAddAccount={() => setShowAddAccount(true)}
+                onLogout={handleLogout}
+              />
+            )}
+            <View style={{ height: 12 }} />
             {displayName && <Text style={styles.profileName}>{displayName}</Text>}
             <Text style={styles.npub} selectable numberOfLines={1}>{npub}</Text>
             <TouchableOpacity style={styles.button} onPress={() => setShowEditProfile(true)}>
@@ -383,8 +415,8 @@ export function SettingsScreen() {
             <TouchableOpacity style={styles.button} onPress={() => setShowSignup(true)}>
               <Text style={styles.buttonText}>Create account</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.button} onPress={() => setShowLogin(true)}>
-              <Text style={styles.buttonText}>Log in with nsec</Text>
+            <TouchableOpacity style={styles.button} onPress={() => setShowAddAccount(true)}>
+              <Text style={styles.buttonText}>Log in with existing account</Text>
             </TouchableOpacity>
           </>
         )}
@@ -533,51 +565,163 @@ export function SettingsScreen() {
         </View>
       ) : null}
 
-      {/* ---- Bandwidth ---- */}
+      {/* ---- Bandwidth & Performance (ThroughputSettings) ---- */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Bandwidth</Text>
-        <Text style={styles.sectionHint}>Control image file size limits to save data</Text>
-        <Text style={styles.fieldLabel}>Avatar max</Text>
-        <View style={styles.themeRow}>
-          {([
-            { val: 'small', label: '250 KB' },
-            { val: 'default', label: '750 KB' },
-            { val: 'large', label: '1.5 MB' },
-            { val: 'none', label: 'None' },
-          ] as const).map(opt => {
-            const current = mobileStorage.getSync(STORAGE_KEYS.AVATAR_SIZE_LIMIT) || 'default';
-            return (
-              <TouchableOpacity
-                key={opt.val}
-                style={[styles.themeBtn, current === opt.val && styles.themeBtnActive]}
-                onPress={() => mobileStorage.setSync(STORAGE_KEYS.AVATAR_SIZE_LIMIT, JSON.stringify(opt.val))}
-              >
-                <Text style={[styles.themeLabel, current === opt.val && styles.themeLabelActive]}>{opt.label}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-        <Text style={[styles.fieldLabel, { marginTop: 12 }]}>Image max</Text>
-        <View style={styles.themeRow}>
-          {([
-            { val: 'small', label: '750 KB' },
-            { val: 'default', label: '2.25 MB' },
-            { val: 'large', label: '4.5 MB' },
-            { val: 'none', label: 'None' },
-          ] as const).map(opt => {
-            const current = mobileStorage.getSync(STORAGE_KEYS.IMAGE_SIZE_LIMIT) || 'default';
-            return (
-              <TouchableOpacity
-                key={opt.val}
-                style={[styles.themeBtn, current === opt.val && styles.themeBtnActive]}
-                onPress={() => mobileStorage.setSync(STORAGE_KEYS.IMAGE_SIZE_LIMIT, JSON.stringify(opt.val))}
-              >
-                <Text style={[styles.themeLabel, current === opt.val && styles.themeLabelActive]}>{opt.label}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+        <Text style={styles.sectionTitle}>Bandwidth & Performance</Text>
+        <Text style={styles.sectionHint}>Control feed load, refresh rate, and image sizes</Text>
+        <ThroughputSettings
+          multiplier={multiplier}
+          onMultiplierChange={setMultiplier}
+          autofetchIntervalSecs={autofetchInterval}
+          onAutofetchIntervalChange={setAutofetchInterval}
+          avatarSizeLimit={avatarSizeLimit}
+          onAvatarSizeLimitChange={setAvatarSizeLimit}
+          imageSizeLimit={imageSizeLimit}
+          onImageSizeLimitChange={setImageSizeLimit}
+        />
       </View>
+
+      {/* ---- Custom Emoji Sets ---- */}
+      {pubkey ? (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Custom Emoji Sets</Text>
+          <Text style={styles.sectionHint}>Create and manage NIP-30 custom emoji sets</Text>
+          <TouchableOpacity style={styles.button} onPress={() => setShowEmojiEditor(true)}>
+            <Text style={styles.buttonText}>Open Emoji Set Editor</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {/* ---- Profile Cache ---- */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Profile Cache</Text>
+        <Text style={styles.sectionHint}>Manage locally cached profile metadata</Text>
+        {showProfileCache ? (
+          <>
+            <ProfileCacheSettings />
+            <TouchableOpacity
+              style={[styles.button, { marginTop: 8 }]}
+              onPress={() => setShowProfileCache(false)}
+            >
+              <Text style={styles.cancelText}>Hide</Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          <TouchableOpacity style={styles.button} onPress={() => setShowProfileCache(true)}>
+            <Text style={styles.buttonText}>View Cache Stats</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      {/* ---- Client Tag ---- */}
+      {pubkey ? (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Publishing</Text>
+          <TouchableOpacity
+            style={styles.clientTagRow}
+            onPress={() => {
+              const current = config.publishClientTag !== false;
+              Alert.alert(
+                current ? 'Disable client tag?' : 'Enable client tag?',
+                current
+                  ? 'Your posts will no longer include a tag identifying Corkboards as the client.'
+                  : 'Your posts will include a tag identifying Corkboards as the client. This helps the Nostr ecosystem track client diversity.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: current ? 'Disable' : 'Enable',
+                    onPress: () => updateConfig(c => ({ ...c, publishClientTag: !current })),
+                  },
+                ],
+              );
+            }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.clientTagTitle}>
+                {config.publishClientTag !== false ? '\u2713 ' : ''}Client Tag
+              </Text>
+              <Text style={styles.clientTagHint}>
+                Tag your posts as "sent from Corkboards"
+              </Text>
+            </View>
+            <View style={[
+              styles.toggleDot,
+              config.publishClientTag !== false ? styles.toggleDotOn : styles.toggleDotOff,
+            ]} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {/* ---- Advanced ---- */}
+      {pubkey ? (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Advanced</Text>
+
+          {/* Dismissed notes */}
+          <TouchableOpacity style={styles.button} onPress={() => {
+            const raw = mobileStorage.getSync(STORAGE_KEYS.DISMISSED_NOTES);
+            const dismissed = raw ? JSON.parse(raw) as string[] : [];
+            if (dismissed.length === 0) {
+              Alert.alert('No dismissed notes', 'There are no dismissed notes to restore.');
+            } else {
+              Alert.alert(
+                'Restore dismissed notes',
+                `Bring back ${dismissed.length} dismissed note${dismissed.length === 1 ? '' : 's'}?`,
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Restore', onPress: () => { mobileStorage.removeSync(STORAGE_KEYS.DISMISSED_NOTES); Alert.alert('Restored', 'Dismissed notes have been restored.'); } },
+                ],
+              );
+            }
+          }}>
+            <Text style={styles.buttonText}>Restore dismissed notes</Text>
+          </TouchableOpacity>
+
+          {/* Public bookmarks toggle */}
+          <TouchableOpacity style={styles.button} onPress={() => {
+            const current = mobileStorage.getSync(STORAGE_KEYS.PUBLIC_BOOKMARKS) === 'true';
+            const newVal = !current;
+            Alert.alert(
+              newVal ? 'Make bookmarks public?' : 'Make bookmarks private?',
+              newVal
+                ? 'Your saved notes will be visible to anyone. Private is recommended.'
+                : 'Your saved notes will be encrypted and only visible to you.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: newVal ? 'Make public' : 'Make private', onPress: () => mobileStorage.setSync(STORAGE_KEYS.PUBLIC_BOOKMARKS, String(newVal)) },
+              ],
+            );
+          }}>
+            <Text style={styles.buttonText}>
+              Bookmark privacy: {mobileStorage.getSync(STORAGE_KEYS.PUBLIC_BOOKMARKS) === 'true' ? 'Public' : 'Private'}
+            </Text>
+          </TouchableOpacity>
+
+          {/* Delete account */}
+          <TouchableOpacity style={[styles.button, styles.dangerBtn]} onPress={() => {
+            Alert.alert(
+              'Delete account',
+              'This broadcasts a deletion event (kind 5) to relays. Your key still works, but clients that respect NIP-09 will hide your content. This cannot be undone.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Delete', style: 'destructive', onPress: async () => {
+                    try {
+                      await publish({ kind: 5, content: 'Account deletion requested', tags: [], created_at: Math.floor(Date.now() / 1000) });
+                      Alert.alert('Account deleted', 'Deletion event broadcast. Logging out.');
+                      logout();
+                    } catch (err) {
+                      Alert.alert('Failed', err instanceof Error ? err.message : 'Unknown error');
+                    }
+                  },
+                },
+              ],
+            );
+          }}>
+            <Text style={styles.dangerBtnText}>Delete account</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
       {/* ---- About ---- */}
       <View style={styles.section}>
@@ -594,6 +738,12 @@ export function SettingsScreen() {
         />
       </Modal>
 
+      {/* Add account modal (all login methods) */}
+      <AddAccountModal
+        visible={showAddAccount}
+        onClose={() => setShowAddAccount(false)}
+      />
+
       {/* Edit Profile modal */}
       {pubkey && (
         <EditProfileModal
@@ -602,6 +752,18 @@ export function SettingsScreen() {
           pubkey={pubkey}
         />
       )}
+
+      {/* Emoji Set Editor modal */}
+      <Modal visible={showEmojiEditor} animationType="slide">
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={() => setShowEmojiEditor(false)}>
+              <Text style={styles.modalCloseText}>{'<'} Back</Text>
+            </TouchableOpacity>
+          </View>
+          <EmojiSetEditor />
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -655,4 +817,15 @@ const styles = StyleSheet.create({
   fieldRow: { marginBottom: 16 },
   fieldLabel: { color: '#999', fontSize: 12, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
   info: { color: '#b3b3b3', fontSize: 13, marginBottom: 4 },
+  // Client tag toggle
+  clientTagRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#2a2a2a', borderWidth: 1, borderColor: '#404040', borderRadius: 8, padding: 14, gap: 12 },
+  clientTagTitle: { color: '#f2f2f2', fontSize: 14, fontWeight: '500' },
+  clientTagHint: { color: '#888', fontSize: 12, marginTop: 2 },
+  toggleDot: { width: 20, height: 20, borderRadius: 10, borderWidth: 2 },
+  toggleDotOn: { backgroundColor: '#22c55e', borderColor: '#22c55e' },
+  toggleDotOff: { backgroundColor: 'transparent', borderColor: '#666' },
+  // Emoji editor modal
+  modalContainer: { flex: 1, backgroundColor: '#1f1f1f', paddingTop: 60, paddingHorizontal: 16 },
+  modalHeader: { marginBottom: 16 },
+  modalCloseText: { color: '#a855f7', fontSize: 16, fontWeight: '500' },
 });

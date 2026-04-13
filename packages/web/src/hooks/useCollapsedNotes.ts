@@ -250,18 +250,32 @@ export function useCollapsedNotes() {
    *  Collapsed notes remain in the collapsed list so they still appear above the fold. */
   const consolidate = useCallback(() => {
     if (_softDismissedSet.size === 0 && collapsedIds.length === 0) return
-    // Snapshot the soft-dismissed set before clearing
-    const softSnapshot = [..._softDismissedSet]
+    // Partition soft-dismissed: skip notes still within their undo window
+    const now = Date.now()
+    const readyToConsolidate: string[] = []
+    const stillUndoable: string[] = []
+    for (const id of _softDismissedSet) {
+      const dismissedAt = _dismissedUndoMap.get(id)
+      if (dismissedAt && now - dismissedAt <= UNDO_WINDOW_MS) {
+        stillUndoable.push(id)
+      } else {
+        readyToConsolidate.push(id)
+      }
+    }
     setDismissedIds(prev => {
-      const unique = [...new Set([...prev, ...softSnapshot, ...collapsedIds])]
+      const unique = [...new Set([...prev, ...readyToConsolidate, ...collapsedIds])]
       return unique.length > MAX_DISMISSED_NOTES ? unique.slice(-MAX_DISMISSED_NOTES) : unique
     })
-    setSoftDismissedIds([])
+    // Keep undoable notes as soft-dismissed so their undo buttons still work
+    _softDismissedSet = new Set(stillUndoable)
+    _setSoftDismissedIds(stillUndoable)
+    persistSoftDismissed()
+    notifySoftDismissChange()
     // Clear session collapsed tracking since consolidate removes the blank spaces
     _sessionCollapsedIds = new Set()
     _sessionCollapsedCounter++
     notifySessionCollapsedChange()
-  }, [setDismissedIds, setSoftDismissedIds, collapsedIds])
+  }, [setDismissedIds, collapsedIds])
 
   /** Dismiss multiple notes at once — efficient for bulk operations */
   const dismissMultiple = useCallback((noteIds: string[]) => {

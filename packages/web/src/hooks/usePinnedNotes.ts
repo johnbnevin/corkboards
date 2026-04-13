@@ -165,24 +165,40 @@ export function usePinnedNotes() {
     }
   }, [user, nostr])
 
-  // Toggle pin: add or remove, publish, update local + invalidate queries
+  // Toggle pin: add or remove, publish, update local + set optimistic cache.
+  // We use setQueryData (not invalidateQueries) for the pin list to prevent
+  // stale relay data from overwriting the optimistic state. We also pre-seed
+  // the pinned-note-events cache so the me tab doesn't flash.
   const togglePin = useCallback(async (noteId: string) => {
     if (!user) return
 
     const currentIds = [...pinnedIds]
-    const newIds = currentIds.includes(noteId)
+    const isUnpin = currentIds.includes(noteId)
+    const newIds = isUnpin
       ? currentIds.filter(id => id !== noteId)
       : [...currentIds, noteId]
+
+    // Pre-seed pinned events cache for the new key so the me tab doesn't flash
+    const oldEvents = queryClient.getQueryData<NostrEvent[]>(['pinned-note-events', currentIds]) ?? []
+    if (isUnpin) {
+      queryClient.setQueryData(['pinned-note-events', newIds], oldEvents.filter(e => e.id !== noteId))
+    } else {
+      // Carry forward existing events; newly pinned note will be fetched after publish
+      queryClient.setQueryData(['pinned-note-events', newIds], oldEvents)
+    }
 
     // Optimistic update
     persistPendingRef.current = true
     setPinnedIds(newIds)
 
+    // Set optimistic pin list cache (prevents relay refetch from reverting)
+    queryClient.setQueryData(['pinned-notes', user.pubkey],
+      { ids: newIds, status: newIds.length > 0 ? 'found' as const : 'none' as const })
+
     // Publish to relays
     await publishPinList(newIds)
 
-    // Invalidate to refetch
-    queryClient.invalidateQueries({ queryKey: ['pinned-notes', user.pubkey] })
+    // After relay confirms, refetch events to pick up newly pinned notes
     queryClient.invalidateQueries({ queryKey: ['pinned-note-events'] })
   }, [user, pinnedIds, publishPinList, queryClient])
 

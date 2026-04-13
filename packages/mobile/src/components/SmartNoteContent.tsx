@@ -78,10 +78,12 @@ export function SmartNoteContent({
 
   // Video kinds have content in imeta tags
   const isVideoKind = event.kind === 34235 || event.kind === 34236;
-  const hasMedia = isVideoKind || /https?:\/\/\S+\.(jpg|jpeg|png|gif|webp|mp4|webm|mov)/i.test(text);
+  const hasMedia = isVideoKind || /https?:\/\/\S+\.(jpg|jpeg|png|gif|webp|mp4|webm|mov)/i.test(text)
+    || /https?:\/\/[^\s]*(nostr\.build|blossom\.|cdn\.sovbit|files\.primal|cdn\.satellite|void\.cat|media\.nostr\.band)/i.test(text);
+  const hasNostrRefs = /(nostr:)?(note1|npub1|nprofile1|nevent1|naddr1)[a-zA-Z0-9]+/.test(text);
 
-  // If no visible text and no media, show debug info
-  if (visLen === 0 && !hasMedia && !text.startsWith('{')) {
+  // If no visible text, no media, and no nostr references, show debug info
+  if (visLen === 0 && !hasMedia && !hasNostrRefs && !text.startsWith('{')) {
     return (
       <View>
         <Text style={styles.debugText}>

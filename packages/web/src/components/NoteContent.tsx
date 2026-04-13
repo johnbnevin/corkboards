@@ -383,7 +383,7 @@ const mediaPattern = new RegExp(
 
 // Regex patterns for parsing — instantiated fresh per call to avoid stateful /g issues
 const MD_LINK_PATTERN = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g
-const MARKDOWN_INDICATORS_PATTERN = /(?:^#{1,6}\s|^\s*[-*+]\s|^\s*\d+\.\s|^\s*>|`|^\s*---\s*$|^\s*\*\*\*\s*$|\*\*|__|\*[^*\s]|_[^_\s]|~~|\|.+\||!\[|^\s*- \[[ x]\])/m
+const MARKDOWN_INDICATORS_PATTERN = /(?:^#{1,6}\s|^\s*[-*+]\s|^\s*\d+\.\s|^\s*>|`|^\s*---\s*$|^\s*\*\*\*\s*$|\*\*|__|\*[^*\s].*\*|_[^_\s].*_|~~.+~~|\|.+\||\[[^\]]+\]\(https?:|!\[|^\s*- \[[ x]\])/m
 
 function parseContent(content: string): ContentPart[] {
   const parts: ContentPart[] = []
@@ -411,8 +411,21 @@ function parseContent(content: string): ContentPart[] {
 
   let match
   while ((match = combinedRegex.exec(content)) !== null) {
-    const [fullMatch] = match
+    const [rawMatch] = match
     const index = match.index
+
+    // Strip trailing punctuation that the greedy URL regex may have grabbed
+    // (e.g., "https://x.com/video.mp4)" → strip ")"; keep "?" and "#" as
+    // they start query/fragment strings)
+    let fullMatch = rawMatch
+    let trailingChars = ''
+    if (rawMatch.startsWith('http')) {
+      const cleaned = rawMatch.replace(/[),.;:!]+$/, '')
+      if (cleaned.length < rawMatch.length) {
+        trailingChars = rawMatch.slice(cleaned.length)
+        fullMatch = cleaned
+      }
+    }
 
     // Check if this match is inside a markdown link [text](url)
     const mdLink = markdownLinks.find(md => index >= md.start && index < md.end)
@@ -424,11 +437,13 @@ function parseContent(content: string): ContentPart[] {
           value: content.slice(lastIndex, mdLink.start)
         })
       }
-      // For markdown links, use the clean URL (without trailing paren)
-      if (mediaPattern.test(mdLink.url)) {
+      // For image markdown ![alt](media-url), extract as media to get inline rendering
+      if (content[mdLink.start] === '!' && mediaPattern.test(mdLink.url)) {
         parts.push({ type: 'media', value: mdLink.url })
       } else {
-        parts.push({ type: 'web', value: mdLink.url })
+        // Keep full [text](url) as text — ReactMarkdown will render it with
+        // the link text visible instead of dropping it
+        parts.push({ type: 'text', value: content.slice(mdLink.start, mdLink.end) })
       }
       lastIndex = mdLink.end
       combinedRegex.lastIndex = mdLink.end
@@ -470,7 +485,12 @@ function parseContent(content: string): ContentPart[] {
       parts.push({ type: 'text', value: fullMatch })
     }
 
-    lastIndex = index + fullMatch.length
+    // Append stripped trailing punctuation as text so it's not lost
+    if (trailingChars) {
+      parts.push({ type: 'text', value: trailingChars })
+    }
+
+    lastIndex = index + rawMatch.length
   }
 
   // Add remaining text

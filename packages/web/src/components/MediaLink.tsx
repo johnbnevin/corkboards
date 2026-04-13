@@ -4,7 +4,7 @@ import { LightboxTrigger } from '@/components/ui/lightbox'
 import { SizeGuardedImage } from '@/components/SizeGuardedImage'
 import { ExternalLink, UtensilsCrossed, Film, AlertCircle } from 'lucide-react'
 import { optimizeMediaUrl } from '@/lib/imageUtils'
-import { isImageUrl } from '@/lib/mediaUtils'
+import { isImageUrl, isCdnHost } from '@/lib/mediaUtils'
 
 /** Video player with loading indicator */
 function VideoPlayer({ src, poster }: { src: string; poster?: string }) {
@@ -94,6 +94,7 @@ function VideoPlayer({ src, poster }: { src: string; poster?: string }) {
         ref={videoRef}
         src={src}
         controls
+        playsInline
         className="w-full max-h-[500px] rounded-lg"
         preload="metadata"
         poster={poster}
@@ -129,6 +130,8 @@ function isSafeUrl(u: string): boolean {
 export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo }: { url: string; blurMedia?: boolean; poster?: string; isVideo?: boolean }) {
   const [embed, setEmbed] = useState<EmbedInfo | null>(null)
   const [imageError, setImageError] = useState(false)
+  // When a CDN-hosted "image" fails to load, try rendering as video instead
+  const [tryVideoFallback, setTryVideoFallback] = useState(false)
   const [revealed, setRevealed] = useState(false)
   const [twitchRevealed, setTwitchRevealed] = useState(false)
 
@@ -332,8 +335,12 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
     )
   }
 
-  // Render image in lightbox
+  // Render image in lightbox (with video fallback for CDN hosts)
   if (embed.type === 'image') {
+    // CDN image failed → try rendering as video player instead of a dead link
+    if (imageError && tryVideoFallback) {
+      return <VideoPlayer src={url} poster={poster} />
+    }
     if (imageError) {
       if (!isSafeUrl(url)) return <span className="text-muted-foreground text-sm break-all">{url}</span>
       return (
@@ -360,7 +367,15 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
           alt=""
           className="max-w-full max-h-[500px] rounded-lg object-contain hover:opacity-90 transition-opacity"
           loading="lazy"
-          onError={() => setImageError(true)}
+          onError={() => {
+            // On CDN hosts (Blossom, nostr.build, etc.), extensionless URLs
+            // might be videos served without an image-compatible content type.
+            // Try rendering as a video player before giving up.
+            if (isCdnHost(url)) {
+              setTryVideoFallback(true)
+            }
+            setImageError(true)
+          }}
         />
       </LightboxTrigger>
     )
@@ -409,8 +424,14 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
     )
   }
 
-  // Compact placeholder for iframe embeds (YouTube, Rumble, etc.) — keep blur for these
-  const shouldBlurEmbed = blurMedia && !revealed && !isVideoUrl(url)
+  // Direct video or forceVideo (imeta) — always render inline player, never blur
+  const isDirectVideo = isVideoUrl(url) || forceVideo
+  if (isDirectVideo) {
+    return <VideoPlayer src={embed.url} poster={poster} />
+  }
+
+  // Compact placeholder for iframe embeds (Rumble, etc.) — keep blur for these
+  const shouldBlurEmbed = blurMedia && !revealed
   if (shouldBlurEmbed) {
     return (
       <div
@@ -422,11 +443,6 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
         </span>
       </div>
     )
-  }
-
-  // Render direct video with loading indicator
-  if (isVideoUrl(url)) {
-    return <VideoPlayer src={embed.url} poster={poster} />
   }
 
   // Render iframe embed

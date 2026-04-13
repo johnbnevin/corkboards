@@ -6,7 +6,9 @@ export function isImageUrl(url: string): boolean {
   const imageExtensions = /\.(jpg|jpeg|png|gif|webp|svg|bmp|ico)(\?.*)?$/i
   if (imageExtensions.test(url)) return true
 
-  // Known image hosts
+  // Known CDN hosts — only classify extensionless URLs as images if they're
+  // on a host we know. Extensionless Blossom URLs (SHA256 hashes) might be
+  // videos; MediaLink handles the fallback detection for those.
   const imageHosts = [
     'nostr.build',
     'image.nostr.build',
@@ -32,4 +34,13 @@ export function isImageUrl(url: string): boolean {
   } catch {
     return false
   }
+}
+
+/** True when the URL is on a CDN host that may serve either images or videos
+ *  (used by MediaLink to try video fallback on image error) */
+export function isCdnHost(url: string): boolean {
+  try {
+    const h = new URL(url).hostname
+    return ['blossom.', 'nostr.build', 'cdn.sovbit', 'files.primal', 'cdn.satellite', 'void.cat', 'media.nostr.band'].some(p => h.includes(p))
+  } catch { return false }
 }

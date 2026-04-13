@@ -227,13 +227,15 @@ function parseContent(content: string): ContentPart[] {
       if (mdLink.start > lastIndex) {
         parts.push({ type: 'text', value: content.slice(lastIndex, mdLink.start) });
       }
-      // Classify the clean URL from the markdown link
-      if (VIDEO_EXT.test(mdLink.url)) {
-        parts.push({ type: 'video', value: mdLink.url });
-      } else if (IMAGE_EXT.test(mdLink.url) || IMAGE_DOMAINS.test(mdLink.url)) {
+      // For image markdown ![alt](media-url), extract as inline media
+      if (content[mdLink.start] === '!' && (IMAGE_EXT.test(mdLink.url) || IMAGE_DOMAINS.test(mdLink.url))) {
         parts.push({ type: 'image', value: mdLink.url });
+      } else if (content[mdLink.start] === '!' && VIDEO_EXT.test(mdLink.url)) {
+        parts.push({ type: 'video', value: mdLink.url });
       } else {
-        parts.push({ type: 'url', value: mdLink.url });
+        // Keep full [text](url) as text — preserves the descriptive link text
+        // instead of dropping it and showing only the bare URL
+        parts.push({ type: 'text', value: `${mdLink.text} (${mdLink.url})` });
       }
       lastIndex = mdLink.end;
       combined.lastIndex = mdLink.end;

@@ -339,12 +339,14 @@ function computeNoteKindStats(events: NostrEvent[] | undefined, lookup?: Map<str
 /** Confirmation dialog for "Pin to my corkboard" with optional comment */
 function PinToBoardDialog({
   note,
+  open,
   onClose,
   onPin,
   onPinWithComment,
   isAlreadyPinned,
 }: {
-  note: NostrEvent;
+  note: NostrEvent | null;
+  open: boolean;
   onClose: () => void;
   onPin: () => void;
   onPinWithComment: () => void;
@@ -352,13 +354,18 @@ function PinToBoardDialog({
 }) {
   const [addComment, setAddComment] = useState(!!isAlreadyPinned);
 
+  // Reset checkbox when dialog opens with new note
+  useEffect(() => {
+    if (open) setAddComment(!!isAlreadyPinned);
+  }, [open, isAlreadyPinned]);
+
   const title = isAlreadyPinned ? 'Re-pin to my corkboard' : 'Pin to my corkboard';
   const buttonLabel = addComment
     ? (isAlreadyPinned ? 'Write comment & re-pin' : 'Write comment & pin')
     : (isAlreadyPinned ? 'Re-pin to board' : 'Pin to board');
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogContent className="max-w-md" aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -366,23 +373,27 @@ function PinToBoardDialog({
             {title}
           </DialogTitle>
         </DialogHeader>
-        <div className="p-3 bg-muted/50 rounded-lg max-h-48 overflow-y-auto">
-          <p className="text-sm line-clamp-4">{note.content.slice(0, 300)}{note.content.length > 300 && '...'}</p>
-        </div>
-        <label className="flex items-center gap-2 cursor-pointer">
-          <Checkbox checked={addComment} onCheckedChange={(v) => setAddComment(!!v)} />
-          <span className="text-sm">Add a comment</span>
-        </label>
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button
-            onClick={addComment ? onPinWithComment : onPin}
-            className="bg-orange-500 hover:bg-orange-600 gap-1.5"
-          >
-            <Pin className="h-4 w-4" />
-            {buttonLabel}
-          </Button>
-        </div>
+        {note && (
+          <>
+            <div className="p-3 bg-muted/50 rounded-lg max-h-48 overflow-y-auto">
+              <p className="text-sm line-clamp-4">{note.content.slice(0, 300)}{note.content.length > 300 && '...'}</p>
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <Checkbox checked={addComment} onCheckedChange={(v) => setAddComment(!!v)} />
+              <span className="text-sm">Add a comment</span>
+            </label>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={onClose}>Cancel</Button>
+              <Button
+                onClick={addComment ? onPinWithComment : onPin}
+                className="bg-orange-500 hover:bg-orange-600 gap-1.5"
+              >
+                <Pin className="h-4 w-4" />
+                {buttonLabel}
+              </Button>
+            </div>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -510,20 +521,63 @@ export function MultiColumnClient() {
     return () => window.removeEventListener('scroll', onScroll);
   }, [activeTab, scheduleScrollPersist]);
 
-  // On initial mount, restore scroll position from sessionStorage after content renders
+  // On initial mount, restore scroll position from sessionStorage after content renders.
+  // Mobile browsers may evict the page when backgrounded — when it reloads, content
+  // takes time to arrive from relays. We retry with escalating delays (up to 5s total)
+  // so the scroll restore succeeds once the document is tall enough.
   useEffect(() => {
     const savedPos = tabScrollPositions.current.get(activeTab) ?? 0;
-    if (savedPos > 0) {
-      let attempts = 0;
-      const tryRestore = () => {
+    if (savedPos <= 0) return;
+    let cancelled = false;
+    const restore = () => {
+      if (cancelled) return;
+      window.scrollTo(0, savedPos);
+      // If we've scrolled close enough or document is tall enough, stop
+      if (Math.abs(window.scrollY - savedPos) < 20) return;
+      // Escalating retries: rAF burst (8×), then interval polling until content loads
+      return false; // signal: not done yet
+    };
+    // Phase 1: quick rAF burst for fast restores
+    let rAFCount = 0;
+    const tryRAF = () => {
+      if (cancelled) return;
+      window.scrollTo(0, savedPos);
+      rAFCount++;
+      if (Math.abs(window.scrollY - savedPos) < 20) return;
+      if (rAFCount < 8) requestAnimationFrame(tryRAF);
+    };
+    requestAnimationFrame(tryRAF);
+    // Phase 2: slower polling for content-dependent restores (mobile bg return)
+    const pollTimer = setInterval(() => {
+      if (cancelled) return;
+      if (document.body.scrollHeight >= savedPos + window.innerHeight * 0.5) {
         window.scrollTo(0, savedPos);
-        attempts++;
-        if (attempts < 8) requestAnimationFrame(tryRestore);
-      };
-      requestAnimationFrame(tryRestore);
-    }
+        clearInterval(pollTimer);
+      }
+    }, 200);
+    // Give up after 5s
+    const giveUpTimer = setTimeout(() => { clearInterval(pollTimer); }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(pollTimer);
+      clearTimeout(giveUpTimer);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Only on mount
+
+  // Also restore scroll position when returning from background (visibilitychange)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      const savedPos = tabScrollPositions.current.get(activeTabRef2.current) ?? 0;
+      if (savedPos > 0 && Math.abs(window.scrollY - savedPos) > 50) {
+        // Content may have been re-rendered; nudge scroll back
+        requestAnimationFrame(() => window.scrollTo(0, savedPos));
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
 
   const [defaultColumnCount, _setDefaultColumnCount] = usePlatformStorage<number>(STORAGE_KEYS.DEFAULT_COLUMN_COUNT, 3);
   const [featuresModalOpen, setFeaturesModalOpen] = useState(false);
@@ -2010,24 +2064,31 @@ export function MultiColumnClient() {
 
   // Derive userNotes for "me" tab: own notes only (no pinned — those are added separately)
   const pinnedIdSet = useMemo(() => new Set(pinnedIds), [pinnedIds]);
+  // Only exclude a note from userNotes if it's both in pinnedIds AND already
+  // fetched in pinnedNoteEvents. This prevents the note from disappearing
+  // between the optimistic pin toggle and the relay event fetch.
+  const pinnedAndFetchedSet = useMemo(() => {
+    const fetchedIds = new Set((pinnedNoteEvents ?? []).map(e => e.id));
+    return new Set(pinnedIds.filter(id => fetchedIds.has(id)));
+  }, [pinnedIds, pinnedNoteEvents]);
   const userNotes = useMemo(() => {
     if (!user?.pubkey) return undefined;
 
     // Self notes from follow cache
     const selfNotesFromCache = followNotesCache?.filter(e => e.pubkey === user.pubkey) ?? [];
 
-    // Combine sources, dedupe, exclude pinned notes (they're handled separately)
+    // Combine sources, dedupe, exclude pinned notes that have been fetched (they're added separately)
     const seen = new Set<string>();
     const notes: NostrEvent[] = [];
     for (const note of [...selfNotesFromCache, ...extraUserNotes]) {
-      if (!seen.has(note.id) && !pinnedIdSet.has(note.id) && note.pubkey === user.pubkey) {
+      if (!seen.has(note.id) && !pinnedAndFetchedSet.has(note.id) && note.pubkey === user.pubkey) {
         seen.add(note.id);
         notes.push(note);
       }
     }
 
     return notes.sort((a, b) => b.created_at - a.created_at);
-  }, [user?.pubkey, followNotesCache, extraUserNotes, pinnedIdSet]);
+  }, [user?.pubkey, followNotesCache, extraUserNotes, pinnedAndFetchedSet]);
 
   // Keep the ['user-notes'] React Query cache in sync with userNotes so loadMoreByCount
   // can use the oldest note as a pagination anchor.
@@ -3011,14 +3072,24 @@ export function MultiColumnClient() {
     return notes.filter(n => isCollapsedThisSession(n.id) || isSoftDismissed(n.id)).length;
   }, [isNotificationsTab, notifBlankCount, notes, isCollapsedThisSession, isSoftDismissed]);
 
-  // Scroll to a note by ID after a short delay (for DOM to settle)
+  // Scroll to a note by ID with retry logic for mobile.
+  // After consolidate or fetch, React re-renders can take longer on mobile;
+  // we retry with escalating delays until the element is found and visible.
   const scrollToNote = useCallback((noteId: string) => {
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        const el = document.querySelector(`[data-note-id="${noteId}"]`);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 100);
-    });
+    let attempts = 0;
+    const delays = [50, 100, 200, 400, 800]; // escalating: total ~1.5s
+    const tryScroll = () => {
+      const el = document.querySelector(`[data-note-id="${noteId}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+      if (attempts < delays.length) {
+        setTimeout(tryScroll, delays[attempts]);
+        attempts++;
+      }
+    };
+    requestAnimationFrame(tryScroll);
   }, []);
 
   const consolidateSoundRef = useRef(consolidateSound);
@@ -4239,16 +4310,15 @@ export function MultiColumnClient() {
           </ErrorBoundary>
         )}
 
-        {/* Pin to Board Dialog */}
-        {pinToBoardNote && (
-          <PinToBoardDialog
-            note={pinToBoardNote}
-            onClose={() => setPinToBoardNote(null)}
-            onPin={() => executePinToBoard(pinToBoardNote)}
-            onPinWithComment={() => executePinToBoardWithComment(pinToBoardNote)}
-            isAlreadyPinned={pinnedIds.includes(pinToBoardNote.id)}
-          />
-        )}
+        {/* Pin to Board Dialog — always mounted, controlled open for clean mobile unmount */}
+        <PinToBoardDialog
+          note={pinToBoardNote}
+          open={!!pinToBoardNote}
+          onClose={() => setPinToBoardNote(null)}
+          onPin={() => pinToBoardNote && executePinToBoard(pinToBoardNote)}
+          onPinWithComment={() => pinToBoardNote && executePinToBoardWithComment(pinToBoardNote)}
+          isAlreadyPinned={pinToBoardNote ? pinnedIds.includes(pinToBoardNote.id) : false}
+        />
 
         {/* Zap Dialog */}
         <ZapDialog

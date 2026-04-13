@@ -188,17 +188,28 @@ export function useFeedPagination({
 
   // Track newest timestamp from displayed notes — exclude own posts so that
   // 'me' notes injected via showOwnNotes don't skew the since-anchor for loadNewerNotes.
+  // Also exclude RSS pseudo-events (pubkey 'rss-feed') since they represent article
+  // publication dates, not Nostr relay fetch windows — including them would prevent
+  // the pagination system from correctly fetching newer npub notes.
   // Exception: on the 'me' tab, include all notes since that's the user's own feed.
   useEffect(() => {
     if (currentNotes.length > 0) {
-      // On 'me' tab, include all notes. On other tabs, exclude user's own notes.
-      const notesToTrack = activeTab === 'me' 
-        ? currentNotes 
-        : (userPubkey ? currentNotes.filter(n => n.pubkey !== userPubkey) : currentNotes);
-      
+      // On 'me' tab, include all notes. On other tabs, exclude user's own notes and RSS.
+      const notesToTrack = activeTab === 'me'
+        ? currentNotes
+        : currentNotes.filter(n => {
+            if (n.pubkey === 'rss-feed') return false; // RSS items don't represent Nostr fetch window
+            if (userPubkey && n.pubkey === userPubkey) return false; // own posts
+            return true;
+          });
+
       if (notesToTrack.length > 0) {
         const newest = notesToTrack.reduce((max, n) => n.created_at > max ? n.created_at : max, notesToTrack[0].created_at);
         setNewestTimestamp(prev => (prev === null || newest > prev ? newest : prev));
+        setLastFetchTime(prev => prev ?? Math.floor(Date.now() / 1000));
+      } else if (currentNotes.length > 0) {
+        // Only RSS items present (no Nostr notes yet) — seed lastFetchTime so
+        // autofetch and "Newer" button work to fetch actual Nostr notes.
         setLastFetchTime(prev => prev ?? Math.floor(Date.now() / 1000));
       }
     }
@@ -476,7 +487,10 @@ export function useFeedPagination({
   // ─── Load Newer ─────────────────────────────────────────────────────────────
 
   const loadNewerNotes = useCallback(async () => {
-    if (isLoadingNewer || !newestTimestamp) return;
+    if (isLoadingNewer) return;
+    // Use newestTimestamp if available, otherwise fall back to "last 2 hours"
+    // so feeds with only RSS items can still fetch Nostr notes.
+    const sinceTs = newestTimestamp ?? (Math.floor(Date.now() / 1000) - 7200);
     const requestTab = activeTab;
 
     let _authorCount = contacts?.length ?? 0;
@@ -496,7 +510,7 @@ export function useFeedPagination({
         newEvents = await nostr.query([{
           kinds: [...FEED_KINDS],
           authors: contacts,
-          since: newestTimestamp + 1,
+          since: sinceTs + 1,
           limit,
         }], { signal: AbortSignal.timeout(15000) });
         setBatchProgress({ loaded: 1, total: 1 });
@@ -506,7 +520,7 @@ export function useFeedPagination({
         try {
           for await (const msg of relay.req([{
             kinds: [1, 30023],
-            since: newestTimestamp + 1,
+            since: sinceTs + 1,
             limit,
           }])) {
             if (msg[0] === 'EVENT') newEvents.push(msg[2] as NostrEvent);
@@ -521,7 +535,7 @@ export function useFeedPagination({
           newEvents = await nostr.query([{
             kinds: [...FEED_KINDS],
             authors: activeCustomFeed.pubkeys,
-            since: newestTimestamp + 1,
+            since: sinceTs + 1,
             limit,
           }], { signal: AbortSignal.timeout(15000) });
         }
@@ -530,7 +544,7 @@ export function useFeedPagination({
         newEvents = await nostr.query([{
           kinds: [...FEED_KINDS],
           authors: [userPubkey],
-          since: newestTimestamp + 1,
+          since: sinceTs + 1,
           limit,
         }], { signal: AbortSignal.timeout(10000) });
 
@@ -538,7 +552,7 @@ export function useFeedPagination({
         newEvents = await nostr.query([{
           kinds: [...FEED_KINDS],
           authors: [activeTab],
-          since: newestTimestamp + 1,
+          since: sinceTs + 1,
           limit,
         }], { signal: AbortSignal.timeout(10000) });
       }
@@ -546,7 +560,7 @@ export function useFeedPagination({
       setBatchProgress(null);
 
       // Also fetch user notes for the same window (for dovetailing)
-      await fetchAndMergeUserNotes({ since: newestTimestamp + 1, limit });
+      await fetchAndMergeUserNotes({ since: sinceTs + 1, limit });
 
       // Bail if user switched tabs while we were fetching
       if (activeTabRef.current !== requestTab) {
@@ -581,7 +595,7 @@ export function useFeedPagination({
               gapEvents = await nostr.query([{
                 kinds: [...FEED_KINDS],
                 authors: gapAuthors,
-                since: newestTimestamp + 1,
+                since: sinceTs + 1,
                 until: oldestNew,
                 limit: limit * 2,
               }], { signal: AbortSignal.timeout(15000) });

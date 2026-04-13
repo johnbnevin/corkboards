@@ -24,8 +24,8 @@ interface NotificationsCorkboardProps {
   columnCount?: number;
   /** Reports the number of blank (dismissed/collapsed) notification cards to the parent */
   onBlankSpaceCount?: (count: number) => void;
-  /** Reports loadMore callback and hasMore state to the parent (for StatusBar integration) */
-  onLoadMoreReady?: (loadMore: (count: number) => void, hasMore: boolean) => void;
+  /** Reports loadMore callback, hasMore, loadNewer, and newestTimestamp to parent (for StatusBar) */
+  onLoadMoreReady?: (loadMore: (count: number) => void, hasMore: boolean, loadNewer: () => void, newestTimestamp: number | null) => void;
 }
 
 type NotifFilter = NotificationType;
@@ -79,12 +79,12 @@ export const NotificationsCorkboard = memo(function NotificationsCorkboard({
   onBlankSpaceCount,
   onLoadMoreReady,
 }: NotificationsCorkboardProps) {
-  const { notifications, isLoading, loadMore, hasMore } = useNotifications(true);
+  const { notifications, isLoading, loadMore, loadNewer, hasMore, newestTimestamp } = useNotifications(true);
 
-  // Report loadMore/hasMore to parent for StatusBar integration
+  // Report loadMore/hasMore/loadNewer/newestTimestamp to parent for StatusBar integration
   useEffect(() => {
-    onLoadMoreReady?.(loadMore, hasMore);
-  }, [loadMore, hasMore, onLoadMoreReady]);
+    onLoadMoreReady?.(loadMore, hasMore, loadNewer, newestTimestamp);
+  }, [loadMore, hasMore, loadNewer, newestTimestamp, onLoadMoreReady]);
   const { isDismissed, isCollapsedThisSession, isSoftDismissed } = useCollapsedNotes();
   const [hiddenTypes, setHiddenTypes] = useState<Set<NotifFilter>>(new Set());
   const [isFilterCollapsed, setIsFilterCollapsed] = useState(false);
@@ -113,10 +113,11 @@ export const NotificationsCorkboard = memo(function NotificationsCorkboard({
     [notifications, hiddenTypes, isDismissed],
   );
 
-  // Count blank spaces (dismissed/collapsed) and report to parent for consolidate button
+  // Count blank spaces (dismissed/collapsed) from ALL notifications (not filtered),
+  // matching how regular corkboard tabs count from the full notes array.
   const notifBlankCount = useMemo(
-    () => filtered.filter(n => isCollapsedThisSession(n.event.id) || isSoftDismissed(n.event.id)).length,
-    [filtered, isCollapsedThisSession, isSoftDismissed],
+    () => notifications.filter(n => isCollapsedThisSession(n.event.id) || isSoftDismissed(n.event.id)).length,
+    [notifications, isCollapsedThisSession, isSoftDismissed],
   );
   useEffect(() => { onBlankSpaceCount?.(notifBlankCount); }, [notifBlankCount, onBlankSpaceCount]);
 

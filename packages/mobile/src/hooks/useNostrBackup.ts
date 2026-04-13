@@ -56,12 +56,35 @@ const D_TAG_PREFIX = 'corkboard:backup';
 const LAST_BACKUP_TS_KEY = STORAGE_KEYS.LAST_BACKUP_TS;
 const CHECKPOINTS_KEY = STORAGE_KEYS.REMOTE_CHECKPOINTS;
 
-const BACKUP_BLOSSOM_SERVERS = [
+export const DEFAULT_BLOSSOM_SERVERS = [
   'https://blossom.primal.net/',
   'https://blossom.nostr.build/',
   'https://nostr.download/',
   'https://cdn.sovbit.host/',
 ];
+
+const BLOSSOM_SERVERS_KEY = 'corkboard:blossom-servers';
+
+/** Get user-configured blossom servers, falling back to defaults */
+export function getBlossomServers(): string[] {
+  const stored = mobileStorage.getSync(BLOSSOM_SERVERS_KEY);
+  if (stored) {
+    try {
+      const servers = JSON.parse(stored);
+      if (Array.isArray(servers) && servers.length > 0) return servers;
+    } catch { /* fall through */ }
+  }
+  return [...DEFAULT_BLOSSOM_SERVERS];
+}
+
+/** Save custom blossom server list */
+export function setBlossomServers(servers: string[]): void {
+  mobileStorage.setSync(BLOSSOM_SERVERS_KEY, JSON.stringify(servers));
+}
+
+function getActiveBlossomServers(): string[] {
+  return getBlossomServers();
+}
 
 const BACKUP_DISCOVERY_RELAYS = [
   ...FALLBACK_RELAYS,
@@ -226,7 +249,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
       let blossomUrl: string | null = null;
       let blossomHash: string | undefined;
-      for (const server of BACKUP_BLOSSOM_SERVERS) {
+      for (const server of getActiveBlossomServers()) {
         log(`  Uploading to ${server}…`);
         const result = await blossomUpload(server, encryptedData, signer);
         if (result) {
@@ -397,10 +420,28 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
     setMessage('Downloading backup…');
 
     try {
-      const response = await fetch(checkpoint.blossomUrl, { signal: AbortSignal.timeout(30000) });
-      if (!response.ok) throw new Error(`Download failed (${response.status})`);
-      const encryptedData = await response.text();
-      log(`Downloaded: ${encryptedData.length} chars`);
+      // Try primary URL, then fallback to other Blossom servers using hash
+      let encryptedData: string | null = null;
+      const urls = [checkpoint.blossomUrl];
+      if (checkpoint.blossomHash) {
+        for (const server of getActiveBlossomServers()) {
+          const fallbackUrl = `${server.replace(/\/$/, '')}/${checkpoint.blossomHash}`;
+          if (fallbackUrl !== checkpoint.blossomUrl) urls.push(fallbackUrl);
+        }
+      }
+      for (const url of urls) {
+        try {
+          log(`Fetching from ${url}…`);
+          const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
+          if (!response.ok) { log(`  ${url}: HTTP ${response.status}`); continue; }
+          encryptedData = await response.text();
+          log(`Downloaded: ${encryptedData.length} chars`);
+          break;
+        } catch (err) {
+          log(`  ${url}: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+      if (!encryptedData) throw new Error('Could not download backup from any Blossom server');
 
       // Verify Blossom hash if present (integrity check)
       if (checkpoint.blossomHash) {

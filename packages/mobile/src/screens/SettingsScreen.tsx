@@ -16,7 +16,7 @@ import { useAuth } from '../lib/AuthContext';
 import { useAuthor } from '../hooks/useAuthor';
 import { useNostrPublish } from '../hooks/useNostrPublish';
 import { useNwc } from '../hooks/useNwc';
-import { useNostrBackup } from '../hooks/useNostrBackup';
+import { useNostrBackup, getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS } from '../hooks/useNostrBackup';
 import {
   FALLBACK_RELAYS,
   updateRelayCache,
@@ -697,6 +697,9 @@ export function SettingsScreen() {
             </Text>
           </TouchableOpacity>
 
+          {/* Blossom servers */}
+          <BlossomServerSettings />
+
           {/* Delete account */}
           <TouchableOpacity style={[styles.button, styles.dangerBtn]} onPress={() => {
             Alert.alert(
@@ -767,6 +770,141 @@ export function SettingsScreen() {
     </ScrollView>
   );
 }
+
+// ─── Blossom Server Settings (inline in Advanced section) ────────────────
+
+function BlossomServerSettings() {
+  const [servers, setServersState] = useState<string[]>(getBlossomServers);
+  const [newUrl, setNewUrl] = useState('');
+  const [expanded, setExpanded] = useState(false);
+
+  const getHostname = (url: string) => {
+    try { return new URL(url).hostname; } catch { return url; }
+  };
+
+  const handleAdd = () => {
+    let url = newUrl.trim();
+    if (!url) return;
+    if (!url.startsWith('https://')) url = 'https://' + url;
+    if (!url.endsWith('/')) url += '/';
+    try { new URL(url); } catch {
+      Alert.alert('Invalid URL');
+      return;
+    }
+    if (servers.includes(url)) {
+      Alert.alert('Already in list');
+      return;
+    }
+    const updated = [...servers, url];
+    setServersState(updated);
+    setBlossomServers(updated);
+    setNewUrl('');
+  };
+
+  const handleRemove = (url: string) => {
+    if (servers.length <= 1) return;
+    const updated = servers.filter(s => s !== url);
+    setServersState(updated);
+    setBlossomServers(updated);
+  };
+
+  const handleResetDefaults = () => {
+    setServersState([...DEFAULT_BLOSSOM_SERVERS]);
+    setBlossomServers([...DEFAULT_BLOSSOM_SERVERS]);
+  };
+
+  return (
+    <View style={{ marginBottom: 12 }}>
+      <TouchableOpacity style={blossomStyles.header} onPress={() => setExpanded(!expanded)}>
+        <Text style={blossomStyles.headerText}>Blossom Servers ({servers.length})</Text>
+        <Text style={blossomStyles.expandIcon}>{expanded ? '▼' : '▶'}</Text>
+      </TouchableOpacity>
+
+      {expanded && (
+        <View style={blossomStyles.content}>
+          <Text style={blossomStyles.hint}>Encrypted backup storage servers. Tried in order.</Text>
+
+          {servers.map((url, i) => {
+            const isDefault = DEFAULT_BLOSSOM_SERVERS.includes(url);
+            return (
+              <View key={url} style={blossomStyles.serverRow}>
+                <Text style={blossomStyles.serverUrl} numberOfLines={1}>
+                  #{i + 1} {getHostname(url)}{isDefault ? ' (default)' : ''}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => handleRemove(url)}
+                  disabled={servers.length <= 1}
+                >
+                  <Text style={[blossomStyles.removeText, servers.length <= 1 && { opacity: 0.3 }]}>✕</Text>
+                </TouchableOpacity>
+              </View>
+            );
+          })}
+
+          <View style={blossomStyles.addRow}>
+            <TextInput
+              style={blossomStyles.addInput}
+              placeholder="https://blossom.example.com"
+              placeholderTextColor="#666"
+              value={newUrl}
+              onChangeText={setNewUrl}
+              onSubmitEditing={handleAdd}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TouchableOpacity style={blossomStyles.addBtn} onPress={handleAdd}>
+              <Text style={blossomStyles.addBtnText}>Add</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity style={blossomStyles.resetBtn} onPress={handleResetDefaults}>
+            <Text style={blossomStyles.resetText}>Reset to defaults</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const blossomStyles = StyleSheet.create({
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#333',
+    padding: 14,
+    borderRadius: 8,
+  },
+  headerText: { color: '#f97316', fontSize: 15, fontWeight: '500' },
+  expandIcon: { color: '#888', fontSize: 12 },
+  content: { paddingHorizontal: 8, paddingTop: 8 },
+  hint: { color: '#888', fontSize: 12, marginBottom: 8 },
+  serverRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+  },
+  serverUrl: { color: '#b3b3b3', fontSize: 13, fontFamily: 'monospace', flex: 1 },
+  removeText: { color: '#888', fontSize: 16, paddingHorizontal: 8 },
+  addRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  addInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#404040',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    color: '#f2f2f2',
+    fontSize: 13,
+  },
+  addBtn: { backgroundColor: '#333', paddingHorizontal: 16, borderRadius: 8, justifyContent: 'center' },
+  addBtnText: { color: '#f97316', fontSize: 14, fontWeight: '500' },
+  resetBtn: { marginTop: 8, padding: 8, alignItems: 'center' },
+  resetText: { color: '#a855f7', fontSize: 13 },
+});
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#1f1f1f' },

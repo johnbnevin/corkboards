@@ -87,12 +87,37 @@ const MAX_LOG_ENTRIES = 100;
 // Default blossom servers for backup file upload.
 // blossom.band is excluded: it rejects application/octet-stream blobs (HTTP 415)
 // and only accepts image/media uploads. The remaining servers accept text/plain blobs.
-const BACKUP_BLOSSOM_SERVERS = [
+export const DEFAULT_BLOSSOM_SERVERS = [
   'https://blossom.primal.net/',
   'https://blossom.nostr.build/',
   'https://nostr.download/',
   'https://cdn.sovbit.host/',
 ];
+
+const BLOSSOM_SERVERS_KEY = 'corkboard:blossom-servers';
+
+/** Get user-configured blossom servers, falling back to defaults */
+export function getBlossomServers(): string[] {
+  const stored = idbGetSync(BLOSSOM_SERVERS_KEY);
+  if (stored) {
+    try {
+      const servers = JSON.parse(stored);
+      if (Array.isArray(servers) && servers.length > 0) return servers;
+    } catch { /* fall through */ }
+  }
+  return [...DEFAULT_BLOSSOM_SERVERS];
+}
+
+/** Save custom blossom server list */
+export function setBlossomServers(servers: string[]): void {
+  idbSetSync(BLOSSOM_SERVERS_KEY, JSON.stringify(servers));
+  idbSet(BLOSSOM_SERVERS_KEY, JSON.stringify(servers));
+}
+
+// Resolved list used throughout this module
+function getActiveBlossomServers(): string[] {
+  return getBlossomServers();
+}
 
 export type BackupStatus =
   | 'idle'
@@ -306,9 +331,12 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   const manifestEventRef = useRef<NostrEvent | null>(null);
   const manifestDataRef = useRef<Record<string, unknown> | null>(null);
   const idbReadyChecked = useRef(false);
-  // Snapshot of all backed-up keys taken when a background check starts.
-  // Used to detect user changes during restore and preserve them.
-  // (preCheckBaseline removed — restore now writes unconditionally)
+  // True while the forced background check (for returning users) is in progress.
+  // Prevents auto-save from overwriting a potentially newer remote state.
+  const bgCheckInProgress = useRef(false);
+  // Cross-device update notification — set when forced check finds a newer backup
+  // from a different device, so the UI can show a toast offering restore.
+  const [crossDeviceUpdate, setCrossDeviceUpdate] = useState<RemoteCheckpoint | null>(null);
 
   // Persistent device ID for cross-device sync — stays local, never backed up.
   // Included in backup manifests so we can detect when a different device saved.
@@ -441,9 +469,12 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
       let blossomUrl: string | null = null;
       let blossomHash: string | null = null;
-      for (const server of BACKUP_BLOSSOM_SERVERS) {
+      const servers = getActiveBlossomServers();
+      const serverErrors: string[] = [];
+      for (const server of servers) {
         try {
           log(`  Uploading to ${server}...`);
+          setMessage(`Uploading to ${new URL(server).hostname}...`);
           const uploader = new BlossomUploader({ servers: [server], signer });
           const tags = await Promise.race([
             uploader.upload(file),
@@ -458,12 +489,14 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
             break;
           }
         } catch (err) {
-          log(`  ${server} failed: ${err instanceof Error ? err.message : err}`, 'warn');
+          const errMsg = err instanceof Error ? err.message : String(err);
+          serverErrors.push(`${new URL(server).hostname}: ${errMsg}`);
+          log(`  ${server} failed: ${errMsg}`, 'warn');
         }
       }
 
       if (!blossomUrl) {
-        throw new Error('All Blossom servers failed — backup not saved');
+        throw new Error(`All ${servers.length} Blossom servers failed:\n${serverErrors.join('\n')}`);
       }
 
       // Create manifest with Blossom URL (no chunks, single file)
@@ -591,6 +624,9 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   // Auto-save: silent background save using a fixed d-tag (overwrites itself).
   const autoSaveBackup = useCallback(async (): Promise<boolean> => {
     if (!user || isSaving.current || isRestoring.current) return false;
+    // Block auto-save while a forced background check is running — prevents
+    // overwriting a potentially newer remote state from another device.
+    if (bgCheckInProgress.current) return false;
     if (!hasUnsavedChanges()) return false;
     isSaving.current = true;
 
@@ -614,7 +650,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
       let blossomUrl: string | null = null;
       let blossomHash: string | null = null;
-      for (const server of BACKUP_BLOSSOM_SERVERS) {
+      for (const server of getActiveBlossomServers()) {
         try {
           const uploader = new BlossomUploader({ servers: [server], signer });
           const tags = await Promise.race([
@@ -1067,6 +1103,28 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         });
       }
 
+      // Cross-device detection: if this is a forced check for a returning user,
+      // compare device IDs. If the newest backup is from a different device and
+      // is newer than our last save, notify the UI instead of blocking with splash.
+      const manifestDeviceId = manifest?.deviceId as string | undefined;
+      const localLastTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      const remoteTs = manifest?.timestamp as number || bestManifestEvent.created_at;
+      const isCrossDevice = manifestDeviceId && manifestDeviceId !== deviceId;
+      const isNewer = remoteTs > localLastTs;
+
+      if (force && isReturningUser && isCrossDevice && isNewer) {
+        // Don't block with 'found' — instead notify via crossDeviceUpdate
+        // so the UI can show a non-blocking toast.
+        const newestCp = dedupedCheckpoints.sort((a, b) => b.timestamp - a.timestamp)[0];
+        if (newestCp) {
+          log(`Cross-device update detected (device ${manifestDeviceId?.slice(0, 8)}, ${formatTimeAgo(remoteTs)})`);
+          setCrossDeviceUpdate(newestCp);
+        }
+        setCheckSettled(true);
+        bgCheckInProgress.current = false;
+        return;
+      }
+
       // Always present the found backup to the user — let them decide.
       log(`Found restore point from ${ago}`);
       setStatus('found');
@@ -1090,9 +1148,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setCheckSettled(true);
         setMessage(friendly);
       }
+    } finally {
+      bgCheckInProgress.current = false;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- checkpoints declared after this hook (forward ref); deviceId is stable useState
-  }, [user, queryAll, log, deviceId]);
+  }, [user, queryAll, log, deviceId, isReturningUser]);
 
   // Load remote backup
   const loadRemoteBackup = useCallback(async () => {
@@ -1141,10 +1201,28 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         log(`Restoring v4 backup from Blossom: ${m.blossomUrl}`);
         setMessage('Downloading backup from Blossom...');
 
-        const response = await fetch(m.blossomUrl, { signal: AbortSignal.timeout(30000) });
-        if (!response.ok) throw new Error(`Blossom download failed: ${response.status}`);
-        const encryptedData = await response.text();
-        log(`Downloaded: ${encryptedData.length} chars`);
+        // Try primary URL, then fallback to other Blossom servers using hash
+        let encryptedData: string | null = null;
+        const urls = [m.blossomUrl as string];
+        if (m.blossomHash) {
+          for (const server of getActiveBlossomServers()) {
+            const fallbackUrl = `${server.replace(/\/$/, '')}/${m.blossomHash}`;
+            if (fallbackUrl !== m.blossomUrl) urls.push(fallbackUrl);
+          }
+        }
+        for (const url of urls) {
+          try {
+            setMessage(`Downloading from ${new URL(url).hostname}...`);
+            const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
+            if (!response.ok) { log(`  ${url}: HTTP ${response.status}`, 'warn'); continue; }
+            encryptedData = await response.text();
+            log(`Downloaded: ${encryptedData.length} chars from ${new URL(url).hostname}`);
+            break;
+          } catch (err) {
+            log(`  ${url}: ${err instanceof Error ? err.message : err}`, 'warn');
+          }
+        }
+        if (!encryptedData) throw new Error('Could not download backup from any Blossom server');
 
         // Verify Blossom hash if present in manifest (v4+ integrity check)
         if (m.blossomHash) {
@@ -1393,10 +1471,29 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     setMessage('Restoring from checkpoint...');
 
     try {
-      log(`Fetching checkpoint from ${cp.blossomUrl}...`);
-      const resp = await fetch(cp.blossomUrl, { signal: AbortSignal.timeout(15000) });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const encryptedData = await resp.text();
+      // Try the original Blossom URL first, then fall back to other servers using the hash
+      let encryptedData: string | null = null;
+      const urls = [cp.blossomUrl];
+      // If we have a hash, construct fallback URLs on other Blossom servers
+      if (cp.blossomHash) {
+        for (const server of getActiveBlossomServers()) {
+          const fallbackUrl = `${server.replace(/\/$/, '')}/${cp.blossomHash}`;
+          if (fallbackUrl !== cp.blossomUrl) urls.push(fallbackUrl);
+        }
+      }
+      for (const url of urls) {
+        try {
+          log(`Fetching checkpoint from ${url}...`);
+          setMessage(`Downloading from ${new URL(url).hostname}...`);
+          const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+          if (!resp.ok) { log(`  ${url}: HTTP ${resp.status}`, 'warn'); continue; }
+          encryptedData = await resp.text();
+          break;
+        } catch (err) {
+          log(`  ${url}: ${err instanceof Error ? err.message : err}`, 'warn');
+        }
+      }
+      if (!encryptedData) throw new Error('Could not download backup from any Blossom server');
 
       log('Decrypting...');
       const aesRaw = await hexToRawKey(
@@ -1454,9 +1551,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     checkRemoteBackup();
     // For returning users, also kick off a forced background check after the
     // non-forced one settles instantly — this discovers cross-device changes.
+    // Set bgCheckInProgress to prevent auto-save from overwriting newer remote state.
     if (isReturningUser) {
+      bgCheckInProgress.current = true;
       const bgCheck = setTimeout(() => checkRemoteBackup(true), 500);
-      return () => clearTimeout(bgCheck);
+      // Safety fallback: clear bgCheckInProgress after 20s in case check hangs
+      const safety = setTimeout(() => { bgCheckInProgress.current = false; }, 20000);
+      return () => { clearTimeout(bgCheck); clearTimeout(safety); };
     }
     const retry1 = setTimeout(() => {
       if (_checkedPubkey === null) checkRemoteBackup();
@@ -1554,6 +1655,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     }
   }, [user, isScanning, queryAll, log]);
 
+  // Dismiss cross-device notification (user chose not to restore)
+  const dismissCrossDeviceUpdate = useCallback(() => {
+    setCrossDeviceUpdate(null);
+  }, []);
+
   return {
     backupStatus: status,
     backupCheckSettled: checkSettled,
@@ -1569,6 +1675,10 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     lastBackupTs,
     hasUnsavedChanges,
     isReturningUser,
+    // Cross-device sync
+    bgCheckInProgress: bgCheckInProgress.current,
+    crossDeviceUpdate,
+    dismissCrossDeviceUpdate,
     // Checkpoint management
     checkpoints,
     renameCheckpoint: renameCheckpointFn,

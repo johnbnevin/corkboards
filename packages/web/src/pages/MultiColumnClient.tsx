@@ -893,7 +893,7 @@ export function MultiColumnClient() {
   }, [addBookmark, removeBookmark]);
 
   // Nostr backup/restore
-  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, isReturningUser, checkpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
+  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, isReturningUser, bgCheckInProgress, crossDeviceUpdate, dismissCrossDeviceUpdate, checkpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
 
   // Logout: visible step-by-step — autosave to :auto slot, wipe, reload
   const [logoutStep, setLogoutStep] = useState<string | null>(null);
@@ -1050,10 +1050,9 @@ export function MultiColumnClient() {
     let changeDetectedAt: number | null = null;
 
     const triggerBlossomIfReady = (source: string) => {
-      // Never auto-save while a restore is in progress or just found — prevents
-      // saving partial state (e.g. bookmarks loaded but corkboards not yet restored)
-      // that would overwrite the correct relay state.
-      if (backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored') {
+      // Never auto-save while a restore is in progress, just found, or a background
+      // cross-device check is running — prevents overwriting newer remote state.
+      if (bgCheckInProgress || backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored') {
         if (import.meta.env.DEV) console.log(`[AutoSave] skip (${source}): backup ${backupStatus}, waiting for restore to complete`);
         return;
       }
@@ -1122,11 +1121,39 @@ export function MultiColumnClient() {
       document.removeEventListener('visibilitychange', onVisibilityHidden);
       window.removeEventListener('beforeunload', onBeforeUnload);
     };
-  }, [user, backupCheckSettled, backupStatus, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
+  }, [user, backupCheckSettled, backupStatus, bgCheckInProgress, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
 
-  // Cross-device sync is handled by the mount-time device-ID check in useNostrBackup,
-  // not by visibility events. The forced background check for returning users
-  // (setTimeout → checkRemoteBackup(true)) runs on mount and compares device IDs.
+  // Cross-device update toast: when forced background check detects a newer backup
+  // from a different device, offer the user a non-blocking restore option.
+  useEffect(() => {
+    if (!crossDeviceUpdate) return;
+    const ts = new Date(crossDeviceUpdate.timestamp * 1000).toLocaleString();
+    toast({
+      title: 'Newer backup from another device',
+      description: `Found a backup from ${ts}. Open Backup & Restore to sync.`,
+      duration: 10000,
+    });
+  }, [crossDeviceUpdate, toast]);
+
+  // Re-check for cross-device changes when tab becomes visible after being hidden
+  // for more than 2 minutes. This catches updates made on another device while
+  // this tab was in the background.
+  useEffect(() => {
+    if (!user || !backupCheckSettled) return;
+    let lastHidden = 0;
+    const onVisChange = () => {
+      if (document.visibilityState === 'hidden') {
+        lastHidden = Date.now();
+      } else if (document.visibilityState === 'visible' && lastHidden > 0) {
+        const awayMs = Date.now() - lastHidden;
+        if (awayMs > 2 * 60 * 1000) {
+          checkRemoteBackup(true);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisChange);
+    return () => document.removeEventListener('visibilitychange', onVisChange);
+  }, [user, backupCheckSettled, checkRemoteBackup]);
 
   // Theme management
   const { theme, setTheme } = useTheme();
@@ -1780,10 +1807,14 @@ export function MultiColumnClient() {
 
   // Notification load-more state — surfaced from NotificationsCorkboard for StatusBar
   const notifLoadMoreRef = useRef<((count: number) => void) | null>(null);
+  const notifLoadNewerRef = useRef<(() => void) | null>(null);
   const [notifHasMore, setNotifHasMore] = useState(false);
-  const handleNotifLoadMoreReady = useCallback((loadMore: (count: number) => void, hasMore: boolean) => {
+  const [notifNewestTimestamp, setNotifNewestTimestamp] = useState<number | null>(null);
+  const handleNotifLoadMoreReady = useCallback((loadMore: (count: number) => void, hasMore: boolean, loadNewer: () => void, newestTs: number | null) => {
     notifLoadMoreRef.current = loadMore;
+    notifLoadNewerRef.current = loadNewer;
     setNotifHasMore(hasMore);
+    setNotifNewestTimestamp(newestTs);
   }, []);
 
   // Onboard procedure: active when contacts have loaded and user follows fewer than 10 people.
@@ -3302,6 +3333,21 @@ export function MultiColumnClient() {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start">
+                    <DropdownMenuItem
+                      disabled={backupStatus === 'saving' || backupStatus === 'encrypting'}
+                      onClick={async () => {
+                        try {
+                          await saveBackup();
+                          toast({ title: 'Saved', description: 'Backup saved to Blossom.' });
+                        } catch {
+                          toast({ title: 'Save failed', description: 'Could not save to Blossom.', variant: 'destructive' });
+                        }
+                      }}
+                      className="gap-2"
+                    >
+                      <CloudUpload className="h-4 w-4" />Save Now
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => {
                       // Debounce: don't open during active check/restore
                       if (backupStatus === 'checking' || backupStatus === 'restoring') return;
@@ -3311,7 +3357,7 @@ export function MultiColumnClient() {
                       if (backupCheckSettled && (backupStatus === 'idle' || backupStatus === 'no-backup')) {
                         checkRemoteBackup(true);
                       }
-                    }} className="gap-2"><CloudUpload className="h-4 w-4" />Backup &amp; Restore</DropdownMenuItem>
+                    }} className="gap-2"><HardDrive className="h-4 w-4" />Backup &amp; Restore</DropdownMenuItem>
                     <DropdownMenuItem onClick={() => setLocalBackupOpen(true)} className="gap-2"><HardDrive className="h-4 w-4" />Local File Backup</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -3681,7 +3727,7 @@ export function MultiColumnClient() {
                   {isScanning ? (
                     <><Loader2 className="h-3 w-3 animate-spin" />Scanning relays...</>
                   ) : (
-                    <>Find older states</>
+                    <>Search for more</>
                   )}
                 </Button>
               </div>
@@ -4113,6 +4159,8 @@ export function MultiColumnClient() {
           isNotificationsTab={isNotificationsTab}
           onLoadMoreNotifications={notifLoadMoreRef.current || undefined}
           hasMoreNotifications={notifHasMore}
+          onLoadNewerNotifications={notifLoadNewerRef.current || undefined}
+          newestNotificationTimestamp={notifNewestTimestamp}
         />
 
         {/* Toast Messages */}
@@ -4265,7 +4313,7 @@ export function MultiColumnClient() {
 
         {/* Advanced Settings Dialog */}
         <Dialog open={advancedSettingsOpen} onOpenChange={setAdvancedSettingsOpen}>
-          <DialogContent className="sm:max-w-[380px]">
+          <DialogContent className="sm:max-w-[420px] max-h-[85dvh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>Advanced</DialogTitle>
               <DialogDescription className="sr-only">Advanced settings and account management</DialogDescription>

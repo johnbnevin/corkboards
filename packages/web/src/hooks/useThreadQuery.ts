@@ -106,7 +106,7 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
       // Single bulk query — NPool's reqRouter handles relay routing
       const idsToQuery = rootId === eventId ? [rootId] : [rootId, eventId!]
       const events = await nostr.query(
-        [{ kinds: [1, 6, 7, 16, 9735], '#e': idsToQuery, limit: 500 }],
+        [{ kinds: [1, 7], '#e': idsToQuery, limit: 500 }],
         { signal: AbortSignal.timeout(8000) },
       )
 

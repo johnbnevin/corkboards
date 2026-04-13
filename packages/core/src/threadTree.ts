@@ -98,6 +98,10 @@ export function buildThreadTree(
         arr.push(e)
         reactionsByTarget.set(targetId, arr)
       }
+    } else if (e.kind === 6 || e.kind === 16 || e.kind === 9735) {
+      // Reposts (6, 16) and zap receipts (9735) are engagement signals,
+      // not thread participants — skip them to avoid duplicating the original post
+      continue
     } else {
       const parentId = getParentId(e)
       if (parentId) {

@@ -1,11 +1,17 @@
 /**
  * AdvancedSettings — modal content for less-frequently-used settings.
  *
- * Each option has helper text and a confirmation dialog before acting.
+ * Includes relay management, relay health, blossom server config, and account options.
+ * Each destructive option has a confirmation dialog before acting.
  */
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Separator } from '@/components/ui/separator';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,7 +22,19 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { Eye, Database, Settings, Bookmark, Trash2 } from 'lucide-react';
+import {
+  Eye, Database, Settings, Bookmark, Trash2, Wifi, WifiOff,
+  Plus, X, CheckCircle, AlertTriangle, Server,
+} from 'lucide-react';
+import { useAppContext } from '@/hooks/useAppContext';
+import { useCurrentUser } from '@/hooks/useCurrentUser';
+import { useNostrPublish } from '@/hooks/useNostrPublish';
+import { useRelayHealthAuto, type RelayHealth } from '@/hooks/useRelayHealth';
+import { useToast } from '@/hooks/useToast';
+import { FALLBACK_RELAYS } from '@/components/NostrProvider';
+import {
+  getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS,
+} from '@/hooks/useNostrBackup';
 
 interface AdvancedSettingsProps {
   dismissedCount: number;
@@ -31,6 +49,19 @@ interface AdvancedSettingsProps {
 
 type ConfirmAction = 'dismissed' | 'cache' | 'clientTag' | 'bookmarks' | 'delete' | null;
 
+interface Relay {
+  url: string;
+  read: boolean;
+  write: boolean;
+}
+
+function StatusDot({ status }: { status: RelayHealth['status'] }) {
+  if (status === 'healthy') return <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />;
+  if (status === 'slow') return <AlertTriangle className="h-3 w-3 text-yellow-500 shrink-0" />;
+  if (status === 'error') return <WifiOff className="h-3 w-3 text-red-500 shrink-0" />;
+  return <Wifi className="h-3 w-3 text-muted-foreground shrink-0" />;
+}
+
 export function AdvancedSettings({
   dismissedCount,
   onClearDismissed,
@@ -42,6 +73,7 @@ export function AdvancedSettings({
   onDeleteAccount,
 }: AdvancedSettingsProps) {
   const [confirm, setConfirm] = useState<ConfirmAction>(null);
+  const [section, setSection] = useState<'main' | 'relays' | 'blossom'>('main');
 
   const confirmMessages: Record<Exclude<ConfirmAction, null>, { title: string; description: string; action: string; destructive?: boolean }> = {
     dismissed: {
@@ -89,9 +121,31 @@ export function AdvancedSettings({
 
   const active = confirm ? confirmMessages[confirm] : null;
 
+  if (section === 'relays') return <RelaySection onBack={() => setSection('main')} />;
+  if (section === 'blossom') return <BlossomSection onBack={() => setSection('main')} />;
+
   return (
     <>
       <div className="space-y-1">
+        {/* Relay & Server Management */}
+        <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setSection('relays')}>
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Wifi className="h-4 w-4 shrink-0" />
+            Relays
+          </div>
+          <p className="text-xs text-muted-foreground mt-0.5 pl-6">Manage relays, publish relay list, view health</p>
+        </button>
+
+        <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setSection('blossom')}>
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Server className="h-4 w-4 shrink-0" />
+            Blossom Servers
+          </div>
+          <p className="text-xs text-muted-foreground mt-0.5 pl-6">Configure backup storage servers</p>
+        </button>
+
+        <Separator className="my-2" />
+
         {dismissedCount > 0 && (
           <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setConfirm('dismissed')}>
             <div className="flex items-center gap-2 text-sm font-medium">
@@ -157,5 +211,319 @@ export function AdvancedSettings({
         </AlertDialogContent>
       </AlertDialog>
     </>
+  );
+}
+
+// ─── Relay Management Section ─────────────────────────────────────────────
+
+function RelaySection({ onBack }: { onBack: () => void }) {
+  const { config, updateConfig } = useAppContext();
+  const { user } = useCurrentUser();
+  const { mutate: publishEvent } = useNostrPublish();
+  const { toast } = useToast();
+  const { relayHealth, getShortName, checkAllRelays } = useRelayHealthAuto();
+
+  const [relays, setRelays] = useState<Relay[]>(config.relayMetadata.relays);
+  const [newRelayUrl, setNewRelayUrl] = useState('');
+  const [showDefaults, setShowDefaults] = useState(true);
+
+  useEffect(() => {
+    setRelays(config.relayMetadata.relays);
+  }, [config.relayMetadata.relays]);
+
+  const normalizeRelayUrl = (url: string): string => {
+    url = url.trim();
+    try { return new URL(url).toString(); } catch {
+      try { return new URL(`wss://${url}`).toString(); } catch { return url; }
+    }
+  };
+
+  const handleAddRelay = () => {
+    const normalized = normalizeRelayUrl(newRelayUrl);
+    try { new URL(normalized); } catch {
+      toast({ title: 'Invalid relay URL', variant: 'destructive' });
+      return;
+    }
+    if (relays.some(r => r.url === normalized)) {
+      toast({ title: 'Relay already exists', variant: 'destructive' });
+      return;
+    }
+    const newRelays = [...relays, { url: normalized, read: true, write: true }];
+    setRelays(newRelays);
+    setNewRelayUrl('');
+    saveRelays(newRelays);
+  };
+
+  const handleRemoveRelay = (url: string) => {
+    const newRelays = relays.filter(r => r.url !== url);
+    setRelays(newRelays);
+    saveRelays(newRelays);
+  };
+
+  const handleToggleRead = (url: string) => {
+    const newRelays = relays.map(r => r.url === url ? { ...r, read: !r.read } : r);
+    setRelays(newRelays);
+    saveRelays(newRelays);
+  };
+
+  const handleToggleWrite = (url: string) => {
+    const newRelays = relays.map(r => r.url === url ? { ...r, write: !r.write } : r);
+    setRelays(newRelays);
+    saveRelays(newRelays);
+  };
+
+  const saveRelays = useCallback((newRelays: Relay[]) => {
+    const now = Math.floor(Date.now() / 1000);
+    updateConfig((current) => ({
+      ...current,
+      relayMetadata: { relays: newRelays, updatedAt: now },
+    }));
+    if (user) {
+      const tags = newRelays.map(relay => {
+        if (relay.read && relay.write) return ['r', relay.url];
+        if (relay.read) return ['r', relay.url, 'read'];
+        if (relay.write) return ['r', relay.url, 'write'];
+        return null;
+      }).filter((tag): tag is string[] => tag !== null);
+      publishEvent(
+        { kind: 10002, content: '', tags },
+        {
+          onSuccess: () => toast({ title: 'Relay list published' }),
+          onError: () => toast({ title: 'Failed to publish relay list', variant: 'destructive' }),
+        }
+      );
+    }
+  }, [updateConfig, user, publishEvent, toast]);
+
+  const getHealthForRelay = (url: string): RelayHealth | undefined => {
+    return relayHealth.find(h => h.url === url || h.url === url.replace(/\/$/, '') + '/');
+  };
+
+  const healthy = relayHealth.filter(r => r.status === 'healthy').length;
+  const total = relayHealth.length;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <Button variant="ghost" size="sm" onClick={onBack} className="h-7 px-2 text-xs">&larr; Back</Button>
+        <span className="text-sm font-medium flex-1">Relays</span>
+        <span className="text-xs text-muted-foreground">{healthy}/{total} healthy</span>
+        <Button variant="ghost" size="sm" onClick={checkAllRelays} className="h-7 px-2 text-xs">Check</Button>
+      </div>
+
+      {/* Relay list with health */}
+      <div className="space-y-1.5 max-h-[40vh] overflow-y-auto">
+        {relays.map((relay) => {
+          const health = getHealthForRelay(relay.url);
+          return (
+            <div key={relay.url} className="flex items-center gap-2 p-2 rounded-md border bg-muted/20 text-xs">
+              <StatusDot status={health?.status || 'unknown'} />
+              <span className="font-mono flex-1 truncate" title={relay.url}>{getShortName(relay.url)}</span>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="ghost" size="icon" className="size-5 text-muted-foreground shrink-0">
+                    <Settings className="h-3.5 w-3.5" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-44" align="end">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs cursor-pointer">Read</Label>
+                      <Switch checked={relay.read} onCheckedChange={() => handleToggleRead(relay.url)} className="data-[state=checked]:bg-purple-500 scale-75" />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs cursor-pointer">Write</Label>
+                      <Switch checked={relay.write} onCheckedChange={() => handleToggleWrite(relay.url)} className="data-[state=checked]:bg-orange-500 scale-75" />
+                    </div>
+                    {health && (
+                      <div className="text-[10px] text-muted-foreground pt-1 border-t">
+                        Status: {health.status} {health.latency !== null && `(${health.latency}ms)`}
+                      </div>
+                    )}
+                  </div>
+                </PopoverContent>
+              </Popover>
+              <Button
+                variant="ghost" size="icon"
+                onClick={() => handleRemoveRelay(relay.url)}
+                className="size-5 text-muted-foreground hover:text-destructive shrink-0"
+                disabled={relays.length <= 1}
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Add relay */}
+      <div className="flex gap-1.5">
+        <Input
+          placeholder="wss://relay.example.com"
+          value={newRelayUrl}
+          onChange={(e) => setNewRelayUrl(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleAddRelay(); }}
+          className="h-8 text-xs"
+        />
+        <Button onClick={handleAddRelay} disabled={!newRelayUrl.trim()} variant="outline" size="sm" className="h-8 shrink-0">
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+      {/* Default relays toggle */}
+      <div className="flex items-center justify-between p-2 rounded-md border bg-muted/10">
+        <div>
+          <p className="text-xs font-medium">Default relays</p>
+          <p className="text-[10px] text-muted-foreground">{FALLBACK_RELAYS.length} fallback relays used for discovery</p>
+        </div>
+        <Switch
+          checked={showDefaults}
+          onCheckedChange={setShowDefaults}
+          className="scale-75"
+        />
+      </div>
+      {showDefaults && (
+        <div className="space-y-0.5 pl-2">
+          {FALLBACK_RELAYS.map(url => {
+            const health = getHealthForRelay(url);
+            return (
+              <div key={url} className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                <StatusDot status={health?.status || 'unknown'} />
+                <span className="truncate">{getShortName(url)}</span>
+                {health?.latency !== null && health?.latency !== undefined && <span className="shrink-0">{health.latency}ms</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {!user && (
+        <p className="text-xs text-muted-foreground">Log in to sync your relay list with Nostr</p>
+      )}
+    </div>
+  );
+}
+
+// ─── Blossom Server Management Section ────────────────────────────────────
+
+function BlossomSection({ onBack }: { onBack: () => void }) {
+  const { toast } = useToast();
+  const [servers, setServers] = useState<string[]>(getBlossomServers);
+  const [newUrl, setNewUrl] = useState('');
+  const [testing, setTesting] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Map<string, 'ok' | 'error'>>(new Map());
+
+  const isDefault = (url: string) => DEFAULT_BLOSSOM_SERVERS.includes(url);
+
+  const handleAdd = () => {
+    let url = newUrl.trim();
+    if (!url) return;
+    if (!url.startsWith('https://')) url = 'https://' + url;
+    if (!url.endsWith('/')) url += '/';
+    try { new URL(url); } catch {
+      toast({ title: 'Invalid URL', variant: 'destructive' });
+      return;
+    }
+    if (servers.includes(url)) {
+      toast({ title: 'Server already in list', variant: 'destructive' });
+      return;
+    }
+    const updated = [...servers, url];
+    setServers(updated);
+    setBlossomServers(updated);
+    setNewUrl('');
+    toast({ title: 'Server added' });
+  };
+
+  const handleRemove = (url: string) => {
+    const updated = servers.filter(s => s !== url);
+    setServers(updated);
+    setBlossomServers(updated);
+  };
+
+  const handleResetDefaults = () => {
+    setServers([...DEFAULT_BLOSSOM_SERVERS]);
+    setBlossomServers([...DEFAULT_BLOSSOM_SERVERS]);
+    toast({ title: 'Reset to defaults' });
+  };
+
+  const testServer = async (url: string) => {
+    setTesting(url);
+    try {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(10000), method: 'HEAD' });
+      setTestResults(prev => new Map(prev).set(url, resp.ok || resp.status === 405 ? 'ok' : 'error'));
+    } catch {
+      setTestResults(prev => new Map(prev).set(url, 'error'));
+    }
+    setTesting(null);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <Button variant="ghost" size="sm" onClick={onBack} className="h-7 px-2 text-xs">&larr; Back</Button>
+        <span className="text-sm font-medium flex-1">Blossom Servers</span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Blossom servers store encrypted backup files. Servers are tried in order until one succeeds.
+      </p>
+
+      <div className="space-y-1.5">
+        {servers.map((url, i) => {
+          const result = testResults.get(url);
+          return (
+            <div key={url} className="flex items-center gap-2 p-2 rounded-md border bg-muted/20 text-xs">
+              {result === 'ok' ? (
+                <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />
+              ) : result === 'error' ? (
+                <WifiOff className="h-3 w-3 text-red-500 shrink-0" />
+              ) : (
+                <Server className="h-3 w-3 text-muted-foreground shrink-0" />
+              )}
+              <span className="font-mono flex-1 truncate" title={url}>
+                {(() => { try { return new URL(url).hostname; } catch { return url; } })()}
+              </span>
+              {isDefault(url) && <span className="text-[9px] px-1 py-0.5 rounded bg-muted text-muted-foreground shrink-0">default</span>}
+              <span className="text-[9px] text-muted-foreground shrink-0">#{i + 1}</span>
+              <Button
+                variant="ghost" size="icon"
+                onClick={() => testServer(url)}
+                disabled={testing === url}
+                className="size-5 text-muted-foreground shrink-0"
+                title="Test server"
+              >
+                <Wifi className={`h-3 w-3 ${testing === url ? 'animate-pulse' : ''}`} />
+              </Button>
+              <Button
+                variant="ghost" size="icon"
+                onClick={() => handleRemove(url)}
+                className="size-5 text-muted-foreground hover:text-destructive shrink-0"
+                disabled={servers.length <= 1}
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Add server */}
+      <div className="flex gap-1.5">
+        <Input
+          placeholder="https://blossom.example.com"
+          value={newUrl}
+          onChange={(e) => setNewUrl(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
+          className="h-8 text-xs"
+        />
+        <Button onClick={handleAdd} disabled={!newUrl.trim()} variant="outline" size="sm" className="h-8 shrink-0">
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+      <Button variant="outline" size="sm" onClick={handleResetDefaults} className="w-full text-xs">
+        Reset to defaults
+      </Button>
+    </div>
   );
 }

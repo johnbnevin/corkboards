@@ -136,6 +136,9 @@ export function useNotifications(enabled: boolean) {
   const { user } = useCurrentUser();
   const limitRef = useRef(100);
   const [, forceUpdate] = useState(0);
+  // Track the newest notification timestamp so StatusBar can show "Newer" button
+  const newestTimestampRef = useRef<number | null>(null);
+  const [newestTimestamp, setNewestTimestamp] = useState<number | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['notifications', user?.pubkey],
@@ -148,7 +151,7 @@ export function useNotifications(enabled: boolean) {
       );
 
       const seen = new Set<string>();
-      return events
+      const items = events
         .filter(e => {
           if (seen.has(e.id)) return false;
           seen.add(e.id);
@@ -161,6 +164,15 @@ export function useNotifications(enabled: boolean) {
           ...getTargetInfo(event),
           senderPubkey: event.kind === 9735 ? getZapSenderPubkey(event) : null,
         }));
+
+      // Track the newest timestamp for "Newer" button
+      if (items.length > 0) {
+        const newest = items[0].event.created_at;
+        newestTimestampRef.current = newest;
+        setNewestTimestamp(newest);
+      }
+
+      return items;
     },
     enabled: enabled && !!user?.pubkey,
     staleTime: 30_000,
@@ -174,11 +186,20 @@ export function useNotifications(enabled: boolean) {
     forceUpdate(n => n + 1);
   }, [refetch]);
 
+  // Load newer notifications since the newest one we have
+  const loadNewer = useCallback(() => {
+    // Simply refetch — the query fetches the newest N notifications,
+    // so any newer ones since last fetch will be included.
+    refetch();
+  }, [refetch]);
+
   return {
     notifications: data ?? [],
     isLoading,
     refetch,
     loadMore,
+    loadNewer,
     hasMore: (data?.length ?? 0) >= limitRef.current,
+    newestTimestamp,
   };
 }

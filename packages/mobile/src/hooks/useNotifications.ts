@@ -137,6 +137,7 @@ export function useNotifications(enabled = true) {
   const { nostr } = useNostr();
   const { pubkey } = useAuth();
   const [limit, setLimit] = useState(100);
+  const [newestTimestamp, setNewestTimestamp] = useState<number | null>(null);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['notifications', pubkey, limit],
@@ -149,7 +150,7 @@ export function useNotifications(enabled = true) {
       );
 
       const seen = new Set<string>();
-      return events
+      const items = events
         .filter(e => {
           if (seen.has(e.id)) return false;
           seen.add(e.id);
@@ -162,6 +163,12 @@ export function useNotifications(enabled = true) {
           ...getTargetInfo(event),
           senderPubkey: event.kind === 9735 ? getZapSenderPubkey(event) : null,
         }));
+
+      if (items.length > 0) {
+        setNewestTimestamp(items[0].event.created_at);
+      }
+
+      return items;
     },
     enabled: enabled && !!pubkey,
     staleTime: 30_000,
@@ -170,11 +177,16 @@ export function useNotifications(enabled = true) {
 
   const loadMore = useCallback(() => setLimit(l => l + 100), []);
 
+  // Load newer notifications — simply refetch since query gets newest N
+  const loadNewer = useCallback(() => { refetch(); }, [refetch]);
+
   return {
     notifications: data ?? [],
     isLoading,
     refetch,
     loadMore,
+    loadNewer,
     hasMore: (data?.length ?? 0) >= limit,
+    newestTimestamp,
   };
 }

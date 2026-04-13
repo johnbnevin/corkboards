@@ -37,6 +37,8 @@ interface StatusBarProps {
   isNotificationsTab?: boolean;
   onLoadMoreNotifications?: (count: number) => void;
   hasMoreNotifications?: boolean;
+  onLoadNewerNotifications?: () => void;
+  newestNotificationTimestamp?: number | null;
 }
 
 // Format time gap for "Newer" button label
@@ -83,6 +85,8 @@ export function StatusBar({
   isNotificationsTab = false,
   onLoadMoreNotifications,
   hasMoreNotifications = false,
+  onLoadNewerNotifications,
+  newestNotificationTimestamp,
 }: StatusBarProps) {
   const [isVisible, setIsVisible] = useState(true);
   const [isSticky, setIsSticky] = useState(true);
@@ -243,8 +247,8 @@ export function StatusBar({
         <div className={`hidden sm:flex items-center justify-center px-8 py-1.5 min-h-[28px] transition-all duration-300 ease-in-out opacity-100 relative`}>
         {/* Centered button group */}
         <div className="flex items-center gap-1">
-          {isNotificationsTab ? (
-            hasMoreNotifications && onLoadMoreNotifications && (<>
+          {isNotificationsTab ? (<>
+            {hasMoreNotifications && onLoadMoreNotifications && (<>
               <Button
                 size="sm"
                 variant="outline"
@@ -263,8 +267,21 @@ export function StatusBar({
               >
                 +{100 * multiplier}
               </Button>
-            </>)
-          ) : !isDiscoverTab && (<>
+            </>)}
+            {!autofetch && onLoadNewerNotifications && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onLoadNewerNotifications}
+                disabled={isLoading}
+                className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors gap-0.5"
+                title="Load newer notifications"
+              >
+                <RotateCcw className={`h-3 w-3 ${isLoading ? 'animate-spin' : ''}`} />
+                Newer{formatNewerTime(newestNotificationTimestamp)}
+              </Button>
+            )}
+          </>) : !isDiscoverTab && (<>
           <Button
             size="sm"
             variant="outline"
@@ -426,8 +443,8 @@ export function StatusBar({
         {/* First row: Load buttons + column selector */}
         <div className="flex items-center justify-between px-8 py-1 min-h-[24px] border-b border-white/10 relative">
           <div className="flex items-center gap-1">
-            {isNotificationsTab ? (
-              hasMoreNotifications && onLoadMoreNotifications && (<>
+            {isNotificationsTab ? (<>
+              {hasMoreNotifications && onLoadMoreNotifications && (<>
                 <Button
                   size="sm"
                   variant="outline"
@@ -446,8 +463,21 @@ export function StatusBar({
                 >
                   +{100 * multiplier}
                 </Button>
-              </>)
-            ) : !isDiscoverTab && (<>
+              </>)}
+              {!autofetch && onLoadNewerNotifications && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onLoadNewerNotifications}
+                  disabled={isLoading}
+                  className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors gap-0.5"
+                  title="Load newer notifications"
+                >
+                  <RotateCcw className={`h-3 w-3 ${isLoading ? 'animate-spin' : ''}`} />
+                  Newer{formatNewerTime(newestNotificationTimestamp)}
+                </Button>
+              )}
+            </>) : !isDiscoverTab && (<>
             <Button
               size="sm"
               variant="outline"

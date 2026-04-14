@@ -133,6 +133,12 @@ export function NotificationsScreen() {
     return c;
   }, [notifications]);
 
+  // Count dismissed notifications
+  const dismissedCount = useMemo(
+    () => notifications.filter(n => isDismissed(n.event.id)).length,
+    [notifications, isDismissed],
+  );
+
   // Apply type filters and dismissed status
   const filtered = useMemo(
     () => notifications.filter(n => !hiddenTypes.has(n.type) && !isDismissed(n.event.id)),
@@ -169,7 +175,10 @@ export function NotificationsScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>Notifications</Text>
         {notifications.length > 0 && (
-          <Text style={styles.subtitle}>{notifications.length} total</Text>
+          <Text style={styles.subtitle}>
+            {filtered.length} showing{filtered.length < notifications.length ? ` (${notifications.length} loaded)` : ''}
+            {dismissedCount > 0 ? ` · ${dismissedCount} dismissed` : ''}
+          </Text>
         )}
       </View>
 

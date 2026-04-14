@@ -4,18 +4,20 @@
  * Each account's nsec is stored in the OS keychain under a per-pubkey service name.
  * The account list (pubkeys + active account) is tracked in MMKV.
  */
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import * as Keychain from 'react-native-keychain';
 import { nip19, getPublicKey } from 'nostr-tools';
 import { NSecSigner } from '@nostrify/nostrify';
 import { handleLogoutStorage, switchActiveUser } from '../lib/storageKeys';
 import { clearRelayCache } from './NostrProvider';
 import { clearCollapsedNotesModuleState } from '../hooks/useCollapsedNotes';
+import { evictCachedProfile, clearProfileCache } from '../lib/cacheStore';
 import { mobileStorage } from '../storage/MmkvStorage';
 
 const KEYCHAIN_SERVICE_PREFIX = 'corkboards-nsec:';
 const ACCOUNTS_KEY = 'corkboard:accounts'; // JSON array of pubkeys
 const ACTIVE_ACCOUNT_KEY = 'corkboard:active-account'; // pubkey string
+const MIGRATION_DONE_KEY = 'corkboard:keychain-migrated'; // flag to prevent re-migration
 
 function keychainService(pubkey: string) {
   return `${KEYCHAIN_SERVICE_PREFIX}${pubkey}`;
@@ -69,6 +71,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     loading: true,
     accounts: [],
   });
+  const pubkeyRef = useRef<string | null>(null);
+  pubkeyRef.current = state.pubkey;
 
   // Restore session from keychain on mount
   useEffect(() => {
@@ -78,8 +82,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const activePubkey = getStoredActiveAccount();
 
         // Migrate from old single-account keychain if no accounts stored
-        if (accounts.length === 0) {
+        // Guard with a flag to prevent concurrent or repeated migration attempts
+        const alreadyMigrated = mobileStorage.getSync(MIGRATION_DONE_KEY) === 'true';
+        if (accounts.length === 0 && !alreadyMigrated) {
           try {
+            mobileStorage.setSync(MIGRATION_DONE_KEY, 'true');
             const oldCreds = await Keychain.getGenericPassword({ service: 'corkboards-nsec' });
             if (oldCreds && oldCreds.password) {
               const decoded = nip19.decode(oldCreds.password);
@@ -154,14 +161,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     // Switch active user storage
-    const oldPubkey = state.pubkey;
+    const oldPubkey = pubkeyRef.current;
     if (oldPubkey && oldPubkey !== pubkey) {
       switchActiveUser(oldPubkey, pubkey);
     }
     setStoredActiveAccount(pubkey);
 
     setState({ pubkey, signer, loading: false, accounts });
-  }, [state.pubkey]);
+  }, []);
 
   const switchAccount = useCallback(async (pubkey: string) => {
     const accounts = getStoredAccounts();
@@ -176,24 +183,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const signer = new NSecSigner(decoded.data);
 
     // Switch per-user storage
-    const oldPubkey = state.pubkey;
+    const oldPubkey = pubkeyRef.current;
     if (oldPubkey && oldPubkey !== pubkey) {
       switchActiveUser(oldPubkey, pubkey);
+      // Clear in-memory caches so stale data doesn't leak between users
+      clearRelayCache();
+      clearCollapsedNotesModuleState();
+      // Evict the new user's profile so it's fetched fresh from relays
+      evictCachedProfile(pubkey);
     }
     setStoredActiveAccount(pubkey);
 
     setState({ pubkey, signer, loading: false, accounts });
-  }, [state.pubkey]);
+  }, []);
 
   const removeAccount = useCallback(async (pubkey: string) => {
     handleLogoutStorage(pubkey);
     await Keychain.resetGenericPassword({ service: keychainService(pubkey) });
 
+    // Clear in-memory caches (they're from the departing user)
+    clearRelayCache();
+    clearCollapsedNotesModuleState();
+
     const accounts = getStoredAccounts().filter(a => a !== pubkey);
     setStoredAccounts(accounts);
 
     // If removing the active account, switch to another or clear
-    if (state.pubkey === pubkey) {
+    if (pubkeyRef.current === pubkey) {
       if (accounts.length > 0) {
         // Switch to next account
         const nextPubkey = accounts[0];
@@ -204,6 +220,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (decoded.type === 'nsec') {
               const signer = new NSecSigner(decoded.data);
               setStoredActiveAccount(nextPubkey);
+              // Evict the new user's profile so it's fetched fresh
+              evictCachedProfile(nextPubkey);
               setState({ pubkey: nextPubkey, signer, loading: false, accounts });
               return;
             }
@@ -211,14 +229,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } catch { /* fall through to full logout */ }
       }
       // No accounts left or switch failed
-      clearRelayCache();
-      clearCollapsedNotesModuleState();
       setStoredActiveAccount(null);
       setState({ pubkey: null, signer: null, loading: false, accounts: [] });
     } else {
       setState(prev => ({ ...prev, accounts }));
     }
-  }, [state.pubkey]);
+  }, []);
 
   const logout = useCallback(async () => {
     // Remove ALL accounts

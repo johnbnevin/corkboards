@@ -32,6 +32,9 @@ Check their recent GitHub repos when in doubt — they don't always agree with e
 - **vitorpamplona** — `amethyst`, `quartz`
 - **purrgrammer** — `grimoire`, `https://github.com/purrgrammer/grimoire/tree/main/.claude/skills`
 - **alex gleason**  — `soapbox.pub`, `ditto.pub`, `nostrify`, `https://github.com/purrgrammer/grimoire/tree/main/.claude/skills`
+- **MK Fain**  — `MKStacks`
+- **Pablof7z**  — `https://github.com/pablof7z`
+
 Key references:
 - NIPs: https://nips.nostr.com
 - Kind registry (check before picking/creating a kind): https://undocumented.nostrkinds.info/

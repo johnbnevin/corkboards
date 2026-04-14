@@ -5,7 +5,7 @@
  * Uses mobile's NostrProvider relay cache instead of web IDB.
  */
 import { type NostrEvent, NRelay1 } from '@nostrify/nostrify';
-import { getRelayCache, updateRelayCache, FALLBACK_RELAYS } from './NostrProvider';
+import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS } from './NostrProvider';
 import { isSecureRelay } from '@core/nostrUtils';
 
 // ── Session cache ─────────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ export async function queryRelay(
   let timeout: ReturnType<typeof setTimeout> | undefined;
 
   try {
-    relay = new NRelay1(relayUrl);
+    relay = new NRelay1(relayUrl, { backoff: false });
     timeout = setTimeout(() => relay!.close(), timeoutMs);
     for await (const msg of relay.req([filter])) {
       if (msg[0] === 'EVENT') events.push(msg[2] as NostrEvent);
@@ -78,7 +78,7 @@ async function fetchAuthorRelays(pubkey: string): Promise<string[]> {
   if (cached.length > 0) return cached;
 
   const relayLists = await Promise.all(
-    FALLBACK_RELAYS.map(relay =>
+    [...FALLBACK_RELAYS, ...READ_ONLY_RELAYS].map(relay =>
       queryRelay(relay, { kinds: [10002], authors: [pubkey], limit: 1 }, 3000)
         .then(events => events[0] || null)
         .catch(() => null)
@@ -118,19 +118,16 @@ export async function fetchEventWithOutbox(
   const hints = (opts?.hints || []).filter(isSecureRelay);
   const authorPubkey = opts?.authorPubkey;
 
-  // Phase 1: Race pool + hints + cached author relays + fallbacks
-  const relaysToTry = new Set<string>();
-  hints.forEach(r => relaysToTry.add(r));
-  FALLBACK_RELAYS.forEach(r => relaysToTry.add(r));
-  if (authorPubkey) {
-    getRelayCache(authorPubkey).slice(0, 3).forEach(r => relaysToTry.add(r));
-  }
+  // Phase 1: NPool covers fallbacks + author relays via reqRouter. Only open standalone connections to hints.
+  const poolRelays = new Set<string>([...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]);
+  if (authorPubkey) getRelayCache(authorPubkey).slice(0, 3).forEach(r => poolRelays.add(r));
+  const hintOnly = hints.filter(r => !poolRelays.has(r));
 
   const racePromises: Promise<NostrEvent | null>[] = [
     nostr.query([{ ids: [eventId], limit: 1 }], { signal: AbortSignal.timeout(3000) })
       .then(events => events[0] || null)
       .catch(() => null),
-    ...Array.from(relaysToTry).map(relay =>
+    ...hintOnly.map(relay =>
       queryRelay(relay, { ids: [eventId], limit: 1 })
         .then(events => events[0] || null)
         .catch(() => null)
@@ -155,7 +152,7 @@ export async function fetchEventWithOutbox(
     const authorRelays = await fetchAuthorRelays(authorPubkey);
     if (authorRelays.length > 0) {
       const outboxResults = await Promise.all(
-        authorRelays.slice(0, 5).map(relay =>
+        authorRelays.slice(0, 3).map(relay =>
           queryRelay(relay, { ids: [eventId], limit: 1 })
             .then(events => events[0] || null)
             .catch(() => null)
@@ -179,16 +176,16 @@ export async function fetchNaddrWithOutbox(
   const filter = { kinds: [kind], authors: [pubkey], '#d': [identifier], limit: 1 };
   const safeHints = (hints || []).filter(isSecureRelay);
 
-  const relaysToTry = new Set<string>();
-  safeHints.forEach(r => relaysToTry.add(r));
-  FALLBACK_RELAYS.forEach(r => relaysToTry.add(r));
-  getRelayCache(pubkey).slice(0, 3).forEach(r => relaysToTry.add(r));
+  // NPool covers fallbacks + author relays via reqRouter. Only open standalone connections to hints.
+  const poolRelays = new Set<string>([...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]);
+  getRelayCache(pubkey).slice(0, 3).forEach(r => poolRelays.add(r));
+  const hintOnly = safeHints.filter(r => !poolRelays.has(r));
 
   const racePromises: Promise<NostrEvent | null>[] = [
     nostr.query([filter], { signal: AbortSignal.timeout(3000) })
       .then(events => events[0] || null)
       .catch(() => null),
-    ...Array.from(relaysToTry).map(relay =>
+    ...hintOnly.map(relay =>
       queryRelay(relay, filter)
         .then(events => events[0] || null)
         .catch(() => null)
@@ -211,7 +208,7 @@ export async function fetchNaddrWithOutbox(
   const authorRelays = await fetchAuthorRelays(pubkey);
   if (authorRelays.length > 0) {
     const all = await Promise.all(
-      authorRelays.slice(0, 5).map(relay =>
+      authorRelays.slice(0, 3).map(relay =>
         queryRelay(relay, filter).then(events => events[0] || null).catch(() => null)
       )
     );

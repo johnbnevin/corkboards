@@ -63,7 +63,7 @@ export const DEFAULT_BLOSSOM_SERVERS = [
   'https://cdn.sovbit.host/',
 ];
 
-const BLOSSOM_SERVERS_KEY = 'corkboard:blossom-servers';
+const BLOSSOM_SERVERS_KEY = STORAGE_KEYS.BLOSSOM_SERVERS;
 
 /** Get user-configured blossom servers, falling back to defaults */
 export function getBlossomServers(): string[] {
@@ -103,7 +103,28 @@ function getStoredCheckpoints(): RemoteCheckpoint[] {
 }
 
 function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
-  mobileStorage.setSync(CHECKPOINTS_KEY, JSON.stringify(cps));
+  // Always dedup before storing:
+  // 1. By d-tag (addressable events replace each other — keep newest)
+  const byDTag = new Map<string, RemoteCheckpoint>();
+  for (const cp of cps) {
+    const key = cp.dTag || cp.eventId;
+    const existing = byDTag.get(key);
+    if (!existing || cp.timestamp > existing.timestamp) {
+      byDTag.set(key, cp);
+    }
+  }
+  // 2. Collapse checkpoints with identical stats (keep newest per stats signature)
+  const byStats = new Map<string, RemoteCheckpoint>();
+  for (const cp of byDTag.values()) {
+    const key = `${cp.stats?.corkboards ?? '?'}:${cp.stats?.savedForLater ?? '?'}:${cp.stats?.dismissed ?? '?'}`;
+    const existing = byStats.get(key);
+    if (!existing || cp.timestamp > existing.timestamp) {
+      if (existing?.name && !cp.name) cp.name = existing.name;
+      byStats.set(key, cp);
+    }
+  }
+  const deduped = [...byStats.values()].sort((a, b) => b.timestamp - a.timestamp);
+  mobileStorage.setSync(CHECKPOINTS_KEY, JSON.stringify(deduped));
 }
 
 function serializeBackup(): string {
@@ -264,22 +285,33 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
       // Publish manifest (kind 30078)
       const now = Math.floor(Date.now() / 1000);
-      const dTag = `${D_TAG_PREFIX}:${now}`;
-      const manifestData = {
-        v: 4,
-        timestamp: now,
-        encryption: 'aes-gcm',
-        wrappedKey,
-        signerMethod,
-        blossomUrl,
-        deviceId,
-        ...(blossomHash ? { blossomHash } : {}),
-        keys: BACKED_UP_KEYS.filter(k => mobileStorage.getSync(k) !== null),
+      const dTag = `${D_TAG_PREFIX}:auto`;
+      const keysPresent = BACKED_UP_KEYS.filter(k => mobileStorage.getSync(k) !== null);
+      const jsonLen = (k: string) => { try { return JSON.parse(mobileStorage.getSync(k) || '[]').length; } catch { return 0; } };
+      const stats = {
+        corkboards: jsonLen('nostr-custom-feeds'),
+        savedForLater: jsonLen('collapsed-notes'),
+        dismissed: jsonLen('dismissed-notes'),
       };
+      let corkboardNames: string[] = [];
+      try {
+        const feeds = JSON.parse(mobileStorage.getSync('nostr-custom-feeds') || '[]');
+        corkboardNames = feeds.map((f: { title?: string }) => f.title).filter(Boolean) as string[];
+      } catch { /* ignore */ }
+      const manifestJson = JSON.stringify({
+        v: 4, timestamp: now, encryption: 'aes-gcm',
+        wrappedKey, signerMethod, blossomUrl, deviceId,
+        ...(blossomHash ? { blossomHash } : {}),
+        keys: keysPresent, stats, corkboardNames,
+      });
+      // Encrypt manifest so stats and Blossom URL aren't leaked
+      const encryptedManifest = signer.nip44
+        ? await signer.nip44.encrypt(pubkey, manifestJson)
+        : manifestJson;
 
       const manifestEvent = await signer.signEvent({
         kind: 30078,
-        content: JSON.stringify(manifestData),
+        content: encryptedManifest,
         tags: [['d', dTag]],
         created_at: now,
       });
@@ -287,7 +319,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       const relays = getPublishRelays(pubkey);
       let published = 0;
       for (const url of relays) {
-        const relay = new NRelay1(url);
+        const relay = new NRelay1(url, { backoff: false });
         try {
           await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
           log(`  ${url} ← manifest OK`);
@@ -347,28 +379,23 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
     log(`Checking ${relays.length} relays…`);
 
-    // Two queries per relay batch (matching web's approach):
-    //   Q1: auto-save event (exact d-tag match, cheap)
-    //   Q2: latest 3 events of any d-tag (catches manual checkpoints with timestamp suffixes)
+    // Fetch recent backup manifests (limit 5 for fast login).
+    // User can manually check for older states from the backup UI.
     for (let i = 0; i < relays.length; i += 3) {
       const batch = relays.slice(i, i + 3);
       await Promise.allSettled(batch.map(async url => {
-        const relay = new NRelay1(url);
+        const relay = new NRelay1(url, { backoff: false });
         try {
-          const [autoEvents, recentEvents] = await Promise.all([
-            relay.query(
-              [{ kinds: [30078], authors: [pubkey], '#d': [`${D_TAG_PREFIX}:auto`], limit: 1 }],
-              { signal: AbortSignal.timeout(5000) },
-            ),
-            relay.query(
-              [{ kinds: [30078], authors: [pubkey], limit: 3 }],
-              { signal: AbortSignal.timeout(5000) },
-            ),
-          ]);
-          for (const ev of [...autoEvents, ...recentEvents]) {
+          const events = await relay.query(
+            [{ kinds: [30078], authors: [pubkey], limit: 5 }],
+            { signal: AbortSignal.timeout(5000) },
+          );
+          for (const ev of events) {
+            const dTag = ev.tags.find(t => t[0] === 'd')?.[1];
+            if (!dTag || !(dTag === D_TAG_PREFIX || dTag.startsWith(D_TAG_PREFIX + ':'))) continue;
             if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
           }
-          log(`  ${url}: ${autoEvents.length + recentEvents.length} backups`);
+          log(`  ${url}: ${events.length} kind:30078, ${allEvents.length} backup manifests`);
         } catch { /* timeout ok */ } finally {
           try { relay.close(); } catch { /* */ }
         }
@@ -383,12 +410,20 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       return;
     }
 
-    // Parse checkpoints from events
+    // Parse checkpoints from events (try plaintext first, then NIP-44 decrypt)
     const cps: RemoteCheckpoint[] = [];
     for (const ev of allEvents) {
+      let data: Record<string, unknown> | null = null;
+      try { data = JSON.parse(ev.content); } catch {
+        if (signer?.nip44) {
+          try {
+            const json = await signer.nip44.decrypt(pubkey, ev.content);
+            data = JSON.parse(json);
+          } catch { /* decrypt failed — skip */ }
+        }
+      }
       try {
-        const data = JSON.parse(ev.content) as Record<string, unknown>;
-        if (!data.blossomUrl || !data.wrappedKey || !data.signerMethod) continue;
+        if (!data || !data.blossomUrl || !data.wrappedKey || !data.signerMethod) continue;
         const dTag = ev.tags.find(t => t[0] === 'd')?.[1] || '';
         cps.push({
           eventId: ev.id,
@@ -403,13 +438,14 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       } catch { /* ignore malformed */ }
     }
 
-    cps.sort((a, b) => b.timestamp - a.timestamp);
+    // setStoredCheckpoints handles d-tag + stats dedup automatically
     setStoredCheckpoints(cps);
-    setCheckpoints(cps);
+    const deduped = getStoredCheckpoints();
+    setCheckpoints(deduped);
 
     setStatus('found');
-    setMessage(`Found ${cps.length} backup${cps.length === 1 ? '' : 's'}`);
-    log(`Found ${cps.length} backups`);
+    setMessage(`Found ${deduped.length} backup${deduped.length === 1 ? '' : 's'}`);
+    log(`Found ${deduped.length} backups (${cps.length} raw → ${deduped.length} after dedup)`);
   }, [pubkey, signer, log]);
 
   const restoreBackup = useCallback(async (checkpoint: RemoteCheckpoint) => {

@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getCachedProfile, cacheProfile } from '@/lib/cacheStore';
 import { FALLBACK_RELAYS } from '@/components/NostrProvider';
 import { getBackupRelaysUsed } from '@/hooks/useNostrBackup';
+import { debugWarn } from '@/lib/debug';
 
 interface NostrPool {
   query: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]>;
@@ -33,18 +34,18 @@ async function fetchAuthorFromNetwork(
       try {
         const metadata = n.json().pipe(n.metadata()).parse(event.content);
         cacheProfile(pubkey, metadata, event).catch((err) => {
-          if (import.meta.env.DEV) console.warn('[useAuthor] Cache write failed:', err);
+          debugWarn('[useAuthor] Cache write failed:', err);
         });
         return { metadata, event };
       } catch (err) {
-        if (import.meta.env.DEV) console.warn('[useAuthor] Metadata parse failed for', pubkey.slice(0, 8), err);
+        debugWarn('[useAuthor] Metadata parse failed for', pubkey.slice(0, 8), err);
         return { event };
       }
     }
   } catch (err) {
     // Fall through to fallback
-    if (import.meta.env.DEV && (err as Error)?.name !== 'AbortError') {
-      console.warn('[useAuthor] Pool query failed for', pubkey.slice(0, 8), (err as Error)?.message);
+    if ((err as Error)?.name !== 'AbortError') {
+      debugWarn('[useAuthor] Pool query failed for', pubkey.slice(0, 8), (err as Error)?.message);
     }
   }
 
@@ -76,16 +77,16 @@ async function fetchAuthorFromNetwork(
     try {
       const metadata = n.json().pipe(n.metadata()).parse(event.content);
       cacheProfile(pubkey, metadata, event).catch((err) => {
-        if (import.meta.env.DEV) console.warn('[useAuthor] Fallback cache write failed:', err);
+        debugWarn('[useAuthor] Fallback cache write failed:', err);
       });
       return { metadata, event };
     } catch (err) {
-      if (import.meta.env.DEV) console.warn('[useAuthor] Fallback metadata parse failed for', pubkey.slice(0, 8), err);
+      debugWarn('[useAuthor] Fallback metadata parse failed for', pubkey.slice(0, 8), err);
       return { event };
     }
   } catch (err) {
-    if (import.meta.env.DEV && (err as Error)?.name !== 'AggregateError') {
-      console.warn('[useAuthor] All fallback relays failed for', pubkey.slice(0, 8));
+    if ((err as Error)?.name !== 'AggregateError') {
+      debugWarn('[useAuthor] All fallback relays failed for', pubkey.slice(0, 8));
     }
     return {};
   }
@@ -123,7 +124,7 @@ export function useAuthor(pubkey: string | undefined, enabled = true) {
             queryClient.setQueryData(['author', capturedPubkey], result);
           }
         }).catch((err) => {
-          if (import.meta.env.DEV && err?.name !== 'AbortError') console.warn('[useAuthor] Background refresh failed for', capturedPubkey.slice(0, 8), err);
+          if (err?.name !== 'AbortError') debugWarn('[useAuthor] Background refresh failed for', capturedPubkey.slice(0, 8), err);
         });
 
         return {

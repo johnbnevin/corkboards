@@ -107,7 +107,7 @@ export function InlineReplyComposer({ replyTo, onCancel, onPublished, onOpenEmoj
         <div className="flex flex-wrap gap-1.5">
           {images.map((url) => (
             <div key={url} className="relative group">
-              <img src={url} alt="" className="h-14 w-14 object-cover rounded" />
+              <img src={url} alt="" className="h-14 w-14 object-cover rounded" referrerPolicy="no-referrer" />
               <button
                 onClick={() => setImages(prev => prev.filter(u => u !== url))}
                 className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"

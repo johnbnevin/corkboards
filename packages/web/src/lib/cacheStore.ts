@@ -28,6 +28,7 @@
  */
 import { openDB, type IDBPDatabase } from 'idb';
 import type { NostrEvent, NostrMetadata } from '@nostrify/nostrify';
+import { debugWarn } from '@/lib/debug';
 
 const DB_NAME = 'corkboard-cache';
 const DB_VERSION = 1;
@@ -123,7 +124,7 @@ export async function cacheProfile(
     const db = await openDatabase();
     await db.put('profiles', profile, pubkey);
   } catch (error) {
-    console.warn('[ProfileCache] Failed to cache profile:', error);
+    debugWarn('[ProfileCache] Failed to cache profile:', error);
   }
 }
 
@@ -156,7 +157,7 @@ export async function getCachedProfile(
     
     return profile;
   } catch (error) {
-    console.warn('[ProfileCache] Failed to get cached profile:', error);
+    debugWarn('[ProfileCache] Failed to get cached profile:', error);
     return null;
   }
 }
@@ -194,7 +195,7 @@ export async function getCachedProfiles(
       }
     }
   } catch (error) {
-    console.warn('[ProfileCache] Failed to get cached profiles:', error);
+    debugWarn('[ProfileCache] Failed to get cached profiles:', error);
   }
   
   return results;
@@ -223,7 +224,7 @@ export async function cacheNote(event: NostrEvent): Promise<void> {
     };
     await db.put('notes', note, event.id);
   } catch (error) {
-    console.warn('[NoteCache] Failed to cache note:', error);
+    debugWarn('[NoteCache] Failed to cache note:', error);
   }
 }
 
@@ -244,7 +245,7 @@ export async function cacheNotes(events: NostrEvent[]): Promise<void> {
       tx.done,
     ]);
   } catch (error) {
-    console.warn('[NoteCache] Failed to cache notes:', error);
+    debugWarn('[NoteCache] Failed to cache notes:', error);
   }
 }
 
@@ -263,7 +264,7 @@ export async function getCachedNote(
     
     return note;
   } catch (error) {
-    console.warn('[NoteCache] Failed to get cached note:', error);
+    debugWarn('[NoteCache] Failed to get cached note:', error);
     return null;
   }
 }
@@ -288,7 +289,7 @@ export async function getCachedNotes(
       }
     }
   } catch (error) {
-    console.warn('[NoteCache] Failed to get cached notes:', error);
+    debugWarn('[NoteCache] Failed to get cached notes:', error);
   }
   
   return results;
@@ -307,7 +308,7 @@ export async function clearCache(): Promise<void> {
     db.close();
     dbPromise = null;
   } catch (error) {
-    console.warn('[Cache] Failed to clear cache:', error);
+    debugWarn('[Cache] Failed to clear cache:', error);
   }
 }
 
@@ -318,7 +319,7 @@ export async function getCacheStats(): Promise<{ profiles: number; notes: number
     const noteCount = await db.count('notes');
     return { profiles: profileCount, notes: noteCount };
   } catch (error) {
-    console.warn('[Cache] Failed to get cache stats:', error);
+    debugWarn('[Cache] Failed to get cache stats:', error);
     return { profiles: 0, notes: 0 };
   }
 }

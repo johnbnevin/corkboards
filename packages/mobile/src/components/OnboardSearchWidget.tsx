@@ -29,12 +29,14 @@ interface SearchResult {
 
 interface OnboardSearchWidgetProps {
   contactCount?: number;
+  followTarget?: number;
   onSkip?: () => void;
   onSelectProfile: (pubkey: string) => void;
 }
 
 export function OnboardSearchWidget({
   contactCount = 0,
+  followTarget = 10,
   onSkip,
   onSelectProfile,
 }: OnboardSearchWidgetProps) {
@@ -94,7 +96,7 @@ export function OnboardSearchWidget({
       }
       setIsSearching(true);
       try {
-        const relay = new NRelay1(SEARCH_RELAY);
+        const relay = new NRelay1(SEARCH_RELAY, { backoff: false });
         relayRef.current = relay;
 
         const events: NostrEvent[] = [];
@@ -133,7 +135,7 @@ export function OnboardSearchWidget({
     }, 400);
   }, [tryDirectPubkey, onSelectProfile, clearSearch, isSearching]);
 
-  const progressWidth = `${Math.min(contactCount / 10 * 100, 100)}%`;
+  const progressWidth = `${Math.min(contactCount / followTarget * 100, 100)}%`;
 
   return (
     <View style={styles.container}>
@@ -146,7 +148,7 @@ export function OnboardSearchWidget({
         <View style={styles.progressTrack}>
           <View style={[styles.progressFill, { width: progressWidth as any }]} />
         </View>
-        <Text style={styles.progressLabel}>{contactCount}/10</Text>
+        <Text style={styles.progressLabel}>{contactCount}/{followTarget}</Text>
       </View>
 
       {onSkip && (

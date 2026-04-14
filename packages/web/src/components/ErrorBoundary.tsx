@@ -22,6 +22,10 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error('ErrorBoundary caught error:', error, errorInfo)
+    // Auto-recover from transient DOM errors (e.g. Radix portal cleanup race conditions)
+    if (error.name === 'NotFoundError' || error.message?.includes('removeChild')) {
+      setTimeout(() => this.setState({ hasError: false, error: null }), 100)
+    }
   }
 
   render() {

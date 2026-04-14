@@ -68,9 +68,31 @@ export function getTagWhere(
 }
 
 export function isSecureRelay(url: string): boolean {
-  if (!url.startsWith('wss://') || url.length > 256) return false;
+  if (!url.startsWith('wss://') || url.length > 2048) return false;
   try {
     const parsed = new URL(url);
-    return parsed.protocol === 'wss:' && parsed.hostname.length > 0;
+    if (parsed.protocol !== 'wss:' || parsed.hostname.length === 0) return false;
+    // Block private/localhost IPs to prevent SSRF-like data leaks
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'localhost') return false;
+    // IPv6 private ranges: loopback, link-local, unique local, IPv4-mapped
+    if (host.startsWith('[')) {
+      const ipv6 = host.slice(1, -1); // strip brackets
+      if (ipv6 === '::1') return false;                             // loopback
+      if (ipv6.startsWith('fe80:')) return false;                   // link-local
+      if (ipv6.startsWith('fc') || ipv6.startsWith('fd')) return false; // unique local (fc00::/7)
+      if (ipv6.startsWith('::ffff:')) return false;                 // IPv4-mapped IPv6
+      return true;
+    }
+    // IPv4 private ranges: 0.x.x.x, 10.x.x.x, 127.x.x.x, 169.254.x.x, 172.16-31.x.x, 192.168.x.x, 255.x.x.x
+    const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4Match) {
+      const [, a, b] = ipv4Match.map(Number);
+      if (a === 0 || a === 10 || a === 127 || a === 255) return false;
+      if (a === 192 && b === 168) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+      if (a === 169 && b === 254) return false;
+    }
+    return true;
   } catch { return false; }
 }

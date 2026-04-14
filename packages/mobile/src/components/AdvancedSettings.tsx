@@ -5,7 +5,7 @@
  * Options: relay management, blossom server config, clear dismissed notes,
  * client tag toggle, public bookmarks toggle, profile cache, delete account.
  */
-import { useState, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -27,6 +27,9 @@ interface AdvancedSettingsProps {
   publicBookmarks: boolean;
   onTogglePublicBookmarks: () => void;
   onDeleteAccount: () => void;
+  initialSection?: 'main' | 'relays' | 'blossom';
+  isOnboarding: boolean;
+  onResetOnboarding: () => void;
   // Relay management (optional — passed from SettingsScreen when available)
   relays?: { url: string; read: boolean; write: boolean }[];
   onAddRelay?: (url: string) => void;
@@ -44,13 +47,21 @@ export function AdvancedSettings({
   publicBookmarks,
   onTogglePublicBookmarks,
   onDeleteAccount,
+  initialSection = 'main',
+  isOnboarding,
+  onResetOnboarding,
   relays,
   onAddRelay,
   onRemoveRelay,
   onToggleRelayRead,
   onToggleRelayWrite,
 }: AdvancedSettingsProps) {
-  const [section, setSection] = useState<'main' | 'relays' | 'blossom'>('main');
+  const [section, setSection] = useState<'main' | 'relays' | 'blossom'>(initialSection);
+
+  // Sync with external section changes (e.g., opened from settings shortcut)
+  useEffect(() => {
+    setSection(initialSection);
+  }, [initialSection]);
 
   const handleClearDismissed = () => {
     if (dismissedCount === 0) {
@@ -184,6 +195,14 @@ export function AdvancedSettings({
         </Text>
       </TouchableOpacity>
 
+      {/* Restart onboarding */}
+      {!isOnboarding && (
+        <TouchableOpacity style={styles.settingRow} onPress={onResetOnboarding}>
+          <Text style={styles.settingTitle}>Restart Onboarding</Text>
+          <Text style={styles.settingHint}>Show the discover/follow guide again</Text>
+        </TouchableOpacity>
+      )}
+
       {/* Separator */}
       <View style={styles.separator} />
 
@@ -222,9 +241,13 @@ function RelaySection({
   const handleAdd = () => {
     let url = newUrl.trim();
     if (!url) return;
-    if (!url.startsWith('wss://') && !url.startsWith('ws://')) url = 'wss://' + url;
+    if (!url.startsWith('wss://')) url = 'wss://' + url;
     try { new URL(url); } catch {
       Alert.alert('Invalid URL');
+      return;
+    }
+    if (!url.startsWith('wss://')) {
+      Alert.alert('Insecure relay', 'Only wss:// (encrypted) relays are allowed.');
       return;
     }
     onAddRelay?.(url);

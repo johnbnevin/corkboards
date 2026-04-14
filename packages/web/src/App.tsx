@@ -13,7 +13,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { NostrLoginProvider } from '@nostrify/react/login';
 import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
-import { FALLBACK_RELAYS } from '@/lib/relayConstants';
+import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
 import { NwcProvider } from '@/hooks/useNwc';
 import AppRouter from './AppRouter';
 
@@ -36,7 +36,10 @@ const queryClient = new QueryClient({
 const defaultConfig: AppConfig = {
   theme: "light",
   relayMetadata: {
-    relays: FALLBACK_RELAYS.map(url => ({ url, read: true, write: true })),
+    relays: [
+      ...FALLBACK_RELAYS.map(url => ({ url, read: true, write: true })),
+      ...READ_ONLY_RELAYS.map(url => ({ url, read: true, write: false })),
+    ],
     updatedAt: 0,
   },
 };

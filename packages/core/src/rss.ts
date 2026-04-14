@@ -10,6 +10,15 @@ export interface RssFeedResult {
   items: Array<{ title: string; description: string; link: string; pubDate: string }>;
 }
 
+/** Escape HTML entities to prevent injection via RSS feed content. */
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 /** Stable numeric hash → short alphanumeric ID for an RSS item. */
 export function rssItemId(str: string, feedUrl?: string): string {
   const input = feedUrl ? `${feedUrl}::${str}` : str;
@@ -31,7 +40,7 @@ export function rssItemsToEvents(
 ): NostrEvent[] {
   return items.map((item, i) => ({
     id: rssItemId(item.link || item.title, feedUrl),
-    pubkey: 'rss-feed',
+    pubkey: '0000000000000000000000000000000000000000000000000000727373666565',
     created_at: (() => {
       if (!item.pubDate) return Math.floor(Date.now() / 1000) - i;
       const ts = new Date(item.pubDate).getTime();
@@ -43,7 +52,7 @@ export function rssItemsToEvents(
       ['feed_name', feedTitle],
       ['feed_icon', feedIcon],
     ],
-    content: `**${item.title}**\n\n${item.description}${item.link ? `\n\n${item.link}` : ''}`,
+    content: `**${escapeHtml(item.title)}**\n\n${escapeHtml(item.description)}${item.link ? `\n\n${item.link}` : ''}`,
     sig: '',
   } as NostrEvent));
 }

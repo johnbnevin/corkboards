@@ -17,12 +17,14 @@ import { useAuthor } from '../hooks/useAuthor';
 import { useNostrPublish } from '../hooks/useNostrPublish';
 import { useNwc } from '../hooks/useNwc';
 import { useNostrBackup, getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS } from '../hooks/useNostrBackup';
+import { useContacts } from '../hooks/useFeed';
 import {
   FALLBACK_RELAYS,
   updateRelayCache,
   APP_CONFIG_KEY,
 } from '../lib/NostrProvider';
 import { getCurrentPlatform, STORAGE_KEYS } from '../lib/storageKeys';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 import { SignupFlow } from '../components/SignupFlow';
 import { AccountSwitcher } from '../components/AccountSwitcher';
 import { AddAccountModal } from '../components/AddAccountModal';
@@ -189,6 +191,7 @@ export function SettingsScreen() {
   const { pubkey, loginWithNsec, logout, accounts, loading: authLoading } = useAuth();
   const { signer } = useAuth();
   const { data: author } = useAuthor(pubkey ?? undefined);
+  const { data: contacts } = useContacts(pubkey ?? undefined);
   const { mutateAsync: publish } = useNostrPublish();
 
   // AppContext for client tag
@@ -228,6 +231,10 @@ export function SettingsScreen() {
 
   // Backup
   const { status: backupStatus, message: backupMessage, checkpoints, lastBackupAgo, saveBackup, checkForBackup, restoreBackup } = useNostrBackup(pubkey ?? null, signer as NSecSigner | null);
+
+  // Onboarding state — mirrors web's MultiColumnClient onboarding logic
+  const [onboardingSkipped, setOnboardingSkipped] = useLocalStorage<boolean>(STORAGE_KEYS.ONBOARDING_SKIPPED, false);
+  const [onboardFollowTarget, setOnboardFollowTarget] = useLocalStorage<number>(STORAGE_KEYS.ONBOARDING_FOLLOW_TARGET, 10);
 
   const setTheme = (t: ThemeMode) => {
     setThemeState(t);
@@ -699,6 +706,18 @@ export function SettingsScreen() {
 
           {/* Blossom servers */}
           <BlossomServerSettings />
+
+          {/* Restart onboarding */}
+          {contacts !== undefined && (contacts.length >= onboardFollowTarget || onboardingSkipped) && (
+            <TouchableOpacity style={styles.button} onPress={() => {
+              setOnboardFollowTarget((contacts?.length ?? 0) + 10);
+              setOnboardingSkipped(false);
+              Alert.alert('Onboarding restarted', 'Go to Discover to follow 10 more people.');
+            }}>
+              <Text style={styles.buttonText}>Restart Onboarding</Text>
+              <Text style={[styles.buttonText, { fontSize: 11, color: '#888', marginTop: 2 }]}>Show the discover/follow guide again</Text>
+            </TouchableOpacity>
+          )}
 
           {/* Delete account */}
           <TouchableOpacity style={[styles.button, styles.dangerBtn]} onPress={() => {

@@ -8,6 +8,7 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
 import { useCallback, useMemo, useRef } from 'react';
+import { debugLog, debugWarn } from '@/lib/debug';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { NSchema as n } from '@nostrify/nostrify';
 import { getCachedProfiles, cacheProfile } from '@/lib/cacheStore';
@@ -61,11 +62,11 @@ export function useBulkAuthors() {
       }
       
       if (uncachedPubkeys.length === 0) {
-        if (import.meta.env.DEV) console.log('[bulkAuthors] All', uniquePubkeys.length, 'profiles found in cache');
+        debugLog('[bulkAuthors] All', uniquePubkeys.length, 'profiles found in cache');
         return;
       }
       
-      if (import.meta.env.DEV) console.log('[bulkAuthors] Fetching', uncachedPubkeys.length, 'profiles from network...');
+      debugLog('[bulkAuthors] Fetching', uncachedPubkeys.length, 'profiles from network...');
       
       const batches: string[][] = [];
       for (let i = 0; i < uncachedPubkeys.length; i += BATCH_SIZE) {
@@ -96,12 +97,12 @@ export function useBulkAuthors() {
             }
           }
         } catch (err) {
-          console.warn('[bulkAuthors] Batch failed:', err);
+          debugWarn('[bulkAuthors] Batch failed:', err);
         }
       });
       
       await Promise.allSettled(fetchPromises);
-      if (import.meta.env.DEV) console.log('[bulkAuthors] Fetched', fetched, 'profiles from network');
+      debugLog('[bulkAuthors] Fetched', fetched, 'profiles from network');
     } finally {
       clearTimeout(safetyReset);
       isFetchingRef.current = false;

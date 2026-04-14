@@ -56,7 +56,7 @@ function replaceEmojis(text: string, emojiMap: Map<string, string>): React.React
         const isAnimated = url.endsWith('.gif') || url.includes('.gif?')
         parts.push(
           <img key={`e${j}`} src={url} alt={segments[j]} title={`:${segments[j]}:`}
-            className={`inline-block align-middle ${isAnimated ? 'h-20 w-20' : 'h-6 w-6'}`} loading="lazy" />
+            className={`inline-block align-middle ${isAnimated ? 'h-20 w-20' : 'h-6 w-6'}`} loading="lazy" referrerPolicy="no-referrer" />
         )
       } else {
         parts.push(`:${segments[j]}:`)
@@ -299,7 +299,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
         return <MarkdownText key={i} text={part.value} emojiMap={emojiMap} />
       case 'emoji': {
         const isAnimated = part.value.endsWith('.gif') || part.value.includes('.gif?')
-        return <img key={i} src={part.value} alt={part.alt ?? 'emoji'} title={`:${part.alt}:`} className={`inline-block align-middle ${isAnimated ? 'h-20 w-20' : 'h-6 w-6'}`} loading="lazy" />
+        return <img key={i} src={part.value} alt={part.alt ?? 'emoji'} title={`:${part.alt}:`} className={`inline-block align-middle ${isAnimated ? 'h-20 w-20' : 'h-6 w-6'}`} loading="lazy" referrerPolicy="no-referrer" />
       }
       default:
         return <span className="whitespace-pre-wrap" key={i}>{part.value}</span>

@@ -22,6 +22,7 @@ import {
   batchFetchByAuthors,
   FEED_KINDS,
 } from '@/lib/feedUtils';
+import { debugLog, debugWarn, debugError } from '@/lib/debug';
 
 export interface CustomFeedDef {
   id: string;
@@ -278,7 +279,7 @@ export function useFeedPagination({
   // ─── Load Older (pagination) ────────────────────────────────────────────────
 
   const loadMoreNotes = useCallback(async (hours: number) => {
-    if (import.meta.env.DEV) console.log('[loadMore] hours:', hours, 'tab:', activeTab);
+    debugLog('[loadMore] hours:', hours, 'tab:', activeTab);
     if (isLoadingMore) return;
     const requestTab = activeTab;
 
@@ -356,7 +357,7 @@ export function useFeedPagination({
     const until = anchorTimestamp - 1;
     const since = until - (hoursToFetch * 3600);
 
-    if (import.meta.env.DEV) console.log('[loadMore] since:', new Date(since * 1000).toISOString(), 'until:', new Date(until * 1000).toISOString());
+    debugLog('[loadMore] since:', new Date(since * 1000).toISOString(), 'until:', new Date(until * 1000).toISOString());
 
     try {
       const signal = AbortSignal.timeout(10000);
@@ -407,14 +408,14 @@ export function useFeedPagination({
         }], { signal });
       }
 
-      if (import.meta.env.DEV) console.log('[loadMore] got', newEvents.length, 'events');
+      debugLog('[loadMore] got', newEvents.length, 'events');
 
       // Also fetch user notes for the same window (for dovetailing)
       await fetchAndMergeUserNotes({ since, until, limit });
 
       // Bail if user switched tabs while we were fetching
       if (activeTabRef.current !== requestTab) {
-        if (import.meta.env.DEV) console.log('[loadMore] tab changed, discarding results');
+        debugLog('[loadMore] tab changed, discarding results');
         return;
       }
 
@@ -471,7 +472,7 @@ export function useFeedPagination({
         }
       }
     } catch (e) {
-      if (import.meta.env.DEV) console.log('[loadMore] failed:', e instanceof Error ? e.message : e);
+      debugLog('[loadMore] failed:', e instanceof Error ? e.message : e);
       showBriefMessage('Load failed — try again');
     } finally {
       setIsLoadingMore(false);
@@ -516,7 +517,7 @@ export function useFeedPagination({
         setBatchProgress({ loaded: 1, total: 1 });
 
       } else if (isRelayTab) {
-        const relay = new NRelay1(activeTab);
+        const relay = new NRelay1(activeTab, { backoff: false });
         try {
           for await (const msg of relay.req([{
             kinds: [1, 30023],
@@ -564,7 +565,7 @@ export function useFeedPagination({
 
       // Bail if user switched tabs while we were fetching
       if (activeTabRef.current !== requestTab) {
-        if (import.meta.env.DEV) console.log('[loadNewer] tab changed, discarding results');
+        debugLog('[loadNewer] tab changed, discarding results');
         return;
       }
 
@@ -583,7 +584,7 @@ export function useFeedPagination({
         const GAP_THRESHOLD = 10 * 60; // 10 minutes
 
         if (gapSeconds > GAP_THRESHOLD && newestTimestamp) {
-          if (import.meta.env.DEV) console.log('[loadNewer] Gap detected:', Math.round(gapSeconds / 60), 'min — backfilling');
+          debugLog('[loadNewer] Gap detected:', Math.round(gapSeconds / 60), 'min — backfilling');
           try {
             let gapEvents: NostrEvent[] = [];
             const gapAuthors = isAllFollowsTab ? contacts ?? [] :
@@ -606,11 +607,11 @@ export function useFeedPagination({
               if (gapNew.length > 0) {
                 sortedNew.push(...gapNew);
                 sortedNew.sort((a, b) => b.created_at - a.created_at);
-                if (import.meta.env.DEV) console.log('[loadNewer] Backfilled', gapNew.length, 'gap notes');
+                debugLog('[loadNewer] Backfilled', gapNew.length, 'gap notes');
               }
             }
           } catch (err) {
-            if (import.meta.env.DEV) console.warn('[loadNewer] Gap backfill failed:', err);
+            debugWarn('[loadNewer] Gap backfill failed:', err);
             // Non-fatal — continue with what we have
           }
         }
@@ -642,7 +643,7 @@ export function useFeedPagination({
         showBriefMessage('No new notes found');
       }
     } catch (err) {
-      if (import.meta.env.DEV) console.error('[loadNewer] error:', err);
+      debugError('[loadNewer] error:', err);
       showBriefMessage('Load failed — try again');
     } finally {
       setIsLoadingNewer(false);
@@ -746,7 +747,7 @@ export function useFeedPagination({
         authors = [activeTab];
       }
 
-      if (import.meta.env.DEV) console.log('[loadMoreByCount] tab:', activeTab, 'authors:', authors.length, 'count:', count);
+      debugLog('[loadMoreByCount] tab:', activeTab, 'authors:', authors.length, 'count:', count);
 
       if (authors.length === 0) {
         showBriefMessage('No authors for this tab');
@@ -772,7 +773,7 @@ export function useFeedPagination({
       const cachedEvents = existing.filter(e => authorSet.has(e.pubkey));
 
       const cachedCount = cachedEvents.length;
-      if (import.meta.env.DEV) console.log('[loadMoreByCount] cached events from authors:', cachedCount);
+      debugLog('[loadMoreByCount] cached events from authors:', cachedCount);
 
       // Always fetch `count` notes from relay (using oldest cached note as anchor for pagination)
       // Cache is only used for deduplication, not to limit the fetch count
@@ -787,18 +788,16 @@ export function useFeedPagination({
         let until: number;
         if (existing.length === 0) {
           until = Math.floor(Date.now() / 1000);
-          if (import.meta.env.DEV) console.log('[loadMoreByCount] No cached notes, fetching most recent');
+          debugLog('[loadMoreByCount] No cached notes, fetching most recent');
         } else {
         // Get the oldest note from the cache (cache is sorted newest-first, so take last)
         const oldestInCache = existing[existing.length - 1].created_at;
         until = oldestInCache - 1;
-        if (import.meta.env.DEV) console.log('[loadMoreByCount] oldest in cache:', new Date(oldestInCache * 1000).toISOString(), 'until:', new Date(until * 1000).toISOString());
+        debugLog('[loadMoreByCount] oldest in cache:', new Date(oldestInCache * 1000).toISOString(), 'until:', new Date(until * 1000).toISOString());
         }
 
         // ── Fetch from relay ─────────────────────────────────────────────
-        if (import.meta.env.DEV) {
-          console.log(`[loadMoreByCount] query until: ${new Date(until * 1000).toISOString()}  limit: ${neededFromRelay}`);
-        }
+        debugLog(`[loadMoreByCount] query until: ${new Date(until * 1000).toISOString()}  limit: ${neededFromRelay}`);
         
         // Use simple timeout - reqRouter will handle relay routing (author outbox + user relays + fallbacks)
         const raw = await nostr.query([{
@@ -814,12 +813,12 @@ export function useFeedPagination({
           .filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; })
           .sort((a, b) => b.created_at - a.created_at);
 
-        if (import.meta.env.DEV) console.log('[loadMoreByCount] fetched from relay:', fetchedEvents.length, 'notes');
+        debugLog('[loadMoreByCount] fetched from relay:', fetchedEvents.length, 'notes');
 
         // Slice to exactly what was requested if relay returned more
         if (fetchedEvents.length > neededFromRelay) {
           fetchedEvents = fetchedEvents.slice(0, neededFromRelay);
-          if (import.meta.env.DEV) console.log('[loadMoreByCount] sliced to:', fetchedEvents.length, 'notes');
+          debugLog('[loadMoreByCount] sliced to:', fetchedEvents.length, 'notes');
         }
       }
 
@@ -829,7 +828,7 @@ export function useFeedPagination({
 
       // Bail if user switched tabs while we were fetching
       if (activeTabRef.current !== requestTab) {
-        if (import.meta.env.DEV) console.log('[loadMoreByCount] tab changed, discarding results');
+        debugLog('[loadMoreByCount] tab changed, discarding results');
         return;
       }
 
@@ -860,7 +859,7 @@ export function useFeedPagination({
         showBriefMessage('No older notes found');
       }
     } catch (err) {
-      if (import.meta.env.DEV) console.error('[loadMoreByCount] error:', err);
+      debugError('[loadMoreByCount] error:', err);
       showBriefMessage('Load failed — try again');
     } finally {
       setIsLoadingMore(false);

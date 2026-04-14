@@ -4,8 +4,8 @@ import { NostrContext } from '@nostrify/react';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
 // Re-exported for backwards compatibility — canonical source is @/lib/relayConstants
-export { FALLBACK_RELAYS } from '@/lib/relayConstants';
-import { FALLBACK_RELAYS } from '@/lib/relayConstants';
+export { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
+import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
 
 interface NostrProviderProps {
   children: React.ReactNode;
@@ -225,6 +225,7 @@ function createPool(): NPool {
         // Tier 1 — Bulk feed query: skip per-author expansion, use a small fixed set
         userRelays.read.forEach(relay => relaysToQuery.add(relay));
         FALLBACK_RELAYS.forEach(relay => relaysToQuery.add(relay));
+        READ_ONLY_RELAYS.forEach(relay => relaysToQuery.add(relay));
 
         // Hard cap to prevent excessive WebSocket connections
         const capped = Array.from(relaysToQuery).slice(0, MAX_BULK_RELAYS);
@@ -259,9 +260,10 @@ function createPool(): NPool {
           }
         });
         userRelays.read.forEach(relay => relaysToQuery.add(relay));
-        // Always include fallback relays — critical for #p queries (notifications)
+        // Always include fallback + read-only relays — critical for #p queries (notifications)
         // where the user has read relays but the event may live on a fallback relay.
         FALLBACK_RELAYS.forEach(relay => relaysToQuery.add(relay));
+        READ_ONLY_RELAYS.forEach(relay => relaysToQuery.add(relay));
 
         for (const relay of relaysToQuery) {
           routes.set(relay, filters);

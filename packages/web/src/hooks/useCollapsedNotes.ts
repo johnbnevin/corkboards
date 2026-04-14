@@ -94,16 +94,6 @@ export function useCollapsedNotes() {
   // Session-collapsed counter: triggers re-render when notes are collapsed this session
   const [sessionCollapsedCounter, setSessionCollapsedCounter] = useState(_sessionCollapsedCounter)
 
-  const setSoftDismissedIds = useCallback((updater: string[] | ((prev: string[]) => string[])) => {
-    // Read current snapshot atomically then replace
-    const currentArr = [..._softDismissedSet]
-    const next = typeof updater === 'function' ? updater(currentArr) : updater
-    _softDismissedSet = new Set(next.slice(-MAX_SOFT_DISMISSED))
-    _setSoftDismissedIds([..._softDismissedSet])
-    persistSoftDismissed()
-    notifySoftDismissChange()
-  }, [])
-
   // Listen for changes from other hook instances using AbortController
   // to prevent listener accumulation in StrictMode
   useEffect(() => {

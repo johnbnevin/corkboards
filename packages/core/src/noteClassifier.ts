@@ -32,25 +32,25 @@ export function classifyNote(event: NostrEvent): NoteClassification {
   let parentEventId: string | undefined;
   let rootEventId: string | undefined;
 
-  if (replyTag) {
+  if (replyTag && replyTag.length > 1) {
     // Explicit reply marker
     const id = replyTag[1];
     if (isValidEventId(id)) parentEventId = id;
-  } else if (eTags.length === 1) {
+  } else if (eTags.length === 1 && eTags[0].length > 1) {
     // Single e-tag: it's both root and parent
     const id = eTags[0][1];
     if (isValidEventId(id)) parentEventId = id;
-  } else if (eTags.length > 1) {
+  } else if (eTags.length > 1 && eTags[eTags.length - 1].length > 1) {
     // Multiple e-tags without markers: last one is parent (NIP-10 deprecated convention)
     const id = eTags[eTags.length - 1][1];
     if (isValidEventId(id)) parentEventId = id;
   }
 
   // Get root event ID
-  if (rootTag) {
+  if (rootTag && rootTag.length > 1) {
     const id = rootTag[1];
     if (isValidEventId(id)) rootEventId = id;
-  } else if (eTags.length >= 1) {
+  } else if (eTags.length >= 1 && eTags[0].length > 1) {
     // First e-tag is typically the root
     const id = eTags[0][1];
     if (isValidEventId(id)) rootEventId = id;

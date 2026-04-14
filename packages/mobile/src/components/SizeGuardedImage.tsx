@@ -46,11 +46,13 @@ function getLimitBytes(type: 'avatar' | 'image'): number {
   }
 }
 
-// HEAD-based size cache
-const sizeCache = new Map<string, number | null>();
-const pendingChecks = new Map<string, Promise<number | null>>();
+// HEAD-based size cache (matches web's SizeGuardedImage cache structure)
+interface SizeCheckResult { size: number | null; isVideo: boolean }
+const MAX_SIZE_CACHE = 2000;
+const sizeCache = new Map<string, SizeCheckResult>();
+const pendingChecks = new Map<string, Promise<SizeCheckResult>>();
 
-async function checkSize(url: string): Promise<number | null> {
+async function checkSize(url: string): Promise<SizeCheckResult> {
   if (sizeCache.has(url)) return sizeCache.get(url)!;
   if (pendingChecks.has(url)) return pendingChecks.get(url)!;
 
@@ -58,12 +60,25 @@ async function checkSize(url: string): Promise<number | null> {
     try {
       const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
       const cl = res.headers.get('content-length');
-      const size = cl ? parseInt(cl, 10) : null;
-      sizeCache.set(url, size);
-      return size;
+      const ct = res.headers.get('content-type') || '';
+      const result: SizeCheckResult = {
+        size: cl ? parseInt(cl, 10) : null,
+        isVideo: ct.startsWith('video/'),
+      };
+      if (sizeCache.size >= MAX_SIZE_CACHE) {
+        const oldest = sizeCache.keys().next().value;
+        if (oldest !== undefined) sizeCache.delete(oldest);
+      }
+      sizeCache.set(url, result);
+      return result;
     } catch {
-      sizeCache.set(url, null);
-      return null;
+      const result: SizeCheckResult = { size: null, isVideo: false };
+      if (sizeCache.size >= MAX_SIZE_CACHE) {
+        const oldest = sizeCache.keys().next().value;
+        if (oldest !== undefined) sizeCache.delete(oldest);
+      }
+      sizeCache.set(url, result);
+      return result;
     } finally {
       pendingChecks.delete(url);
     }
@@ -100,15 +115,16 @@ export function SizeGuardedImage({ uri, style, type = 'image', resizeMode = 'cov
     if (limitBytes === 0) { setStatus('allowed'); return; }
     if (sizeCache.has(uri)) {
       const cached = sizeCache.get(uri)!;
-      setFileSize(cached);
-      setStatus(cached !== null && cached > limitBytes ? 'blocked' : 'allowed');
+      setFileSize(cached.size);
+      // Never block videos — they only load metadata until user taps play
+      setStatus(!cached.isVideo && cached.size !== null && cached.size > limitBytes ? 'blocked' : 'allowed');
       return;
     }
     setStatus('checking');
-    checkSize(uri).then(size => {
+    checkSize(uri).then(result => {
       if (!mountedRef.current) return;
-      setFileSize(size);
-      setStatus(size !== null && size > limitBytes ? 'blocked' : 'allowed');
+      setFileSize(result.size);
+      setStatus(!result.isVideo && result.size !== null && result.size > limitBytes ? 'blocked' : 'allowed');
     });
   }, [uri, limitBytes]);
 

@@ -6,7 +6,8 @@
 export function formatTimeAgo(timestamp: number): string {
   const now = Math.floor(Date.now() / 1000);
   const diff = now - timestamp;
-  
+
+  if (diff < 0) return 'just now'; // future timestamp (clock skew)
   if (diff < 60) return 'just now';
   if (diff < 3600) {
     const mins = Math.floor(diff / 60);
@@ -32,7 +33,8 @@ export function formatTimeAgo(timestamp: number): string {
  * @returns Compact human-readable relative time string
  */
 export function formatTimeAgoCompact(createdAt: number): string {
-  const seconds = Math.floor(Date.now() / 1000) - createdAt;
+  const rawSeconds = Math.floor(Date.now() / 1000) - createdAt;
+  const seconds = Math.max(0, rawSeconds); // handle future timestamps (clock skew)
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(seconds / 3600);
   const days = Math.floor(seconds / 86400);

@@ -443,7 +443,7 @@ export function TabBar({
                         {isActive && (onEditFeed || onDeleteFeed) && (
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
-                              <button type="button" className="h-5 w-4 -ml-0.5 flex items-center justify-center text-purple-300 hover:text-white rounded-r-md bg-purple-600 border border-purple-600 shrink-0">
+                              <button type="button" className="h-5 w-4 -ml-0.5 flex items-center justify-center text-purple-300 hover:text-white rounded-r-md bg-purple-600 border border-purple-600 shrink-0" aria-label="Feed options">
                                 <MoreVertical className="h-3 w-3" />
                               </button>
                             </DropdownMenuTrigger>

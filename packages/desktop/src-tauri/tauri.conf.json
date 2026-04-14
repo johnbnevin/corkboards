@@ -18,11 +18,12 @@
         "minWidth": 800,
         "minHeight": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "contentProtected": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; connect-src 'self' wss: https:; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; connect-src 'self' wss: https:; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests"
     }
   },
   "bundle": {

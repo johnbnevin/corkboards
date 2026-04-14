@@ -12,3 +12,9 @@ export function debugWarn(...args: unknown[]) {
     console.warn('[corkboard]', ...args);
   }
 }
+
+export function debugError(...args: unknown[]) {
+  if (DEBUG) {
+    console.error('[corkboard]', ...args);
+  }
+}

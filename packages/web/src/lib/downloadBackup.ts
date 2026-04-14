@@ -235,12 +235,23 @@ export interface PreflightResult {
 /** Analyze incoming backup data and compare against current state.
  *  Supports both v4 format ({version, settings: {...}}) and flat format ({key: value, ...}). */
 export function preflightRestore(json: string): PreflightResult {
-  const backup = JSON.parse(json);
-  const settings = (backup.settings && typeof backup.settings === 'object') ? backup.settings : backup;
+  let backup: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(json);
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('expected an object');
+    }
+    backup = parsed as Record<string, unknown>;
+  } catch {
+    throw new Error('Invalid backup file: not valid JSON');
+  }
+  const settings = (backup.settings && typeof backup.settings === 'object')
+    ? backup.settings as Record<string, string | null>
+    : backup as unknown as Record<string, string | null>;
   const incomingStats = computeStats(settings);
   const currentStats = getCurrentStats();
-  const incomingVersion = backup.version || 1;
-  const incomingTimestamp = backup.createdAtUnix || backup.timestamp || 0;
+  const incomingVersion = (backup.version as number) || 1;
+  const incomingTimestamp = ((backup.createdAtUnix ?? backup.timestamp) as number) || 0;
   const incomingCorkboardNames = corkboardNames(settings['nostr-custom-feeds']);
 
   const warnings: RestoreWarning[] = [];

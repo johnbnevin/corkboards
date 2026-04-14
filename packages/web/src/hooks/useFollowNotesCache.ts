@@ -11,6 +11,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
 import { batchFetchByAuthors } from '@/lib/feedUtils';
+import { debugLog } from '@/lib/debug';
 import {
   getNotesFromMemory,
   saveNotesToCache,
@@ -60,10 +61,10 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
     queryKey,
     queryFn: async () => {
       const authorCount = allAuthors.length;
-      if (import.meta.env.DEV) console.log('[notesCache] queryFn called, authors:', authorCount);
+      debugLog('[notesCache] queryFn called, authors:', authorCount);
 
       if (authorCount === 0) {
-        if (import.meta.env.DEV) console.log('[notesCache] No authors, returning empty');
+        debugLog('[notesCache] No authors, returning empty');
         return [];
       }
       
@@ -72,7 +73,7 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
       
       // If we already have events and author count hasn't changed significantly, skip
       if (existingData && existingData.length > 0) {
-        if (import.meta.env.DEV) console.log('[notesCache] Using existing', existingData.length, 'events');
+        debugLog('[notesCache] Using existing', existingData.length, 'events');
         return existingData;
       }
       
@@ -81,15 +82,13 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
       const now = Math.floor(Date.now() / 1000);
       const since = now - timeWindowSeconds;
       
-      if (import.meta.env.DEV) {
-        console.log('[notesCache] Fetching notes:');
-        console.log('  baseWindowSeconds:', baseWindowSeconds, 'seconds');
-        console.log('  multiplier:', multiplier);
-        console.log('  timeWindowSeconds:', timeWindowSeconds, 'seconds =', timeWindowSeconds / 3600, 'hours');
-        console.log('  now:', now, '(', new Date(now * 1000).toISOString(), ')');
-        console.log('  since:', since, '(', new Date(since * 1000).toISOString(), ')');
-        console.log('  fetching from', new Date(since * 1000).toLocaleString(), 'to', new Date(now * 1000).toLocaleString());
-      }
+      debugLog('[notesCache] Fetching notes:');
+      debugLog('  baseWindowSeconds:', baseWindowSeconds, 'seconds');
+      debugLog('  multiplier:', multiplier);
+      debugLog('  timeWindowSeconds:', timeWindowSeconds, 'seconds =', timeWindowSeconds / 3600, 'hours');
+      debugLog('  now:', now, '(', new Date(now * 1000).toISOString(), ')');
+      debugLog('  since:', since, '(', new Date(since * 1000).toISOString(), ')');
+      debugLog('  fetching from', new Date(since * 1000).toLocaleString(), 'to', new Date(now * 1000).toLocaleString());
       
       const events = await batchFetchByAuthors({
         nostr,
@@ -100,16 +99,14 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
         onProgress: onProgress ?? (() => {}),
       });
       
-      if (import.meta.env.DEV) {
-        console.log('[notesCache] Got', events.length, 'events');
-        if (events.length > 0) {
-          const oldest = events.reduce((min, e) => e.created_at < min ? e.created_at : min, events[0].created_at);
-          const newest = events.reduce((max, e) => e.created_at > max ? e.created_at : max, events[0].created_at);
-          const timeSpan = (newest - oldest) / 3600;
-          console.log('[notesCache] Time span:', timeSpan.toFixed(2), 'hours');
-          console.log('[notesCache] Oldest:', new Date(oldest * 1000).toISOString());
-          console.log('[notesCache] Newest:', new Date(newest * 1000).toISOString());
-        }
+      debugLog('[notesCache] Got', events.length, 'events');
+      if (events.length > 0) {
+        const oldest = events.reduce((min, e) => e.created_at < min ? e.created_at : min, events[0].created_at);
+        const newest = events.reduce((max, e) => e.created_at > max ? e.created_at : max, events[0].created_at);
+        const timeSpan = (newest - oldest) / 3600;
+        debugLog('[notesCache] Time span:', timeSpan.toFixed(2), 'hours');
+        debugLog('[notesCache] Oldest:', new Date(oldest * 1000).toISOString());
+        debugLog('[notesCache] Newest:', new Date(newest * 1000).toISOString());
       }
       
       // Merge fresh relay data with persisted IDB cache so notes accumulated
@@ -146,7 +143,7 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
       if (cached.length > 0) {
         const authorSet = new Set(allAuthors);
         const filtered = authorSet.size > 0 ? cached.filter(e => authorSet.has(e.pubkey)) : cached;
-        if (import.meta.env.DEV) console.log('[notesCache] Initializing with', filtered.length, 'cached notes (', cached.length, 'total in IDB)');
+        debugLog('[notesCache] Initializing with', filtered.length, 'cached notes (', cached.length, 'total in IDB)');
         queryClient.setQueryData(queryKey, filtered);
       }
       hasInitialized.current = true;
@@ -162,7 +159,7 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
     const maxOffset = baseWindowSeconds * 3; // Max 3x
     const offset = Math.min(loadMoreOffsetRef.current, maxOffset);
     
-    if (import.meta.env.DEV) console.log('[notesCache] Load more clicked, offset:', offset / 3600, 'hours');
+    debugLog('[notesCache] Load more clicked, offset:', offset / 3600, 'hours');
     
     // Get oldest timestamp in current cache
     const cached = query.data ?? [];
@@ -174,7 +171,7 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
     const until = oldestTimestamp;
     const since = oldestTimestamp - offset;
     
-    if (import.meta.env.DEV) console.log('[notesCache] Fetching older notes: until', until, 'since', since);
+    debugLog('[notesCache] Fetching older notes: until', until, 'since', since);
     
     const events = await batchFetchByAuthors({
       nostr,
@@ -187,7 +184,7 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
 
     if (events.length > 0) {
       await mergeNotesToCache(events);
-      if (import.meta.env.DEV) console.log('[notesCache] Added', events.length, 'older notes');
+      debugLog('[notesCache] Added', events.length, 'older notes');
       
       queryClient.setQueryData(queryKey, (prev: NostrEvent[] | undefined) => {
         const existing = prev ?? [];
@@ -216,7 +213,7 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
     if (events.length > 0) {
       const added = await mergeNotesToCache(events);
       if (added > 0) {
-        if (import.meta.env.DEV) console.log('[notesCache] Added', added, 'newer notes to cache');
+        debugLog('[notesCache] Added', added, 'newer notes to cache');
         await setCacheMetadata({ lastSync: Date.now() });
       }
       

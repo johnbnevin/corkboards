@@ -302,10 +302,10 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
       <div className="relative">
         <Input type={showKey ? 'text' : 'password'} value={nsec} readOnly autoComplete="off" data-1p-ignore data-lpignore="true" className="pr-20 font-mono text-sm" />
         <div className="absolute right-0 top-0 h-full flex items-center gap-0.5 pr-1">
-          <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-transparent" onClick={() => setShowKey(!showKey)}>
+          <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-transparent" onClick={() => setShowKey(!showKey)} aria-label={showKey ? 'Hide key' : 'Show key'}>
             {showKey ? <EyeOff className="h-4 w-4 text-muted-foreground" /> : <Eye className="h-4 w-4 text-muted-foreground" />}
           </Button>
-          <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-transparent" onClick={copyKey}>
+          <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-transparent" onClick={copyKey} aria-label="Copy key">
             {copied ? <Check className="h-4 w-4 text-purple-500" /> : <Copy className="h-4 w-4 text-muted-foreground" />}
           </Button>
         </div>
@@ -734,6 +734,7 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
                     size="icon"
                     className="absolute right-0 top-0 h-full w-9 hover:bg-transparent"
                     onClick={() => setShowSeedPassphrase(!showSeedPassphrase)}
+                    aria-label={showSeedPassphrase ? 'Hide passphrase' : 'Show passphrase'}
                   >
                     {showSeedPassphrase ? <EyeOff className="h-4 w-4 text-muted-foreground" /> : <Eye className="h-4 w-4 text-muted-foreground" />}
                   </Button>
@@ -991,6 +992,7 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
                     size="icon"
                     className="absolute right-0 top-0 h-full w-9 hover:bg-transparent"
                     onClick={() => setShowSeedPassphrase(!showSeedPassphrase)}
+                    aria-label={showSeedPassphrase ? 'Hide passphrase' : 'Show passphrase'}
                   >
                     {showSeedPassphrase ? <EyeOff className="h-4 w-4 text-muted-foreground" /> : <Eye className="h-4 w-4 text-muted-foreground" />}
                   </Button>

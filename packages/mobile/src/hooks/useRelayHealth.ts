@@ -18,7 +18,7 @@ export interface RelayHealth {
   errorCount: number;
 }
 
-const HEALTH_CHECK_INTERVAL = 60000;
+const HEALTH_CHECK_INTERVAL = 120000;
 const SLOW_THRESHOLD = 3000;
 const ERROR_THRESHOLD = 3;
 
@@ -73,7 +73,7 @@ export function useRelayHealth() {
 
   const checkRelay = useCallback(async (url: string): Promise<RelayHealth> => {
     const existing = relayHealthMap.get(url);
-    const relay = new NRelay1(url);
+    const relay = new NRelay1(url, { backoff: false });
     const start = Date.now();
 
     try {
@@ -117,7 +117,7 @@ export function useRelayHealth() {
 
   const checkAllRelays = useCallback(async () => {
     const relays = activeRelays();
-    await Promise.all(relays.map(checkRelay));
+    for (let i = 0; i < relays.length; i += 3) { const batch = relays.slice(i, i + 3); await Promise.allSettled(batch.map(checkRelay)); }
   }, [activeRelays, checkRelay]);
 
   return {
@@ -147,7 +147,7 @@ export function useRelayHealthAuto() {
     });
     notifyListeners();
 
-    const timeout = setTimeout(checkAllRelays, 10000);
+    const timeout = setTimeout(checkAllRelays, 30000);
     return () => clearTimeout(timeout);
   }, [activeRelays, checkAllRelays]);
 

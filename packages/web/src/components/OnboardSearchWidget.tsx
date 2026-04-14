@@ -14,7 +14,7 @@ interface SearchResult {
   about?: string
 }
 
-export function OnboardSearchWidget({ contactCount = 0, onSkip }: { contactCount?: number; onSkip?: () => void }) {
+export function OnboardSearchWidget({ contactCount = 0, followTarget = 10, onSkip }: { contactCount?: number; followTarget?: number; onSkip?: () => void }) {
   const { openProfile } = useProfileModal()
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
@@ -72,7 +72,7 @@ export function OnboardSearchWidget({ contactCount = 0, onSkip }: { contactCount
       }
       setIsSearching(true)
       try {
-        const relay = new NRelay1(SEARCH_RELAY)
+        const relay = new NRelay1(SEARCH_RELAY, { backoff: false })
         relayRef.current = relay
 
         const events: NostrEvent[] = []
@@ -128,10 +128,10 @@ export function OnboardSearchWidget({ contactCount = 0, onSkip }: { contactCount
         <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
           <div
             className="h-full bg-purple-500 transition-all duration-500 rounded-full"
-            style={{ width: `${Math.min(contactCount / 10 * 100, 100)}%` }}
+            style={{ width: `${Math.min(contactCount / followTarget * 100, 100)}%` }}
           />
         </div>
-        <span className="text-xs font-medium text-muted-foreground shrink-0">{contactCount}/10</span>
+        <span className="text-xs font-medium text-muted-foreground shrink-0">{contactCount}/{followTarget}</span>
       </div>
       {onSkip && (
         <p className="text-[10px] text-muted-foreground/50 mb-3 leading-relaxed">

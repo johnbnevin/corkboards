@@ -81,6 +81,7 @@ export const STORAGE_KEYS = {
 
   // Onboarding (per-user — each account has its own onboarding state)
   ONBOARDING_SKIPPED: 'corkboard:onboarding-skipped',
+  ONBOARDING_FOLLOW_TARGET: 'corkboard:onboarding-follow-target', // number: follow count to reach (default 10, set to current+10 on restart)
 
   // Blossom servers (per-user — different accounts may use different servers)
   BLOSSOM_SERVERS: 'corkboard:blossom-servers',
@@ -187,6 +188,7 @@ const SHARED_BACKED_UP_KEYS = [
   STORAGE_KEYS.HIDE_MARKDOWN,
   STORAGE_KEYS.HIDE_EXACT_TEXT,
   STORAGE_KEYS.ONBOARDING_SKIPPED,
+  STORAGE_KEYS.ONBOARDING_FOLLOW_TARGET,
   STORAGE_KEYS.BANNER_HEIGHT_PCT,
   STORAGE_KEYS.BANNER_FIT_MODE,
   STORAGE_KEYS.BLOSSOM_SERVERS,
@@ -241,10 +243,20 @@ export const PER_USER_KEYS = getAllPerUserKeys();
 // Track which pubkey currently owns the active (global) keys
 const ACTIVE_USER_KEY = 'corkboard:active-user-pubkey';
 
+const PUBKEY_RE = /^[0-9a-f]{64}$/;
+
+/** Validate that a pubkey is a 64-char lowercase hex string. Throws on invalid input. */
+function assertValidPubkey(pubkey: string): void {
+  if (!PUBKEY_RE.test(pubkey)) {
+    throw new Error(`Invalid pubkey: expected 64-char hex, got "${pubkey.slice(0, 16)}..."`);
+  }
+}
+
 /**
  * Save the current global per-user keys into namespaced storage for the given pubkey.
  */
 export function stashUserData(storage: KVStorage, pubkey: string): void {
+  assertValidPubkey(pubkey);
   for (const key of PER_USER_KEYS) {
     const value = storage.getSync(key);
     if (value !== null) {
@@ -268,6 +280,7 @@ export function clearActiveUserData(storage: KVStorage): void {
  * Restore a user's namespaced data into the global per-user keys.
  */
 export function restoreUserData(storage: KVStorage, pubkey: string): void {
+  assertValidPubkey(pubkey);
   for (const key of PER_USER_KEYS) {
     const value = storage.getSync(`user:${pubkey}:${key}`);
     if (value !== null) {
@@ -285,6 +298,8 @@ export function restoreUserData(storage: KVStorage, pubkey: string): void {
  * clear-and-restore is safe even if storage reads fail mid-swap.
  */
 export function switchActiveUser(storage: KVStorage, oldPubkey: string | null, newPubkey: string): void {
+  assertValidPubkey(newPubkey);
+  if (oldPubkey) assertValidPubkey(oldPubkey);
   if (oldPubkey === newPubkey) return;
 
   // Pre-load new user's data before making any destructive changes.
@@ -308,6 +323,10 @@ export function switchActiveUser(storage: KVStorage, oldPubkey: string | null, n
   }
 
   storage.setSync(ACTIVE_USER_KEY, newPubkey);
+
+  // Signal to backup system that this is an account switch, not a new session.
+  // sessionStorage survives page reload but not new tabs/windows.
+  try { sessionStorage.setItem('corkboard:account-switch', '1'); } catch { /* SSR / restricted */ }
 }
 
 /**
@@ -321,9 +340,12 @@ export function getActiveUserPubkey(storage: KVStorage): string | null {
  * Handle logout: stash the user's data and clear active keys.
  */
 export function handleLogoutStorage(storage: KVStorage, pubkey: string): void {
+  assertValidPubkey(pubkey);
   stashUserData(storage, pubkey);
   clearActiveUserData(storage);
   storage.removeSync(ACTIVE_USER_KEY);
+  // Rotate device ID on logout to prevent cross-session tracking
+  storage.removeSync(STORAGE_KEYS.DEVICE_ID);
 }
 
 /**
@@ -332,6 +354,7 @@ export function handleLogoutStorage(storage: KVStorage, pubkey: string): void {
  * next logged-in user.
  */
 export async function handleLogoutStorageAsync(storage: KVStorage, pubkey: string): Promise<void> {
+  assertValidPubkey(pubkey);
   // Stash: read from sync cache (always current in an active session) and persist
   const stashOps = PER_USER_KEYS.map(async (key) => {
     const value = storage.getSync(key);

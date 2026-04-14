@@ -12,7 +12,7 @@ import { Card } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 // Select UI removed — NIP-17 is the only send protocol now
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { ArrowLeft, Send, Loader2, AlertTriangle, Key, ShieldCheck } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { NoteContent } from '@/components/NoteContent';
@@ -87,59 +87,53 @@ const MessageBubble = memo(({
           </p>
         )}
         <div className="flex items-center gap-2 mt-1">
-          <TooltipProvider>
-            <Tooltip delayDuration={200}>
-              <TooltipTrigger asChild>
-                <span className={cn(
-                  "text-xs opacity-70 cursor-default",
-                  isFromCurrentUser ? "text-primary-foreground" : "text-muted-foreground"
-                )}>
-                  {formatConversationTime(message.created_at)}
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>
-                <p className="text-xs">{formatFullDateTime(message.created_at)}</p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <Tooltip delayDuration={200}>
+            <TooltipTrigger asChild>
+              <span className={cn(
+                "text-xs opacity-70 cursor-default",
+                isFromCurrentUser ? "text-primary-foreground" : "text-muted-foreground"
+              )}>
+                {formatConversationTime(message.created_at)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className="text-xs">{formatFullDateTime(message.created_at)}</p>
+            </TooltipContent>
+          </Tooltip>
           
-          <TooltipProvider>
-            <Tooltip delayDuration={200}>
+          <Tooltip delayDuration={200}>
+            <TooltipTrigger asChild>
+              <span className={cn(
+                "flex-shrink-0 opacity-50",
+                isFromCurrentUser ? "text-primary-foreground" : "text-muted-foreground"
+              )}>
+                {message.kind === 4 ? (
+                  <Key className="h-3 w-3" />
+                ) : (
+                  <ShieldCheck className="h-3 w-3" />
+                )}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className="text-xs">
+                {message.kind === 4 && "NIP-04 Kind 4 (Legacy DM)"}
+                {message.kind === 14 && "NIP-17 Kind 14 (Private Message)"}
+                {message.kind === 15 && "NIP-17 Kind 15 (Media)"}
+                {message.kind !== 4 && message.kind !== 14 && message.kind !== 15 && `Kind ${message.kind}`}
+              </p>
+            </TooltipContent>
+          </Tooltip>
+          {isNIP4Message && (
+            <Tooltip>
               <TooltipTrigger asChild>
-                <span className={cn(
-                  "flex-shrink-0 opacity-50",
-                  isFromCurrentUser ? "text-primary-foreground" : "text-muted-foreground"
-                )}>
-                  {message.kind === 4 ? (
-                    <Key className="h-3 w-3" />
-                  ) : (
-                    <ShieldCheck className="h-3 w-3" />
-                  )}
-                </span>
+                <div className="flex-shrink-0">
+                  <AlertTriangle className="h-3 w-3 text-yellow-600 dark:text-yellow-500" />
+                </div>
               </TooltipTrigger>
               <TooltipContent>
-                <p className="text-xs">
-                  {message.kind === 4 && "NIP-04 Kind 4 (Legacy DM)"}
-                  {message.kind === 14 && "NIP-17 Kind 14 (Private Message)"}
-                  {message.kind === 15 && "NIP-17 Kind 15 (Media)"}
-                  {message.kind !== 4 && message.kind !== 14 && message.kind !== 15 && `Kind ${message.kind}`}
-                </p>
+                <p className="text-xs">Uses outdated NIP-04 encryption</p>
               </TooltipContent>
             </Tooltip>
-          </TooltipProvider>
-          {isNIP4Message && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <div className="flex-shrink-0">
-                    <AlertTriangle className="h-3 w-3 text-yellow-600 dark:text-yellow-500" />
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p className="text-xs">Uses outdated NIP-04 encryption</p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
           )}
           {message.isSending && (
             <Loader2 className="h-3 w-3 animate-spin opacity-70" />

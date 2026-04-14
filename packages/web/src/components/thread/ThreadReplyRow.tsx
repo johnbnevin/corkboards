@@ -75,7 +75,7 @@ function resolveReactionEmoji(r: NostrEvent): { key: string; render: React.React
     if (url) {
       return {
         key: `:${shortcode}:`,
-        render: <img src={url} alt={`:${shortcode}:`} title={`:${shortcode}:`} className="inline-block h-6 w-6 object-contain align-middle" loading="lazy" />,
+        render: <img src={url} alt={`:${shortcode}:`} title={`:${shortcode}:`} className="inline-block h-6 w-6 object-contain align-middle" loading="lazy" referrerPolicy="no-referrer" />,
       }
     }
   }
@@ -266,7 +266,7 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
                 sentReaction ? (
                   <span className="inline-flex items-center px-2 py-0.5" title="You reacted">
                     {sentReaction.url ? (
-                      <img src={sentReaction.url} alt={sentReaction.emoji} className="h-5 w-5 object-contain" />
+                      <img src={sentReaction.url} alt={sentReaction.emoji} className="h-5 w-5 object-contain" referrerPolicy="no-referrer" />
                     ) : (
                       <span className="text-lg leading-none">{sentReaction.emoji}</span>
                     )}

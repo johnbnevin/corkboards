@@ -40,8 +40,8 @@ export function parseThreadTags(event: NostrEvent): {
     return { root: rootTag?.[1], reply: replyTag?.[1] || rootTag?.[1], hints }
   }
   // Positional fallback (NIP-10)
-  if (eTags.length === 1) return { root: eTags[0][1], reply: eTags[0][1], hints }
-  if (eTags.length > 1) return { root: eTags[0][1], reply: eTags[eTags.length - 1][1], hints }
+  if (eTags.length === 1) return { root: eTags[0]?.[1], reply: eTags[0]?.[1], hints }
+  if (eTags.length > 1) return { root: eTags[0]?.[1], reply: eTags[eTags.length - 1]?.[1], hints }
   return { hints }
 }
 
@@ -50,8 +50,8 @@ export function getParentId(event: NostrEvent): string | null {
   const eTags = event.tags.filter(t => t[0] === 'e')
   if (eTags.length === 0) return null
   const replyTag = eTags.find(t => t[3] === 'reply')
-  if (replyTag) return replyTag[1]
-  return eTags[eTags.length - 1][1]
+  if (replyTag?.[1]) return replyTag[1]
+  return eTags[eTags.length - 1]?.[1] ?? null
 }
 
 /** Check if event is a direct reply to the given eventId */

@@ -765,7 +765,7 @@ export function EmojiSetEditor() {
                         className={`flex flex-col items-center gap-0.5 p-1 rounded transition-colors ${alreadyAdded ? 'opacity-30' : 'hover:bg-muted'}`}
                         title={alreadyAdded ? 'Already in set' : `:${e.shortcode}:`}
                       >
-                        <img src={e.url} alt={e.shortcode} className="h-8 w-8 object-contain" loading="lazy" />
+                        <img src={e.url} alt={e.shortcode} className="h-8 w-8 object-contain" loading="lazy" referrerPolicy="no-referrer" />
                         <span className="text-[9px] text-muted-foreground truncate max-w-full">{e.shortcode}</span>
                       </button>
                     )

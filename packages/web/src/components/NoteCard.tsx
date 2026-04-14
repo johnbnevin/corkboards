@@ -1006,7 +1006,7 @@ export const NoteCard = React.memo(function NoteCard({
                     {profileLoading ? (
                       <Skeleton className="h-full w-full" />
                     ) : discoverFeaturedAvatarUrl ? (
-                      <img src={discoverFeaturedAvatarUrl} alt={discoverFeaturedDisplayName} className="h-full w-full object-cover" />
+                      <img src={discoverFeaturedAvatarUrl} alt={discoverFeaturedDisplayName} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
                     ) : (
                       <div className="h-full w-full bg-muted flex items-center justify-center text-2xl font-bold text-muted-foreground">
                         {discoverFeaturedDisplayName.slice(0, 2).toUpperCase()}
@@ -1427,7 +1427,7 @@ export const NoteCard = React.memo(function NoteCard({
                 onClick={(e) => e.stopPropagation()}
               >
                 {sentReaction.url ? (
-                  <img src={sentReaction.url} alt={sentReaction.emoji} className="h-5 w-5 object-contain" />
+                  <img src={sentReaction.url} alt={sentReaction.emoji} className="h-5 w-5 object-contain" referrerPolicy="no-referrer" />
                 ) : (
                   <span className="text-base leading-none">{sentReaction.emoji}</span>
                 )}

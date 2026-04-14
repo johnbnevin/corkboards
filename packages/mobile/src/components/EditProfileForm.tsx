@@ -78,8 +78,25 @@ export function EditProfileForm({ onSaved }: EditProfileFormProps) {
   const update = (field: keyof ProfileFormData, value: string) =>
     setForm(prev => ({ ...prev, [field]: value }));
 
+  // Check if any profile metadata fields actually changed
+  const isProfileDirty = (() => {
+    if (!meta) return true; // No existing metadata = always publish
+    const fields: (keyof ProfileFormData)[] = ['display_name', 'name', 'about', 'picture', 'banner', 'website', 'nip05', 'lud16'];
+    for (const f of fields) {
+      if ((form[f] || '') !== (meta[f as keyof typeof meta] || '')) return true;
+    }
+    return false;
+  })();
+
   const handleSave = async () => {
     if (!pubkey) return;
+
+    // If no profile metadata actually changed, skip the kind:0 publish.
+    // Banner display settings are local-only and don't need a Nostr event.
+    if (!isProfileDirty) {
+      onSaved?.();
+      return;
+    }
 
     try {
       // Merge with existing metadata to preserve fields we don't edit

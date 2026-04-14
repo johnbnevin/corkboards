@@ -17,6 +17,7 @@ import { useBulkAuthors } from '../hooks/useAuthor';
 import { useNip65Relays } from '../hooks/useNip65Relays';
 import { useMuteList } from '../hooks/useMuteList';
 import { useBookmarks } from '../hooks/useBookmarks';
+import { useCollapsedNotes } from '../hooks/useCollapsedNotes';
 import { useAuth } from '../lib/AuthContext';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { useCustomFeedNotes } from '../hooks/useCustomFeedNotes';
@@ -160,6 +161,7 @@ export function HomeScreen() {
   const { prefetchFromNotes } = useBulkAuthors();
   const { mutedPubkeys } = useMuteList();
   const { isBookmarked, toggleBookmark } = useBookmarks();
+  const { isDismissed } = useCollapsedNotes();
   const { limit } = useFeedLimit();
 
   // ── UI state ────────────────────────────────────────────────────────────────
@@ -307,8 +309,17 @@ export function HomeScreen() {
       });
     }
 
+    // Filter dismissed notes
+    result = result.filter(note => !isDismissed(note.id));
+
     return result;
-  }, [events, kindFilters, filterMode, hashtagFilters, eventLookup]);
+  }, [events, kindFilters, filterMode, hashtagFilters, eventLookup, isDismissed]);
+
+  // Count dismissed notes from the deduped set (before kind/hashtag filters)
+  const dismissedCount = useMemo(
+    () => (events ?? []).filter(e => isDismissed(e.id)).length,
+    [events, isDismissed],
+  );
 
   // ── Stats for filter UI ─────────────────────────────────────────────────────
   const noteKindStats = useMemo(() => computeNoteKindStats(events, eventLookup), [events, eventLookup]);
@@ -339,11 +350,16 @@ export function HomeScreen() {
 
   // ── Feed label ──────────────────────────────────────────────────────────────
   const feedLabel = useMemo(() => {
-    if (isCustomTab && activeCustomFeed) return activeCustomFeed.title;
-    if (isGlobalTab) return 'Global feed';
-    if (pubkey && contacts && contacts.length > 0) return `Following ${contacts.length}`;
+    const count = filteredEvents?.length ?? 0;
+    const totalLoaded = events?.length ?? 0;
+    const statsStr = count > 0
+      ? `${count} showing${totalLoaded > count ? ` (${totalLoaded} loaded)` : ''}${dismissedCount > 0 ? ` · ${dismissedCount} dismissed` : ''}`
+      : '';
+    if (isCustomTab && activeCustomFeed) return statsStr ? `${activeCustomFeed.title} · ${statsStr}` : activeCustomFeed.title;
+    if (isGlobalTab) return statsStr ? `Global · ${statsStr}` : 'Global feed';
+    if (pubkey && contacts && contacts.length > 0) return statsStr ? `Following ${contacts.length} · ${statsStr}` : `Following ${contacts.length}`;
     return 'Global feed';
-  }, [isCustomTab, isGlobalTab, activeCustomFeed, pubkey, contacts]);
+  }, [isCustomTab, isGlobalTab, activeCustomFeed, pubkey, contacts, filteredEvents, events, dismissedCount]);
 
   // ── Callbacks ───────────────────────────────────────────────────────────────
   const handleReply = useCallback((event: NostrEvent) => {

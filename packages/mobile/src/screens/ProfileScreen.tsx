@@ -219,7 +219,7 @@ export function ProfileScreen({ pubkey, onBack, onViewThread, onCreateCorkboard 
   const renderHeader = () => (
     <View>
       {/* Banner */}
-      {meta?.banner ? (
+      {meta?.banner && /^https?:\/\//.test(meta.banner) ? (
         <Image source={{ uri: meta.banner }} style={styles.banner} />
       ) : (
         <View style={[styles.banner, styles.bannerPlaceholder]} />

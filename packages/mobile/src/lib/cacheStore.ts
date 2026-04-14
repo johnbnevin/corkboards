@@ -60,6 +60,13 @@ export function getCachedProfileSync(pubkey: string): NostrMetadata | null {
   }
 }
 
+/** Evict a single profile from cache (forces relay refetch) */
+export function evictCachedProfile(pubkey: string): void {
+  try {
+    mobileStorage.removeSync(PROFILE_PREFIX + pubkey);
+  } catch { /* best-effort */ }
+}
+
 /** Clear all cached profiles. Uses the async keys() API since MMKV's KVStorage
  *  interface doesn't expose synchronous key iteration. */
 export async function clearProfileCache(): Promise<void> {

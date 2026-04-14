@@ -11,11 +11,11 @@
  * chars, even if it would fail nip19.decode(). This is a display heuristic,
  * not a protocol validator.
  */
-const NON_VISIBLE_PATTERN = /(nostr:)?(note1|npub1|nprofile1|nevent1|naddr1)[a-zA-Z0-9]+|!\[[^\]]*\]\([^)]*\)/g
-const URL_PATTERN = /https?:\/\/[^\s]+/g
+const NON_VISIBLE_PATTERN = /(nostr:)?(note1|npub1|nprofile1|nevent1|naddr1)[a-zA-Z0-9]+|!\[[^\]]*\]\([^)]*\)/
+const URL_PATTERN = /https?:\/\/[^\s]+/
 
-function nonVisibleRegex() { return new RegExp(NON_VISIBLE_PATTERN.source, NON_VISIBLE_PATTERN.flags) }
-function urlRegex() { return new RegExp(URL_PATTERN.source, URL_PATTERN.flags) }
+function nonVisibleRegex() { return new RegExp(NON_VISIBLE_PATTERN.source, 'g') }
+function urlRegex() { return new RegExp(URL_PATTERN.source, 'g') }
 
 /** Count visible characters (excludes nostr references and image markdown, but keeps URLs) */
 export function visibleLength(content: string): number {

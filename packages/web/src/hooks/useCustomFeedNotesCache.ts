@@ -8,6 +8,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
 import { batchFetchByAuthors } from '@/lib/feedUtils';
+import { debugLog } from '@/lib/debug';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
 
@@ -53,10 +54,10 @@ export function useCustomFeedNotesCache({
     queryKey,
     queryFn: async ({ queryKey }) => {
       const [, , pubkeyCount] = queryKey;
-      if (import.meta.env.DEV) console.log(`[customFeedCache] queryFn called for feed ${feedId}, authors: ${pubkeyCount}`);
+      debugLog(`[customFeedCache] queryFn called for feed ${feedId}, authors: ${pubkeyCount}`);
       
       if (pubkeys.length === 0) {
-        if (import.meta.env.DEV) console.log(`[customFeedCache] No authors for feed ${feedId}, returning empty`);
+        debugLog(`[customFeedCache] No authors for feed ${feedId}, returning empty`);
         return [];
       }
       
@@ -65,7 +66,7 @@ export function useCustomFeedNotesCache({
       
       // If we already have events and pubkey count hasn't changed, skip
       if (existingData && existingData.length > 0) {
-        if (import.meta.env.DEV) console.log(`[customFeedCache] Using existing ${existingData.length} events for feed ${feedId}`);
+        debugLog(`[customFeedCache] Using existing ${existingData.length} events for feed ${feedId}`);
         return existingData;
       }
       
@@ -74,15 +75,13 @@ export function useCustomFeedNotesCache({
       const now = Math.floor(Date.now() / 1000);
       const since = now - timeWindowSeconds;
       
-      if (import.meta.env.DEV) {
-        console.log(`[customFeedCache] Fetching notes for feed ${feedId}:`);
-        console.log(`  baseWindowSeconds: ${baseWindowSeconds} seconds`);
-        console.log(`  multiplier: ${multiplier}`);
-        console.log(`  timeWindowSeconds: ${timeWindowSeconds} seconds = ${timeWindowSeconds / 3600} hours`);
-        console.log(`  now: ${now} (${new Date(now * 1000).toISOString()})`);
-        console.log(`  since: ${since} (${new Date(since * 1000).toISOString()})`);
-        console.log(`  fetching from ${new Date(since * 1000).toLocaleString()} to ${new Date(now * 1000).toLocaleString()}`);
-      }
+      debugLog(`[customFeedCache] Fetching notes for feed ${feedId}:`);
+      debugLog(`  baseWindowSeconds: ${baseWindowSeconds} seconds`);
+      debugLog(`  multiplier: ${multiplier}`);
+      debugLog(`  timeWindowSeconds: ${timeWindowSeconds} seconds = ${timeWindowSeconds / 3600} hours`);
+      debugLog(`  now: ${now} (${new Date(now * 1000).toISOString()})`);
+      debugLog(`  since: ${since} (${new Date(since * 1000).toISOString()})`);
+      debugLog(`  fetching from ${new Date(since * 1000).toLocaleString()} to ${new Date(now * 1000).toLocaleString()}`);
       
       const events = await batchFetchByAuthors({
         nostr,
@@ -93,16 +92,14 @@ export function useCustomFeedNotesCache({
         onProgress: onProgress ?? (() => {}),
       });
       
-      if (import.meta.env.DEV) {
-        console.log(`[customFeedCache] Got ${events.length} events for feed ${feedId}`);
-        if (events.length > 0) {
-          const oldest = events.reduce((min, e) => e.created_at < min ? e.created_at : min, events[0].created_at);
-          const newest = events.reduce((max, e) => e.created_at > max ? e.created_at : max, events[0].created_at);
-          const timeSpan = (newest - oldest) / 3600;
-          console.log(`[customFeedCache] Time span: ${timeSpan.toFixed(2)} hours`);
-          console.log(`[customFeedCache] Oldest: ${new Date(oldest * 1000).toISOString()}`);
-          console.log(`[customFeedCache] Newest: ${new Date(newest * 1000).toISOString()}`);
-        }
+      debugLog(`[customFeedCache] Got ${events.length} events for feed ${feedId}`);
+      if (events.length > 0) {
+        const oldest = events.reduce((min, e) => e.created_at < min ? e.created_at : min, events[0].created_at);
+        const newest = events.reduce((max, e) => e.created_at > max ? e.created_at : max, events[0].created_at);
+        const timeSpan = (newest - oldest) / 3600;
+        debugLog(`[customFeedCache] Time span: ${timeSpan.toFixed(2)} hours`);
+        debugLog(`[customFeedCache] Oldest: ${new Date(oldest * 1000).toISOString()}`);
+        debugLog(`[customFeedCache] Newest: ${new Date(newest * 1000).toISOString()}`);
       }
       
       // Save to custom feed cache (separate from global notes cache)
@@ -122,7 +119,7 @@ export function useCustomFeedNotesCache({
     if (!hasInitialized.current && isCustomFeedCacheLoaded()) {
       const cached = getCustomFeedNotesFromMemory(feedId);
       if (cached.length > 0) {
-        if (import.meta.env.DEV) console.log(`[customFeedCache] Initializing feed ${feedId} with ${cached.length} cached notes`);
+        debugLog(`[customFeedCache] Initializing feed ${feedId} with ${cached.length} cached notes`);
         queryClient.setQueryData(queryKey, cached);
       }
       hasInitialized.current = true;
@@ -140,9 +137,7 @@ export function useCustomFeedNotesCache({
     const until = oldestTimestamp;
     const since = oldestTimestamp - (baseWindowSeconds * 3); // Go back 3x base window
     
-    if (import.meta.env.DEV) {
-      console.log(`[customFeedCache] Loading older notes for feed ${feedId}: until ${until} since ${since}`);
-    }
+    debugLog(`[customFeedCache] Loading older notes for feed ${feedId}: until ${until} since ${since}`);
     
     const events = await batchFetchByAuthors({
       nostr,
@@ -155,7 +150,7 @@ export function useCustomFeedNotesCache({
 
     if (events.length > 0) {
       await mergeCustomFeedNotes(feedId, events);
-      if (import.meta.env.DEV) console.log(`[customFeedCache] Added ${events.length} older notes to feed ${feedId}`);
+      debugLog(`[customFeedCache] Added ${events.length} older notes to feed ${feedId}`);
       
       queryClient.setQueryData(queryKey, (prev: NostrEvent[] | undefined) => {
         const existing = prev ?? [];
@@ -185,7 +180,7 @@ export function useCustomFeedNotesCache({
     if (events.length > 0) {
       const added = await mergeCustomFeedNotes(feedId, events);
       if (added > 0) {
-        if (import.meta.env.DEV) console.log(`[customFeedCache] Added ${added} newer notes to feed ${feedId}`);
+        debugLog(`[customFeedCache] Added ${added} newer notes to feed ${feedId}`);
         await setCustomFeedMetadata(feedId, { lastSync: Date.now(), pubkeyCount: pubkeys.length });
       }
       
@@ -373,7 +368,7 @@ customFeedCacheLoaded = true;
       if (events.length > MAX_NOTES_PER_FEED) {
         const pruned = events.sort((a, b) => b.created_at - a.created_at).slice(0, MAX_NOTES_PER_FEED);
         await idbSet(key, JSON.stringify(pruned));
-        if (import.meta.env.DEV) console.log(`[customFeedCache] Pruned feed ${feedId}: ${events.length} → ${pruned.length}`);
+        debugLog(`[customFeedCache] Pruned feed ${feedId}: ${events.length} → ${pruned.length}`);
       }
     }
   } catch {

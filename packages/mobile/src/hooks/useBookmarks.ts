@@ -146,15 +146,15 @@ export function useBookmarks(fetchEnabled = true) {
     }
   }, [relayResult, pubkey]);
 
-  // Schedule publish when bookmarkIds changes from user action
+  // Schedule publish when bookmarkIds changes from user action.
+  // Always resets the debounce timer so rapid toggles accumulate into one publish.
   useEffect(() => {
-    if (needsPublish.current && bookmarkIds.length > 0) {
-      needsPublish.current = false;
-      if (publishTimer.current) clearTimeout(publishTimer.current);
-      publishTimer.current = setTimeout(() => {
-        publishBookmarkList(bookmarkIds);
-      }, 1500);
-    }
+    if (!needsPublish.current || bookmarkIds.length === 0) return;
+    needsPublish.current = false;
+    if (publishTimer.current) clearTimeout(publishTimer.current);
+    publishTimer.current = setTimeout(() => {
+      publishBookmarkList(bookmarkIds);
+    }, 1500);
   }, [bookmarkIds, publishBookmarkList]);
 
   const bookmarkSet = useMemo(() => new Set(bookmarkIds), [bookmarkIds]);

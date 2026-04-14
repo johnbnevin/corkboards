@@ -54,7 +54,7 @@ export function useNostrCustomFeedsSync() {
       const relays = getPublishRelays(pubkey);
       let succeeded = 0;
       for (const url of relays) {
-        const relay = new NRelay1(url);
+        const relay = new NRelay1(url, { backoff: false });
         try {
           await relay.event(event, { signal: AbortSignal.timeout(8000) });
           succeeded++;
@@ -75,7 +75,7 @@ export function useNostrCustomFeedsSync() {
     let best: NostrEvent | null = null;
 
     for (const url of relays) {
-      const relay = new NRelay1(url);
+      const relay = new NRelay1(url, { backoff: false });
       try {
         const [event] = await relay.query(
           [{ kinds: [KIND], authors: [pubkey], '#d': [D_TAG], limit: 1 }],

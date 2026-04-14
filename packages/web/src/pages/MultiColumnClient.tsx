@@ -7,6 +7,7 @@ import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { useImageSizeLimitSetting, useAvatarSizeLimitSetting } from '@/hooks/useImageSizeLimit';
 import { usePlatformStorage } from '@/hooks/usePlatformStorage';
 import { useToast } from '@/hooks/useToast';
+import { debugLog, debugWarn } from '@/lib/debug';
 
 import { usePinnedNotes } from '@/hooks/usePinnedNotes';
 import { useParentNotes } from '@/hooks/useParentNotes';
@@ -63,7 +64,7 @@ const ComposeDialog = lazy(async () => {
   const fresh = await import('@/components/ComposeDialog');
   return { default: fresh.ComposeDialog };
 });
-import { Layers, PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, Volume2, Smile, Loader2, SlidersHorizontal, RefreshCw, Wifi, Server } from 'lucide-react';
+import { PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, Volume2, Smile, Loader2, SlidersHorizontal, RefreshCw, Wifi, Server } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useRelayHealth } from '@/hooks/useRelayHealth';
@@ -547,14 +548,6 @@ export function MultiColumnClient() {
     const savedPos = tabScrollPositions.current.get(activeTab) ?? 0;
     if (savedPos <= 0) return;
     let cancelled = false;
-    const restore = () => {
-      if (cancelled) return;
-      window.scrollTo(0, savedPos);
-      // If we've scrolled close enough or document is tall enough, stop
-      if (Math.abs(window.scrollY - savedPos) < 20) return;
-      // Escalating retries: rAF burst (8×), then interval polling until content loads
-      return false; // signal: not done yet
-    };
     // Phase 1: quick rAF burst for fast restores
     let rAFCount = 0;
     const tryRAF = () => {
@@ -1188,13 +1181,13 @@ export function MultiColumnClient() {
       // Never auto-save while a restore is in progress, just found, or a background
       // cross-device check is running — prevents overwriting newer remote state.
       if (bgCheckInProgress || backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored') {
-        if (import.meta.env.DEV) console.log(`[AutoSave] skip (${source}): backup ${backupStatus}, waiting for restore to complete`);
+        debugLog(`[AutoSave] skip (${source}): backup ${backupStatus}, waiting for restore to complete`);
         return;
       }
       const lastUploadMs = (lastBackupTs ?? 0) * 1000;
       const msSinceLast = Date.now() - lastUploadMs;
       if (msSinceLast < MIN_BLOSSOM_INTERVAL_MS) {
-        if (import.meta.env.DEV) console.log(`[AutoSave] skip (${source}): ${Math.round(msSinceLast / 1000)}s since last upload, need ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
+        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceLast / 1000)}s since last upload, need ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
         return;
       }
       if (!hasUnsavedChanges()) {
@@ -1205,42 +1198,42 @@ export function MultiColumnClient() {
       if (changeDetectedAt === null) {
         changeDetectedAt = Date.now();
         setBackupSaveFlash(false);
-        if (import.meta.env.DEV) console.log(`[AutoSave] changes detected (${source}), will save in ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
+        debugLog(`[AutoSave] changes detected (${source}), will save in ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
         return;
       }
       // Wait 2 minutes from when changes were first detected
       const msSinceChange = Date.now() - changeDetectedAt;
       if (msSinceChange < MIN_BLOSSOM_INTERVAL_MS) {
-        if (import.meta.env.DEV) console.log(`[AutoSave] skip (${source}): ${Math.round(msSinceChange / 1000)}s since change, need ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
+        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceChange / 1000)}s since change, need ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
         return;
       }
-      if (import.meta.env.DEV) console.log(`[AutoSave] triggering (${source})`);
+      debugLog(`[AutoSave] triggering (${source})`);
       changeDetectedAt = null;
       autoSaveBackup().then((saved) => {
         if (saved) {
           setBackupSaveFlash(true);
         } else {
-          console.warn('[AutoSave] Blossom upload failed');
+          debugWarn('[AutoSave] Blossom upload failed');
           toast({
             title: 'Auto-save failed',
             description: 'Could not save to Blossom. Use the backup menu to retry or download a local copy.',
             variant: 'destructive',
           });
         }
-      }).catch((e) => console.warn('[AutoSave] Unexpected error during Blossom auto-save:', e));
+      }).catch((e) => debugWarn('[AutoSave] Unexpected error during Blossom auto-save:', e));
     };
 
     // Force-save immediately on app background/close — bypass the interval check.
     // This ensures cross-device sync has the latest state when the user leaves.
     const onVisibilityHidden = () => {
       if (document.visibilityState === 'hidden' && hasUnsavedChanges()) {
-        if (import.meta.env.DEV) console.log('[AutoSave] forcing save on background (cross-device sync)');
-        autoSaveBackup().catch(e => console.warn('[AutoSave] bg save failed:', e));
+        debugLog('[AutoSave] forcing save on background (cross-device sync)');
+        autoSaveBackup().catch(e => debugWarn('[AutoSave] bg save failed:', e));
       }
     };
     const onBeforeUnload = () => {
       if (hasUnsavedChanges()) {
-        autoSaveBackup().catch(e => console.warn('[AutoSave] close save failed:', e));
+        autoSaveBackup().catch(e => debugWarn('[AutoSave] close save failed:', e));
       }
     };
 
@@ -1266,24 +1259,25 @@ export function MultiColumnClient() {
   const autoRestoreCheckedRef = useRef(false);
 
   // Detect when ANY checkpoint has more dismissed notes than local state.
-  // Scan all checkpoints (not just newest) because an older backup from another
-  // device may have progressed further (more notes dismissed).
-  // Wait until the initial backup flow completes (not 'found'/'restoring'/'restored')
-  // to avoid conflicting with the BackupSplashScreen's own restore.
+  // Only for NEW users on this device (not returning users) — returning users
+  // get the cross-device path below instead. This prevents false auto-restore
+  // triggers when switching between accounts on the same device.
   const initialRestoreDone = backupCheckSettled && backupStatus !== 'found' && backupStatus !== 'restoring' && backupStatus !== 'restored';
   useEffect(() => {
     if (autoRestoreCheckedRef.current || !initialRestoreDone || !checkpoints.length) return;
+    if (isReturningUser) return; // Returning users only get cross-device restore
     let best: typeof checkpoints[0] | null = null;
     let bestDismissed = dismissedCount;
     for (const cp of checkpoints) {
       const d = cp.stats?.dismissed ?? 0;
       if (d > bestDismissed) { best = cp; bestDismissed = d; }
     }
-    if (best) {
+    // Only auto-restore if the backup has significantly more dismissed notes (>5)
+    if (best && (bestDismissed - dismissedCount) > 5) {
       autoRestoreCheckedRef.current = true;
       setAutoRestoreTarget({ checkpoint: best, reason: `Backup found (${bestDismissed - dismissedCount} more dismissed)` });
     }
-  }, [initialRestoreDone, checkpoints, dismissedCount]);
+  }, [initialRestoreDone, checkpoints, dismissedCount, isReturningUser]);
 
   // Cross-device update fallback (if dismissed count didn't catch it)
   useEffect(() => {
@@ -1866,16 +1860,14 @@ export function MultiColumnClient() {
       if (!contacts || contacts.length === 0) return [];
 
       const authorBatch = contacts.slice(followsOffset, followsOffset + 500);
-      if (import.meta.env.DEV) console.log('[follows-data] Fetching profiles for', authorBatch.length, 'authors using outbox model');
+      debugLog('[follows-data] Fetching profiles for', authorBatch.length, 'authors using outbox model');
 
       // Check cache first
       const cachedProfiles = await getCachedProfiles(authorBatch);
       const needRefresh = await getProfilesNeedingRefresh(authorBatch);
       
-      if (import.meta.env.DEV) {
-        console.log('[follows-data] Cache hit:', cachedProfiles.size, '/', authorBatch.length);
-        console.log('[follows-data] Need refresh:', needRefresh.length, 'profiles');
-      }
+      debugLog('[follows-data] Cache hit:', cachedProfiles.size, '/', authorBatch.length);
+      debugLog('[follows-data] Need refresh:', needRefresh.length, 'profiles');
 
       // Fetch profiles that need refresh — two passes with increasing timeout
       const fetchedProfiles = new Map<string, { pubkey: string; name: string; picture?: string }>();
@@ -1921,7 +1913,7 @@ export function MultiColumnClient() {
 
         // Retry pass: 8s for those that failed (relays may have been slow)
         if (stillMissing.length > 0) {
-          if (import.meta.env.DEV) console.log('[follows-data] Retrying', stillMissing.length, 'unresolved profiles');
+          debugLog('[follows-data] Retrying', stillMissing.length, 'unresolved profiles');
           await fetchBatch(stillMissing, 8000);
         }
       }
@@ -2006,20 +1998,22 @@ export function MultiColumnClient() {
   // Skip after a backup restore (backupStatus 'restored') so returning users aren't
   // dropped back into onboarding while their contacts are still loading.
   const [onboardingSkipped, setOnboardingSkipped] = useLocalStorage<boolean>(STORAGE_KEYS.ONBOARDING_SKIPPED, false);
+  const [onboardFollowTarget, setOnboardFollowTarget] = useLocalStorage<number>(STORAGE_KEYS.ONBOARDING_FOLLOW_TARGET, 10);
   const wasRestoredRef = useRef(false);
   if (backupStatus === 'restored' || backupStatus === 'restoring') wasRestoredRef.current = true;
-  const isOnboarding = contacts !== undefined && contacts.length < 10 && !onboardingSkipped && !wasRestoredRef.current;
+  const isOnboarding = contacts !== undefined && contacts.length < onboardFollowTarget && !onboardingSkipped && !wasRestoredRef.current;
 
   // Open the edit-profile dialog the first time onboarding completes (contacts reach 10).
+  // Skip if onboarding was dismissed via a backup restore (user already set up their profile).
   const onboardingWasActiveRef = useRef(false);
   useEffect(() => {
     if (isOnboarding) {
       onboardingWasActiveRef.current = true;
-    } else if (onboardingWasActiveRef.current) {
+    } else if (onboardingWasActiveRef.current && !wasRestoredRef.current && !onboardingSkipped) {
       onboardingWasActiveRef.current = false;
       setEditProfileOpen(true);
     }
-  }, [isOnboarding]);
+  }, [isOnboarding, onboardingSkipped]);
 
   // Auto-switch to discover tab on first contacts load when following fewer than 10 people
   const contactsFirstLoadRef = useRef<string | null>(null);
@@ -2028,7 +2022,7 @@ export function MultiColumnClient() {
     // Reset when user changes (account switch)
     if (contactsFirstLoadRef.current === user.pubkey) return;
     contactsFirstLoadRef.current = user.pubkey;
-    if (contacts.length < 10 && (activeTab === 'me' || activeTab === 'discover')) {
+    if (contacts.length < onboardFollowTarget && !onboardingSkipped && (activeTab === 'me' || activeTab === 'discover')) {
       setActiveTab('discover');
     }
   // setActiveTab is stable but not listed to avoid stale-closure lint noise
@@ -2340,9 +2334,7 @@ export function MultiColumnClient() {
       if (!seenIds.has(n.id)) { allNostr.push(n); seenIds.add(n.id); }
     }
 
-    if (import.meta.env.DEV) {
-      console.log('[corkboard] nostrNotes:', nostrNotes.length, 'hashtagNotes:', htNotes.length, 'rssNotes:', rss.length);
-    }
+    debugLog('[corkboard] nostrNotes:', nostrNotes.length, 'hashtagNotes:', htNotes.length, 'rssNotes:', rss.length);
 
     // Merge RSS notes with Nostr+hashtag notes, filtering RSS to the time window
     if (rss.length === 0) return allNostr.sort((a, b) => b.created_at - a.created_at);
@@ -2408,7 +2400,7 @@ export function MultiColumnClient() {
 
     // Fetch notes from non-follow pubkeys and merge into follow cache
     const fetchNonFollowNotes = async () => {
-      if (import.meta.env.DEV) console.log('[customFeed] Fetching notes for', nonFollowPubkeys.length, 'non-follow pubkeys');
+      debugLog('[customFeed] Fetching notes for', nonFollowPubkeys.length, 'non-follow pubkeys');
       try {
         const signal = AbortSignal.timeout(15000);
         const events = await nostr.query([{
@@ -2419,10 +2411,10 @@ export function MultiColumnClient() {
         if (events.length > 0) {
           const { mergeNotesToCache } = await import('@/lib/notesCache');
           await mergeNotesToCache(events);
-          if (import.meta.env.DEV) console.log('[customFeed] Merged', events.length, 'notes from non-follow pubkeys');
+          debugLog('[customFeed] Merged', events.length, 'notes from non-follow pubkeys');
         }
       } catch (e) {
-        if (import.meta.env.DEV) console.log('[customFeed] Failed to fetch non-follow notes:', e);
+        debugLog('[customFeed] Failed to fetch non-follow notes:', e);
       }
     };
     fetchNonFollowNotes();
@@ -2974,7 +2966,7 @@ export function MultiColumnClient() {
       const notesToPrefetch = deduplicatedNotes.slice(0, feedLimit);
       if (notesToPrefetch.length > 0) {
         prefetchFromNotes(notesToPrefetch).catch(err => {
-          console.warn('[MultiColumnClient] Bulk author prefetch failed:', err);
+          debugWarn('[MultiColumnClient] Bulk author prefetch failed:', err);
         });
       }
     }, 50); // 50ms debounce — fire fast so profiles arrive before individual useAuthor calls
@@ -4274,7 +4266,7 @@ export function MultiColumnClient() {
         </div>
 
         {/* Onboard search widget — shown during onboard procedure on discover tab */}
-        {isOnboarding && isDiscoverTab && <OnboardSearchWidget contactCount={contacts?.length ?? 0} onSkip={() => { setOnboardingSkipped(true); setActiveTab('me'); }} />}
+        {isOnboarding && isDiscoverTab && <OnboardSearchWidget contactCount={contacts?.length ?? 0} followTarget={onboardFollowTarget} onSkip={() => { setOnboardingSkipped(true); setActiveTab('me'); autoSaveBackup().then((saved) => { if (saved) { setBackupSaveFlash(true); } else { toast({ title: 'Backup failed', description: 'Onboarding preference could not be saved to cloud. It will retry automatically.', variant: 'destructive' }); } }).catch(() => {}); }} />}
 
         {/* Masonry feed columns + load older/newer/consolidate buttons */}
         {!isNotificationsTab && <FeedGrid
@@ -4549,7 +4541,7 @@ export function MultiColumnClient() {
               onDeleteAccount={() => { setAdvancedSettingsOpen(false); setShowVanishConfirm(true); }}
               initialSection={advancedSection}
               isOnboarding={isOnboarding}
-              onResetOnboarding={() => { setOnboardingSkipped(false); setAdvancedSettingsOpen(false); setActiveTab('discover'); }}
+              onResetOnboarding={() => { setOnboardFollowTarget((contacts?.length ?? 0) + 10); setOnboardingSkipped(false); setAdvancedSettingsOpen(false); setActiveTab('discover'); }}
             />
           </DialogContent>
         </Dialog>

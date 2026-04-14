@@ -13,21 +13,26 @@ import {
   PER_USER_KEYS,
   BACKED_UP_KEYS,
   PLATFORM_SPECIFIC_KEYS,
+  ALL_PLATFORMS,
   platformKey,
+  getAllBackupKeys,
   getPlatformSetting as _getPlatformSetting,
   setPlatformSetting as _setPlatformSetting,
+  removePlatformSetting as _removePlatformSetting,
   stashUserData as _stashUserData,
   clearActiveUserData as _clearActiveUserData,
   restoreUserData as _restoreUserData,
   switchActiveUser as _switchActiveUser,
   getActiveUserPubkey as _getActiveUserPubkey,
   handleLogoutStorage as _handleLogoutStorage,
+  handleLogoutStorageAsync as _handleLogoutStorageAsync,
 } from '@core/storageKeys';
 
 export {
   STORAGE_KEYS, PER_USER_KEYS, BACKED_UP_KEYS,
-  PLATFORM_SPECIFIC_KEYS, platformKey,
+  PLATFORM_SPECIFIC_KEYS, ALL_PLATFORMS, platformKey, getAllBackupKeys,
 };
+export type { Platform };
 
 /** Detect mobile vs tablet based on screen width (deferred — not safe at module load) */
 export function detectPlatform(): Platform {
@@ -72,6 +77,14 @@ export function getActiveUserPubkey(): string | null {
   return _getActiveUserPubkey(storage);
 }
 
+export function removePlatformSetting(baseKey: string): void {
+  _removePlatformSetting(storage, getCurrentPlatform(), baseKey);
+}
+
 export function handleLogoutStorage(pubkey: string): void {
   _handleLogoutStorage(storage, pubkey);
+}
+
+export async function handleLogoutStorageAsync(pubkey: string): Promise<void> {
+  return _handleLogoutStorageAsync(storage, pubkey);
 }

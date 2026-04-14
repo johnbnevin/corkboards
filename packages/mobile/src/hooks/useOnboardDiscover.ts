@@ -38,7 +38,7 @@ async function queryRelay(
   timeoutMs = 4000,
 ): Promise<NostrEvent[]> {
   try {
-    const relay = new NRelay1(url);
+    const relay = new NRelay1(url, { backoff: false });
     const events = await relay.query([filter], { signal: AbortSignal.timeout(timeoutMs) });
     try { relay.close(); } catch { /* */ }
     return events;

@@ -13,6 +13,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@/hooks/useNostr';
 import { batchFetchByAuthors, FEED_KINDS } from '@/lib/feedUtils';
 import { mergeNotesToCache, isCacheLoaded, getNotesFromMemory } from '@/lib/notesCache';
+import { debugLog, debugWarn } from '@/lib/debug';
 import { useEffect, useRef, useCallback, useMemo } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 
@@ -71,7 +72,7 @@ export function useCustomFeedNotes({
     const pubkeySet = new Set(feed.pubkeys);
     const cached = getNotesFromMemory().filter(e => pubkeySet.has(e.pubkey));
     if (cached.length > 0) {
-      if (import.meta.env.DEV) console.log('[customFeedNotes] Seeding', cached.length, 'notes from IndexedDB for', feed.id);
+      debugLog('[customFeedNotes] Seeding', cached.length, 'notes from IndexedDB for', feed.id);
       queryClient.setQueryData(queryKey, cached);
     }
     hasSeededRef.current = true;
@@ -95,7 +96,7 @@ export function useCustomFeedNotes({
       const now = Math.floor(Date.now() / 1000);
       const since = now - timeWindowSeconds;
 
-      if (import.meta.env.DEV) console.log('[customFeedNotes] Fetching from relay, window:', timeWindowSeconds / 3600, 'hr');
+      debugLog('[customFeedNotes] Fetching from relay, window:', timeWindowSeconds / 3600, 'hr');
 
       const events = await batchFetchByAuthors({
         nostr,
@@ -105,11 +106,11 @@ export function useCustomFeedNotes({
         onProgress: onProgress ?? (() => {}),
       });
 
-      if (import.meta.env.DEV) console.log('[customFeedNotes] Got', events.length, 'events from relay');
+      debugLog('[customFeedNotes] Got', events.length, 'events from relay');
 
       // If nothing in time window, find most recent note and fetch around it
       if (events.length === 0) {
-        if (import.meta.env.DEV) console.log('[customFeedNotes] No events in window, searching for most recent');
+        debugLog('[customFeedNotes] No events in window, searching for most recent');
         const recent = await nostr.query([{
           kinds: [...FEED_KINDS],
           authors: feed.pubkeys,
@@ -161,7 +162,7 @@ export function useCustomFeedNotes({
     const until = oldestTimestamp - 1;
     const since = until - hours * 3600;
 
-    if (import.meta.env.DEV) console.log('[customFeedNotes] loadMore', hours, 'hr, since:', new Date(since * 1000).toISOString());
+    debugLog('[customFeedNotes] loadMore', hours, 'hr, since:', new Date(since * 1000).toISOString());
 
     const events = await batchFetchByAuthors({
       nostr,
@@ -172,7 +173,7 @@ export function useCustomFeedNotes({
       onProgress: onProgress ?? (() => {}),
     });
 
-    if (import.meta.env.DEV) console.log('[customFeedNotes] loadMore got', events.length, 'events');
+    debugLog('[customFeedNotes] loadMore got', events.length, 'events');
 
     if (events.length > 0) {
       await mergeNotesToCache(events);
@@ -190,7 +191,7 @@ export function useCustomFeedNotes({
   // ── addNotes — external merge (e.g. from loadMoreByCount) ───────────────────
   const addNotes = useCallback((newEvents: NostrEvent[]) => {
     if (newEvents.length === 0) return;
-    mergeNotesToCache(newEvents).catch(err => console.warn('[customFeedNotes] mergeNotesToCache error:', err)); // fire-and-forget — writes to IndexedDB
+    mergeNotesToCache(newEvents).catch(err => debugWarn('[customFeedNotes] mergeNotesToCache error:', err)); // fire-and-forget — writes to IndexedDB
     queryClient.setQueryData(queryKey, (prev: NostrEvent[] | undefined) => {
       const existing = prev ?? [];
       const existingIds = new Set(existing.map(e => e.id));

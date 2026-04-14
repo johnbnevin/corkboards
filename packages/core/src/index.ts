@@ -32,6 +32,8 @@ export * from './storageKeys';
 export * from './failedNotes';
 export * from './nostrUtils';
 export * from './cryptoUtils';
+export * from './imageUtils';
+export * from './relayConstants';
 
 // Emoji data (shared by web and mobile)
 export * from './emojiCategories';

@@ -14,6 +14,7 @@ import { ImageOff } from 'lucide-react';
 // ─── HEAD-based size cache ──────────────────────────────────────────────────
 
 interface SizeCheckResult { size: number | null; isVideo: boolean }
+const MAX_SIZE_CACHE = 2000;
 const sizeCache = new Map<string, SizeCheckResult>();
 const pendingChecks = new Map<string, Promise<SizeCheckResult>>();
 
@@ -33,10 +34,18 @@ async function checkImageSize(url: string): Promise<SizeCheckResult> {
         size: cl ? parseInt(cl, 10) : null,
         isVideo: ct.startsWith('video/'),
       };
+      if (sizeCache.size >= MAX_SIZE_CACHE) {
+        const oldest = sizeCache.keys().next().value;
+        if (oldest !== undefined) sizeCache.delete(oldest);
+      }
       sizeCache.set(url, result);
       return result;
     } catch {
       const result: SizeCheckResult = { size: null, isVideo: false };
+      if (sizeCache.size >= MAX_SIZE_CACHE) {
+        const oldest = sizeCache.keys().next().value;
+        if (oldest !== undefined) sizeCache.delete(oldest);
+      }
       sizeCache.set(url, result);
       return result;
     } finally {
@@ -113,6 +122,8 @@ export function SizeGuardedImage({ src, compact = false, className, alt, ...imgP
           style={{ width: imgProps.width || 32, height: imgProps.height || 32 }}
           onClick={(e) => { e.stopPropagation(); e.preventDefault(); setStatus('override') }}
           title={`Image blocked: ${fileSize ? formatBytes(fileSize) : 'unknown size'} (click to load)`}
+          role="button"
+          aria-label={`Load blocked image (${fileSize ? formatBytes(fileSize) : 'unknown size'})`}
         >
           <ImageOff className="h-3 w-3" />
         </span>
@@ -134,5 +145,5 @@ export function SizeGuardedImage({ src, compact = false, className, alt, ...imgP
   }
 
   // allowed or override
-  return <img src={src} alt={alt} className={className} {...imgProps} />;
+  return <img src={src} alt={alt} className={className} referrerPolicy="no-referrer" {...imgProps} />;
 }

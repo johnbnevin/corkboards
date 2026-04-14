@@ -185,6 +185,7 @@ const LoginDialog: React.FC<LoginDialogProps> = ({ isOpen, onClose, onLogin }) =
                     className="h-8 w-8 hover:bg-transparent"
                     onClick={() => setShowKey(!showKey)}
                     title={showKey ? 'Hide key' : 'Show key'}
+                    aria-label={showKey ? 'Hide key' : 'Show key'}
                   >
                     {showKey ? <EyeOff className="h-4 w-4 text-muted-foreground" /> : <Eye className="h-4 w-4 text-muted-foreground" />}
                   </Button>
@@ -195,6 +196,7 @@ const LoginDialog: React.FC<LoginDialogProps> = ({ isOpen, onClose, onLogin }) =
                     className="h-8 w-8 hover:bg-transparent"
                     onClick={copyKey}
                     title="Copy key"
+                    aria-label="Copy key"
                   >
                     {copied ? <Check className="h-4 w-4 text-purple-500" /> : <Copy className="h-4 w-4 text-muted-foreground" />}
                   </Button>

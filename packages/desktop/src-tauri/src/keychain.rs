@@ -28,19 +28,19 @@ pub fn keychain_store(key: String, value: String) -> Result<(), String> {
     if value.len() > MAX_VALUE_LEN {
         return Err(format!("keychain value exceeds maximum length of {} bytes", MAX_VALUE_LEN));
     }
-    let entry = Entry::new(SERVICE_NAME, &key).map_err(|e| e.to_string())?;
-    entry.set_password(&value).map_err(|e| e.to_string())
+    let entry = Entry::new(SERVICE_NAME, &key).map_err(|_| "Failed to access keychain".to_string())?;
+    entry.set_password(&value).map_err(|_| "Failed to store keychain entry".to_string())
 }
 
 /// Retrieve a secret from the OS keychain.
 #[tauri::command]
 pub fn keychain_get(key: String) -> Result<Option<String>, String> {
     validate_key(&key)?;
-    let entry = Entry::new(SERVICE_NAME, &key).map_err(|e| e.to_string())?;
+    let entry = Entry::new(SERVICE_NAME, &key).map_err(|_| "Failed to access keychain".to_string())?;
     match entry.get_password() {
         Ok(password) => Ok(Some(password)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e.to_string()),
+        Err(_) => Err("Failed to retrieve keychain entry".to_string()),
     }
 }
 
@@ -48,10 +48,10 @@ pub fn keychain_get(key: String) -> Result<Option<String>, String> {
 #[tauri::command]
 pub fn keychain_delete(key: String) -> Result<(), String> {
     validate_key(&key)?;
-    let entry = Entry::new(SERVICE_NAME, &key).map_err(|e| e.to_string())?;
+    let entry = Entry::new(SERVICE_NAME, &key).map_err(|_| "Failed to access keychain".to_string())?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()), // Already deleted
-        Err(e) => Err(e.to_string()),
+        Err(_) => Err("Failed to delete keychain entry".to_string()),
     }
 }

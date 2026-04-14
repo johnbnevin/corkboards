@@ -68,6 +68,7 @@ export function useLoggedInAccounts() {
   }, [activePubkey, switchAccount]);
 
   return {
+    logins: authors,
     authors,
     currentUser,
     otherUsers,

@@ -36,7 +36,11 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 
 /** Sanitizes a user-supplied banner URL for safe use in a CSS backgroundImage. */
 function sanitizeBannerUrl(url: string): string {
-  try { return new URL(url).href.replace(/"/g, '%22'); } catch { return ''; }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
+    return parsed.href.replace(/"/g, '%22');
+  } catch { return ''; }
 }
 
 // Custom events for profile actions (listened by MultiColumnClient)

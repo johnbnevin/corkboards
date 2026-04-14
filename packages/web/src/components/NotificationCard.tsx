@@ -418,7 +418,7 @@ export const NotificationCard = React.memo(function NotificationCard({
         {/* Reaction emoji standalone — only when no target note to overlay */}
         {type === 'reaction' && reactionEmoji && !targetEventId && (
           reactionCustomUrl ? (
-            <img src={reactionCustomUrl} alt={reactionEmoji} className="h-10 w-10 object-contain my-1 drop-shadow-md select-none" />
+            <img src={reactionCustomUrl} alt={reactionEmoji} className="h-10 w-10 object-contain my-1 drop-shadow-md select-none" referrerPolicy="no-referrer" />
           ) : (
             <div className="text-4xl leading-none py-1 select-none drop-shadow-md">
               {reactionEmoji === '+' ? '👍' : reactionEmoji === '-' ? '👎' : reactionEmoji}

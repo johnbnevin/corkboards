@@ -197,6 +197,7 @@ const SignupDialog: React.FC<SignupDialogProps> = ({ isOpen, onClose }) => {
                   size="icon"
                   className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
                   onClick={() => setShowKey(!showKey)}
+                  aria-label={showKey ? 'Hide key' : 'Show key'}
                 >
                   {showKey ? (
                     <EyeOff className="h-4 w-4 text-muted-foreground" />

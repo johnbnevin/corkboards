@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { useNostr } from '@nostrify/react'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
+import { debugLog, debugWarn, debugError } from '@/lib/debug'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getUserRelays, FALLBACK_RELAYS } from '@/components/NostrProvider'
 import { idbGetSync, idbSetSync } from '@/lib/idb'
@@ -54,7 +55,7 @@ export function useBookmarks(fetchEnabled = true) {
     try {
       const stored = idbGetSync(IDB_KEY)
       const parsed = stored ? JSON.parse(stored) : []
-      if (import.meta.env.DEV) console.log('[bookmarks] IDB cache:', parsed.length, 'ids')
+      debugLog('[bookmarks] IDB cache:', parsed.length, 'ids')
       return parsed
     } catch {
       return []
@@ -122,7 +123,7 @@ export function useBookmarks(fetchEnabled = true) {
     try {
       idbSetSync(IDB_KEY, JSON.stringify(bookmarkIds))
     } catch (e) {
-      console.error('[bookmarks] Failed to save to IDB:', e)
+      if (import.meta.env.DEV) console.error('[bookmarks] Failed to save to IDB:', e)
     }
   }, [bookmarkIds])
 
@@ -134,7 +135,7 @@ export function useBookmarks(fetchEnabled = true) {
 
       const userRelays = getUserRelays()
       const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
-      if (import.meta.env.DEV) console.log('[bookmarks] Querying relays for kind 10003:', writeRelays)
+      debugLog('[bookmarks] Querying relays for kind 10003:', writeRelays)
 
       let bookmarkEvent: NostrEvent | null = null
       try {
@@ -146,12 +147,12 @@ export function useBookmarks(fetchEnabled = true) {
               { signal: AbortSignal.timeout(5000) },
             )
             if (!ev) throw new Error('no bookmark list')
-            if (import.meta.env.DEV) console.log('[bookmarks] Found kind 10003 on', relayUrl, '—', ev.tags.length, 'public tags, content:', ev.content ? ev.content.length + ' chars' : 'empty')
+            debugLog('[bookmarks] Found kind 10003 on', relayUrl, '—', ev.tags.length, 'public tags, content:', ev.content ? ev.content.length + ' chars' : 'empty')
             return ev
           }),
         )
       } catch {
-        if (import.meta.env.DEV) console.log('[bookmarks] No kind 10003 found on any relay')
+        debugLog('[bookmarks] No kind 10003 found on any relay')
         return { ids: [], found: false, hasPublicTags: false }
       }
 
@@ -166,18 +167,18 @@ export function useBookmarks(fetchEnabled = true) {
       let privateIds: string[] = []
       if (bookmarkEvent.content) {
         try {
-          if (import.meta.env.DEV) console.log('[bookmarks] Decrypting private bookmark content...')
+          debugLog('[bookmarks] Decrypting private bookmark content...')
           const decrypted = await decryptFromSelf(user.signer, user.pubkey, bookmarkEvent.content)
           const tags = JSON.parse(decrypted) as string[][]
           privateIds = tags.filter(t => t[0] === 'e' && t[1]).map(t => t[1])
-          if (import.meta.env.DEV) console.log('[bookmarks] Decrypted', privateIds.length, 'private bookmarks')
+          debugLog('[bookmarks] Decrypted', privateIds.length, 'private bookmarks')
         } catch (err) {
-          console.warn('[bookmarks] Failed to decrypt content:', err)
+          debugWarn('[bookmarks] Failed to decrypt content:', err)
         }
       }
 
       const ids = [...new Set([...publicIds, ...privateIds])]
-      if (import.meta.env.DEV) console.log('[bookmarks] Total:', ids.length, 'bookmark ids (public:', publicIds.length, ', private:', privateIds.length, ')')
+      debugLog('[bookmarks] Total:', ids.length, 'bookmark ids (public:', publicIds.length, ', private:', privateIds.length, ')')
       return { ids, found: true, hasPublicTags: publicIds.length > 0 }
     },
     enabled: !!user?.pubkey && fetchEnabled,
@@ -189,21 +190,21 @@ export function useBookmarks(fetchEnabled = true) {
     // Read user from ref to avoid stale closure in setTimeout callbacks
     const currentUser = userRef.current
     if (!currentUser) {
-      console.warn('[bookmarks] Publish skipped — no user')
+      debugWarn('[bookmarks] Publish skipped — no user')
       return
     }
     if (!currentUser.signer.nip44) {
-      console.error('[bookmarks] Publish skipped — signer does not support NIP-44 encryption')
+      debugError('[bookmarks] Publish skipped — signer does not support NIP-44 encryption')
       return
     }
     if (publishingRef.current) {
-      console.warn('[bookmarks] Publish skipped — already publishing')
+      debugWarn('[bookmarks] Publish skipped — already publishing')
       return
     }
     publishingRef.current = true
 
     const isPublic = getPublicBookmarksPref()
-    if (import.meta.env.DEV) console.log('[bookmarks] Publishing kind 10003 with', newIds.length, 'bookmarks (public:', isPublic, ')')
+    debugLog('[bookmarks] Publishing kind 10003 with', newIds.length, 'bookmarks (public:', isPublic, ')')
 
     try {
       const eTags = newIds.map(id => ['e', id])
@@ -216,13 +217,13 @@ export function useBookmarks(fetchEnabled = true) {
         tags: isPublic ? eTags : [],  // public tags only when user opts in
         created_at: Math.floor(Date.now() / 1000),
       })
-      if (import.meta.env.DEV) console.log('[bookmarks] Signed event', event.id.slice(0, 8))
+      debugLog('[bookmarks] Signed event', event.id.slice(0, 8))
       await nostr.event(event, { signal: AbortSignal.timeout(8000) })
-      if (import.meta.env.DEV) console.log('[bookmarks] Published successfully')
+      debugLog('[bookmarks] Published successfully')
       // Invalidate query cache so UI sees fresh state
       queryClient.invalidateQueries({ queryKey: ['bookmarks', currentUser.pubkey] })
     } catch (err) {
-      console.error('[bookmarks] Publish failed:', err)
+      debugError('[bookmarks] Publish failed:', err)
     } finally {
       publishingRef.current = false
     }
@@ -232,27 +233,27 @@ export function useBookmarks(fetchEnabled = true) {
   useEffect(() => {
     if (!relayResult || !user?.pubkey) return
 
-    if (import.meta.env.DEV) console.log('[bookmarks] Sync effect — relay found:', relayResult.found, 'ids:', relayResult.ids.length, 'hasPublicTags:', relayResult.hasPublicTags)
+    debugLog('[bookmarks] Sync effect — relay found:', relayResult.found, 'ids:', relayResult.ids.length, 'hasPublicTags:', relayResult.hasPublicTags)
 
     if (relayResult.found && relayResult.ids.length > 0) {
       setBookmarkIds(prev => {
         const merged = [...new Set([...relayResult.ids, ...prev])]
         if (merged.length === prev.length && merged.every(id => prev.includes(id))) {
-          if (import.meta.env.DEV) console.log('[bookmarks] Relay bookmarks already in local state')
+          debugLog('[bookmarks] Relay bookmarks already in local state')
           return prev
         }
-        if (import.meta.env.DEV) console.log('[bookmarks] Merged relay bookmarks:', prev.length, '→', merged.length)
+        debugLog('[bookmarks] Merged relay bookmarks:', prev.length, '→', merged.length)
         persistPendingRef.current = true
         return merged
       })
 
       // Re-publish if public/private state doesn't match user preference
       if (relayResult.hasPublicTags && !getPublicBookmarksPref()) {
-        if (import.meta.env.DEV) console.log('[bookmarks] Re-publishing bookmarks as private (user preference)...')
+        debugLog('[bookmarks] Re-publishing bookmarks as private (user preference)...')
         if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
         syncTimerRef.current = setTimeout(() => { if (isMountedRef.current && userRef.current) publishBookmarkList(relayResult.ids) }, 3000)
       } else if (!relayResult.hasPublicTags && getPublicBookmarksPref()) {
-        if (import.meta.env.DEV) console.log('[bookmarks] Re-publishing bookmarks as public (user preference)...')
+        debugLog('[bookmarks] Re-publishing bookmarks as public (user preference)...')
         if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
         syncTimerRef.current = setTimeout(() => { if (isMountedRef.current && userRef.current) publishBookmarkList(relayResult.ids) }, 3000)
       }
@@ -262,12 +263,12 @@ export function useBookmarks(fetchEnabled = true) {
     if (relayResult.ids.length === 0 && !hasMigrated.current()) {
       hasMigrated.current = () => true
       try { idbSetSync('nostr-bookmarks-migrated', 'true') } catch { /* ignore */ }
-      if (import.meta.env.DEV) console.log('[bookmarks] No relay bookmarks — checking for legacy collapsed-notes')
+      debugLog('[bookmarks] No relay bookmarks — checking for legacy collapsed-notes')
       try {
         const legacy = idbGetSync('collapsed-notes')
         if (legacy) {
           const legacyIds: string[] = JSON.parse(legacy)
-          if (import.meta.env.DEV) console.log('[bookmarks] Found', legacyIds.length, 'legacy collapsed-notes to migrate')
+          debugLog('[bookmarks] Found', legacyIds.length, 'legacy collapsed-notes to migrate')
           if (legacyIds.length > 0) {
             const idsToPublish = [...new Set(legacyIds)]
             persistPendingRef.current = true
@@ -278,10 +279,10 @@ export function useBookmarks(fetchEnabled = true) {
             }, 2000)
           }
         } else {
-          if (import.meta.env.DEV) console.log('[bookmarks] No legacy collapsed-notes found in IDB')
+          debugLog('[bookmarks] No legacy collapsed-notes found in IDB')
         }
       } catch (e) {
-        console.error('[bookmarks] Migration error:', e)
+        debugError('[bookmarks] Migration error:', e)
       }
     }
   }, [relayResult, user?.pubkey, publishBookmarkList])
@@ -292,14 +293,13 @@ export function useBookmarks(fetchEnabled = true) {
   const needsPublish = useRef(false)
 
   useEffect(() => {
-    if (needsPublish.current && bookmarkIds.length > 0) {
-      needsPublish.current = false
-      if (import.meta.env.DEV) console.log('[bookmarks] Scheduling publish for', bookmarkIds.length, 'bookmarks')
-      if (publishTimer.current) clearTimeout(publishTimer.current)
-      publishTimer.current = setTimeout(() => {
-        publishBookmarkList(bookmarkIds)
-      }, 1500)
-    }
+    if (!needsPublish.current || bookmarkIds.length === 0) return
+    needsPublish.current = false
+    debugLog('[bookmarks] Scheduling publish for', bookmarkIds.length, 'bookmarks')
+    if (publishTimer.current) clearTimeout(publishTimer.current)
+    publishTimer.current = setTimeout(() => {
+      publishBookmarkList(bookmarkIds)
+    }, 1500)
   }, [bookmarkIds, publishBookmarkList])
 
   // Debounce publishing to batch rapid toggles
@@ -313,7 +313,7 @@ export function useBookmarks(fetchEnabled = true) {
   }, [])
 
   const addBookmark = useCallback((noteId: string) => {
-    if (import.meta.env.DEV) console.log('[bookmarks] addBookmark:', noteId.slice(0, 8))
+    debugLog('[bookmarks] addBookmark:', noteId.slice(0, 8))
     persistPendingRef.current = true
     setBookmarkIds(prev => {
       if (prev.includes(noteId)) return prev
@@ -323,7 +323,7 @@ export function useBookmarks(fetchEnabled = true) {
   }, [])
 
   const removeBookmark = useCallback((noteId: string) => {
-    if (import.meta.env.DEV) console.log('[bookmarks] removeBookmark:', noteId.slice(0, 8))
+    debugLog('[bookmarks] removeBookmark:', noteId.slice(0, 8))
     persistPendingRef.current = true
     setBookmarkIds(prev => {
       if (!prev.includes(noteId)) return prev

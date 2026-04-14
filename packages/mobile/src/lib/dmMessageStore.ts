@@ -88,7 +88,14 @@ export function readMessagesFromDB(
   try {
     const json = dmMmkv.getString(storeKey(userPubkey));
     if (!json) return undefined;
-    return JSON.parse(json) as MessageStore;
+    const parsed = JSON.parse(json) as MessageStore;
+    // Validate structure — guard against corrupted/legacy data
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.participants !== 'object' || !parsed.lastSync) {
+      console.warn('[dmMessageStore] Invalid store format, resetting');
+      dmMmkv.delete(storeKey(userPubkey));
+      return undefined;
+    }
+    return parsed;
   } catch (error) {
     console.error('[dmMessageStore] Error reading from MMKV:', error);
     throw error;

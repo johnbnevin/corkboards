@@ -19,7 +19,7 @@ export function useRelayFeed({ relayUrl, enabled = true, limit }: UseRelayFeedOp
     queryFn: async () => {
       const events: NostrEvent[] = [];
       try {
-        const relay = new NRelay1(relayUrl);
+        const relay = new NRelay1(relayUrl, { backoff: false });
         const timeout = setTimeout(() => relay.close(), 10_000);
 
         try {

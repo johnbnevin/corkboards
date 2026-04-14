@@ -195,7 +195,7 @@ export function Lightbox({ src, alt = '', isOpen, onClose }: LightboxProps) {
           <X className="h-6 w-6" />
         </button>
         <div className="relative w-full max-w-7xl mx-auto" onClick={(e) => { e.stopPropagation() }}>
-          <img src={src} alt={alt} className="w-full h-auto max-h-[85vh] object-contain rounded-lg shadow-2xl" />
+          <img src={src} alt={alt} className="w-full h-auto max-h-[85vh] object-contain rounded-lg shadow-2xl" referrerPolicy="no-referrer" />
         </div>
         <a href={src} target="_blank" rel="noopener noreferrer" className="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-black/50 hover:bg-black/70 text-white text-sm transition-colors" onClick={(e) => { e.stopPropagation() }}>
           Open original

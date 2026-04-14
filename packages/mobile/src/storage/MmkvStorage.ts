@@ -8,10 +8,18 @@ import { MMKV } from 'react-native-mmkv';
 import type { KVStorage } from '@core/storage';
 
 let mmkv: MMKV;
+/** True if MMKV failed to initialize and we're using in-memory fallback (data will not persist). */
+export let mmkvInitFailed = false;
+/** Error message from MMKV init failure (for user-facing display). */
+export let mmkvInitError: string | null = null;
+
 try {
   mmkv = new MMKV();
 } catch (e) {
-  console.error('[MmkvStorage] Failed to initialize MMKV:', e);
+  const msg = e instanceof Error ? e.message : String(e);
+  console.error('[MmkvStorage] Failed to initialize MMKV:', msg);
+  mmkvInitFailed = true;
+  mmkvInitError = `Storage initialization failed: ${msg}. Data will not persist across restarts.`;
   // Fallback: in-memory storage so the app can at least launch
   const fallback = new Map<string, string>();
   mmkv = {

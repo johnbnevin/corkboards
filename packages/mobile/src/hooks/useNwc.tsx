@@ -94,7 +94,7 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
       relayRef.current = null;
       return;
     }
-    relayRef.current = new NRelay1(parsed.relay);
+    relayRef.current = new NRelay1(parsed.relay, { backoff: false });
     return () => {
       relayRef.current?.close();
       relayRef.current = null;
@@ -156,7 +156,7 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
           }
         }, 60000);
 
-        (async () => {
+        const subscription = (async () => {
           try {
             for await (const msg of relay.req([{
               kinds: [23195],
@@ -193,6 +193,14 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
             }
           }
         })();
+        // Catch any unhandled rejection from the async IIFE
+        subscription.catch(err => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeout);
+            reject(err);
+          }
+        });
       });
     } finally {
       setIsProcessing(false);

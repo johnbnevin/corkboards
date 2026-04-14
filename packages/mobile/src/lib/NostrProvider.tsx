@@ -8,20 +8,12 @@ import { NPool, NRelay1 } from '@nostrify/nostrify';
 import type { NostrEvent, NostrFilter, NPool as NPoolType } from '@nostrify/nostrify';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { isSecureRelay } from '@core/nostrUtils';
+import { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS } from '@core/relayConstants';
+export { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS };
 
 // ============================================================================
 // Constants
 // ============================================================================
-
-// Keep in sync with packages/web/src/lib/relayConstants.ts FALLBACK_RELAYS
-export const FALLBACK_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.ditto.pub',
-  'wss://antiprimal.net',
-  'wss://relay.nostr.band',
-  'wss://indexer.nostrarchives.com',
-];
 
 const RELAY_CACHE_KEY = 'corkboard:relay-cache';
 export const APP_CONFIG_KEY = 'corkboard:app-config';
@@ -31,14 +23,7 @@ const MAX_RELAY_CACHE = 3000; // 3000 vs 5000 on web — conservative mobile mem
 // MAX_RELAY_CACHE: 3000 (mobile) vs 5000 (web) — conservative mobile memory budget
 // BroadcastChannel: absent — React Native is single-process, no tab sync needed
 // MMKV replaces IDB — same synchronous-cache semantics, platform-native API
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Keep in sync with packages/web/src/lib/relayConstants.ts ZAP_RELAYS
-export const ZAP_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.nostr.band',
-];
+// ────────────────────────────────���────────────────────────────────────────────
 
 // Tiered relay routing thresholds (keep in sync with web NostrProvider)
 const BULK_AUTHOR_THRESHOLD = 10;
@@ -168,6 +153,7 @@ function createPool(): NPoolType {
         const userRelays = getUserRelays();
         userRelays.read.forEach(r => relaysToQuery.add(r));
         FALLBACK_RELAYS.forEach(r => relaysToQuery.add(r));
+        READ_ONLY_RELAYS.forEach(r => relaysToQuery.add(r));
         const capped = Array.from(relaysToQuery).slice(0, MAX_BULK_RELAYS);
 
         for (const relay of capped) {
@@ -197,9 +183,10 @@ function createPool(): NPoolType {
         }
         // Include the user's own read relays (matches web NostrProvider Tier 2 behaviour)
         getUserRelays().read.forEach(r => relaysToQuery.add(r));
-        // Always include fallback relays — critical for #p queries (notifications)
+        // Always include fallback + read-only relays — critical for #p queries (notifications)
         // where the user has read relays but the event may live on a fallback relay.
         FALLBACK_RELAYS.forEach(r => relaysToQuery.add(r));
+        READ_ONLY_RELAYS.forEach(r => relaysToQuery.add(r));
 
         for (const relay of relaysToQuery) {
           routes.set(relay, filters);

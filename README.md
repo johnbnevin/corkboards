@@ -75,7 +75,7 @@ Optional hostable RSS proxy allows feeds to include RSS sources chronologically 
 Prerequisites: Node.js 22+, npm 10+
 
 ```bash
-git clone https://github.com/nickkdev/corkboards.git
+git clone https://github.com/johnbnevin/corkboards.git
 cd corkboards
 npm install
 ```

@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { LOADING_PHASES } from '@/lib/dmConstants';
 
@@ -78,32 +78,28 @@ const ConversationItemComponent = ({
                 <span className="font-medium text-sm truncate">{displayName}</span>
               )}
               {hasNIP4Messages && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <div className="flex-shrink-0">
-                        <AlertTriangle className="h-3.5 w-3.5 text-yellow-600 dark:text-yellow-500" />
-                      </div>
-                    </TooltipTrigger>
-                    <TooltipContent side="left">
-                      <p className="text-xs max-w-[200px]">Some messages use outdated NIP-04 encryption</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div className="flex-shrink-0">
+                      <AlertTriangle className="h-3.5 w-3.5 text-yellow-600 dark:text-yellow-500" />
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="left">
+                    <p className="text-xs max-w-[200px]">Some messages use outdated NIP-04 encryption</p>
+                  </TooltipContent>
+                </Tooltip>
               )}
             </div>
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="text-xs text-muted-foreground whitespace-nowrap flex-shrink-0 cursor-default">
-                    {formatConversationTime(lastActivity)}
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent side="left">
-                  <p className="text-xs">{formatFullDateTime(lastActivity)}</p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="text-xs text-muted-foreground whitespace-nowrap flex-shrink-0 cursor-default">
+                  {formatConversationTime(lastActivity)}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="left">
+                <p className="text-xs">{formatFullDateTime(lastActivity)}</p>
+              </TooltipContent>
+            </Tooltip>
           </div>
           
           <p className="text-sm text-muted-foreground truncate">
@@ -169,22 +165,20 @@ export const DMConversationList = ({
           {(loadingPhase === LOADING_PHASES.CACHE || 
             loadingPhase === LOADING_PHASES.RELAYS || 
             loadingPhase === LOADING_PHASES.SUBSCRIPTIONS) && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <div className="flex items-center">
-                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p className="text-xs">
-                    {loadingPhase === LOADING_PHASES.CACHE && 'Loading from cache...'}
-                    {loadingPhase === LOADING_PHASES.RELAYS && 'Querying relays for new messages...'}
-                    {loadingPhase === LOADING_PHASES.SUBSCRIPTIONS && 'Setting up subscriptions...'}
-                  </p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="flex items-center">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p className="text-xs">
+                  {loadingPhase === LOADING_PHASES.CACHE && 'Loading from cache...'}
+                  {loadingPhase === LOADING_PHASES.RELAYS && 'Querying relays for new messages...'}
+                  {loadingPhase === LOADING_PHASES.SUBSCRIPTIONS && 'Setting up subscriptions...'}
+                </p>
+              </TooltipContent>
+            </Tooltip>
           )}
         </div>
         {onStatusClick && (

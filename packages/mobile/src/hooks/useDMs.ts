@@ -90,11 +90,12 @@ export function useDMEvents() {
 
 /** Wrap a signer decrypt call with a hard timeout to prevent DM pane hangs. */
 function withDecryptTimeout<T>(promise: Promise<T>, ms = 5000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
   return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Decryption timed out')), ms)
-    ),
+    promise.then(v => { clearTimeout(timer); return v; }),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Decryption timed out')), ms);
+    }),
   ]);
 }
 
@@ -146,7 +147,7 @@ async function unwrapGiftWrap(
       partnerPubkey,
     };
   } catch (err) {
-    if (__DEV__) console.warn('[useDMs] NIP-17 unwrap failed:', (err as Error)?.message);
+    if (__DEV__) console.warn('[useDMs] NIP-17 unwrap failed');
     return null;
   }
 }
@@ -278,7 +279,7 @@ export function useConversationMessages(partnerPubkey: string) {
             protocol: 'nip04',
           });
         } catch (err) {
-          if (__DEV__) console.warn('[useDMs] NIP-04 decryption failed for', ev.id.slice(0, 8), (err as Error)?.message);
+          if (__DEV__) console.warn('[useDMs] NIP-04 decryption failed');
           messages.push({
             id: ev.id,
             content: '[decryption failed]',

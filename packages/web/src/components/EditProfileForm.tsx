@@ -24,6 +24,7 @@ import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { STORAGE_KEYS } from '@/lib/storageKeys';
 import { Slider } from '@/components/ui/slider';
 import { cacheProfile } from '@/lib/cacheStore';
+import { debugLog, debugError } from '@/lib/debug';
 
 /** Placeholder banner: green hills + blue sky gradient */
 function BannerPlaceholder() {
@@ -108,7 +109,7 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
       const [[, url]] = await uploadFile(file);
       form.setValue(field, url);
     } catch (error) {
-      console.error(`Failed to upload ${field}:`, error);
+      debugError(`Failed to upload ${field}:`, error);
       toast({
         title: 'Upload failed',
         description: `Could not upload ${field === 'picture' ? 'avatar' : 'banner'}. Try again.`,
@@ -119,6 +120,14 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
 
   const onSubmit = async (values: ProfileFormData) => {
     if (!user) return;
+
+    // If no profile metadata actually changed, skip the kind:0 publish.
+    // Banner display settings are local-only and don't need a Nostr event.
+    if (!form.formState.isDirty) {
+      onSaved?.();
+      return;
+    }
+
     try {
       const data = { ...metadata, ...values };
       for (const key in data) {
@@ -126,7 +135,7 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
       }
 
       const event = await publishEvent({ kind: 0, content: JSON.stringify(data) });
-      console.log('[EditProfile] Published kind 0:', event.id, 'pubkey:', event.pubkey);
+      debugLog('[EditProfile] Published kind 0:', event.id, 'pubkey:', event.pubkey);
 
       // Optimistically update the local cache + query so the UI reflects
       // the new profile immediately without waiting for a relay round-trip.
@@ -137,7 +146,7 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
       toast({ title: 'Profile saved', description: 'Published to Nostr relays.' });
       onSaved?.();
     } catch (error) {
-      console.error('Failed to update profile:', error);
+      debugError('Failed to update profile:', error);
       toast({ title: 'Failed to update profile', variant: 'destructive' });
     }
   };
@@ -153,7 +162,6 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
   const effectivePct = bannerHeightPct === 0 ? naturalPct : bannerHeightPct;
 
   // Track if banner display settings changed so we can toast on close
-  const initialBannerSettings = useRef({ heightPct: bannerHeightPct, fitMode: bannerFitMode });
   const bannerSettingsChanged = useRef(false);
   const wrappedSetHeight = useCallback((v: number) => {
     setBannerHeightPct(v);
@@ -222,7 +230,7 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
             onClick={(e) => { e.stopPropagation(); avatarInputRef.current?.click(); }}
           >
             {pictureUrl ? (
-              <img src={pictureUrl} alt="" className="w-full h-full object-cover" />
+              <img src={pictureUrl} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
             ) : (
               <AvatarPlaceholder />
             )}

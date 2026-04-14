@@ -6,6 +6,7 @@
  */
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { useNostr } from '@nostrify/react';
+import { debugLog, debugWarn, debugError } from '@/lib/debug';
 
 // Re-export core constants and helpers
 import { FEED_KINDS as _FEED_KINDS, RSS_PROXY } from '@core/feedConstants';
@@ -25,20 +26,20 @@ export async function fetchRssFeed(feedUrl: string, maxItems = 20): Promise<impo
   try {
     const url = `${RSS_PROXY}?url=${encodeURIComponent(feedUrl)}&max=${maxItems}`;
     const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
-    if (import.meta.env.DEV) console.log('[rss] Proxy response for', feedUrl, '→ status:', response.status, 'content-type:', response.headers.get('content-type'));
+    debugLog('[rss] Proxy response for', feedUrl, '→ status:', response.status, 'content-type:', response.headers.get('content-type'));
     const text = await response.text();
-    if (import.meta.env.DEV) console.log('[rss] Raw response for', feedUrl, '→', text.slice(0, 500));
+    debugLog('[rss] Raw response for', feedUrl, '→', text.slice(0, 500));
     let data: Record<string, unknown>;
-    try { data = JSON.parse(text); } catch { console.error('[rss] Non-JSON response for', feedUrl); return null; }
+    try { data = JSON.parse(text); } catch { debugError('[rss] Non-JSON response for', feedUrl); return null; }
     if (response.ok) {
       if (!data.error && (data.items as unknown[])?.length > 0) {
-        if (import.meta.env.DEV) console.log('[rss] Loaded', (data.items as unknown[]).length, 'items from', feedUrl);
+        debugLog('[rss] Loaded', (data.items as unknown[]).length, 'items from', feedUrl);
         return { title: (data.title as string) || feedDomain, icon: (data.icon as string) || feedIcon, items: data.items as import('@core/rss').RssFeedResult['items'] };
       }
-      if (data.error) console.warn('[rss] Error for', feedUrl, data.error);
+      if (data.error) debugWarn('[rss] Error for', feedUrl, data.error);
     }
   } catch (err) {
-    console.warn('[rss] Failed for', feedUrl, err instanceof Error ? err.message : err);
+    debugWarn('[rss] Failed for', feedUrl, err instanceof Error ? err.message : err);
   }
 
   return null;
@@ -102,7 +103,7 @@ export async function batchFetchByAuthors(opts: BatchFetchOpts): Promise<NostrEv
   const effectiveSince = since ?? (now - (baseWindowSeconds * multiplier));
   const effectiveWindowMinutes = (baseWindowSeconds * multiplier) / 60;
 
-  if (import.meta.env.DEV) console.log(`[batchFetch] Query for ${authors.length} authors, window: ${effectiveWindowMinutes}min (${multiplier}x)`);
+  debugLog(`[batchFetch] Query for ${authors.length} authors, window: ${effectiveWindowMinutes}min (${multiplier}x)`);
 
   onProgress?.(0, 1);
 
@@ -125,7 +126,7 @@ export async function batchFetchByAuthors(opts: BatchFetchOpts): Promise<NostrEv
           }],
           { signal: AbortSignal.timeout(timeout) },
         ).catch((err) => {
-          console.warn('[batchFetch] Chunk query failed:', err);
+          debugWarn('[batchFetch] Chunk query failed:', err);
           return [] as NostrEvent[];
         })
       )
@@ -133,7 +134,7 @@ export async function batchFetchByAuthors(opts: BatchFetchOpts): Promise<NostrEv
 
     const events = allEvents.flat();
     onProgress?.(1, 1);
-    if (import.meta.env.DEV) console.log(`[batchFetch] Got ${events.length} events from ${authors.length} authors (${chunks.length} chunks)`);
+    debugLog(`[batchFetch] Got ${events.length} events from ${authors.length} authors (${chunks.length} chunks)`);
 
     // Deduplicate and sort
     const seen = new Set<string>();
@@ -145,7 +146,7 @@ export async function batchFetchByAuthors(opts: BatchFetchOpts): Promise<NostrEv
 
     return deduped.sort((a, b) => b.created_at - a.created_at);
   } catch (err) {
-    console.warn('[batchFetch] Query failed:', err);
+    debugWarn('[batchFetch] Query failed:', err);
     onProgress?.(1, 1);
     return [];
   }
@@ -200,7 +201,7 @@ export async function fetchByHashtags(opts: HashtagFetchOpts): Promise<NostrEven
       .filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; })
       .sort((a, b) => b.created_at - a.created_at);
   } catch (err) {
-    console.warn('[hashtagFetch] Query failed:', err);
+    debugWarn('[hashtagFetch] Query failed:', err);
     return [];
   }
 }

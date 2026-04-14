@@ -105,7 +105,7 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
       relayRef.current = null;
       return;
     }
-    relayRef.current = new NRelay1(parsed.relay);
+    relayRef.current = new NRelay1(parsed.relay, { backoff: false });
     return () => {
       relayRef.current?.close();
       relayRef.current = null;

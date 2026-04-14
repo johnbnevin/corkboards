@@ -22,12 +22,13 @@ import { triggerDownload } from '@/lib/triggerDownload';
 import { BlossomUploader } from '@nostrify/nostrify/uploaders';
 import type { NostrEvent, NPool } from '@nostrify/nostrify';
 import type { NUser } from '@nostrify/react/login';
-import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache } from '@/components/NostrProvider';
+import { FALLBACK_RELAYS, READ_ONLY_RELAYS, getUserRelays, getRelayCache, updateRelayCache } from '@/components/NostrProvider';
 
 // Broader relay list for backup discovery — includes popular relays beyond the 4 fallbacks.
 // These are only used for finding backup manifests (kind 30078), not for general queries.
 const BACKUP_DISCOVERY_RELAYS = [
   ...FALLBACK_RELAYS,
+  ...READ_ONLY_RELAYS,
   'wss://relay.nostr.band',
   'wss://relay.primal.net',
   'wss://purplepag.es',
@@ -169,7 +170,29 @@ function getStoredCheckpoints(): RemoteCheckpoint[] {
 }
 
 function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
-  idbSetSync(CHECKPOINTS_KEY, JSON.stringify(cps));
+  // Always dedup before storing:
+  // 1. By d-tag (addressable events replace each other — keep newest)
+  const byDTag = new Map<string, RemoteCheckpoint>();
+  for (const cp of cps) {
+    const key = cp.dTag || cp.eventId;
+    const existing = byDTag.get(key);
+    if (!existing || cp.timestamp > existing.timestamp) {
+      byDTag.set(key, cp);
+    }
+  }
+  // 2. Collapse checkpoints with identical stats (keep newest per stats signature)
+  const byStats = new Map<string, RemoteCheckpoint>();
+  for (const cp of byDTag.values()) {
+    const key = `${cp.stats?.corkboards ?? '?'}:${cp.stats?.savedForLater ?? '?'}:${cp.stats?.dismissed ?? '?'}`;
+    const existing = byStats.get(key);
+    if (!existing || cp.timestamp > existing.timestamp) {
+      // Preserve user-given names
+      if (existing?.name && !cp.name) cp.name = existing.name;
+      byStats.set(key, cp);
+    }
+  }
+  const deduped = [...byStats.values()].sort((a, b) => b.timestamp - a.timestamp);
+  idbSetSync(CHECKPOINTS_KEY, JSON.stringify(deduped));
 }
 
 interface RelayResult {
@@ -296,7 +319,7 @@ function getPublishRelays(pubkey: string): { primary: string[]; fallback: string
 
 
 // Keys tracked for change detection (shared between save, auto-save, and restore)
-const SNAPSHOT_KEYS = ['nostr-custom-feeds','collapsed-notes','dismissed-notes','nostr-friends','nostr-browse-relays','nostr-rss-feeds','saved-minimized-notes','corkboard:tab-filters'] as const;
+const SNAPSHOT_KEYS = ['nostr-custom-feeds','collapsed-notes','dismissed-notes','nostr-friends','nostr-browse-relays','nostr-rss-feeds','saved-minimized-notes','corkboard:tab-filters','corkboard:onboarding-skipped','corkboard:banner-height-pct','corkboard:banner-fit-mode'] as const;
 
 // Module-level guard: prevents double backup check across component remounts.
 // Keyed by pubkey so switching accounts still triggers a check.
@@ -372,24 +395,14 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const feeds = idbGetSync('nostr-custom-feeds');
       const dismissed = idbGetSync('dismissed-notes');
       const collapsed = idbGetSync('collapsed-notes');
-      const hasMeaningfulData = (feeds && feeds !== '[]') || (dismissed && dismissed !== '[]') || (collapsed && collapsed !== '[]');
+      const onboardingSkipped = idbGetSync('corkboard:onboarding-skipped');
+      const hasMeaningfulData = (feeds && feeds !== '[]') || (dismissed && dismissed !== '[]') || (collapsed && collapsed !== '[]') || onboardingSkipped === 'true';
       return !!hasMeaningfulData;
     }
 
     try {
       const lastData = JSON.parse(saved);
-      const keysToCheck = [
-        'nostr-custom-feeds',
-        'collapsed-notes',
-        'dismissed-notes',
-        'nostr-friends',
-        'nostr-browse-relays',
-        'nostr-rss-feeds',
-        'saved-minimized-notes',
-        'corkboard:tab-filters',
-      ];
-
-      for (const key of keysToCheck) {
+      for (const key of SNAPSHOT_KEYS) {
         const current = idbGetSync(key) || '';
         const lastSaved = lastData[key] || '';
         if (current !== lastSaved) {
@@ -543,7 +556,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const allRelayUrls = [...primary, ...fallback];
       const succeeded: RelayResult[] = [];
       for (const url of allRelayUrls) {
-        const relay = new NRelay1(url);
+        const relay = new NRelay1(url, { backoff: false });
         try {
           await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
           log(`  ${url} <- manifest OK`);
@@ -567,7 +580,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
             kind: 30078, content: '', tags: [['d', `${D_TAG_PREFIX}:${i}`]], created_at: now,
           });
           for (const r of succeeded) {
-            const relay = new NRelay1(r.url);
+            const relay = new NRelay1(r.url, { backoff: false });
             try { await relay.event(tombstone, { signal: AbortSignal.timeout(5000) }); } catch { /* ignore */ }
             finally { try { relay.close(); } catch { /* ignore */ } }
           }
@@ -695,13 +708,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const manifestEvent = await signer.signEvent({
         kind: 30078,
         content: encryptedAutoManifest,
-        tags: [['d', `${D_TAG_PREFIX}:auto:${deviceId}`]],
+        tags: [['d', `${D_TAG_PREFIX}:auto`]],
         created_at: now,
       });
 
       const { primary, fallback } = getPublishRelays(pubkey);
       for (const url of [...primary, ...fallback]) {
-        const relay = new NRelay1(url);
+        const relay = new NRelay1(url, { backoff: false });
         try { await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) }); }
         catch { /* continue */ }
         finally { try { relay.close(); } catch { /* */ } }
@@ -720,7 +733,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const cps = getStoredCheckpoints();
       const autoEntry: RemoteCheckpoint = {
         eventId: manifestEvent.id,
-        dTag: `${D_TAG_PREFIX}:auto:${deviceId}`,
+        dTag: `${D_TAG_PREFIX}:auto`,
         timestamp: now,
         blossomUrl: blossomUrl!,
         ...(blossomHash ? { blossomHash } : {}),
@@ -793,7 +806,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
     const queryRelay = async (url: string): Promise<NostrEvent[]> => {
       try {
-        const relay = new NRelay1(normalizeRelay(url));
+        const relay = new NRelay1(normalizeRelay(url), { backoff: false });
         const signal = AbortSignal.any([AbortSignal.timeout(perRelayTimeoutMs), overallAbort.signal]);
         const events = await relay.query([filter], { signal });
         log(`  ${url}: ${events.length} ${label}`);
@@ -809,12 +822,19 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       }
     };
 
-    // Query all relays in parallel — first result wins (unless checkAll)
-    const results = await Promise.all(activeRelayUrls.map(queryRelay));
-    for (const events of results) {
-      for (const ev of events) {
-        if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
+    // Query relays in batches of 3, stop early once we have results (unless checkAll)
+    for (let i = 0; i < activeRelayUrls.length; i += 3) {
+      if (overallAbort.signal.aborted) break;
+      const batch = activeRelayUrls.slice(i, i + 3);
+      const results = await Promise.allSettled(batch.map(queryRelay));
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          for (const ev of r.value) {
+            if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
+          }
+        }
       }
+      if (!_checkAll && allEvents.length > 0) break;
     }
 
     clearTimeout(overallTimeout);
@@ -891,27 +911,31 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const pubkey = user.pubkey;
 
       // Step 0: Fetch user's kind 10002 relay list so we know their write relays.
-      // Query ALL discovery relays in parallel for best chance of finding the list.
+      // Query discovery relays in batches of 3, stop early once found.
       if (getRelayCache(pubkey).length === 0) {
         setMessage('Finding your relays...');
-        log('Fetching kind 10002 relay list from all discovery relays...');
-        const relayResults = await Promise.allSettled(
-          BACKUP_DISCOVERY_RELAYS.map(async (url) => {
-            const relay = new NRelay1(normalizeRelay(url));
-            try {
-              const evts = await relay.query(
-                [{ kinds: [10002], authors: [pubkey], limit: 1 }],
-                { signal: AbortSignal.timeout(6000) }
-              );
-              return evts;
-            } finally {
-              try { relay.close(); } catch { /* */ }
-            }
-          })
-        );
+        log('Fetching kind 10002 relay list from discovery relays (batches of 3)...');
         const relayEvents: NostrEvent[] = [];
-        for (const r of relayResults) {
-          if (r.status === 'fulfilled') relayEvents.push(...r.value);
+        for (let i = 0; i < BACKUP_DISCOVERY_RELAYS.length; i += 3) {
+          const batch = BACKUP_DISCOVERY_RELAYS.slice(i, i + 3);
+          const relayResults = await Promise.allSettled(
+            batch.map(async (url) => {
+              const relay = new NRelay1(normalizeRelay(url), { backoff: false });
+              try {
+                const evts = await relay.query(
+                  [{ kinds: [10002], authors: [pubkey], limit: 1 }],
+                  { signal: AbortSignal.timeout(6000) }
+                );
+                return evts;
+              } finally {
+                try { relay.close(); } catch { /* */ }
+              }
+            })
+          );
+          for (const r of relayResults) {
+            if (r.status === 'fulfilled') relayEvents.push(...r.value);
+          }
+          if (relayEvents.length > 0) break;
         }
         if (relayEvents.length > 0) {
           const best = relayEvents.reduce((a, b) => a.created_at > b.created_at ? a : b);
@@ -929,9 +953,10 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setMessage('Checking for backup...');
       }
 
-      // Fetch recent backup manifests from all known relays.
+      // Fetch recent backup manifests from all known relays (limit to 5 for fast login).
+      // User can manually scan for older states via the Checkpoints dialog.
       const allEvents = await queryAll(
-        { kinds: [30078], authors: [pubkey] },
+        { kinds: [30078], authors: [pubkey], limit: 5 },
         'backup manifest events',
         undefined,
         false,
@@ -943,7 +968,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         const dTag = ev.tags.find(t => t[0] === 'd')?.[1];
         return dTag === D_TAG_PREFIX || dTag?.startsWith(D_TAG_PREFIX + ':');
       });
-      log(`Total: ${manifestEvents.length} backup manifest events (from ${allEvents.length} kind:30078, no limit)`);
+      log(`Total: ${manifestEvents.length} backup manifest events (from ${allEvents.length} kind:30078, limit 5)`);
 
       if (manifestEvents.length === 0) {
         if (allEvents.length === 0) {
@@ -1043,8 +1068,9 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         }
         const sorted = [...merged.values()].sort((a, b) => b.timestamp - a.timestamp);
         setStoredCheckpoints(sorted);
-        setCheckpoints(sorted);
-        log(`Checkpoints: ${sorted.length} after dedup (${discoveredCheckpoints.length} from relays, ${dedupedCheckpoints.length} unique d-tags, ${existing.length} local)`);
+        const deduped = getStoredCheckpoints();
+        setCheckpoints(deduped);
+        log(`Checkpoints: ${sorted.length} → ${deduped.length} after dedup (${discoveredCheckpoints.length} from relays, ${dedupedCheckpoints.length} unique d-tags, ${existing.length} local)`);
       }
 
       // Parse the best (newest) manifest for the restore flow
@@ -1413,7 +1439,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     if (index >= 0 && index < cps.length) {
       cps[index].name = name;
       setStoredCheckpoints(cps);
-      setCheckpoints([...cps]);
+      setCheckpoints(getStoredCheckpoints());
     }
   }, []);
 
@@ -1426,7 +1452,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     // Update local state immediately (optimistic)
     cps.splice(idx, 1);
     setStoredCheckpoints(cps);
-    setCheckpoints([...cps]);
+    setCheckpoints(getStoredCheckpoints());
 
     // Publish NIP-09 deletion event in the background (best effort)
     if (user) {
@@ -1440,7 +1466,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
           });
           const { primary, fallback } = getPublishRelays(user.pubkey);
           for (const url of [...primary, ...fallback].slice(0, 5)) {
-            const relay = new NRelay1(url);
+            const relay = new NRelay1(url, { backoff: false });
             try { await relay.event(delEvent, { signal: AbortSignal.timeout(5000) }); }
             catch { /* best effort */ }
             finally { try { relay.close(); } catch { /* */ } }
@@ -1553,11 +1579,20 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     // non-forced one settles instantly — this discovers cross-device changes.
     // Set bgCheckInProgress to prevent auto-save from overwriting newer remote state.
     if (isReturningUser) {
-      bgCheckInProgress.current = true;
-      const bgCheck = setTimeout(() => checkRemoteBackup(true), 500);
-      // Safety fallback: clear bgCheckInProgress after 20s in case check hangs
-      const safety = setTimeout(() => { bgCheckInProgress.current = false; }, 20000);
-      return () => { clearTimeout(bgCheck); clearTimeout(safety); };
+      // Skip the forced background check if this is an account switch (not a new session).
+      // Account switches set a sessionStorage flag — the user's local state is already
+      // correct from switchActiveUser stash/restore, no need to fetch from relays.
+      const isAccountSwitch = (() => { try { return !!sessionStorage.getItem('corkboard:account-switch'); } catch { return false; } })();
+      if (isAccountSwitch) {
+        try { sessionStorage.removeItem('corkboard:account-switch'); } catch { /* */ }
+        log('Skipping forced background check (account switch, not new session)');
+      } else {
+        bgCheckInProgress.current = true;
+        const bgCheck = setTimeout(() => checkRemoteBackup(true), 500);
+        // Safety fallback: clear bgCheckInProgress after 20s in case check hangs
+        const safety = setTimeout(() => { bgCheckInProgress.current = false; }, 20000);
+        return () => { clearTimeout(bgCheck); clearTimeout(safety); };
+      }
     }
     const retry1 = setTimeout(() => {
       if (_checkedPubkey === null) checkRemoteBackup();
@@ -1639,14 +1674,14 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
             corkboardNames: m.corkboardNames as string[] | undefined,
           });
         }
-        // Merge with existing checkpoints
+        // Merge discovered with existing checkpoints
         const existing = getStoredCheckpoints();
-        const merged = new Map<string, RemoteCheckpoint>();
-        for (const cp of [...existing, ...discovered]) merged.set(cp.eventId, cp);
-        const sorted = [...merged.values()].sort((a, b) => b.timestamp - a.timestamp);
-        setStoredCheckpoints(sorted);
-        setCheckpoints(sorted);
-        log(`After merge: ${sorted.length} unique checkpoints`);
+        const all = [...existing, ...discovered];
+        // setStoredCheckpoints handles d-tag + stats dedup automatically
+        setStoredCheckpoints(all);
+        const result = getStoredCheckpoints();
+        setCheckpoints(result);
+        log(`Discovered: ${discovered.length}, existing: ${existing.length} → ${result.length} after dedup`);
       }
     } catch (err) {
       log('Scan failed: ' + (err instanceof Error ? err.message : String(err)), 'warn');

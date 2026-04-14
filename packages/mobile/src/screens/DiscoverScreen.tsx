@@ -21,6 +21,7 @@ import {
   TouchableOpacity,
   TextInput,
   ScrollView,
+  Modal,
 } from 'react-native';
 import type { FlatList as FlatListType } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -30,8 +31,13 @@ import { useContacts } from '../hooks/useFeed';
 import { useMuteList } from '../hooks/useMuteList';
 import { useBookmarks } from '../hooks/useBookmarks';
 import { useBulkAuthors } from '../hooks/useAuthor';
+import { useLocalStorage } from '../hooks/useLocalStorage';
+import { useNostrBackup } from '../hooks/useNostrBackup';
+import { STORAGE_KEYS } from '../lib/storageKeys';
 import { NoteCard } from '../components/NoteCard';
+import { OnboardSearchWidget } from '../components/OnboardSearchWidget';
 import { ZapDialog } from '../components/ZapDialog';
+import { ProfileScreen } from './ProfileScreen';
 
 // ---- Kind filter types ----
 
@@ -192,10 +198,11 @@ const kindStyles = StyleSheet.create({
 // ---- Main component ----
 
 export function DiscoverScreen() {
-  const { pubkey } = useAuth();
+  const { pubkey, signer } = useAuth();
   const { data: contacts } = useContacts(pubkey ?? undefined);
   const { mutedPubkeys } = useMuteList();
   const { isBookmarked, toggleBookmark } = useBookmarks();
+  const { saveBackup } = useNostrBackup(pubkey, signer);
   useBulkAuthors();
   const flatListRef = useRef<FlatListType<NostrEvent>>(null);
 
@@ -203,6 +210,12 @@ export function DiscoverScreen() {
   const [activeKinds, setActiveKinds] = useState<Set<KindFilter>>(new Set());
   const [hashtagFilters, setHashtagFilters] = useState<Set<string>>(new Set());
   const [zapTarget, setZapTarget] = useState<NostrEvent | null>(null);
+  const [viewingProfile, setViewingProfile] = useState<string | null>(null);
+
+  // Onboarding state — show search widget when user has fewer than target follows
+  const [onboardingSkipped, setOnboardingSkipped] = useLocalStorage<boolean>(STORAGE_KEYS.ONBOARDING_SKIPPED, false);
+  const [onboardFollowTarget] = useLocalStorage<number>(STORAGE_KEYS.ONBOARDING_FOLLOW_TARGET, 10);
+  const isOnboarding = contacts !== undefined && (contacts.length ?? 0) < onboardFollowTarget && !onboardingSkipped;
 
   const follows = pubkey && contacts && contacts.length > 0 ? contacts : undefined;
   const { discoveredNotes, isLoading, refresh, loadMore, hasMoreDiscover, totalDiscoverCount } = useDiscover(follows);
@@ -328,8 +341,19 @@ export function DiscoverScreen() {
 
   if (!follows || follows.length === 0) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.emptyText}>Follow some people first to discover new content</Text>
+      <View style={[styles.container, { paddingTop: 60 }]}>
+        <OnboardSearchWidget
+          contactCount={contacts?.length ?? 0}
+          followTarget={onboardFollowTarget}
+          onSelectProfile={(pk) => setViewingProfile(pk)}
+          onSkip={() => { setOnboardingSkipped(true); saveBackup().catch((e) => console.warn('[onboarding] backup failed:', e)); }}
+        />
+        <Text style={[styles.emptyText, { marginTop: 20 }]}>Follow some people to discover new content</Text>
+        {viewingProfile && (
+          <Modal visible animationType="slide">
+            <ProfileScreen pubkey={viewingProfile} onBack={() => setViewingProfile(null)} />
+          </Modal>
+        )}
       </View>
     );
   }
@@ -342,6 +366,16 @@ export function DiscoverScreen() {
           {isLoading ? 'Finding new voices...' : `${totalDiscoverCount} notes from outside your network`}
         </Text>
       </View>
+
+      {/* Onboarding widget — shown when user needs to follow more people */}
+      {isOnboarding && (
+        <OnboardSearchWidget
+          contactCount={contacts?.length ?? 0}
+          followTarget={onboardFollowTarget}
+          onSelectProfile={(pk) => setViewingProfile(pk)}
+          onSkip={() => { setOnboardingSkipped(true); saveBackup().catch((e) => console.warn('[onboarding] backup failed:', e)); }}
+        />
+      )}
 
       {/* Search bar */}
       <View style={styles.searchContainer}>
@@ -439,6 +473,13 @@ export function DiscoverScreen() {
         visible={!!zapTarget}
         onClose={() => setZapTarget(null)}
       />
+
+      {/* Profile modal (from onboarding search) */}
+      {viewingProfile && (
+        <Modal visible animationType="slide">
+          <ProfileScreen pubkey={viewingProfile} onBack={() => setViewingProfile(null)} />
+        </Modal>
+      )}
     </View>
   );
 }

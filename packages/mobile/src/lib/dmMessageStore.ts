@@ -36,14 +36,14 @@ try {
 interface StoredParticipant {
   messages: NostrEvent[];
   lastActivity: number;
-  hasNIP4: boolean;
+  hasNIP04: boolean;
   hasNIP17: boolean;
 }
 
 export interface MessageStore {
   participants: Record<string, StoredParticipant>;
   lastSync: {
-    nip4: number | null;
+    nip04: number | null;
     nip17: number | null;
   };
 }
@@ -139,7 +139,7 @@ export function getOrCreateStore(userPubkey: string): MessageStore {
 
   const empty: MessageStore = {
     participants: {},
-    lastSync: { nip4: null, nip17: null },
+    lastSync: { nip04: null, nip17: null },
   };
   writeMessagesToDB(userPubkey, empty);
   return empty;
@@ -160,7 +160,7 @@ export function upsertMessages(
   const participant: StoredParticipant = store.participants[partnerPubkey] ?? {
     messages: [],
     lastActivity: 0,
-    hasNIP4: false,
+    hasNIP04: false,
     hasNIP17: false,
   };
 
@@ -177,7 +177,7 @@ export function upsertMessages(
   participant.messages.sort((a, b) => a.created_at - b.created_at);
 
   // Update metadata
-  if (protocol === 'nip04') participant.hasNIP4 = true;
+  if (protocol === 'nip04') participant.hasNIP04 = true;
   if (protocol === 'nip17') participant.hasNIP17 = true;
 
   const latestTime = participant.messages.length > 0
@@ -199,7 +199,7 @@ export function updateLastSync(
 ): void {
   const store = getOrCreateStore(userPubkey);
   if (protocol === 'nip04') {
-    store.lastSync.nip4 = timestamp;
+    store.lastSync.nip04 = timestamp;
   } else {
     store.lastSync.nip17 = timestamp;
   }
@@ -215,5 +215,5 @@ export function getLastSync(
 ): number | null {
   const store = readMessagesFromDB(userPubkey);
   if (!store) return null;
-  return protocol === 'nip04' ? store.lastSync.nip4 : store.lastSync.nip17;
+  return protocol === 'nip04' ? store.lastSync.nip04 : store.lastSync.nip17;
 }

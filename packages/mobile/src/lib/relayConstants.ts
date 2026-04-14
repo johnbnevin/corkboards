@@ -1,2 +1,2 @@
 // Re-export from core — single source of truth for relay constants
-export { FALLBACK_RELAYS, ZAP_RELAYS, NOSTRCONNECT_RELAYS, SEARCH_RELAY } from '@core/relayConstants';
+export { FALLBACK_RELAYS, ZAP_RELAYS, NOSTRCONNECT_RELAYS, NIP50_SEARCH_RELAY } from '@core/relayConstants';

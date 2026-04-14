@@ -7,7 +7,7 @@ import { useMemo } from 'react';
 import { Text, StyleSheet, Linking, TouchableOpacity } from 'react-native';
 import { nip19 } from 'nostr-tools';
 import { hasHtmlContent } from '@core/sanitizeUtils';
-import { NOSTR_IDENTIFIER_PATTERN } from '@core/nostr';
+import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr';
 
 interface ProfileAboutProps {
   about?: string;
@@ -26,7 +26,7 @@ export function ProfileAbout({ about, style }: ProfileAboutProps) {
     // Parse Nostr identifiers and hashtags.
     // Fresh regex per call -- /g flag is stateful.
     const regex = new RegExp(
-      NOSTR_IDENTIFIER_PATTERN + '|(?<![#\\w])#([a-zA-Z]\\w{0,49})',
+      NIP19_IDENTIFIER_PATTERN + '|(?<![#\\w])#([a-zA-Z]\\w{0,49})',
       'g',
     );
 

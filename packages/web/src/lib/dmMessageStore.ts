@@ -18,14 +18,14 @@ const STORE_NAME = 'messages';
 interface StoredParticipant {
   messages: NostrEvent[];
   lastActivity: number;
-  hasNIP4: boolean;
+  hasNIP04: boolean;
   hasNIP17: boolean;
 }
 
 export interface MessageStore {
   participants: Record<string, StoredParticipant>;
   lastSync: {
-    nip4: number | null;
+    nip04: number | null;
     nip17: number | null;
   };
 }

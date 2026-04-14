@@ -57,4 +57,4 @@ export const NOSTRCONNECT_RELAYS = [
  * NIP-50 full-text search relay used for profile discovery during onboarding.
  * Must support the `search` filter field.
  */
-export const SEARCH_RELAY = 'wss://relay.nostr.band';
+export const NIP50_SEARCH_RELAY = 'wss://relay.nostr.band';

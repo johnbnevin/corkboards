@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { RefreshCw, Database, Wifi, CheckCircle2, Loader2 } from 'lucide-react';
 import { useDMContext } from '@/hooks/useDMContext';
-import { LOADING_PHASES } from '@/lib/dmConstants';
+import { DM_LOADING_PHASES } from '@/lib/dmConstants';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -48,15 +48,15 @@ export const DMStatusInfo = ({ clearCacheAndRefetch }: DMStatusInfoProps) => {
 
   const getLoadingPhaseInfo = () => {
     switch (loadingPhase) {
-      case LOADING_PHASES.IDLE:
+      case DM_LOADING_PHASES.IDLE:
         return { label: 'Idle', description: 'Not yet initialized', icon: Loader2, color: 'text-muted-foreground' };
-      case LOADING_PHASES.CACHE:
+      case DM_LOADING_PHASES.CACHE:
         return { label: 'Loading from cache', description: 'Reading cached messages...', icon: Database, color: 'text-purple-500' };
-      case LOADING_PHASES.RELAYS:
+      case DM_LOADING_PHASES.RELAYS:
         return { label: 'Loading from relays', description: 'Fetching messages from Nostr relays...', icon: Wifi, color: 'text-orange-500' };
-      case LOADING_PHASES.SUBSCRIPTIONS:
+      case DM_LOADING_PHASES.SUBSCRIPTIONS:
         return { label: 'Connecting subscriptions', description: 'Setting up real-time message sync...', icon: RefreshCw, color: 'text-orange-500' };
-      case LOADING_PHASES.READY:
+      case DM_LOADING_PHASES.READY:
         return { label: 'Ready', description: 'All systems operational', icon: CheckCircle2, color: 'text-purple-500' };
       default:
         return { label: 'Unknown', description: 'Status unknown', icon: Loader2, color: 'text-muted-foreground' };
@@ -85,7 +85,7 @@ export const DMStatusInfo = ({ clearCacheAndRefetch }: DMStatusInfoProps) => {
       <Card>
         <CardContent className="pt-6">
           <div className="flex items-start gap-3">
-            <PhaseIcon className={`h-5 w-5 ${phaseInfo.color} ${loadingPhase !== LOADING_PHASES.READY ? 'animate-pulse' : ''}`} />
+            <PhaseIcon className={`h-5 w-5 ${phaseInfo.color} ${loadingPhase !== DM_LOADING_PHASES.READY ? 'animate-pulse' : ''}`} />
             <div className="flex-1 space-y-1">
               <div className="flex items-center gap-2">
                 <p className="font-medium">{phaseInfo.label}</p>
@@ -102,18 +102,18 @@ export const DMStatusInfo = ({ clearCacheAndRefetch }: DMStatusInfoProps) => {
       </Card>
 
       {/* Scan Progress */}
-      {(scanProgress.nip4 !== null || scanProgress.nip17 !== null) && (
+      {(scanProgress.nip04 !== null || scanProgress.nip17 !== null) && (
         <Card>
           <CardContent className="pt-6">
             <div className="space-y-3">
               <p className="text-sm font-medium">Scanning Messages</p>
-              {scanProgress.nip4 !== null && (
+              {scanProgress.nip04 !== null && (
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-muted-foreground">NIP-4 (Legacy)</span>
-                    <span className="text-muted-foreground">{scanProgress.nip4.current} events</span>
+                    <span className="text-muted-foreground">{scanProgress.nip04.current} events</span>
                   </div>
-                  <p className="text-xs text-muted-foreground">{scanProgress.nip4.status}</p>
+                  <p className="text-xs text-muted-foreground">{scanProgress.nip04.status}</p>
                 </div>
               )}
               {scanProgress.nip17 !== null && (
@@ -138,8 +138,8 @@ export const DMStatusInfo = ({ clearCacheAndRefetch }: DMStatusInfoProps) => {
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-muted-foreground">NIP-4 (Legacy DMs)</span>
-                <Badge variant={subscriptions.isNIP4Connected ? 'default' : 'secondary'}>
-                  {subscriptions.isNIP4Connected ? 'Connected' : 'Disconnected'}
+                <Badge variant={subscriptions.isNIP04Connected ? 'default' : 'secondary'}>
+                  {subscriptions.isNIP04Connected ? 'Connected' : 'Disconnected'}
                 </Badge>
               </div>
               <div className="flex items-center justify-between">
@@ -165,7 +165,7 @@ export const DMStatusInfo = ({ clearCacheAndRefetch }: DMStatusInfoProps) => {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Last NIP-4 sync</span>
-                <span className="font-medium">{formatTimestamp(lastSync.nip4)}</span>
+                <span className="font-medium">{formatTimestamp(lastSync.nip04)}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Last NIP-17 sync</span>

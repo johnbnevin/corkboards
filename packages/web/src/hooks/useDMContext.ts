@@ -10,7 +10,7 @@ import { DMContext, DMContextType } from "@/contexts/DMContext";
  * @example
  * ```tsx
  * import { useDMContext } from '@/hooks/useDMContext';
- * import { MESSAGE_PROTOCOL } from '@/lib/dmConstants';
+ * import { DM_PROTOCOL } from '@/lib/dmConstants';
  * 
  * function MyComponent() {
  *   const { conversations, sendMessage, isLoading } = useDMContext();
@@ -19,7 +19,7 @@ import { DMContext, DMContextType } from "@/contexts/DMContext";
  *   await sendMessage({
  *     recipientPubkey: 'hex-pubkey',
  *     content: 'Hello!',
- *     protocol: MESSAGE_PROTOCOL.NIP17
+ *     protocol: DM_PROTOCOL.NIP17
  *   });
  * 
  *   // Display conversations

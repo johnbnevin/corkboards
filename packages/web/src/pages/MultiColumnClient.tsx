@@ -37,7 +37,7 @@ import { ThreadPanel } from '@/components/thread'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { genUserName } from '@/lib/genUserName';
 import type { KindFilter } from '@/components/NoteKindToggles';
-import { ALL_KINDS } from '@/components/NoteKindToggles';
+import { ALL_NOTE_KIND_FILTERS } from '@/components/NoteKindToggles';
 import type { ContentFilterConfig, ContentFilterKey } from '@/components/ContentFilters';
 import { socialUrlToRss } from '@core/rss';
 import {
@@ -3128,7 +3128,7 @@ export function MultiColumnClient() {
       updateFilterSetting('kindFilters', []);
       updateFilterSetting('hashtagFilters', []);
     } else if (kind === 'none') {
-      updateFilterSetting('kindFilters', [...ALL_KINDS]);
+      updateFilterSetting('kindFilters', [...ALL_NOTE_KIND_FILTERS]);
     } else {
       // Functional update reads prev state — safe under concurrent toggling
       const applyToggle = (prev: TabFilterSettings): TabFilterSettings => {

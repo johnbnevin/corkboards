@@ -49,6 +49,11 @@ Key references:
 - Cheap and fast statistics (zap totals, follower totals etc): https://antiprimal.net/
 ---
 
+## To Keep In Mind On All Edits
+
+- Make variable names intuitive, explicit, and self documenting (but adhere to existing standards where applicable)
+- Do things the right way, not the easy way
+
 ## ⚠ Before Choosing or Creating an Event Kind
 
 Do this every time, even if you think you know the answer:
@@ -92,6 +97,22 @@ Event categories by kind range:
 ## Key Libraries
 
 These overlap — pick one per project and stay consistent.
+
+## Nostr Relays
+
+When there is no other preference expressed by user, the following relay set should be used by default:
+wss://relay.damus.io
+wss://nos.lol
+wss://relay.ditto.pub
+wss://relay.primal.net
+
+## Blossom Servers
+
+When there is no other preference expressed by user, the following blossom servers should be used by default:
+https://cdn.sovbit.host/
+https://blossom.yakihonne.com/
+https://blossom.primal.net/
+https://nostrcheck.me/
 
 ### @nostrify/nostrify (JSR)
 ```bash

@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useNostr } from '../lib/NostrProvider';
 import { FALLBACK_RELAYS } from '../lib/NostrProvider';
-import { NOTES_MOBILE, FEED_KINDS } from '@core/feedConstants';
+import { FEED_PAGE_SIZE_MOBILE, FEED_KINDS } from '@core/feedConstants';
 
 /**
  * Fetch recent notes from a set of authors.
@@ -16,7 +16,7 @@ export function useFeed(authors: string[] = []) {
     queryFn: async () => {
       const filter = {
         kinds: FEED_KINDS.filter(k => k === 1 || k === 6) as number[],
-        limit: NOTES_MOBILE,
+        limit: FEED_PAGE_SIZE_MOBILE,
         ...(authors.length > 0 ? { authors } : {}),
       };
 
@@ -55,7 +55,7 @@ export function useFeed(authors: string[] = []) {
       }
 
       // Sort newest first
-      return events.sort((a, b) => b.created_at - a.created_at).slice(0, NOTES_MOBILE);
+      return events.sort((a, b) => b.created_at - a.created_at).slice(0, FEED_PAGE_SIZE_MOBILE);
     },
     staleTime: 2 * 60_000,
     retry: 1,

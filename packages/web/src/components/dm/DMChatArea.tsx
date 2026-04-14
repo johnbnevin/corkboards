@@ -4,7 +4,7 @@ import { useDMContext } from '@/hooks/useDMContext';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useAuthor } from '@/hooks/useAuthor';
 import { genUserName } from '@/lib/genUserName';
-import { MESSAGE_PROTOCOL, type MessageProtocol } from '@/lib/dmConstants';
+import { DM_PROTOCOL, type DMProtocol } from '@/lib/dmConstants';
 import { formatConversationTime, formatFullDateTime } from '@/lib/dmUtils';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -43,7 +43,7 @@ const MessageBubble = memo(({
 }) => {
   // For NIP-17, use inner message kind (14/15); for NIP-04, use message kind (4)
   const actualKind = message.decryptedEvent?.kind || message.kind;
-  const isNIP4Message = message.kind === 4;
+  const isNIP04Message = message.kind === 4;
   const isFileAttachment = actualKind === 15; // Kind 15 = files/attachments
 
   // Create a NostrEvent object for NoteContent (only used for kind 15)
@@ -123,7 +123,7 @@ const MessageBubble = memo(({
               </p>
             </TooltipContent>
           </Tooltip>
-          {isNIP4Message && (
+          {isNIP04Message && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <div className="flex-shrink-0">
@@ -217,7 +217,7 @@ export const DMChatArea = ({ pubkey, onBack, className }: DMChatAreaProps) => {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   
   // Always use NIP-17 for sending. NIP-04 is deprecated (read-only for legacy messages).
-  const [selectedProtocol] = useState<MessageProtocol>(MESSAGE_PROTOCOL.NIP17);
+  const [selectedProtocol] = useState<DMProtocol>(DM_PROTOCOL.NIP17);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   const _allowSelection = false;

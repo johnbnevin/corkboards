@@ -1,7 +1,7 @@
 import { createContext } from 'react';
-import { type LoadingPhase, type ProtocolMode } from '@/lib/dmConstants';
+import { type DMLoadingPhase, type DMProtocolMode } from '@/lib/dmConstants';
 import { type NostrEvent } from '@nostrify/nostrify';
-import type { MessageProtocol } from '@/lib/dmConstants';
+import type { DMProtocol } from '@/lib/dmConstants';
 
 // ============================================================================
 // DM Types and Constants
@@ -11,19 +11,19 @@ export interface ParticipantData {
   messages: DecryptedMessage[];
   lastActivity: number;
   lastMessage: DecryptedMessage | null;
-  hasNIP4: boolean;
+  hasNIP04: boolean;
   hasNIP17: boolean;
 }
 
 export type MessagesState = Map<string, ParticipantData>;
 
 export interface LastSyncData {
-  nip4: number | null;
+  nip04: number | null;
   nip17: number | null;
 }
 
 export interface SubscriptionStatus {
-  isNIP4Connected: boolean;
+  isNIP04Connected: boolean;
   isNIP17Connected: boolean;
 }
 
@@ -33,7 +33,7 @@ export interface ScanProgress {
 }
 
 export interface ScanProgressState {
-  nip4: ScanProgress | null;
+  nip04: ScanProgress | null;
   nip17: ScanProgress | null;
 }
 
@@ -42,7 +42,7 @@ export interface ConversationSummary {
   pubkey: string;
   lastMessage: DecryptedMessage | null;
   lastActivity: number;
-  hasNIP4Messages: boolean;
+  hasNIP04Messages: boolean;
   hasNIP17Messages: boolean;
   isKnown: boolean;
   isRequest: boolean;
@@ -119,7 +119,7 @@ export interface FileAttachment {
 export interface DMContextType {
   messages: MessagesState;
   isLoading: boolean;
-  loadingPhase: LoadingPhase;
+  loadingPhase: DMLoadingPhase;
   isDoingInitialLoad: boolean;
   lastSync: LastSyncData;
   subscriptions: SubscriptionStatus;
@@ -127,10 +127,10 @@ export interface DMContextType {
   sendMessage: (params: { 
     recipientPubkey: string; 
     content: string; 
-    protocol?: MessageProtocol;
+    protocol?: DMProtocol;
     attachments?: FileAttachment[];
   }) => Promise<void>;
-  protocolMode: ProtocolMode;
+  protocolMode: DMProtocolMode;
   scanProgress: ScanProgressState;
   clearCacheAndRefetch: () => Promise<void>;
 }

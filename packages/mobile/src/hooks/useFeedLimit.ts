@@ -1,5 +1,5 @@
 import { usePlatformStorage } from './usePlatformStorage';
-import { NOTES_MOBILE } from '@core/feedConstants';
+import { FEED_PAGE_SIZE_MOBILE } from '@core/feedConstants';
 import { STORAGE_KEYS } from '@core/storageKeys';
 
 export type FeedLimitMultiplier = 1 | 2 | 3;
@@ -10,7 +10,7 @@ export function useFeedLimit() {
     1
   );
 
-  const baseLimit = NOTES_MOBILE;
+  const baseLimit = FEED_PAGE_SIZE_MOBILE;
   const limit = Math.round(baseLimit * multiplier);
   // Fetch more = half the base limit, scaled by multiplier
   const fetchMoreCount = Math.round(Math.ceil(baseLimit / 2) * multiplier);

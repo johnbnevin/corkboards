@@ -1,5 +1,5 @@
 import { formatTimeAgo } from '@core/formatTimeAgo';
-import { FEED_KINDS, NOTES_MOBILE } from '@core/feedConstants';
+import { FEED_KINDS, FEED_PAGE_SIZE_MOBILE } from '@core/feedConstants';
 import { getConversationPartner } from '@core/dmUtils';
 
 describe('core imports', () => {
@@ -11,7 +11,7 @@ describe('core imports', () => {
   it('feedConstants are defined', () => {
     expect(FEED_KINDS).toBeDefined();
     expect(FEED_KINDS.length).toBeGreaterThan(0);
-    expect(NOTES_MOBILE).toBeGreaterThan(0);
+    expect(FEED_PAGE_SIZE_MOBILE).toBeGreaterThan(0);
   });
 
   it('getConversationPartner returns partner pubkey', () => {

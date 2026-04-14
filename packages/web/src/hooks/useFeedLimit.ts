@@ -8,7 +8,7 @@
  */
 import { usePlatformStorage } from './usePlatformStorage';
 import { useIsMobile } from './useIsMobile';
-import { NOTES_DESKTOP, NOTES_MOBILE, FETCH_MORE_COUNT } from '@/lib/feedUtils';
+import { FEED_PAGE_SIZE_DESKTOP, FEED_PAGE_SIZE_MOBILE, FEED_LOAD_MORE_COUNT } from '@/lib/feedUtils';
 import { STORAGE_KEYS } from '@/lib/storageKeys';
 
 export type FeedLimitMultiplier = 1 | 2 | 3;
@@ -20,9 +20,9 @@ export function useFeedLimit() {
     1
   );
 
-  const baseLimit = isMobile ? NOTES_MOBILE : NOTES_DESKTOP;
+  const baseLimit = isMobile ? FEED_PAGE_SIZE_MOBILE : FEED_PAGE_SIZE_DESKTOP;
   const limit = Math.round(baseLimit * multiplier);
-  const fetchMoreCount = Math.round(FETCH_MORE_COUNT * multiplier);
+  const fetchMoreCount = Math.round(FEED_LOAD_MORE_COUNT * multiplier);
 
   return {
     limit,

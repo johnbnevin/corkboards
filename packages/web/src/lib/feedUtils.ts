@@ -10,7 +10,7 @@ import { debugLog, debugWarn, debugError } from '@/lib/debug';
 
 // Re-export core constants and helpers
 import { FEED_KINDS as _FEED_KINDS, RSS_PROXY } from '@core/feedConstants';
-export { NOTES_DESKTOP, NOTES_MOBILE, FETCH_MORE_COUNT, AUTHOR_BATCH_SIZE, MAX_PARALLEL_BATCHES, RSS_PROXY, FEED_KINDS } from '@core/feedConstants';
+export { FEED_PAGE_SIZE_DESKTOP, FEED_PAGE_SIZE_MOBILE, FEED_LOAD_MORE_COUNT, AUTHOR_BATCH_SIZE, MAX_PARALLEL_BATCHES, RSS_PROXY, FEED_KINDS } from '@core/feedConstants';
 const FEED_KINDS = _FEED_KINDS;
 import { baseTimeWindow as _baseTimeWindow } from '@core/rss';
 export { rssItemId, rssItemsToEvents, baseTimeWindow } from '@core/rss';

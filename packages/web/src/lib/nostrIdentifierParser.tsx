@@ -1,7 +1,7 @@
 import { nip19 } from 'nostr-tools';
 import { Link } from 'react-router-dom';
 import React from 'react';
-import { NOSTR_IDENTIFIER_PATTERN } from '@core/nostr';
+import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr';
 
 /**
  * Parses Nostr identifiers (npub1, nprofile1, note1, nevent1, naddr1) in text
@@ -12,7 +12,7 @@ import { NOSTR_IDENTIFIER_PATTERN } from '@core/nostr';
  */
 export function parseNostrIdentifiers(text: string): React.ReactNode[] {
   // Fresh regex per call — /g flag is stateful, never reuse a module-level instance
-  const regex = new RegExp(NOSTR_IDENTIFIER_PATTERN, 'g');
+  const regex = new RegExp(NIP19_IDENTIFIER_PATTERN, 'g');
 
   const parts: React.ReactNode[] = [];
   let lastIndex = 0;
@@ -116,5 +116,5 @@ export function extractNevents(text: string): string[] {
  * Uses a non-/g regex (no statefulness concern) for a simple boolean test.
  */
 export function hasNostrIdentifiers(text: string): boolean {
-  return new RegExp(NOSTR_IDENTIFIER_PATTERN, 'i').test(text);
+  return new RegExp(NIP19_IDENTIFIER_PATTERN, 'i').test(text);
 }

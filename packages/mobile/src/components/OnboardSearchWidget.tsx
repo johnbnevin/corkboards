@@ -18,7 +18,7 @@ import { NRelay1 } from '@nostrify/nostrify';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { nip19 } from 'nostr-tools';
 import { SizeGuardedImage } from './SizeGuardedImage';
-import { SEARCH_RELAY } from '../lib/relayConstants';
+import { NIP50_SEARCH_RELAY } from '../lib/relayConstants';
 
 interface SearchResult {
   pubkey: string;
@@ -96,7 +96,7 @@ export function OnboardSearchWidget({
       }
       setIsSearching(true);
       try {
-        const relay = new NRelay1(SEARCH_RELAY, { backoff: false });
+        const relay = new NRelay1(NIP50_SEARCH_RELAY, { backoff: false });
         relayRef.current = relay;
 
         const events: NostrEvent[] = [];

@@ -3,7 +3,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 /**
  * Validate that an event is a proper DM event
  */
-export function validateDMEvent(event: NostrEvent): boolean {
+export function validateNip04DMEvent(event: NostrEvent): boolean {
   // Must be kind 4 (NIP-04 DM)
   if (event.kind !== 4) return false;
 

@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { hasHtmlContent } from '@/lib/sanitize';
 import { Link } from 'react-router-dom';
 import { nip19 } from 'nostr-tools';
-import { NOSTR_IDENTIFIER_PATTERN } from '@core/nostr';
+import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr';
 
 interface ProfileAboutProps {
   about?: string;
@@ -27,7 +27,7 @@ export function ProfileAbout({ about, className }: ProfileAboutProps) {
     // Hashtags must start with a letter (not digit) and not be preceded by # (avoids markdown headers like ###).
     // Fresh regex per call — /g flag is stateful, never reuse a module-level instance.
     // Hashtags must start with a letter (not digit) and not be preceded by # (avoids markdown headers like ###).
-    const regex = new RegExp(NOSTR_IDENTIFIER_PATTERN + '|(?<![#\\w])#([a-zA-Z]\\w{0,49})', 'g');
+    const regex = new RegExp(NIP19_IDENTIFIER_PATTERN + '|(?<![#\\w])#([a-zA-Z]\\w{0,49})', 'g');
 
     const parts: React.ReactNode[] = [];
     let lastIndex = 0;

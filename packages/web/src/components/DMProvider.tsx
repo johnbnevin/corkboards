@@ -6,7 +6,7 @@
  * protocols, decrypts incoming messages with the appropriate algorithm
  * (NIP-04 or NIP-44), and merges them into a single unified conversation list.
  *
- * The PROTOCOL_MODE setting controls which protocol is used for *sending*
+ * The DM_PROTOCOL_MODE setting controls which protocol is used for *sending*
  * new messages. Received messages are always accepted from both protocols
  * regardless of the send setting.
  *
@@ -20,13 +20,13 @@ import { useNostr } from '@nostrify/react';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
-import { validateDMEvent } from '@/lib/dmUtils';
-import { LOADING_PHASES, type LoadingPhase, PROTOCOL_MODE, type ProtocolMode } from '@/lib/dmConstants';
+import { validateNip04DMEvent } from '@/lib/dmUtils';
+import { DM_LOADING_PHASES, type DMLoadingPhase, DM_PROTOCOL_MODE, type DMProtocolMode } from '@/lib/dmConstants';
 import { NSecSigner, type NostrEvent } from '@nostrify/nostrify';
 import { generateSecretKey } from 'nostr-tools';
 import { secureRandomInt } from '@core/cryptoUtils';
-import type { MessageProtocol } from '@/lib/dmConstants';
-import { MESSAGE_PROTOCOL } from '@/lib/dmConstants';
+import type { DMProtocol } from '@/lib/dmConstants';
+import { DM_PROTOCOL } from '@/lib/dmConstants';
 import { 
   DMContext, 
   DMContextType, 
@@ -76,13 +76,13 @@ const DM_CONSTANTS = {
   SUBSCRIPTION_OVERLAP_SECONDS: 10, // Overlap for subscriptions to catch race conditions
   SCAN_TOTAL_LIMIT: 20000,
   SCAN_BATCH_SIZE: 1000,
-  NIP4_QUERY_TIMEOUT: 15000,
+  NIP04_QUERY_TIMEOUT: 15000,
   NIP17_QUERY_TIMEOUT: 30000,
   ERROR_LOG_DEBOUNCE_DELAY: 2000,
 } as const;
 
 const SCAN_STATUS_MESSAGES = {
-  NIP4_STARTING: 'Starting NIP-4 scan...',
+  NIP04_STARTING: 'Starting NIP-4 scan...',
   NIP17_STARTING: 'Starting NIP-17 scan...',
 } as const;
 
@@ -106,7 +106,7 @@ const nip17ErrorLogger = createErrorLogger('NIP-17');
 
 export interface DMConfig {
   enabled?: boolean;
-  protocolMode?: ProtocolMode;
+  protocolMode?: DMProtocolMode;
 }
 
 interface DMProviderProps {
@@ -154,7 +154,7 @@ function createImetaTags(attachments: FileAttachment[] = []): string[][] {
 // ============================================================================
 
 export function DMProvider({ children, config }: DMProviderProps) {
-  const { enabled = false, protocolMode = PROTOCOL_MODE.NIP17_ONLY } = config || {};
+  const { enabled = false, protocolMode = DM_PROTOCOL_MODE.NIP17_ONLY } = config || {};
   const { user } = useCurrentUser();
   const { nostr } = useNostr();
   const { mutateAsync: createEvent } = useNostrPublish();
@@ -167,27 +167,27 @@ export function DMProvider({ children, config }: DMProviderProps) {
   const previousRelayMetadata = useRef(appConfig.relayMetadata);
 
   // Determine if NIP-17 is enabled based on protocol mode
-  const enableNIP17 = protocolMode !== PROTOCOL_MODE.NIP04_ONLY;
+  const enableNIP17 = protocolMode !== DM_PROTOCOL_MODE.NIP04_ONLY;
 
   const [messages, setMessages] = useState<MessagesState>(new Map());
   const [lastSync, setLastSync] = useState<LastSyncData>({
-    nip4: null,
+    nip04: null,
     nip17: null
   });
   const [isLoading, setIsLoading] = useState(false);
-  const [loadingPhase, setLoadingPhase] = useState<LoadingPhase>(LOADING_PHASES.IDLE);
+  const [loadingPhase, setDMLoadingPhase] = useState<DMLoadingPhase>(DM_LOADING_PHASES.IDLE);
   const [subscriptions, setSubscriptions] = useState<SubscriptionStatus>({
-    isNIP4Connected: false,
+    isNIP04Connected: false,
     isNIP17Connected: false
   });
   const [hasInitialLoadCompleted, setHasInitialLoadCompleted] = useState(false);
   const [shouldSaveImmediately, setShouldSaveImmediately] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgressState>({
-    nip4: null,
+    nip04: null,
     nip17: null
   });
 
-  const nip4SubscriptionRef = useRef<{ close: () => void } | null>(null);
+  const nip04SubscriptionRef = useRef<{ close: () => void } | null>(null);
   const nip17SubscriptionRef = useRef<{ close: () => void } | null>(null);
   const debouncedWriteRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -196,7 +196,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
   // ============================================================================
 
   // Send NIP-04 Message (internal)
-  const _sendNIP4Message = useMutation<NostrEvent, Error, {
+  const _sendNIP04Message = useMutation<NostrEvent, Error, {
     recipientPubkey: string;
     content: string;
     attachments?: FileAttachment[];
@@ -393,7 +393,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
   // ============================================================================
 
   // Load past NIP-4 messages
-  const loadPastNIP4Messages = useCallback(async (sinceTimestamp?: number) => {
+  const loadPastNIP04Messages = useCallback(async (sinceTimestamp?: number) => {
     if (!user?.pubkey) return;
 
     let allMessages: NostrEvent[] = [];
@@ -401,7 +401,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
     let currentSince = sinceTimestamp || 0;
 
 
-    setScanProgress(prev => ({ ...prev, nip4: { current: 0, status: SCAN_STATUS_MESSAGES.NIP4_STARTING } }));
+    setScanProgress(prev => ({ ...prev, nip04: { current: 0, status: SCAN_STATUS_MESSAGES.NIP04_STARTING } }));
 
     while (processedMessages < DM_CONSTANTS.SCAN_TOTAL_LIMIT) {
       const batchLimit = Math.min(DM_CONSTANTS.SCAN_BATCH_SIZE, DM_CONSTANTS.SCAN_TOTAL_LIMIT - processedMessages);
@@ -412,8 +412,8 @@ export function DMProvider({ children, config }: DMProviderProps) {
       ];
 
       try {
-        const batchDMs = await nostr.query(filters, { signal: AbortSignal.timeout(DM_CONSTANTS.NIP4_QUERY_TIMEOUT) });
-        const validBatchDMs = batchDMs.filter(validateDMEvent);
+        const batchDMs = await nostr.query(filters, { signal: AbortSignal.timeout(DM_CONSTANTS.NIP04_QUERY_TIMEOUT) });
+        const validBatchDMs = batchDMs.filter(validateNip04DMEvent);
 
         if (validBatchDMs.length === 0) break;
 
@@ -422,7 +422,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
         setScanProgress(prev => ({
           ...prev,
-          nip4: {
+          nip04: {
             current: allMessages.length,
             status: `Batch ${Math.floor(processedMessages / DM_CONSTANTS.SCAN_BATCH_SIZE) + 1} complete: ${validBatchDMs.length} messages`
           }
@@ -449,7 +449,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
       }
     }
 
-    setScanProgress(prev => ({ ...prev, nip4: null }));
+    setScanProgress(prev => ({ ...prev, nip04: null }));
     return allMessages;
   }, [user, nostr]);
 
@@ -509,8 +509,8 @@ export function DMProvider({ children, config }: DMProviderProps) {
   }, [user, nostr]);
 
   // Query relays for messages
-  const queryRelaysForMessagesSince = useCallback(async (protocol: MessageProtocol, sinceTimestamp?: number): Promise<MessageProcessingResult> => {
-    if (protocol === MESSAGE_PROTOCOL.NIP17 && !enableNIP17) {
+  const queryRelaysForMessagesSince = useCallback(async (protocol: DMProtocol, sinceTimestamp?: number): Promise<MessageProcessingResult> => {
+    if (protocol === DM_PROTOCOL.NIP17 && !enableNIP17) {
       return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
     }
 
@@ -518,8 +518,8 @@ export function DMProvider({ children, config }: DMProviderProps) {
       return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
     }
 
-    if (protocol === MESSAGE_PROTOCOL.NIP04) {
-      const messages = await loadPastNIP4Messages(sinceTimestamp);
+    if (protocol === DM_PROTOCOL.NIP04) {
+      const messages = await loadPastNIP04Messages(sinceTimestamp);
 
       if (messages && messages.length > 0) {
         const newState = new Map();
@@ -531,7 +531,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
           if (!otherPubkey || otherPubkey === user?.pubkey) continue;
 
-          const { decryptedContent, error } = await decryptNIP4Message(message, otherPubkey);
+          const { decryptedContent, error } = await decryptNIP04Message(message, otherPubkey);
 
           const decryptedMessage: DecryptedMessage = {
             ...message,
@@ -551,7 +551,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
           const participant = newState.get(otherPubkey)!;
           participant.messages.push(decryptedMessage);
-          participant.hasNIP4 = true;
+          participant.hasNIP04 = true;
         }
 
         newState.forEach(participant => {
@@ -561,7 +561,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
         mergeMessagesIntoState(newState);
 
         const currentTime = Math.floor(Date.now() / 1000);
-        setLastSync(prev => ({ ...prev, nip4: currentTime }));
+        setLastSync(prev => ({ ...prev, nip04: currentTime }));
 
         const newestMessage = messages.reduce((newest, msg) =>
           msg.created_at > newest.created_at ? msg : newest
@@ -570,10 +570,10 @@ export function DMProvider({ children, config }: DMProviderProps) {
       } else {
         // No new messages, but we still successfully queried relays - update lastSync
         const currentTime = Math.floor(Date.now() / 1000);
-        setLastSync(prev => ({ ...prev, nip4: currentTime }));
+        setLastSync(prev => ({ ...prev, nip04: currentTime }));
         return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
       }
-    } else if (protocol === MESSAGE_PROTOCOL.NIP17) {
+    } else if (protocol === DM_PROTOCOL.NIP17) {
       const messages = await loadPastNIP17Messages(sinceTimestamp);
 
       if (messages && messages.length > 0) {
@@ -640,10 +640,10 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
     return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enableNIP17, userPubkey, loadPastNIP4Messages, loadPastNIP17Messages, user]);
+  }, [enableNIP17, userPubkey, loadPastNIP04Messages, loadPastNIP17Messages, user]);
 
   // Decrypt NIP-4 message
-  const decryptNIP4Message = useCallback(async (event: NostrEvent, otherPubkey: string): Promise<DecryptionResult> => {
+  const decryptNIP04Message = useCallback(async (event: NostrEvent, otherPubkey: string): Promise<DecryptionResult> => {
     try {
       if (user?.signer?.nip04) {
         const decryptedContent = await withDecryptTimeout(user.signer.nip04.decrypt(otherPubkey, event.content));
@@ -668,7 +668,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
     messages: [],
     lastActivity: 0,
     lastMessage: null,
-    hasNIP4: false,
+    hasNIP04: false,
     hasNIP17: false,
   }), []);
 
@@ -710,7 +710,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
             messages: mergedMessages,
             lastActivity,
             lastMessage,
-            hasNIP4: existing.hasNIP4 || value.hasNIP4,
+            hasNIP04: existing.hasNIP04 || value.hasNIP04,
             hasNIP17: existing.hasNIP17 || value.hasNIP17,
           });
         } else {
@@ -723,7 +723,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
   }, []);
 
   // Add message to state
-  const addMessageToState = useCallback((message: DecryptedMessage, conversationPartner: string, protocol: MessageProtocol) => {
+  const addMessageToState = useCallback((message: DecryptedMessage, conversationPartner: string, protocol: DMProtocol) => {
     setMessages(prev => {
       const newMap = new Map(prev);
       const existing = newMap.get(conversationPartner);
@@ -765,16 +765,16 @@ export function DMProvider({ children, config }: DMProviderProps) {
           messages: updatedMessages,
           lastActivity: actualLastMessage.created_at,
           lastMessage: actualLastMessage,
-          hasNIP4: protocol === MESSAGE_PROTOCOL.NIP04 ? true : existing.hasNIP4,
-          hasNIP17: protocol === MESSAGE_PROTOCOL.NIP17 ? true : existing.hasNIP17,
+          hasNIP04: protocol === DM_PROTOCOL.NIP04 ? true : existing.hasNIP04,
+          hasNIP17: protocol === DM_PROTOCOL.NIP17 ? true : existing.hasNIP17,
         });
       } else {
         const newConversation = {
           messages: [message],
           lastActivity: message.created_at,
           lastMessage: message,
-          hasNIP4: protocol === MESSAGE_PROTOCOL.NIP04,
-          hasNIP17: protocol === MESSAGE_PROTOCOL.NIP17,
+          hasNIP04: protocol === DM_PROTOCOL.NIP04,
+          hasNIP17: protocol === DM_PROTOCOL.NIP17,
         };
 
         newMap.set(conversationPartner, newConversation);
@@ -785,10 +785,10 @@ export function DMProvider({ children, config }: DMProviderProps) {
   }, []);
 
   // Process incoming NIP-4 message
-  const processIncomingNIP4Message = useCallback(async (event: NostrEvent) => {
+  const processIncomingNIP04Message = useCallback(async (event: NostrEvent) => {
     if (!user?.pubkey) return;
 
-    if (!validateDMEvent(event)) return;
+    if (!validateNip04DMEvent(event)) return;
 
     const isFromUser = event.pubkey === user.pubkey;
     const recipientPTag = event.tags?.find(([name]) => name === 'p')?.[1];
@@ -796,7 +796,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
     if (!otherPubkey || otherPubkey === user.pubkey) return;
 
-    const { decryptedContent, error } = await decryptNIP4Message(event, otherPubkey);
+    const { decryptedContent, error } = await decryptNIP04Message(event, otherPubkey);
 
     const decryptedMessage: DecryptedMessage = {
       ...event,
@@ -810,8 +810,8 @@ export function DMProvider({ children, config }: DMProviderProps) {
       decryptedMessage.clientFirstSeen = Date.now();
     }
 
-    addMessageToState(decryptedMessage, otherPubkey, MESSAGE_PROTOCOL.NIP04);
-  }, [user, decryptNIP4Message, addMessageToState]);
+    addMessageToState(decryptedMessage, otherPubkey, DM_PROTOCOL.NIP04);
+  }, [user, decryptNIP04Message, addMessageToState]);
 
   // Process NIP-17 Gift Wrap
   const processNIP17GiftWrap = useCallback(async (event: NostrEvent): Promise<NIP17ProcessingResult> => {
@@ -951,7 +951,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
         messageWithAnimation.clientFirstSeen = Date.now();
       }
 
-      addMessageToState(messageWithAnimation, conversationPartner, MESSAGE_PROTOCOL.NIP17);
+      addMessageToState(messageWithAnimation, conversationPartner, DM_PROTOCOL.NIP17);
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Exception in processIncomingNIP17Message:', {
         giftWrapId: event.id,
@@ -962,17 +962,17 @@ export function DMProvider({ children, config }: DMProviderProps) {
   }, [user, processNIP17GiftWrap, addMessageToState]);
 
   // Start NIP-4 subscription
-  const startNIP4Subscription = useCallback(async (sinceTimestamp?: number) => {
+  const startNIP04Subscription = useCallback(async (sinceTimestamp?: number) => {
     if (!user?.pubkey || !nostr) return;
 
-    if (nip4SubscriptionRef.current) {
-      nip4SubscriptionRef.current.close();
+    if (nip04SubscriptionRef.current) {
+      nip04SubscriptionRef.current.close();
     }
 
     try {
       let subscriptionSince = sinceTimestamp || Math.floor(Date.now() / 1000);
-      if (!sinceTimestamp && lastSync.nip4) {
-        subscriptionSince = lastSync.nip4 - DM_CONSTANTS.SUBSCRIPTION_OVERLAP_SECONDS;
+      if (!sinceTimestamp && lastSync.nip04) {
+        subscriptionSince = lastSync.nip04 - DM_CONSTANTS.SUBSCRIPTION_OVERLAP_SECONDS;
       }
 
       const filters = [
@@ -989,7 +989,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
           for await (const msg of subscription) {
             if (!isActive) break;
             if (msg[0] === 'EVENT') {
-              await processIncomingNIP4Message(msg[2]);
+              await processIncomingNIP04Message(msg[2]);
             }
           }
         } catch (error) {
@@ -999,19 +999,19 @@ export function DMProvider({ children, config }: DMProviderProps) {
         }
       })();
 
-      nip4SubscriptionRef.current = {
+      nip04SubscriptionRef.current = {
         close: () => {
           isActive = false;
           controller.abort();
         }
       };
 
-      setSubscriptions(prev => ({ ...prev, isNIP4Connected: true }));
+      setSubscriptions(prev => ({ ...prev, isNIP04Connected: true }));
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Failed to start NIP-4 subscription:', error);
-      setSubscriptions(prev => ({ ...prev, isNIP4Connected: false }));
+      setSubscriptions(prev => ({ ...prev, isNIP04Connected: false }));
     }
-  }, [user, nostr, lastSync.nip4, processIncomingNIP4Message]);
+  }, [user, nostr, lastSync.nip04, processIncomingNIP04Message]);
 
   // Start NIP-17 subscription
   const startNIP17Subscription = useCallback(async (sinceTimestamp?: number) => {
@@ -1072,7 +1072,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
   }, [user, nostr, lastSync.nip17, enableNIP17, processIncomingNIP17Message]);
 
   // Load all cached messages at once (both protocols)
-  const loadAllCachedMessages = useCallback(async (): Promise<{ nip4Since?: number; nip17Since?: number }> => {
+  const loadAllCachedMessages = useCallback(async (): Promise<{ nip04Since?: number; nip17Since?: number }> => {
     if (!userPubkey) return {};
 
     try {
@@ -1143,7 +1143,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
           messages: processedMessages,
           lastActivity: participant.lastActivity,
           lastMessage: processedMessages.length > 0 ? processedMessages[processedMessages.length - 1] : null,
-          hasNIP4: participant.hasNIP4,
+          hasNIP04: participant.hasNIP04,
           hasNIP17: participant.hasNIP17,
         });
       }
@@ -1154,7 +1154,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
       }
 
       return {
-        nip4Since: cachedStore.lastSync?.nip4 || undefined,
+        nip04Since: cachedStore.lastSync?.nip04 || undefined,
         nip17Since: cachedStore.lastSync?.nip17 || undefined,
       };
     } catch (error) {
@@ -1168,49 +1168,49 @@ export function DMProvider({ children, config }: DMProviderProps) {
     if (isLoading) return;
 
     setIsLoading(true);
-    setLoadingPhase(LOADING_PHASES.CACHE);
+    setDMLoadingPhase(DM_LOADING_PHASES.CACHE);
 
     try {
       // ===== PHASE 1: Load cache and show immediately =====
-      const { nip4Since, nip17Since } = await loadAllCachedMessages();
+      const { nip04Since, nip17Since } = await loadAllCachedMessages();
 
       // Mark as completed BEFORE releasing isLoading to prevent re-trigger
       setHasInitialLoadCompleted(true);
 
       // Show cached messages immediately! Don't wait for relays
-      setLoadingPhase(LOADING_PHASES.READY);
+      setDMLoadingPhase(DM_LOADING_PHASES.READY);
       setIsLoading(false);
 
       // ===== PHASE 2: Query relays in background (non-blocking, parallel) =====
-      setLoadingPhase(LOADING_PHASES.RELAYS);
+      setDMLoadingPhase(DM_LOADING_PHASES.RELAYS);
 
       // Run NIP-04 and NIP-17 queries IN PARALLEL
-      const [nip4Result, nip17Result] = await Promise.all([
-        queryRelaysForMessagesSince(MESSAGE_PROTOCOL.NIP04, nip4Since),
-        enableNIP17 ? queryRelaysForMessagesSince(MESSAGE_PROTOCOL.NIP17, nip17Since) : Promise.resolve({ lastMessageTimestamp: undefined, messageCount: 0 })
+      const [nip04Result, nip17Result] = await Promise.all([
+        queryRelaysForMessagesSince(DM_PROTOCOL.NIP04, nip04Since),
+        enableNIP17 ? queryRelaysForMessagesSince(DM_PROTOCOL.NIP17, nip17Since) : Promise.resolve({ lastMessageTimestamp: undefined, messageCount: 0 })
       ]);
 
-      const totalNewMessages = nip4Result.messageCount + (nip17Result?.messageCount || 0);
+      const totalNewMessages = nip04Result.messageCount + (nip17Result?.messageCount || 0);
       if (totalNewMessages > 0) {
         setShouldSaveImmediately(true);
       }
 
       // ===== PHASE 3: Setup subscriptions =====
-      setLoadingPhase(LOADING_PHASES.SUBSCRIPTIONS);
+      setDMLoadingPhase(DM_LOADING_PHASES.SUBSCRIPTIONS);
 
       await Promise.all([
-        startNIP4Subscription(nip4Result.lastMessageTimestamp),
+        startNIP04Subscription(nip04Result.lastMessageTimestamp),
         enableNIP17 ? startNIP17Subscription(nip17Result?.lastMessageTimestamp) : Promise.resolve()
       ]);
 
-      setLoadingPhase(LOADING_PHASES.READY);
+      setDMLoadingPhase(DM_LOADING_PHASES.READY);
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Error in message loading:', error);
       setHasInitialLoadCompleted(true);
-      setLoadingPhase(LOADING_PHASES.READY);
+      setDMLoadingPhase(DM_LOADING_PHASES.READY);
       setIsLoading(false);
     }
-  }, [loadAllCachedMessages, queryRelaysForMessagesSince, startNIP4Subscription, startNIP17Subscription, enableNIP17, isLoading]);
+  }, [loadAllCachedMessages, queryRelaysForMessagesSince, startNIP04Subscription, startNIP17Subscription, enableNIP17, isLoading]);
 
   // Clear cache and refetch from relays
   const clearCacheAndRefetch = useCallback(async () => {
@@ -1218,9 +1218,9 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
     try {
       // Close existing subscriptions
-      if (nip4SubscriptionRef.current) {
-        nip4SubscriptionRef.current.close();
-        nip4SubscriptionRef.current = null;
+      if (nip04SubscriptionRef.current) {
+        nip04SubscriptionRef.current.close();
+        nip04SubscriptionRef.current = null;
       }
       if (nip17SubscriptionRef.current) {
         nip17SubscriptionRef.current.close();
@@ -1233,10 +1233,10 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
       // Reset all state
       setMessages(new Map());
-      setLastSync({ nip4: null, nip17: null });
-      setSubscriptions({ isNIP4Connected: false, isNIP17Connected: false });
-      setScanProgress({ nip4: null, nip17: null });
-      setLoadingPhase(LOADING_PHASES.IDLE);
+      setLastSync({ nip04: null, nip17: null });
+      setSubscriptions({ isNIP04Connected: false, isNIP17Connected: false });
+      setScanProgress({ nip04: null, nip17: null });
+      setDMLoadingPhase(DM_LOADING_PHASES.IDLE);
 
       // Trigger reload by setting hasInitialLoadCompleted to false
       setHasInitialLoadCompleted(false);
@@ -1258,9 +1258,9 @@ export function DMProvider({ children, config }: DMProviderProps) {
     if (!enabled) return;
 
     return () => {
-      if (nip4SubscriptionRef.current) {
-        nip4SubscriptionRef.current.close();
-        nip4SubscriptionRef.current = null;
+      if (nip04SubscriptionRef.current) {
+        nip04SubscriptionRef.current.close();
+        nip04SubscriptionRef.current = null;
       }
       if (nip17SubscriptionRef.current) {
         nip17SubscriptionRef.current.close();
@@ -1269,12 +1269,12 @@ export function DMProvider({ children, config }: DMProviderProps) {
       if (debouncedWriteRef.current) {
         clearTimeout(debouncedWriteRef.current);
       }
-      setSubscriptions({ isNIP4Connected: false, isNIP17Connected: false });
+      setSubscriptions({ isNIP04Connected: false, isNIP17Connected: false });
       // Reset load state so new user (or re-login) starts fresh
       setHasInitialLoadCompleted(false);
       setMessages(new Map());
-      setLastSync({ nip4: null, nip17: null });
-      setLoadingPhase(LOADING_PHASES.IDLE);
+      setLastSync({ nip04: null, nip17: null });
+      setDMLoadingPhase(DM_LOADING_PHASES.IDLE);
     };
   }, [enabled, userPubkey]);
 
@@ -1341,7 +1341,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
         pubkey: participantPubkey,
         lastMessage: participant.lastMessage,
         lastActivity: participant.lastActivity,
-        hasNIP4Messages: participant.hasNIP4,
+        hasNIP04Messages: participant.hasNIP04,
         hasNIP17Messages: participant.hasNIP17,
         isKnown: isKnown,
         isRequest: isRequest,
@@ -1363,11 +1363,11 @@ export function DMProvider({ children, config }: DMProviderProps) {
         participants: {} as Record<string, {
           messages: NostrEvent[];
           lastActivity: number;
-          hasNIP4: boolean;
+          hasNIP04: boolean;
           hasNIP17: boolean;
         }>,
         lastSync: {
-          nip4: lastSync.nip4,
+          nip04: lastSync.nip04,
           nip17: lastSync.nip17,
         }
       };
@@ -1388,7 +1388,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
             ...(msg.originalGiftWrapId && { originalGiftWrapId: msg.originalGiftWrapId }),
           } as NostrEvent)),
           lastActivity: participant.lastActivity,
-          hasNIP4: participant.hasNIP4,
+          hasNIP04: participant.hasNIP04,
           hasNIP17: participant.hasNIP17,
         };
       });
@@ -1397,7 +1397,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
       const currentTime = Math.floor(Date.now() / 1000);
       setLastSync(prev => ({
-        nip4: prev.nip4 || currentTime,
+        nip04: prev.nip04 || currentTime,
         nip17: prev.nip17 || currentTime
       }));
     } catch (error) {
@@ -1432,7 +1432,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
   const sendMessage = useCallback(async (params: {
     recipientPubkey: string;
     content: string;
-    protocol?: MessageProtocol;
+    protocol?: DMProtocol;
     attachments?: FileAttachment[];
   }) => {
     if (!enabled) return;
@@ -1456,7 +1456,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
       clientFirstSeen: Date.now(),
     };
 
-    addMessageToState(optimisticMessage, recipientPubkey, MESSAGE_PROTOCOL.NIP17);
+    addMessageToState(optimisticMessage, recipientPubkey, DM_PROTOCOL.NIP17);
 
     try {
       await sendNIP17Message.mutateAsync({ recipientPubkey, content, attachments });
@@ -1465,7 +1465,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
     }
   }, [enabled, userPubkey, addMessageToState, sendNIP17Message]);
 
-  const isDoingInitialLoad = isLoading && (loadingPhase === LOADING_PHASES.CACHE || loadingPhase === LOADING_PHASES.RELAYS);
+  const isDoingInitialLoad = isLoading && (loadingPhase === DM_LOADING_PHASES.CACHE || loadingPhase === DM_LOADING_PHASES.RELAYS);
 
   const contextValue: DMContextType = {
     messages,

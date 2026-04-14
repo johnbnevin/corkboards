@@ -10,7 +10,7 @@ import { FEED_KINDS } from '@core/feedConstants';
 import { baseTimeWindow } from '@core/rss';
 
 // Re-export core constants for convenience
-export { NOTES_MOBILE, FETCH_MORE_COUNT, AUTHOR_BATCH_SIZE, MAX_PARALLEL_BATCHES, FEED_KINDS } from '@core/feedConstants';
+export { FEED_PAGE_SIZE_MOBILE, FEED_LOAD_MORE_COUNT, AUTHOR_BATCH_SIZE, MAX_PARALLEL_BATCHES, FEED_KINDS } from '@core/feedConstants';
 
 // Max authors per relay query to avoid silent truncation by relays
 const MAX_AUTHORS_PER_QUERY = 500;

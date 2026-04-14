@@ -1151,7 +1151,18 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         return;
       }
 
-      // Always present the found backup to the user — let them decide.
+      // Forced re-check but user already dismissed/restored — don't re-show splash.
+      // The backup-checked flag is set by dismissRemoteBackup() and loadRemoteBackup(),
+      // so if it exists, the user already made their choice this session.
+      const checkedKey2 = `${BACKUP_CHECKED_KEY}:${user.pubkey}`;
+      if (force && idbGetSync(checkedKey2)) {
+        log('Forced re-check: backup already dismissed/restored, skipping splash');
+        setCheckSettled(true);
+        bgCheckInProgress.current = false;
+        return;
+      }
+
+      // Present the found backup to the user — let them decide.
       log(`Found restore point from ${ago}`);
       setStatus('found');
       setCheckSettled(true);

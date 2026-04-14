@@ -11,7 +11,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { LOADING_PHASES } from '@/lib/dmConstants';
+import { DM_LOADING_PHASES } from '@/lib/dmConstants';
 
 interface DMConversationListProps {
   selectedPubkey: string | null;
@@ -26,7 +26,7 @@ interface ConversationItemProps {
   onClick: () => void;
   lastMessage: { decryptedContent?: string; error?: string } | null;
   lastActivity: number;
-  hasNIP4Messages: boolean;
+  hasNIP04Messages: boolean;
 }
 
 const ConversationItemComponent = ({ 
@@ -35,7 +35,7 @@ const ConversationItemComponent = ({
   onClick,
   lastMessage,
   lastActivity,
-  hasNIP4Messages
+  hasNIP04Messages
 }: ConversationItemProps) => {
   const author = useAuthor(pubkey);
   const metadata = author.data?.metadata;
@@ -77,7 +77,7 @@ const ConversationItemComponent = ({
               ) : (
                 <span className="font-medium text-sm truncate">{displayName}</span>
               )}
-              {hasNIP4Messages && (
+              {hasNIP04Messages && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <div className="flex-shrink-0">
@@ -154,7 +154,7 @@ export const DMConversationList = ({
   const currentConversations = activeTab === 'known' ? knownConversations : requestConversations;
 
   // Show skeleton during initial load (cache + relays) if we have no conversations yet
-  const isInitialLoad = (loadingPhase === LOADING_PHASES.CACHE || loadingPhase === LOADING_PHASES.RELAYS) && conversations.length === 0;
+  const isInitialLoad = (loadingPhase === DM_LOADING_PHASES.CACHE || loadingPhase === DM_LOADING_PHASES.RELAYS) && conversations.length === 0;
 
   return (
     <Card className={cn("h-full flex flex-col overflow-hidden", className)}>
@@ -162,9 +162,9 @@ export const DMConversationList = ({
       <div className="p-4 border-b flex-shrink-0 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h2 className="font-semibold text-lg">Messages</h2>
-          {(loadingPhase === LOADING_PHASES.CACHE || 
-            loadingPhase === LOADING_PHASES.RELAYS || 
-            loadingPhase === LOADING_PHASES.SUBSCRIPTIONS) && (
+          {(loadingPhase === DM_LOADING_PHASES.CACHE || 
+            loadingPhase === DM_LOADING_PHASES.RELAYS || 
+            loadingPhase === DM_LOADING_PHASES.SUBSCRIPTIONS) && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <div className="flex items-center">
@@ -173,9 +173,9 @@ export const DMConversationList = ({
               </TooltipTrigger>
               <TooltipContent>
                 <p className="text-xs">
-                  {loadingPhase === LOADING_PHASES.CACHE && 'Loading from cache...'}
-                  {loadingPhase === LOADING_PHASES.RELAYS && 'Querying relays for new messages...'}
-                  {loadingPhase === LOADING_PHASES.SUBSCRIPTIONS && 'Setting up subscriptions...'}
+                  {loadingPhase === DM_LOADING_PHASES.CACHE && 'Loading from cache...'}
+                  {loadingPhase === DM_LOADING_PHASES.RELAYS && 'Querying relays for new messages...'}
+                  {loadingPhase === DM_LOADING_PHASES.SUBSCRIPTIONS && 'Setting up subscriptions...'}
                 </p>
               </TooltipContent>
             </Tooltip>
@@ -248,7 +248,7 @@ export const DMConversationList = ({
                   onClick={() => onSelectConversation(conversation.pubkey)}
                   lastMessage={conversation.lastMessage}
                   lastActivity={conversation.lastActivity}
-                  hasNIP4Messages={conversation.hasNIP4Messages}
+                  hasNIP04Messages={conversation.hasNIP04Messages}
                 />
               ))}
             </div>

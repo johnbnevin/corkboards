@@ -22,7 +22,7 @@ export type KindFilter =
   | 'posts' | 'replies' | 'articles' | 'videos' | 'images'
   | 'reposts' | 'reactions' | 'highlights' | 'recipes';
 
-export const ALL_KINDS: readonly KindFilter[] = [
+export const ALL_NOTE_KIND_FILTERS: readonly KindFilter[] = [
   'posts', 'replies', 'articles', 'videos', 'images',
   'reposts', 'reactions', 'highlights', 'recipes',
 ] as const;
@@ -86,7 +86,7 @@ export const NoteKindToggles = memo(function NoteKindToggles({
   const allShowing = localFilters.size === 0;
 
   const handleAllNone = () => {
-    const next = allShowing ? new Set(ALL_KINDS) : new Set<KindFilter>();
+    const next = allShowing ? new Set(ALL_NOTE_KIND_FILTERS) : new Set<KindFilter>();
     setLocalFilters(next);
     onFilterByKind(allShowing ? 'none' : 'all');
   };

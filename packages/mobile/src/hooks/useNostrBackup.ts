@@ -86,15 +86,6 @@ function getActiveBlossomServers(): string[] {
   return getBlossomServers();
 }
 
-const BACKUP_DISCOVERY_RELAYS = [
-  ...FALLBACK_RELAYS,
-  'wss://relay.nostr.band',
-  'wss://relay.primal.net',
-  'wss://purplepag.es',
-  'wss://relay.snort.social',
-  'wss://nostr.wine',
-  'wss://relay.nostr.bg',
-];
 
 function getStoredCheckpoints(): RemoteCheckpoint[] {
   const raw = mobileStorage.getSync(CHECKPOINTS_KEY);
@@ -372,10 +363,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
     const seen = new Set<string>();
     const allEvents: NostrEvent[] = [];
 
-    const relays = [...new Set([
-      ...getPublishRelays(pubkey),
-      ...BACKUP_DISCOVERY_RELAYS.map(normalizeRelay),
-    ])];
+    const relays = [...new Set(getPublishRelays(pubkey))];
 
     log(`Checking ${relays.length} relays…`);
 

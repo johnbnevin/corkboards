@@ -5,7 +5,7 @@ import { cacheProfile } from '@/lib/cacheStore'
 import { nip19 } from 'nostr-tools'
 
 // Relays to round-robin through — one connection at a time
-const RELAYS = ['wss://nos.lol', 'wss://relay.nostr.band', 'wss://relay.damus.io', 'wss://relay.ditto.pub']
+const RELAYS = ['wss://nos.lol', 'wss://relay.damus.io', 'wss://relay.ditto.pub']
 
 // Curators whose follows seed the onboard discovery feed
 const CURATOR_NPUBS = [

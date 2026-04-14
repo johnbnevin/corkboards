@@ -10,7 +10,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { cacheProfile } from '../lib/cacheStore';
 import { nip19 } from 'nostr-tools';
 
-const RELAYS = ['wss://nos.lol', 'wss://relay.nostr.band', 'wss://relay.damus.io', 'wss://relay.ditto.pub'];
+const RELAYS = ['wss://nos.lol', 'wss://relay.damus.io', 'wss://relay.ditto.pub'];
 
 const CURATOR_NPUBS = [
   'npub1v89nr2zax8ef0ceyu9te0sjyqv3newa3e82m0rd4kye3ekeyhv2sqf30cc',

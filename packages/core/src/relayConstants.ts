@@ -19,7 +19,6 @@ export const FALLBACK_RELAYS = [
   'wss://relay.damus.io',
   'wss://nos.lol',
   'wss://relay.ditto.pub',
-  'wss://relay.nostr.band',
 ];
 
 /**
@@ -39,7 +38,6 @@ export const READ_ONLY_RELAYS = [
 export const ZAP_RELAYS = [
   'wss://relay.damus.io',
   'wss://nos.lol',
-  'wss://relay.nostr.band',
 ];
 
 /**

@@ -22,20 +22,7 @@ import { triggerDownload } from '@/lib/triggerDownload';
 import { BlossomUploader } from '@nostrify/nostrify/uploaders';
 import type { NostrEvent, NPool } from '@nostrify/nostrify';
 import type { NUser } from '@nostrify/react/login';
-import { FALLBACK_RELAYS, READ_ONLY_RELAYS, getUserRelays, getRelayCache, updateRelayCache } from '@/components/NostrProvider';
-
-// Broader relay list for backup discovery — includes popular relays beyond the 4 fallbacks.
-// These are only used for finding backup manifests (kind 30078), not for general queries.
-const BACKUP_DISCOVERY_RELAYS = [
-  ...FALLBACK_RELAYS,
-  ...READ_ONLY_RELAYS,
-  'wss://relay.nostr.band',
-  'wss://relay.primal.net',
-  'wss://purplepag.es',
-  'wss://relay.snort.social',
-  'wss://nostr.wine',
-  'wss://relay.nostr.bg',
-];
+import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache } from '@/components/NostrProvider';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '@/lib/storageKeys';
 import { formatTimeAgo } from '@/lib/formatTimeAgo';
 import { debugLog, debugWarn } from '@/lib/debug';
@@ -773,11 +760,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     for (const r of [...writePrimary, ...writeFallback]) {
       if (!relayUrls.includes(r)) relayUrls.push(r);
     }
-    // Add broad discovery relays as fallback for finding backups after idbClear
-    for (const r of BACKUP_DISCOVERY_RELAYS) {
-      const nr = normalizeRelay(r);
-      if (!relayUrls.includes(nr)) relayUrls.push(nr);
-    }
 
     const activeRelayUrls = relayUrls.filter(url => !isRelayBlocked(url));
     log(`  Checking ${activeRelayUrls.length} relays for ${label} (batches of 3)`);
@@ -897,28 +879,24 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // Query discovery relays in batches of 3, stop early once found.
       if (getRelayCache(pubkey).length === 0) {
         setMessage('Finding your relays...');
-        log('Fetching kind 10002 relay list from discovery relays (batches of 3)...');
+        log('Fetching kind 10002 relay list from fallback relays...');
         const relayEvents: NostrEvent[] = [];
-        for (let i = 0; i < BACKUP_DISCOVERY_RELAYS.length; i += 3) {
-          const batch = BACKUP_DISCOVERY_RELAYS.slice(i, i + 3);
-          const relayResults = await Promise.allSettled(
-            batch.map(async (url) => {
-              const relay = new NRelay1(normalizeRelay(url), { backoff: false });
-              try {
-                const evts = await relay.query(
-                  [{ kinds: [10002], authors: [pubkey], limit: 1 }],
-                  { signal: AbortSignal.timeout(6000) }
-                );
-                return evts;
-              } finally {
-                try { relay.close(); } catch { /* */ }
-              }
-            })
-          );
-          for (const r of relayResults) {
-            if (r.status === 'fulfilled') relayEvents.push(...r.value);
-          }
-          if (relayEvents.length > 0) break;
+        const relayResults = await Promise.allSettled(
+          FALLBACK_RELAYS.map(async (url) => {
+            const relay = new NRelay1(normalizeRelay(url), { backoff: false });
+            try {
+              const evts = await relay.query(
+                [{ kinds: [10002], authors: [pubkey], limit: 1 }],
+                { signal: AbortSignal.timeout(6000) }
+              );
+              return evts;
+            } finally {
+              try { relay.close(); } catch { /* */ }
+            }
+          })
+        );
+        for (const r of relayResults) {
+          if (r.status === 'fulfilled') relayEvents.push(...r.value);
         }
         if (relayEvents.length > 0) {
           const best = relayEvents.reduce((a, b) => a.created_at > b.created_at ? a : b);
@@ -930,7 +908,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
           }
           if (writeRelays.length > 0) {
             updateRelayCache(pubkey, writeRelays);
-            log(`Found ${writeRelays.length} write relays from kind 10002 (queried ${BACKUP_DISCOVERY_RELAYS.length} relays)`);
+            log(`Found ${writeRelays.length} write relays from kind 10002`);
           }
         }
         setMessage('Checking for backup...');

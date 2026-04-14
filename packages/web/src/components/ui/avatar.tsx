@@ -24,9 +24,23 @@ const avatarSizeCache = new Map<string, number | null>()
 const avatarPendingChecks = new Map<string, Promise<number | null>>()
 // URLs the user chose to load despite being over the size limit
 const avatarOverrides = new Set<string>()
+/** Hosts where HEAD requests fail (CORS) — skip future checks */
+const avatarCorsBlockedHosts = new Set<string>()
+
+function getHost(url: string): string {
+  try { return new URL(url).host } catch { return '' }
+}
 
 function checkAvatarSize(url: string): Promise<number | null> {
   if (avatarSizeCache.has(url)) return Promise.resolve(avatarSizeCache.get(url)!)
+
+  // Skip HEAD for hosts we already know block CORS
+  const host = getHost(url)
+  if (host && avatarCorsBlockedHosts.has(host)) {
+    avatarSizeCache.set(url, null)
+    return Promise.resolve(null)
+  }
+
   if (avatarPendingChecks.has(url)) return avatarPendingChecks.get(url)!
 
   const promise = (async () => {
@@ -37,6 +51,7 @@ function checkAvatarSize(url: string): Promise<number | null> {
       avatarSizeCache.set(url, size)
       return size
     } catch {
+      if (host) avatarCorsBlockedHosts.add(host)
       avatarSizeCache.set(url, null)
       return null
     } finally {

@@ -17,9 +17,24 @@ interface SizeCheckResult { size: number | null; isVideo: boolean }
 const MAX_SIZE_CACHE = 2000;
 const sizeCache = new Map<string, SizeCheckResult>();
 const pendingChecks = new Map<string, Promise<SizeCheckResult>>();
+/** Hosts where HEAD requests fail (CORS) — skip future checks for any URL on these hosts */
+const corsBlockedHosts = new Set<string>();
+
+function getHost(url: string): string {
+  try { return new URL(url).host; } catch { return ''; }
+}
 
 async function checkImageSize(url: string): Promise<SizeCheckResult> {
   if (sizeCache.has(url)) return sizeCache.get(url)!;
+
+  // Skip HEAD for hosts we already know block CORS
+  const host = getHost(url);
+  if (host && corsBlockedHosts.has(host)) {
+    const result: SizeCheckResult = { size: null, isVideo: false };
+    sizeCache.set(url, result);
+    return result;
+  }
+
   if (pendingChecks.has(url)) return pendingChecks.get(url)!;
 
   const promise = (async () => {
@@ -41,6 +56,8 @@ async function checkImageSize(url: string): Promise<SizeCheckResult> {
       sizeCache.set(url, result);
       return result;
     } catch {
+      // Remember this host blocks CORS so we don't flood it with failed requests
+      if (host) corsBlockedHosts.add(host);
       const result: SizeCheckResult = { size: null, isVideo: false };
       if (sizeCache.size >= MAX_SIZE_CACHE) {
         const oldest = sizeCache.keys().next().value;

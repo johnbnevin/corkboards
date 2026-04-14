@@ -5,7 +5,7 @@
  * Extracted from MultiColumnClient.tsx to keep that file manageable.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { type NoteClassification } from '@/lib/noteClassifier';
 import { NoteCard } from '@/components/NoteCard';
@@ -15,6 +15,10 @@ import { Skeleton } from '@/components/ui/skeleton';
 
 /** Brief pointer-events lockout after notes rearrange to prevent misclicks from layout shift */
 const REARRANGE_LOCKOUT_MS = 700;
+/** How many notes per column to render initially */
+const INITIAL_RENDER_PER_COL = 8;
+/** How many notes per column to add when scrolling near the bottom */
+const RENDER_INCREMENT_PER_COL = 8;
 
 // ─── Discover loading experience ─────────────────────────────────────────────
 
@@ -188,6 +192,41 @@ export const FeedGrid = React.memo(function FeedGrid({
   onFindMoreForMe,
   isFindingMore = false,
 }: FeedGridProps) {
+  // ── Incremental rendering: render a small batch first, add more on scroll ──
+  const maxColLength = Math.max(...columns.map(c => c.length), 0);
+  const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_PER_COL);
+
+  // Reset render limit when the underlying data changes (tab switch, new data)
+  const columnsFingerprint = columns.map(col => col[0]?.id ?? '').join(',');
+  const prevColumnsFingerprint = useRef(columnsFingerprint);
+  useEffect(() => {
+    if (columnsFingerprint !== prevColumnsFingerprint.current) {
+      prevColumnsFingerprint.current = columnsFingerprint;
+      setRenderLimit(INITIAL_RENDER_PER_COL);
+    }
+  }, [columnsFingerprint]);
+
+  // Expand render window when user scrolls near the bottom
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (renderLimit >= maxColLength) return; // already showing everything
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setRenderLimit(prev => Math.min(prev + RENDER_INCREMENT_PER_COL, maxColLength));
+        }
+      },
+      { rootMargin: '600px' },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [renderLimit, maxColLength]);
+
+  // Slice columns to only render up to renderLimit per column
+  const visibleColumns = columns.map(col => col.slice(0, renderLimit));
+
   // Detect when notes rearrange (new notes prepended / order changes) and briefly
   // suppress pointer events so the user doesn't misclick during layout shift.
   const gridRef = useRef<HTMLDivElement>(null);
@@ -195,7 +234,7 @@ export const FeedGrid = React.memo(function FeedGrid({
   const lockoutTimer = useRef<ReturnType<typeof setTimeout>>();
 
   // Build a fingerprint from the first note ID in each column
-  const firstIdsFingerprint = columns.map(col => col[0]?.id ?? '').join(',');
+  const firstIdsFingerprint = visibleColumns.map(col => col[0]?.id ?? '').join(',');
 
   useEffect(() => {
     // Skip the initial render and empty states
@@ -332,7 +371,7 @@ export const FeedGrid = React.memo(function FeedGrid({
         <>
           {/* Main grid — each column wrapped in its own ErrorBoundary */}
           <div ref={gridRef} className="grid gap-4 mt-4 pb-32 sm:pb-12" style={{ gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }}>
-            {columns.map((columnNotes, colIndex) => (
+            {visibleColumns.map((columnNotes, colIndex) => (
               <ErrorBoundary
                 key={`col-${colIndex}`}
                 fallback={
@@ -376,6 +415,8 @@ export const FeedGrid = React.memo(function FeedGrid({
               </ErrorBoundary>
             ))}
           </div>
+          {/* Sentinel for incremental rendering — triggers loading more notes on scroll */}
+          {renderLimit < maxColLength && <div ref={sentinelRef} style={{ height: 1 }} />}
           {/* Discover "load more" link — regular discover only */}
           {activeTab === 'discover' && !isOnboarding && hasMoreDiscover && (
             <div className="flex justify-center py-8">

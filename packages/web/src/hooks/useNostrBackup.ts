@@ -1154,9 +1154,29 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // Forced re-check but user already dismissed/restored — don't re-show splash.
       // The backup-checked flag is set by dismissRemoteBackup() and loadRemoteBackup(),
       // so if it exists, the user already made their choice this session.
+      // Also reset status to 'idle' so the splash screen clears if it was showing
+      // (can happen if browser evicted localStorage, losing the returning-user flag).
       const checkedKey2 = `${BACKUP_CHECKED_KEY}:${user.pubkey}`;
       if (force && idbGetSync(checkedKey2)) {
         log('Forced re-check: backup already dismissed/restored, skipping splash');
+        markBackupCheckedSync(user.pubkey); // Re-set localStorage flag in case browser evicted it
+        setStatus('idle');
+        setCheckSettled(true);
+        bgCheckInProgress.current = false;
+        return;
+      }
+
+      // If local data already exists (corkboards, dismissed notes), this is likely
+      // a storage eviction scenario — the browser cleared localStorage/IDB flags but
+      // the user's actual data survived. Auto-dismiss instead of blocking with splash.
+      const localFeeds = idbGetSync('nostr-custom-feeds');
+      const hasLocalData = localFeeds && localFeeds !== '[]' && localFeeds !== 'null';
+      if (hasLocalData && !force) {
+        log('Local data exists — auto-dismissing backup splash (likely storage eviction)');
+        _checkedPubkey = user.pubkey;
+        idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
+        markBackupCheckedSync(user.pubkey);
+        setStatus('idle');
         setCheckSettled(true);
         bgCheckInProgress.current = false;
         return;

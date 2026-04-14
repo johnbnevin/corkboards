@@ -428,6 +428,15 @@ export function MultiColumnClient() {
   const isMobile = useIsMobile();
   const { limit: baseFeedLimit, multiplier: feedLimitMultiplier, setMultiplier: setFeedLimitMultiplier } = useFeedLimit();
 
+  // Request persistent storage so browsers don't evict localStorage/IDB when
+  // the tab is backgrounded or the device is low on space. Without this, the
+  // backup-checked flag can disappear, causing the backup splash to reappear.
+  useEffect(() => {
+    if (user?.pubkey && navigator.storage?.persist) {
+      navigator.storage.persist().catch(() => {});
+    }
+  }, [user?.pubkey]);
+
   // Per-user isolation: wipe any stale session data and mark the active user.
   // This runs whenever the logged-in pubkey changes (including on first login).
   //

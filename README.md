@@ -19,7 +19,7 @@ The desktop app gives you a native window with OS keychain storage for your keys
 You need two things installed on your computer: **Node.js** and **Rust**. If you already have them, skip to Step 2.
 
 - **Node.js 22+** — Download from [nodejs.org](https://nodejs.org/). Pick the LTS version. The installer does everything for you. When it's done, open a terminal and type `node -v` to confirm it worked.
-- **Rust** — Follow the instructions for your OS at [tauri.app/start/prerequisites](https://v2.tauri.app/start/prerequisites/). This page walks you through installing Rust and the system libraries Tauri needs. On macOS you'll need Xcode command line tools. On Windows you'll need Visual Studio Build Tools. On Linux you'll need a few packages via apt.
+- **Rust 1.88+** — Follow the instructions for your OS at [tauri.app/start/prerequisites](https://v2.tauri.app/start/prerequisites/). This page walks you through installing Rust and the system libraries Tauri needs. On macOS you'll need Xcode command line tools. On Windows you'll need Visual Studio Build Tools. On Linux you'll need a few packages via apt. If you already have Rust installed, run `rustup update stable` to make sure it's current.
 
 **Step 2 — Download the source code**
 
@@ -31,22 +31,38 @@ cd corkboards
 npm install
 ```
 
+> **Note:** Clone into a folder you own (like your home directory). Cloning into system directories like `/opt` or `/usr/local` will cause permission errors during the build.
+
 If you don't have `git`, you can also download the source as a zip from [the GitHub page](https://github.com/johnbnevin/corkboards) — click the green "Code" button, then "Download ZIP". Unzip it, open a terminal in that folder, and run `npm install`.
 
 **Step 3 — Build it**
+
+First, build the web frontend (the desktop app uses it as its UI):
+
+```bash
+npm run build
+```
+
+Then build the desktop app:
 
 ```bash
 cd packages/desktop/src-tauri
 npx @tauri-apps/cli build
 ```
 
-This takes a few minutes the first time (Rust compiles everything from scratch). When it's done, you'll have a native installer in the `target/release/bundle/` folder:
+This takes a few minutes the first time (Rust compiles everything from scratch). When it finishes, it prints the path to your installer. If you missed it, they're in `target/release/bundle/` (inside the `packages/desktop/src-tauri/` folder you're already in).
 
-- **Windows** — `.msi` installer and `.exe` in `target/release/bundle/msi/`
-- **macOS** — `.dmg` disk image in `target/release/bundle/dmg/`
-- **Linux** — `.AppImage` and `.deb` in `target/release/bundle/appimage/` and `target/release/bundle/deb/`
+**Step 4 — Install and run it**
 
-Double-click the installer to install it like any other app.
+Find the installer for your OS and open it:
+
+- **Windows** — Open `target/release/bundle/msi/` and double-click the `.msi` file. This installs Corkboards like any other program — you'll find it in your Start Menu afterward.
+- **macOS** — Open `target/release/bundle/dmg/` and double-click the `.dmg` file. Drag Corkboards into your Applications folder, then launch it from there or Spotlight.
+- **Linux** — Either:
+  - Install the `.deb`: `sudo dpkg -i target/release/bundle/deb/*.deb` — then find "Corkboards" in your app launcher or run `corkboards` from any terminal.
+  - Or run the AppImage directly: `chmod +x target/release/bundle/appimage/*.AppImage && ./target/release/bundle/appimage/*.AppImage`
+
+Once installed, Corkboards shows up as a normal app on your system — you don't need the terminal anymore.
 
 ### Build the mobile app (Android)
 

@@ -63,13 +63,13 @@ const ComposeDialog = lazy(async () => {
   const fresh = await import('@/components/ComposeDialog');
   return { default: fresh.ComposeDialog };
 });
-import { Layers, PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, Volume2, Smile, Loader2, SlidersHorizontal, RefreshCw } from 'lucide-react';
+import { Layers, PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, Volume2, Smile, Loader2, SlidersHorizontal, RefreshCw, Wifi, Server } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useRelayHealth } from '@/hooks/useRelayHealth';
 import { useRetryFailedNotes } from '@/hooks/useRetryFailedNotes';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '@/components/ui/dropdown-menu';
-import { useCollapsedNotes, BOOKMARK_SYNC_EVENT } from '@/hooks/useCollapsedNotes';
+import { useCollapsedNotes, BOOKMARK_SYNC_EVENT, clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
 import { useNotificationCount } from '@/hooks/useNotificationCount';
 import { useBookmarks } from '@/hooks/useBookmarks';
 import { ZapDialog } from '@/components/ZapDialog';
@@ -80,7 +80,7 @@ import { ThroughputSettings } from '@/components/ThroughputSettings';
 import { AdvancedSettings } from '@/components/AdvancedSettings';
 import { EmojiSetEditor } from '@/components/EmojiSetEditor';
 import { useNostrBackup } from '@/hooks/useNostrBackup';
-import { getActiveUserPubkey, clearActiveUserData, STORAGE_KEYS } from '@/lib/storageKeys';
+import { getActiveUserPubkey, clearActiveUserData, switchActiveUser, STORAGE_KEYS } from '@/lib/storageKeys';
 import { idbGetSync, idbSetSync, idbSet } from '@/lib/idb';
 import { getCachedProfiles, setCachedProfiles, getProfilesNeedingRefresh, markProfileRefreshed } from '@/lib/profileCache';
 import { BackupSplashScreen } from '@/components/BackupSplashScreen';
@@ -92,6 +92,8 @@ import { useNostrDismissedSync } from '@/hooks/useNostrDismissedSync';
 import { FEED_KINDS } from '@/lib/feedUtils';
 // NostrProvider relay utilities used by components but no longer needed in this file
 import { getCacheStatsForPubkeys, clearNotesCache } from '@/lib/notesCache';
+import { clearRelayCache } from '@/components/NostrProvider';
+import { clearMemCache as clearProfileMemCache, evictCachedProfile } from '@/lib/cacheStore';
 import { useFeedLimit } from '@/hooks/useFeedLimit';
 import { useFeedPagination } from '@/hooks/useFeedPagination';
 import { FeedGrid } from '@/components/FeedGrid';
@@ -409,7 +411,7 @@ export function MultiColumnClient() {
   // Profile fetch is deferred — enabled after canLoadNotes is set (below)
   const [profileFetchEnabled, setProfileFetchEnabled] = useState(false);
   const { user, metadata: authorMetadata } = useCurrentUser(profileFetchEnabled);
-  const { currentUser, removeLogin: _removeLogin } = useLoggedInAccounts();
+  const { currentUser, otherUsers, logins: allLogins, setLogin: switchToAccount } = useLoggedInAccounts();
   const loginActions = useLoginActions();
   const { mutedPubkeys, mute: mutePubkey } = useMuteList(profileFetchEnabled);
   const { lists: followSets, isLoading: isLoadingFollowSets } = useFollowSets(profileFetchEnabled);
@@ -436,14 +438,30 @@ export function MultiColumnClient() {
     if (!user?.pubkey) return;
     const activePubkey = getActiveUserPubkey();
     if (activePubkey !== user.pubkey) {
-      // Wipe EVERYTHING from the previous user — IDB keys, notes cache, query cache.
+      // Wipe EVERYTHING from the previous user — IDB keys, notes cache, query cache,
+      // in-memory caches, session state, and relay routing data.
       clearActiveUserData();
       idbSetSync('corkboard:active-user-pubkey', user.pubkey);
       idbSet('corkboard:active-user-pubkey', user.pubkey).catch(() => {});
       clearNotesCache();
+      clearRelayCache();
+      clearProfileMemCache();
+      clearCollapsedNotesModuleState();
+      // Clear session-scoped state that isn't per-user keyed
+      try {
+        sessionStorage.removeItem('corkboard:scroll-positions');
+        sessionStorage.removeItem('corkboard:active-tab');
+        sessionStorage.removeItem('corkboard:new-user');
+        sessionStorage.removeItem('corkboard:soft-dismissed');
+        sessionStorage.removeItem('corkboard:session-collapsed');
+        sessionStorage.removeItem('corkboard:skip-backup-check');
+      } catch { /* sessionStorage may be unavailable */ }
       // Nuke the ENTIRE TanStack Query cache — kills cached profiles, contact
       // lists, notes, and everything else fetched from Nostr for the old user.
       queryClient.clear();
+      // Evict the new user's own profile from IDB so it's always fetched fresh
+      // from relays (not served from a 48h cache with stale avatar/banner).
+      evictCachedProfile(user.pubkey).catch(() => {});
     }
   }, [user?.pubkey, queryClient]);
   const [activeTab, setActiveTabRaw] = useState(() => {
@@ -582,6 +600,33 @@ export function MultiColumnClient() {
   const [defaultColumnCount, _setDefaultColumnCount] = usePlatformStorage<number>(STORAGE_KEYS.DEFAULT_COLUMN_COUNT, 3);
   const [featuresModalOpen, setFeaturesModalOpen] = useState(false);
   const [addAccountDialogOpen, setAddAccountDialogOpen] = useState(false);
+  // Track login count so we detect when a new account is added.
+  // When a second account is added, force a reload to trigger backup restore
+  // and land on the 'me' tab for the new account.
+  const prevLoginCountRef = useRef(allLogins.length);
+  const prevUserPubkeyRef = useRef(user?.pubkey);
+  useEffect(() => {
+    const prevCount = prevLoginCountRef.current;
+    const prevPubkey = prevUserPubkeyRef.current;
+    prevLoginCountRef.current = allLogins.length;
+    prevUserPubkeyRef.current = user?.pubkey;
+    // Detect new login added (count increased) with multiple accounts
+    if (allLogins.length > prevCount && allLogins.length > 1) {
+      setAddAccountDialogOpen(false);
+      // @nostrify/react auto-activates the new login, so user?.pubkey may
+      // already be the new account. If so, we need to do the storage swap
+      // and reload manually since switchToAccount guards against same-pubkey.
+      if (user?.pubkey && user.pubkey !== prevPubkey && prevPubkey) {
+        // New account is already active in @nostrify — just do the storage swap + reload
+        switchActiveUser(prevPubkey, user.pubkey);
+        window.location.reload();
+      } else {
+        // Fallback: explicitly switch to the newest login
+        const newestLogin = allLogins[allLogins.length - 1];
+        if (newestLogin) switchToAccount(newestLogin.id);
+      }
+    }
+  }, [allLogins, user?.pubkey, switchToAccount]);
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
   // Mobile account menu auto-close after 4s
   const [mobileAccountOpen, setMobileAccountOpen] = useState(false);
@@ -893,6 +938,7 @@ export function MultiColumnClient() {
   const [editProfileOpen, setEditProfileOpen] = useState(false);
   const [profileCacheSettingsOpen, setProfileCacheSettingsOpen] = useState(false);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
+  const [advancedSection, setAdvancedSection] = useState<'main' | 'relays' | 'blossom'>('main');
   const [emojiSetsOpen, setEmojiSetsOpen] = useState(false);
   const [consolidateSound, setConsolidateSound] = useLocalStorage<string>('corkboard:consolidate-sound', 'solitaire');
   const [imageSizeLimit, setImageSizeLimit] = useImageSizeLimitSetting();
@@ -968,24 +1014,41 @@ export function MultiColumnClient() {
   const [showLogoutSaveWarning, setShowLogoutSaveWarning] = useState(false);
 
   const doLogout = useCallback(async () => {
+    if (!user?.pubkey) return;
     setShowLogoutSaveWarning(false);
     setLogoutStep('Preparing logout...');
     const forceReload = setTimeout(() => window.location.reload(), 20000);
-    try {
-      await loginActions.nuclearWipe(logLogout);
-      logLogout('done');
-      await new Promise(r => setTimeout(r, 600));
-    } catch (e) {
-      logLogout('Wipe error: ' + (e instanceof Error ? e.message : String(e)));
+
+    if (otherUsers.length > 0) {
+      try {
+        await loginActions.logoutAccount(user.pubkey);
+        clearTimeout(forceReload);
+        switchToAccount(otherUsers[0].id);
+      } catch (e) {
+        logLogout('Logout error: ' + (e instanceof Error ? e.message : String(e)));
+        clearTimeout(forceReload);
+        window.location.reload();
+      }
+    } else {
+      try {
+        await loginActions.nuclearWipe(logLogout);
+        logLogout('done');
+        await new Promise(r => setTimeout(r, 600));
+      } catch (e) {
+        logLogout('Wipe error: ' + (e instanceof Error ? e.message : String(e)));
+      }
+      clearTimeout(forceReload);
+      window.location.reload();
     }
-    clearTimeout(forceReload);
-    window.location.reload();
-  }, [loginActions, logLogout]);
+  }, [user?.pubkey, otherUsers, loginActions, logLogout, switchToAccount]);
 
   const handleLogout = useCallback(async () => {
+    if (!user?.pubkey) return;
     setLogoutLog([]);
     setLogoutStep('Preparing logout...');
     const forceReload = setTimeout(() => window.location.reload(), 20000);
+
+    // Save unsaved backup changes before logging out
     try {
       if (hasUnsavedChanges()) {
         logLogout('Unsaved changes detected. Saving backup...');
@@ -1009,16 +1072,34 @@ export function MultiColumnClient() {
       logLogout('Backup error: ' + (e instanceof Error ? e.message : String(e)));
       logLogout('Continuing with logout...');
     }
-    try {
-      await loginActions.nuclearWipe(logLogout);
-      logLogout('done');
-      await new Promise(r => setTimeout(r, 600));
-    } catch (e) {
-      logLogout('Wipe error: ' + (e instanceof Error ? e.message : String(e)));
+
+    // Single-account logout: remove only this account, switch to next if any
+    if (otherUsers.length > 0) {
+      logLogout('Logging out active account...');
+      try {
+        await loginActions.logoutAccount(user.pubkey);
+        logLogout('Switching to next account...');
+        // Switch to the next account (triggers reload internally)
+        clearTimeout(forceReload);
+        switchToAccount(otherUsers[0].id);
+      } catch (e) {
+        logLogout('Logout error: ' + (e instanceof Error ? e.message : String(e)));
+        clearTimeout(forceReload);
+        window.location.reload();
+      }
+    } else {
+      // Last account — full nuclear wipe
+      try {
+        await loginActions.nuclearWipe(logLogout);
+        logLogout('done');
+        await new Promise(r => setTimeout(r, 600));
+      } catch (e) {
+        logLogout('Wipe error: ' + (e instanceof Error ? e.message : String(e)));
+      }
+      clearTimeout(forceReload);
+      window.location.reload();
     }
-    clearTimeout(forceReload);
-    window.location.reload();
-  }, [autoSaveBackup, loginActions, hasUnsavedChanges, lastBackupTs, logLogout]);
+  }, [user?.pubkey, otherUsers, autoSaveBackup, loginActions, hasUnsavedChanges, lastBackupTs, logLogout, switchToAccount]);
 
   // Encrypted per-kind sync (corkboards + dismissed notes)
   const _customFeedsSync = useNostrCustomFeedsSync(user, nostr);
@@ -1177,21 +1258,63 @@ export function MultiColumnClient() {
     };
   }, [user, backupCheckSettled, backupStatus, bgCheckInProgress, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
 
-  // Cross-device update toast: when forced background check detects a newer backup
-  // from a different device, offer the user a non-blocking restore option.
+  // Auto-restore: load newest checkpoint that has more dismissed notes than local.
+  // This is the best indicator that another session (or device) progressed further.
+  // Also fires on crossDeviceUpdate as a fallback.
+  const [autoRestoreTarget, setAutoRestoreTarget] = useState<{ checkpoint: typeof checkpoints[0]; reason: string } | null>(null);
+  const [autoRestoreCountdown, setAutoRestoreCountdown] = useState<number | null>(null);
+  const autoRestoreCheckedRef = useRef(false);
+
+  // Detect when ANY checkpoint has more dismissed notes than local state.
+  // Scan all checkpoints (not just newest) because an older backup from another
+  // device may have progressed further (more notes dismissed).
+  // Wait until the initial backup flow completes (not 'found'/'restoring'/'restored')
+  // to avoid conflicting with the BackupSplashScreen's own restore.
+  const initialRestoreDone = backupCheckSettled && backupStatus !== 'found' && backupStatus !== 'restoring' && backupStatus !== 'restored';
   useEffect(() => {
-    if (!crossDeviceUpdate) return;
-    const ts = new Date(crossDeviceUpdate.timestamp * 1000).toLocaleString();
-    toast({
-      title: 'Newer backup from another device',
-      description: `Found a backup from ${ts}. Open Backup & Restore to sync.`,
-      duration: 10000,
-    });
-  }, [crossDeviceUpdate, toast]);
+    if (autoRestoreCheckedRef.current || !initialRestoreDone || !checkpoints.length) return;
+    let best: typeof checkpoints[0] | null = null;
+    let bestDismissed = dismissedCount;
+    for (const cp of checkpoints) {
+      const d = cp.stats?.dismissed ?? 0;
+      if (d > bestDismissed) { best = cp; bestDismissed = d; }
+    }
+    if (best) {
+      autoRestoreCheckedRef.current = true;
+      setAutoRestoreTarget({ checkpoint: best, reason: `Backup found (${bestDismissed - dismissedCount} more dismissed)` });
+    }
+  }, [initialRestoreDone, checkpoints, dismissedCount]);
+
+  // Cross-device update fallback (if dismissed count didn't catch it)
+  useEffect(() => {
+    if (!crossDeviceUpdate || autoRestoreTarget || autoRestoreCheckedRef.current) return;
+    autoRestoreCheckedRef.current = true;
+    setAutoRestoreTarget({ checkpoint: crossDeviceUpdate, reason: 'Newer backup found' });
+    dismissCrossDeviceUpdate();
+  }, [crossDeviceUpdate, autoRestoreTarget, dismissCrossDeviceUpdate]);
+
+  // Countdown timer
+  useEffect(() => {
+    if (!autoRestoreTarget) { setAutoRestoreCountdown(null); return; }
+    setAutoRestoreCountdown(5);
+    const timer = setInterval(() => {
+      setAutoRestoreCountdown(prev => {
+        if (prev === null || prev <= 1) { clearInterval(timer); return 0; }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [autoRestoreTarget]);
+
+  // Auto-load when countdown hits 0
+  useEffect(() => {
+    if (autoRestoreCountdown !== 0 || !autoRestoreTarget) return;
+    loadCheckpointFn(autoRestoreTarget.checkpoint);
+    setAutoRestoreTarget(null);
+  }, [autoRestoreCountdown, autoRestoreTarget, loadCheckpointFn]);
 
   // Re-check for cross-device changes when tab becomes visible after being hidden
-  // for more than 2 minutes. This catches updates made on another device while
-  // this tab was in the background.
+  // for more than 2 minutes, and periodically every 5 minutes while active.
   useEffect(() => {
     if (!user || !backupCheckSettled) return;
     let lastHidden = 0;
@@ -1206,7 +1329,14 @@ export function MultiColumnClient() {
       }
     };
     document.addEventListener('visibilitychange', onVisChange);
-    return () => document.removeEventListener('visibilitychange', onVisChange);
+    // Periodic re-check every 5 minutes for cross-device updates
+    const periodicCheck = setInterval(() => {
+      if (document.visibilityState === 'visible') checkRemoteBackup(true);
+    }, 5 * 60 * 1000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisChange);
+      clearInterval(periodicCheck);
+    };
   }, [user, backupCheckSettled, checkRemoteBackup]);
 
   // Theme management
@@ -1864,6 +1994,7 @@ export function MultiColumnClient() {
   const notifLoadNewerRef = useRef<(() => void) | null>(null);
   const [notifHasMore, setNotifHasMore] = useState(false);
   const [notifNewestTimestamp, setNotifNewestTimestamp] = useState<number | null>(null);
+  const [notifStats, setNotifStats] = useState<{ total: number; visible: number; dismissed: number; filtered: number }>({ total: 0, visible: 0, dismissed: 0, filtered: 0 });
   const handleNotifLoadMoreReady = useCallback((loadMore: (count: number) => void, hasMore: boolean, loadNewer: () => void, newestTs: number | null) => {
     notifLoadMoreRef.current = loadMore;
     notifLoadNewerRef.current = loadNewer;
@@ -1874,7 +2005,7 @@ export function MultiColumnClient() {
   // Onboard procedure: active when contacts have loaded and user follows fewer than 10 people.
   // Skip after a backup restore (backupStatus 'restored') so returning users aren't
   // dropped back into onboarding while their contacts are still loading.
-  const [onboardingSkipped, setOnboardingSkipped] = useLocalStorage<boolean>('corkboard:onboarding-skipped', false);
+  const [onboardingSkipped, setOnboardingSkipped] = useLocalStorage<boolean>(STORAGE_KEYS.ONBOARDING_SKIPPED, false);
   const wasRestoredRef = useRef(false);
   if (backupStatus === 'restored' || backupStatus === 'restoring') wasRestoredRef.current = true;
   const isOnboarding = contacts !== undefined && contacts.length < 10 && !onboardingSkipped && !wasRestoredRef.current;
@@ -3315,12 +3446,23 @@ export function MultiColumnClient() {
   // Show splash only for automatic (login-triggered) backup checks, not user-initiated ones
   const isBackupActive = !isNewUser && !isReturningUser && !userInitiatedCheckRef.current && (!backupCheckSettled || backupStatus === 'checking' || backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored');
   if (isBackupActive) {
+    // Pick the checkpoint with the most dismissed notes as the default restore
+    // target. This avoids restoring a newer but less-progressed checkpoint first,
+    // then having the auto-restore overwrite it with a better one.
+    const bestCheckpoint = checkpoints.length > 0
+      ? checkpoints.reduce((best, cp) => (cp.stats?.dismissed ?? 0) > (best.stats?.dismissed ?? 0) ? cp : best, checkpoints[0])
+      : null;
     return (
       <BackupSplashScreen
         backupStatus={!backupCheckSettled ? 'checking' : backupStatus}
         message={!backupCheckSettled ? 'Checking for backup...' : backupMessage}
-        remoteBackup={remoteBackup}
-        onRestore={loadRemoteBackup}
+        remoteBackup={bestCheckpoint ? {
+          timestamp: bestCheckpoint.timestamp,
+          keys: [],
+          stats: bestCheckpoint.stats,
+          corkboardNames: bestCheckpoint.corkboardNames,
+        } : remoteBackup}
+        onRestore={bestCheckpoint ? () => loadCheckpointFn(bestCheckpoint) : loadRemoteBackup}
         onDismiss={dismissRemoteBackup}
         scanOlderStates={scanOlderStates}
         isScanning={isScanning}
@@ -3351,9 +3493,6 @@ export function MultiColumnClient() {
                     <Button variant="ghost" size="sm" className="h-8 w-8 p-0"><Settings className="h-4 w-4" /></Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start">
-                    {blankSpaceCount > 0 && (
-                      <DropdownMenuItem onClick={consolidate} className="gap-2"><Layers className="h-4 w-4" />Consolidate {`(${blankSpaceCount})`}</DropdownMenuItem>
-                    )}
                     <DropdownMenuItem onClick={() => setEditProfileOpen(true)} className="gap-2"><UserPlus className="h-4 w-4" />Customize Profile</DropdownMenuItem>
                     <DropdownMenuItem onClick={() => setWalletSettingsOpen(true)} className="gap-2"><Wallet className="h-4 w-4" />Connect Wallet</DropdownMenuItem>
                     <DropdownMenuItem onClick={() => setEmojiSetsOpen(true)} className="gap-2"><Smile className="h-4 w-4" />Emoji Sets</DropdownMenuItem>
@@ -3430,6 +3569,9 @@ export function MultiColumnClient() {
                       }
                     }} className="gap-2"><HardDrive className="h-4 w-4" />Backup &amp; Restore</DropdownMenuItem>
                     <DropdownMenuItem onClick={() => setLocalBackupOpen(true)} className="gap-2"><HardDrive className="h-4 w-4" />Local File Backup</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('relays'); }} className="gap-2"><Wifi className="h-4 w-4" />Relays</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('blossom'); }} className="gap-2"><Server className="h-4 w-4" />Blossom Servers</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
                 {canLoadNotes && <RelayHealthIndicator />}
@@ -3506,12 +3648,6 @@ export function MultiColumnClient() {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
-                  {blankSpaceCount > 0 && (
-                    <DropdownMenuItem onClick={consolidate} className="gap-2">
-                      <Layers className="h-4 w-4" />
-                      Consolidate {`(${blankSpaceCount})`}
-                    </DropdownMenuItem>
-                  )}
                   <DropdownMenuItem onClick={() => setEditProfileOpen(true)} className="gap-2">
                     <UserPlus className="h-4 w-4" />
                     Customize Profile
@@ -3588,6 +3724,9 @@ export function MultiColumnClient() {
                     <HardDrive className="h-4 w-4" />
                     Local File Backup
                   </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('relays'); }} className="gap-2"><Wifi className="h-4 w-4" />Relays</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('blossom'); }} className="gap-2"><Server className="h-4 w-4" />Blossom Servers</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
               {canLoadNotes && <RelayHealthIndicator />}
@@ -3966,6 +4105,7 @@ export function MultiColumnClient() {
                 onViewThread={openThread}
                 columnCount={columnCount}
                 onBlankSpaceCount={setNotifBlankCount}
+                onStatsUpdate={setNotifStats}
                 onLoadMoreReady={handleNotifLoadMoreReady}
               />
             </ErrorBoundary>
@@ -4070,6 +4210,8 @@ export function MultiColumnClient() {
               contacts={contacts}
               stats={isDiscoverTab ? discoverStats : activeTabStats}
               notesCount={notes.length}
+              totalLoaded={deduplicatedNotes.length}
+              dismissedCount={dismissedCount}
               hasFilteredNotes={hasFilteredNotes}
               batchProgress={batchProgress}
               isLoadingAllFollows={isLoadingAllFollows}
@@ -4187,6 +4329,7 @@ export function MultiColumnClient() {
         </ErrorBoundary>
 
         {/* Status Bar with inline buttons */}
+        {/* Compute stats based on active tab — notifications have their own data source */}
         <StatusBar
           onLoadNewer={isSavedTab ? () => {} : loadNewerNotes}
           onLoadMoreByCount={isSavedTab ? () => {} : handleLoadMoreByCount}
@@ -4197,14 +4340,10 @@ export function MultiColumnClient() {
           loadingMessage={loadingMessage}
           blankSpaceCount={blankSpaceCount}
           multiplier={feedLimitMultiplier}
-          indexedDbStats={(() => {
+          indexedDbStats={isNotificationsTab ? notifStats : (() => {
             const visible = notes.length;
-            // Count dismissed directly from deduplicatedNotes (which includes dismissed notes before Stage 2 filters them out)
             const dismissed = deduplicatedNotes.filter(n => isDismissed(n.id)).length;
             const filtered = hasActiveFilters ? Math.max(0, deduplicatedNotes.length - notes.length - dismissed) : 0;
-            // Total must equal the sum of visible + dismissed + filtered so the stats always add up.
-            // (indexedDbStats.total counts all cached notes for these pubkeys across all time windows,
-            // which can exceed what's in the current feed view.)
             const total = visible + dismissed + filtered;
             return { total, visible, dismissed, filtered };
           })()}
@@ -4233,6 +4372,17 @@ export function MultiColumnClient() {
           onLoadNewerNotifications={notifLoadNewerRef.current || undefined}
           newestNotificationTimestamp={notifNewestTimestamp}
         />
+
+        {/* Auto-restore countdown banner */}
+        {autoRestoreTarget && autoRestoreCountdown !== null && autoRestoreCountdown > 0 && (
+          <div className="fixed top-2 left-1/2 -translate-x-1/2 z-[100] bg-orange-500 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-3 text-sm animate-in fade-in slide-in-from-top-2">
+            <span>{autoRestoreTarget.reason} — loading in {autoRestoreCountdown}s</span>
+            <button
+              className="text-white/80 hover:text-white font-medium underline"
+              onClick={() => { setAutoRestoreTarget(null); setAutoRestoreCountdown(null); }}
+            >Cancel</button>
+          </div>
+        )}
 
         {/* Toast Messages */}
         <ToastBar messages={feedToastMessages} />
@@ -4382,7 +4532,7 @@ export function MultiColumnClient() {
         </Dialog>
 
         {/* Advanced Settings Dialog */}
-        <Dialog open={advancedSettingsOpen} onOpenChange={setAdvancedSettingsOpen}>
+        <Dialog open={advancedSettingsOpen} onOpenChange={(open) => { setAdvancedSettingsOpen(open); if (!open) setAdvancedSection('main'); }}>
           <DialogContent className="sm:max-w-[420px] max-h-[85dvh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>Advanced</DialogTitle>
@@ -4397,6 +4547,9 @@ export function MultiColumnClient() {
               publicBookmarks={publicBookmarks}
               onTogglePublicBookmarks={() => { if (publicBookmarks) { setPublicBookmarks(false); setTimeout(republishBookmarks, 500); } else { setPublicBookmarks(true); setTimeout(republishBookmarks, 500); } }}
               onDeleteAccount={() => { setAdvancedSettingsOpen(false); setShowVanishConfirm(true); }}
+              initialSection={advancedSection}
+              isOnboarding={isOnboarding}
+              onResetOnboarding={() => { setOnboardingSkipped(false); setAdvancedSettingsOpen(false); setActiveTab('discover'); }}
             />
           </DialogContent>
         </Dialog>

@@ -127,6 +127,15 @@ export async function cacheProfile(
   }
 }
 
+/** Evict a single profile from both mem and IDB cache (forces relay refetch) */
+export async function evictCachedProfile(pubkey: string): Promise<void> {
+  memProfileCache.delete(pubkey);
+  try {
+    const db = await openDatabase();
+    await db.delete('profiles', pubkey);
+  } catch { /* best-effort */ }
+}
+
 export async function getCachedProfile(
   pubkey: string,
   maxAge: number = 24 * 60 * 60 * 1000

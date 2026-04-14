@@ -4,7 +4,7 @@
  * Mirrors packages/web/src/components/EditProfileForm.tsx.
  * Fields: display_name, name, about, picture, banner, website, nip05, lud16.
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -15,11 +15,14 @@ import {
   StyleSheet,
   Alert,
   Image,
+  Dimensions,
 } from 'react-native';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../lib/AuthContext';
 import { useAuthor } from '../hooks/useAuthor';
 import { useNostrPublish } from '../hooks/useNostrPublish';
+import { useLocalStorage } from '../hooks/useLocalStorage';
+import { STORAGE_KEYS } from '@core/storageKeys';
 
 interface ProfileFormData {
   display_name: string;
@@ -97,14 +100,17 @@ export function EditProfileForm({ onSaved }: EditProfileFormProps) {
         }
       }
 
-      await publish({
+      const event = await publish({
         kind: 0,
         content: JSON.stringify(data),
         tags: [],
         created_at: Math.floor(Date.now() / 1000),
       });
 
-      await queryClient.invalidateQueries({ queryKey: ['author', pubkey] });
+      // Optimistically update the query cache so the UI reflects changes immediately
+      if (event) {
+        queryClient.setQueryData(['author', pubkey], { metadata: data, event });
+      }
       Alert.alert('Profile saved', 'Your profile has been published to Nostr relays.');
       onSaved?.();
     } catch (err) {
@@ -115,14 +121,48 @@ export function EditProfileForm({ onSaved }: EditProfileFormProps) {
   const bannerUrl = form.banner.trim();
   const pictureUrl = form.picture.trim();
 
+  // Banner display settings (local, not published to Nostr)
+  const [bannerHeightPct, setBannerHeightPct] = useLocalStorage<number>(STORAGE_KEYS.BANNER_HEIGHT_PCT, 0);
+  const [bannerFitMode, setBannerFitMode] = useLocalStorage<string>(STORAGE_KEYS.BANNER_FIT_MODE, 'crop');
+  const [naturalPct, setNaturalPct] = useState(0);
+  const effectivePct = bannerHeightPct === 0 ? naturalPct : bannerHeightPct;
+  const screenWidth = Dimensions.get('window').width - 32; // minus padding
+
+  // Track if banner display settings changed so we can alert on close
+  const bannerSettingsChanged = useRef(false);
+  const wrappedSetHeight = useCallback((v: number) => {
+    setBannerHeightPct(v);
+    bannerSettingsChanged.current = true;
+  }, [setBannerHeightPct]);
+  const wrappedSetFit = useCallback((v: string) => {
+    setBannerFitMode(v);
+    bannerSettingsChanged.current = true;
+  }, [setBannerFitMode]);
+
+  // Toast on unmount if banner settings were adjusted
+  useEffect(() => {
+    return () => {
+      if (bannerSettingsChanged.current) {
+        Alert.alert('Banner display updated');
+      }
+    };
+  }, []);
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
       {/* Visual banner + avatar header */}
       <View style={styles.headerSection}>
         {/* Banner */}
-        <View style={styles.bannerContainer}>
+        <View style={[styles.bannerContainer, effectivePct > 0 ? { height: screenWidth * effectivePct / 100 } : undefined]}>
           {bannerUrl ? (
-            <Image source={{ uri: bannerUrl }} style={styles.bannerImage} />
+            <Image
+              source={{ uri: bannerUrl }}
+              style={[styles.bannerImage, { resizeMode: bannerFitMode === 'crop' ? 'cover' : 'contain' }]}
+              onLoad={(e) => {
+                const { width, height } = e.nativeEvent.source;
+                if (width > 0) setNaturalPct(Math.round((height / width) * 100));
+              }}
+            />
           ) : (
             <View style={styles.bannerPlaceholder}>
               <View style={styles.bannerSky} />
@@ -144,6 +184,46 @@ export function EditProfileForm({ onSaved }: EditProfileFormProps) {
       </View>
 
       <View style={styles.spacer} />
+
+      {/* Banner display settings */}
+      {bannerUrl ? (
+        <View style={styles.bannerSettings}>
+          <View style={styles.bannerSettingRow}>
+            <Text style={styles.bannerSettingLabel}>Height</Text>
+            <Text style={styles.bannerSettingValue}>
+              {bannerHeightPct === 0 ? `Auto (${naturalPct}%)` : `${bannerHeightPct}%`}
+            </Text>
+          </View>
+          <View style={styles.bannerSettingRow}>
+            <TouchableOpacity style={styles.stepBtn} onPress={() => wrappedSetHeight(Math.max(0, bannerHeightPct - 5))}>
+              <Text style={styles.stepBtnText}>−</Text>
+            </TouchableOpacity>
+            <View style={styles.pctBarOuter}>
+              <View style={[styles.pctBarInner, { width: `${Math.max(2, (bannerHeightPct / 75) * 100)}%` }]} />
+            </View>
+            <TouchableOpacity style={styles.stepBtn} onPress={() => wrappedSetHeight(Math.min(75, bannerHeightPct + 5))}>
+              <Text style={styles.stepBtnText}>+</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.bannerSettingRow}>
+            <Text style={styles.bannerSettingLabel}>Fit</Text>
+            <View style={{ flexDirection: 'row', gap: 6 }}>
+              <TouchableOpacity
+                style={[styles.fitBtn, bannerFitMode === 'crop' && styles.fitBtnActive]}
+                onPress={() => wrappedSetFit('crop')}
+              >
+                <Text style={[styles.fitBtnText, bannerFitMode === 'crop' && styles.fitBtnTextActive]}>Crop</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.fitBtn, bannerFitMode === 'scale' && styles.fitBtnActive]}
+                onPress={() => wrappedSetFit('scale')}
+              >
+                <Text style={[styles.fitBtnText, bannerFitMode === 'scale' && styles.fitBtnTextActive]}>Scale</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      ) : null}
 
       {/* URL inputs for banner/avatar */}
       <View style={styles.row}>
@@ -332,6 +412,49 @@ const styles = StyleSheet.create({
   },
   avatarPlaceholderText: { color: '#9ca3af', fontSize: 24, fontWeight: '600' },
   spacer: { height: 20 },
+
+  // Banner settings
+  bannerSettings: {
+    backgroundColor: '#2a2a2a',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+    gap: 10,
+  },
+  bannerSettingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  bannerSettingLabel: { color: '#999', fontSize: 12, fontWeight: '600' },
+  bannerSettingValue: { color: '#ccc', fontSize: 12 },
+  stepBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 6,
+    backgroundColor: '#404040',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepBtnText: { color: '#f2f2f2', fontSize: 18, fontWeight: '600' },
+  pctBarOuter: {
+    flex: 1,
+    height: 6,
+    backgroundColor: '#404040',
+    borderRadius: 3,
+    marginHorizontal: 8,
+    overflow: 'hidden',
+  },
+  pctBarInner: { height: '100%', backgroundColor: '#f97316', borderRadius: 3 },
+  fitBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 4,
+    backgroundColor: '#404040',
+  },
+  fitBtnActive: { backgroundColor: '#f97316' },
+  fitBtnText: { color: '#999', fontSize: 12, fontWeight: '600' },
+  fitBtnTextActive: { color: '#fff' },
 
   // Form fields
   row: { flexDirection: 'row', gap: 12, marginBottom: 16 },

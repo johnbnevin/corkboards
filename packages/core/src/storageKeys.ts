@@ -75,6 +75,16 @@ export const STORAGE_KEYS = {
   FILTERS_OPEN: 'corkboard:filters-open',
   PROFILE_CARD_COLLAPSED: 'profile-card-collapsed',
 
+  // Banner display settings (shared — same preference across devices)
+  BANNER_HEIGHT_PCT: 'corkboard:banner-height-pct',   // height as % of width; 0 = auto (natural aspect)
+  BANNER_FIT_MODE: 'corkboard:banner-fit-mode',       // 'crop' | 'scale'
+
+  // Onboarding (per-user — each account has its own onboarding state)
+  ONBOARDING_SKIPPED: 'corkboard:onboarding-skipped',
+
+  // Blossom servers (per-user — different accounts may use different servers)
+  BLOSSOM_SERVERS: 'corkboard:blossom-servers',
+
   // Media / bandwidth settings (shared)
   IMAGE_SIZE_LIMIT: 'corkboard:image-size-limit',
   AVATAR_SIZE_LIMIT: 'corkboard:avatar-size-limit',
@@ -176,6 +186,10 @@ const SHARED_BACKED_UP_KEYS = [
   STORAGE_KEYS.HIDE_HTML,
   STORAGE_KEYS.HIDE_MARKDOWN,
   STORAGE_KEYS.HIDE_EXACT_TEXT,
+  STORAGE_KEYS.ONBOARDING_SKIPPED,
+  STORAGE_KEYS.BANNER_HEIGHT_PCT,
+  STORAGE_KEYS.BANNER_FIT_MODE,
+  STORAGE_KEYS.BLOSSOM_SERVERS,
   STORAGE_KEYS.IMAGE_SIZE_LIMIT,
   STORAGE_KEYS.AVATAR_SIZE_LIMIT,
   STORAGE_KEYS.AUTOFETCH_INTERVAL_SECS,

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useCallback } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
@@ -20,6 +20,10 @@ import { Loader2, Camera, Zap, Upload } from 'lucide-react';
 import { NSchema as n, type NostrMetadata } from '@nostrify/nostrify';
 import { useQueryClient } from '@tanstack/react-query';
 import { useUploadFile } from '@/hooks/useUploadFile';
+import { useLocalStorage } from '@/hooks/useLocalStorage';
+import { STORAGE_KEYS } from '@/lib/storageKeys';
+import { Slider } from '@/components/ui/slider';
+import { cacheProfile } from '@/lib/cacheStore';
 
 /** Placeholder banner: green hills + blue sky gradient */
 function BannerPlaceholder() {
@@ -123,8 +127,13 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
 
       const event = await publishEvent({ kind: 0, content: JSON.stringify(data) });
       console.log('[EditProfile] Published kind 0:', event.id, 'pubkey:', event.pubkey);
+
+      // Optimistically update the local cache + query so the UI reflects
+      // the new profile immediately without waiting for a relay round-trip.
+      const parsedMeta = n.json().pipe(n.metadata()).parse(event.content);
+      cacheProfile(user.pubkey, parsedMeta, event).catch(() => {});
+      queryClient.setQueryData(['author', user.pubkey], { metadata: parsedMeta, event });
       queryClient.invalidateQueries({ queryKey: ['logins'] });
-      queryClient.invalidateQueries({ queryKey: ['author', user.pubkey] });
       toast({ title: 'Profile saved', description: 'Published to Nostr relays.' });
       onSaved?.();
     } catch (error) {
@@ -136,6 +145,35 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
   const bannerUrl = form.watch('banner');
   const pictureUrl = form.watch('picture');
 
+  // Banner display settings (local, not published to Nostr)
+  const [bannerHeightPct, setBannerHeightPct] = useLocalStorage<number>(STORAGE_KEYS.BANNER_HEIGHT_PCT, 0);
+  const [bannerFitMode, setBannerFitMode] = useLocalStorage<string>(STORAGE_KEYS.BANNER_FIT_MODE, 'crop');
+  // Measure natural aspect ratio of the uploaded banner to use as default
+  const [naturalPct, setNaturalPct] = React.useState<number>(0);
+  const effectivePct = bannerHeightPct === 0 ? naturalPct : bannerHeightPct;
+
+  // Track if banner display settings changed so we can toast on close
+  const initialBannerSettings = useRef({ heightPct: bannerHeightPct, fitMode: bannerFitMode });
+  const bannerSettingsChanged = useRef(false);
+  const wrappedSetHeight = useCallback((v: number) => {
+    setBannerHeightPct(v);
+    bannerSettingsChanged.current = true;
+  }, [setBannerHeightPct]);
+  const wrappedSetFit = useCallback((v: string) => {
+    setBannerFitMode(v);
+    bannerSettingsChanged.current = true;
+  }, [setBannerFitMode]);
+
+  // Toast on unmount if banner settings were adjusted
+  useEffect(() => {
+    return () => {
+      if (bannerSettingsChanged.current) {
+        toast({ title: 'Banner display updated' });
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
@@ -145,13 +183,31 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
           <input ref={bannerInputRef} type="file" accept="image/*" className="hidden"
             onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f, 'banner'); e.target.value = ''; }} />
           <div
-            className="w-full h-16 sm:h-28 rounded-lg overflow-hidden cursor-pointer relative group"
+            className="w-full rounded-lg overflow-hidden cursor-pointer relative group"
+            style={effectivePct > 0 ? { paddingBottom: `${effectivePct}%` } : { height: bannerUrl ? 'auto' : '7rem' }}
             onClick={() => bannerInputRef.current?.click()}
           >
             {bannerUrl ? (
-              <img src={bannerUrl} alt="" className="w-full h-full object-cover" />
+              effectivePct > 0 ? (
+                <img
+                  src={bannerUrl} alt=""
+                  className={`absolute inset-0 w-full h-full ${bannerFitMode === 'crop' ? 'object-cover' : 'object-contain'}`}
+                  onLoad={(e) => {
+                    const img = e.currentTarget;
+                    if (img.naturalWidth > 0) setNaturalPct(Math.round((img.naturalHeight / img.naturalWidth) * 100));
+                  }}
+                />
+              ) : (
+                <img
+                  src={bannerUrl} alt="" className="w-full h-auto"
+                  onLoad={(e) => {
+                    const img = e.currentTarget;
+                    if (img.naturalWidth > 0) setNaturalPct(Math.round((img.naturalHeight / img.naturalWidth) * 100));
+                  }}
+                />
+              )
             ) : (
-              <BannerPlaceholder />
+              <div className={effectivePct > 0 ? 'absolute inset-0' : 'h-full'}><BannerPlaceholder /></div>
             )}
             <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center">
               <Camera className="h-5 w-5 text-white opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -178,6 +234,43 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
 
         {/* Spacer for overlapping avatar */}
         <div className="h-3 sm:h-6" />
+
+        {/* Banner display settings */}
+        {bannerUrl && (
+          <div className="space-y-2 p-3 bg-muted/50 rounded-lg">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium">Banner height</span>
+              <span className="text-xs text-muted-foreground">
+                {bannerHeightPct === 0 ? `Auto (${naturalPct}%)` : `${bannerHeightPct}%`}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted-foreground w-7">Auto</span>
+              <Slider
+                min={0} max={75} step={1}
+                value={[bannerHeightPct]}
+                onValueChange={([v]) => wrappedSetHeight(v)}
+                className="flex-1"
+              />
+              <span className="text-[10px] text-muted-foreground w-5">75%</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-medium">Fit mode</span>
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  className={`text-xs px-2 py-0.5 rounded ${bannerFitMode === 'crop' ? 'bg-primary text-primary-foreground' : 'bg-muted hover:bg-muted/80'}`}
+                  onClick={() => wrappedSetFit('crop')}
+                >Crop</button>
+                <button
+                  type="button"
+                  className={`text-xs px-2 py-0.5 rounded ${bannerFitMode === 'scale' ? 'bg-primary text-primary-foreground' : 'bg-muted hover:bg-muted/80'}`}
+                  onClick={() => wrappedSetFit('scale')}
+                >Scale</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* URL inputs + upload buttons for banner/avatar */}
         <div className="grid grid-cols-2 gap-3">

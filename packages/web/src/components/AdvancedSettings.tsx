@@ -23,7 +23,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import {
-  Eye, Database, Settings, Bookmark, Trash2, Wifi, WifiOff,
+  Eye, Database, Settings, Bookmark, Trash2, Wifi, WifiOff, Compass,
   Plus, X, CheckCircle, AlertTriangle, Server,
 } from 'lucide-react';
 import { useAppContext } from '@/hooks/useAppContext';
@@ -45,6 +45,9 @@ interface AdvancedSettingsProps {
   publicBookmarks: boolean;
   onTogglePublicBookmarks: () => void;
   onDeleteAccount: () => void;
+  initialSection?: 'main' | 'relays' | 'blossom';
+  isOnboarding: boolean;
+  onResetOnboarding: () => void;
 }
 
 type ConfirmAction = 'dismissed' | 'cache' | 'clientTag' | 'bookmarks' | 'delete' | null;
@@ -71,9 +74,17 @@ export function AdvancedSettings({
   publicBookmarks,
   onTogglePublicBookmarks,
   onDeleteAccount,
+  initialSection = 'main',
+  isOnboarding,
+  onResetOnboarding,
 }: AdvancedSettingsProps) {
   const [confirm, setConfirm] = useState<ConfirmAction>(null);
-  const [section, setSection] = useState<'main' | 'relays' | 'blossom'>('main');
+  const [section, setSection] = useState<'main' | 'relays' | 'blossom'>(initialSection);
+
+  // Sync with external section changes (e.g., opened from backup dropdown)
+  useEffect(() => {
+    setSection(initialSection);
+  }, [initialSection]);
 
   const confirmMessages: Record<Exclude<ConfirmAction, null>, { title: string; description: string; action: string; destructive?: boolean }> = {
     dismissed: {
@@ -127,25 +138,6 @@ export function AdvancedSettings({
   return (
     <>
       <div className="space-y-1">
-        {/* Relay & Server Management */}
-        <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setSection('relays')}>
-          <div className="flex items-center gap-2 text-sm font-medium">
-            <Wifi className="h-4 w-4 shrink-0" />
-            Relays
-          </div>
-          <p className="text-xs text-muted-foreground mt-0.5 pl-6">Manage relays, publish relay list, view health</p>
-        </button>
-
-        <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setSection('blossom')}>
-          <div className="flex items-center gap-2 text-sm font-medium">
-            <Server className="h-4 w-4 shrink-0" />
-            Blossom Servers
-          </div>
-          <p className="text-xs text-muted-foreground mt-0.5 pl-6">Configure backup storage servers</p>
-        </button>
-
-        <Separator className="my-2" />
-
         {dismissedCount > 0 && (
           <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setConfirm('dismissed')}>
             <div className="flex items-center gap-2 text-sm font-medium">
@@ -181,6 +173,16 @@ export function AdvancedSettings({
             {publicBookmarks ? 'Your saved notes are visible to others' : 'Your saved notes are encrypted and private'}
           </p>
         </button>
+
+        {!isOnboarding && (
+          <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={onResetOnboarding}>
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Compass className="h-4 w-4 shrink-0" />
+              Restart Onboarding
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5 pl-6">Show the discover/follow guide again</p>
+          </button>
+        )}
 
         <Separator className="my-2" />
 
@@ -319,6 +321,12 @@ function RelaySection({ onBack }: { onBack: () => void }) {
             <div key={relay.url} className="flex items-center gap-2 p-2 rounded-md border bg-muted/20 text-xs">
               <StatusDot status={health?.status || 'unknown'} />
               <span className="font-mono flex-1 truncate" title={relay.url}>{getShortName(relay.url)}</span>
+              {/* Status inline — latency or status text */}
+              {health && health.status !== 'unknown' && (
+                <span className={`text-[10px] shrink-0 ${health.status === 'healthy' ? 'text-green-500' : health.status === 'slow' ? 'text-yellow-500' : 'text-red-500'}`}>
+                  {health.latency !== null ? `${health.latency}ms` : health.status}
+                </span>
+              )}
               <Popover>
                 <PopoverTrigger asChild>
                   <Button variant="ghost" size="icon" className="size-5 text-muted-foreground shrink-0">
@@ -335,11 +343,6 @@ function RelaySection({ onBack }: { onBack: () => void }) {
                       <Label className="text-xs cursor-pointer">Write</Label>
                       <Switch checked={relay.write} onCheckedChange={() => handleToggleWrite(relay.url)} className="data-[state=checked]:bg-orange-500 scale-75" />
                     </div>
-                    {health && (
-                      <div className="text-[10px] text-muted-foreground pt-1 border-t">
-                        Status: {health.status} {health.latency !== null && `(${health.latency}ms)`}
-                      </div>
-                    )}
                   </div>
                 </PopoverContent>
               </Popover>

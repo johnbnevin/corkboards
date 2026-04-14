@@ -94,7 +94,7 @@ export const DEFAULT_BLOSSOM_SERVERS = [
   'https://cdn.sovbit.host/',
 ];
 
-const BLOSSOM_SERVERS_KEY = 'corkboard:blossom-servers';
+const BLOSSOM_SERVERS_KEY = STORAGE_KEYS.BLOSSOM_SERVERS;
 
 /** Get user-configured blossom servers, falling back to defaults */
 export function getBlossomServers(): string[] {
@@ -695,7 +695,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const manifestEvent = await signer.signEvent({
         kind: 30078,
         content: encryptedAutoManifest,
-        tags: [['d', `${D_TAG_PREFIX}:auto`]],
+        tags: [['d', `${D_TAG_PREFIX}:auto:${deviceId}`]],
         created_at: now,
       });
 
@@ -720,7 +720,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const cps = getStoredCheckpoints();
       const autoEntry: RemoteCheckpoint = {
         eventId: manifestEvent.id,
-        dTag: `${D_TAG_PREFIX}:auto`,
+        dTag: `${D_TAG_PREFIX}:auto:${deviceId}`,
         timestamp: now,
         blossomUrl: blossomUrl!,
         ...(blossomHash ? { blossomHash } : {}),
@@ -730,7 +730,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         corkboardNames,
       };
       // Only add if stats differ from the most recent autosave
-      const latestAuto = cps.find(c => c.dTag?.endsWith(':auto'));
+      const latestAuto = cps.find(c => c.dTag?.includes(':auto'));
       const statsChanged = !latestAuto?.stats
         || latestAuto.stats.corkboards !== stats.corkboards
         || latestAuto.stats.savedForLater !== stats.savedForLater
@@ -748,8 +748,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         cps.unshift(autoEntry);
       }
       // Keep only last 5 autosaves, preserve any manual checkpoints
-      const manualCps = cps.filter(c => !c.dTag?.endsWith(':auto'));
-      const autoCps = cps.filter(c => c.dTag?.endsWith(':auto')).slice(0, 5);
+      const manualCps = cps.filter(c => !c.dTag?.includes(':auto'));
+      const autoCps = cps.filter(c => c.dTag?.includes(':auto')).slice(0, 5);
       const merged = [...manualCps, ...autoCps].sort((a, b) => b.timestamp - a.timestamp);
       setStoredCheckpoints(merged);
       refreshCheckpointsRef.current();
@@ -767,7 +767,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   // Query relays in small batches (2–3 at a time) — stop early when results found.
   // Avoids overwhelming mobile browsers with 10+ simultaneous WebSocket connections.
   // Tracks which relays were used so post-login fetches can prefer the others.
-  const queryAll = useCallback(async (filter: { kinds: number[]; authors: string[]; '#d'?: string[]; limit: number }, label: string, specificRelays?: string[], _checkAll = false, overallTimeoutMs = 15000, perRelayTimeoutMs = 5000): Promise<NostrEvent[]> => {
+  const queryAll = useCallback(async (filter: { kinds: number[]; authors: string[]; '#d'?: string[]; limit?: number }, label: string, specificRelays?: string[], _checkAll = false, overallTimeoutMs = 15000, perRelayTimeoutMs = 5000): Promise<NostrEvent[]> => {
     const pubkey = user?.pubkey || '';
     const primaryRelays = specificRelays?.map(normalizeRelay) || [];
     const { primary: writePrimary, fallback: writeFallback } = pubkey
@@ -931,7 +931,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
       // Fetch recent backup manifests from all known relays.
       const allEvents = await queryAll(
-        { kinds: [30078], authors: [pubkey], limit: 3 },
+        { kinds: [30078], authors: [pubkey] },
         'backup manifest events',
         undefined,
         false,
@@ -943,7 +943,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         const dTag = ev.tags.find(t => t[0] === 'd')?.[1];
         return dTag === D_TAG_PREFIX || dTag?.startsWith(D_TAG_PREFIX + ':');
       });
-      log(`Total: ${manifestEvents.length} backup manifest events (from ${allEvents.length} kind:30078, showing last 3 manual + auto-save)`);
+      log(`Total: ${manifestEvents.length} backup manifest events (from ${allEvents.length} kind:30078, no limit)`);
 
       if (manifestEvents.length === 0) {
         if (allEvents.length === 0) {

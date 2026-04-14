@@ -24,6 +24,8 @@ interface NotificationsCorkboardProps {
   columnCount?: number;
   /** Reports the number of blank (dismissed/collapsed) notification cards to the parent */
   onBlankSpaceCount?: (count: number) => void;
+  /** Reports stats (total, visible, dismissed) to parent for StatusBar */
+  onStatsUpdate?: (stats: { total: number; visible: number; dismissed: number; filtered: number }) => void;
   /** Reports loadMore callback, hasMore, loadNewer, and newestTimestamp to parent (for StatusBar) */
   onLoadMoreReady?: (loadMore: (count: number) => void, hasMore: boolean, loadNewer: () => void, newestTimestamp: number | null) => void;
 }
@@ -77,6 +79,7 @@ export const NotificationsCorkboard = memo(function NotificationsCorkboard({
   onViewThread,
   columnCount = 3,
   onBlankSpaceCount,
+  onStatsUpdate,
   onLoadMoreReady,
 }: NotificationsCorkboardProps) {
   const { notifications, isLoading, loadMore, loadNewer, hasMore, newestTimestamp } = useNotifications(true);
@@ -113,13 +116,29 @@ export const NotificationsCorkboard = memo(function NotificationsCorkboard({
     [notifications, hiddenTypes, isDismissed],
   );
 
-  // Count blank spaces (dismissed/collapsed) from ALL notifications (not filtered),
-  // matching how regular corkboard tabs count from the full notes array.
+  // Count dismissed notifications (fully removed from feed)
+  const notifDismissedCount = useMemo(
+    () => notifications.filter(n => isDismissed(n.event.id)).length,
+    [notifications, isDismissed],
+  );
+
+  // Count blank spaces (collapsed/soft-dismissed but still in grid)
   const notifBlankCount = useMemo(
     () => notifications.filter(n => isCollapsedThisSession(n.event.id) || isSoftDismissed(n.event.id)).length,
     [notifications, isCollapsedThisSession, isSoftDismissed],
   );
   useEffect(() => { onBlankSpaceCount?.(notifBlankCount); }, [notifBlankCount, onBlankSpaceCount]);
+
+  // Report stats to parent for StatusBar
+  const hiddenByType = notifications.length - filtered.length - notifDismissedCount;
+  useEffect(() => {
+    onStatsUpdate?.({
+      total: notifications.length,
+      visible: filtered.length,
+      dismissed: notifDismissedCount,
+      filtered: Math.max(0, hiddenByType),
+    });
+  }, [notifications.length, filtered.length, notifDismissedCount, hiddenByType, onStatsUpdate]);
 
   // Distribute into columns (round-robin)
   const columns = useMemo(() => {
@@ -193,6 +212,16 @@ export const NotificationsCorkboard = memo(function NotificationsCorkboard({
                 >
                   ✕ Show all types
                 </button>
+              </div>
+            )}
+
+            {/* Stats line — matches ProfileCard/FeedInfoCard pattern */}
+            {notifications.length > 0 && (
+              <div className="mt-2 pt-2 border-t flex items-center gap-2 text-xs text-muted-foreground px-2">
+                <span><span className="font-medium text-foreground">{filtered.length}</span> showing{filtered.length < notifications.length ? ` (${notifications.length} loaded)` : ''}</span>
+                {notifDismissedCount > 0 && (
+                  <span>· {notifDismissedCount} dismissed</span>
+                )}
               </div>
             )}
           </CardContent>

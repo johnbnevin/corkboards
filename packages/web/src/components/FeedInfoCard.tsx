@@ -59,6 +59,8 @@ interface FeedInfoCardProps {
   // Stats / counts
   stats?: NoteKindStats;
   notesCount: number;
+  totalLoaded?: number;
+  dismissedCount?: number;
   hasFilteredNotes?: boolean;
   batchProgress: { loaded: number; total: number } | null;
   isLoadingAllFollows: boolean;
@@ -131,7 +133,7 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
     isFiltersCollapsed, onToggleFiltersCollapsed,
     isRelayTab, isCustomFeedTab, isAllFollowsTab, isRssTab, isDiscoverTab, isSavedTab,
     activeCustomFeed, activeRssFeed, contacts,
-    stats, notesCount, hasFilteredNotes, batchProgress,
+    stats, notesCount, totalLoaded, dismissedCount, hasFilteredNotes, batchProgress,
     isLoadingAllFollows, isLoadingDiscover, isLoadingRss, isLoadingMore,
     hasMore, hasActiveFilters, hasActiveContentFilters,
     showOwnNotes, onToggleOwnNotes,
@@ -200,8 +202,9 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
                 </div>
                 <div className="mt-3 flex flex-wrap gap-3 text-xs">
                   <span className="text-muted-foreground">
-                    <span className="font-medium text-foreground">{notesCount}</span> notes loaded
+                    <span className="font-medium text-foreground">{notesCount}</span> showing{totalLoaded && totalLoaded > notesCount ? ` (${totalLoaded} loaded)` : ''}
                   </span>
+                  {(dismissedCount ?? 0) > 0 && <span className="text-muted-foreground">· {dismissedCount} dismissed</span>}
                   <Button
                     variant="ghost"
                     size="sm"
@@ -318,8 +321,9 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
                   {hasFilteredNotes ? (
                     <span className="text-orange-600 dark:text-orange-400">Notes found but filtered by settings.</span>
                   ) : (
-                    <span><span className="font-medium text-foreground">{notesCount}</span> notes loaded</span>
+                    <span><span className="font-medium text-foreground">{notesCount}</span> showing{totalLoaded && totalLoaded > notesCount ? ` (${totalLoaded} loaded)` : ''}</span>
                   )}
+                  {(dismissedCount ?? 0) > 0 && <span className="text-muted-foreground">· {dismissedCount} dismissed</span>}
                   <span className="flex-1" />
                   {onToggleFollow && (
                     <Button
@@ -399,7 +403,8 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
                 </div>
                 <div className="mt-3 pt-2 border-t flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
                   <span><span className="font-medium text-foreground">{contacts?.length || 0}</span> accounts followed</span>
-                  <span><span className="font-medium text-foreground">{notesCount}</span> notes loaded</span>
+                  <span><span className="font-medium text-foreground">{notesCount}</span> showing{totalLoaded && totalLoaded > notesCount ? ` (${totalLoaded} loaded)` : ''}</span>
+                  {(dismissedCount ?? 0) > 0 && <span>· {dismissedCount} dismissed</span>}
                   {isLoadingAllFollows && (
                     <span className="text-purple-600 dark:text-purple-400 flex items-center gap-1">
                       <div className="h-3 w-3 animate-spin rounded-full border-2 border-purple-500 border-t-transparent" />
@@ -471,8 +476,9 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
                 </div>
                 <div className="mt-3 flex flex-wrap gap-3 text-xs">
                   <span className="text-muted-foreground">
-                    <span className="font-medium text-foreground">{notesCount}</span> items loaded
+                    <span className="font-medium text-foreground">{notesCount}</span> showing{totalLoaded && totalLoaded > notesCount ? ` (${totalLoaded} loaded)` : ''}
                   </span>
+                  {(dismissedCount ?? 0) > 0 && <span className="text-muted-foreground">· {dismissedCount} dismissed</span>}
                   {isLoadingRss && (
                     <span className="text-orange-600 dark:text-orange-400 flex items-center gap-1">
                       <div className="h-3 w-3 animate-spin rounded-full border-2 border-orange-500 border-t-transparent" />
@@ -528,7 +534,8 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
                   </div>
                 </div>
                 <div className="mt-3 pt-2 border-t flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
-                  <span><span className="font-medium text-foreground">{notesCount}</span> notes discovered</span>
+                  <span><span className="font-medium text-foreground">{notesCount}</span> showing{totalLoaded && totalLoaded > notesCount ? ` (${totalLoaded} discovered)` : ' discovered'}</span>
+                  {(dismissedCount ?? 0) > 0 && <span>· {dismissedCount} dismissed</span>}
                   {isLoadingDiscover && (
                     <span className="text-amber-600 dark:text-amber-400 flex items-center gap-1">
                       <div className="h-3 w-3 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />

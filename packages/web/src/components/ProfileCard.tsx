@@ -3,6 +3,7 @@ import { toast } from '@/hooks/useToast'
 import { useAuthor } from '@/hooks/useAuthor'
 import { useNip65Relays } from '@/hooks/useNip65Relays'
 import { usePlatformStorage } from '@/hooks/usePlatformStorage'
+import { useLocalStorage } from '@/hooks/useLocalStorage'
 import { STORAGE_KEYS } from '@/lib/storageKeys'
 import { useIsMobile } from '@/hooks/useIsMobile'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
@@ -129,6 +130,10 @@ export function ProfileCard({
   const [relaysLoading, setRelaysLoading] = useState(true)
   const [isProfileCollapsed, setIsProfileCollapsed] = usePlatformStorage<boolean>(STORAGE_KEYS.PROFILE_CARD_COLLAPSED, isMobile)
   const [filtersOpen, setFiltersOpen] = useState(!isMobile)
+  const [bannerHeightPct] = useLocalStorage<number>(STORAGE_KEYS.BANNER_HEIGHT_PCT, 0)
+  const [bannerFitMode] = useLocalStorage<string>(STORAGE_KEYS.BANNER_FIT_MODE, 'crop')
+  const [naturalBannerPct, setNaturalBannerPct] = useState(0)
+  const effectiveBannerPct = bannerHeightPct === 0 ? naturalBannerPct : bannerHeightPct
 
   useEffect(() => {
     let cancelled = false
@@ -260,9 +265,30 @@ export function ProfileCard({
       {/* Profile card — banner, avatar, full info */}
       <Card className={`relative overflow-hidden ${className} ${isMobile ? 'max-h-[70vh] overflow-y-auto' : ''}`}>
         {metadata?.banner ? (
-          <div className="w-full">
-            <img src={metadata.banner} alt="" className="w-full h-auto max-h-24 sm:max-h-none object-cover sm:object-contain" />
-          </div>
+          effectiveBannerPct > 0 ? (
+            <div className="w-full relative" style={{ paddingBottom: `${effectiveBannerPct}%` }}>
+              <img
+                src={metadata.banner} alt=""
+                className={`absolute inset-0 w-full h-full ${bannerFitMode === 'crop' ? 'object-cover' : 'object-contain'}`}
+                onLoad={(e) => {
+                  const img = e.currentTarget;
+                  if (img.naturalWidth > 0 && naturalBannerPct === 0)
+                    setNaturalBannerPct(Math.round((img.naturalHeight / img.naturalWidth) * 100));
+                }}
+              />
+            </div>
+          ) : (
+            <div className="w-full">
+              <img
+                src={metadata.banner} alt="" className="w-full h-auto"
+                onLoad={(e) => {
+                  const img = e.currentTarget;
+                  if (img.naturalWidth > 0 && naturalBannerPct === 0)
+                    setNaturalBannerPct(Math.round((img.naturalHeight / img.naturalWidth) * 100));
+                }}
+              />
+            </div>
+          )
         ) : showPlaceholders ? (
           <div className="h-28 sm:h-36 w-full"><BannerPlaceholder /></div>
         ) : (

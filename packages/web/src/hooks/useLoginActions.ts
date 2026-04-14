@@ -31,6 +31,7 @@ import { clearNotesCache } from '@/lib/notesCache';
 import { clearCache as clearProfileCacheDb, clearMemCache as clearProfileMemCache } from '@/lib/cacheStore';
 import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
 import { clearNoteCardCache } from '@/components/NoteCard';
+import { handleLogoutStorageAsync } from '@/lib/storageKeys';
 import { isTauri, keychainStore, keychainDelete } from '@/lib/tauri';
 import { NOSTRCONNECT_RELAYS } from '@/lib/relayConstants';
 
@@ -234,6 +235,39 @@ export function useLoginActions() {
         relays: connectRelays,
       });
       addLogin(login);
+    },
+
+    /**
+     * Log out a single account. Stashes its per-user data, removes the login
+     * credential, and clears in-memory caches. Does NOT destroy other accounts.
+     * Returns the remaining logins so the caller can switch or redirect.
+     */
+    async logoutAccount(pubkey: string): Promise<{ remaining: typeof logins }> {
+      // Stash per-user IDB data so it survives for potential re-login
+      await handleLogoutStorageAsync(pubkey);
+
+      // Remove the login credential for this account
+      const login = logins.find(l => l.pubkey === pubkey);
+      if (login) {
+        if (isTauri) await keychainDelete(`nsec:${login.pubkey}`);
+        removeLogin(login.id);
+      }
+
+      // Clear in-memory caches (they're from the departing user)
+      clearProfileMemCache();
+      clearCollapsedNotesModuleState();
+      clearNoteCardCache();
+      await clearNotesCache().catch(() => {});
+
+      // Clear session-scoped state
+      try {
+        sessionStorage.removeItem('corkboard:scroll-positions');
+        sessionStorage.removeItem('corkboard:active-tab');
+        sessionStorage.removeItem('corkboard:soft-dismissed');
+        sessionStorage.removeItem('corkboard:session-collapsed');
+      } catch { /* unavailable */ }
+
+      return { remaining: logins.filter(l => l.pubkey !== pubkey) };
     },
 
     /** Nuclear wipe — destroys ALL local data. Nothing survives. */

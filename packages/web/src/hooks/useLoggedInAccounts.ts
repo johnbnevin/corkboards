@@ -63,6 +63,7 @@ export function useLoggedInAccounts() {
   }, [currentUser?.pubkey, logins, rawSetLogin]);
 
   return {
+    logins,
     authors,
     currentUser,
     otherUsers,

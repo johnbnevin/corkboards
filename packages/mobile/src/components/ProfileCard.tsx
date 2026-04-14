@@ -3,7 +3,7 @@
  * NIP-05, website, lightning address, relay list, and follow/mute actions.
  * For use in lists and modals. Mirrors web's ProfileCard.tsx.
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -17,7 +17,10 @@ import { nip19 } from 'nostr-tools';
 import { useAuthor } from '../hooks/useAuthor';
 import { useNip65Relays } from '../hooks/useNip65Relays';
 import { genUserName } from '@core/genUserName';
+import { STORAGE_KEYS } from '@core/storageKeys';
 import { SizeGuardedImage } from './SizeGuardedImage';
+import { useLocalStorage } from '../hooks/useLocalStorage';
+import { Dimensions } from 'react-native';
 
 interface ProfileCardProps {
   pubkey: string;
@@ -36,6 +39,11 @@ export function ProfileCard({ pubkey, compact = false, onPress, stats }: Profile
   const [relaysOpen, setRelaysOpen] = useState(false);
   const [relays, setRelays] = useState<string[]>([]);
   const [relaysLoading, setRelaysLoading] = useState(false);
+  const [bannerHeightPct] = useLocalStorage<number>(STORAGE_KEYS.BANNER_HEIGHT_PCT, 0);
+  const [bannerFitMode] = useLocalStorage<string>(STORAGE_KEYS.BANNER_FIT_MODE, 'crop');
+  const [naturalBannerPct, setNaturalBannerPct] = useState(0);
+  const effectiveBannerPct = bannerHeightPct === 0 ? naturalBannerPct : bannerHeightPct;
+  const bannerWidth = Dimensions.get('window').width - 24; // container padding
 
   const metadata = author?.metadata;
   const displayName = metadata?.display_name || metadata?.name || genUserName(pubkey);
@@ -106,7 +114,12 @@ export function ProfileCard({ pubkey, compact = false, onPress, stats }: Profile
       {/* Banner */}
       {!compact && (
         metadata?.banner ? (
-          <SizeGuardedImage uri={metadata.banner} style={styles.banner} type="image" />
+          <SizeGuardedImage
+            uri={metadata.banner}
+            style={[styles.banner, effectiveBannerPct > 0 ? { height: bannerWidth * effectiveBannerPct / 100 } : undefined]}
+            type="image"
+            resizeMode={bannerFitMode === 'crop' ? 'cover' : 'contain'}
+          />
         ) : (
           <View style={styles.bannerPlaceholder} />
         )

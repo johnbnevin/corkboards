@@ -151,6 +151,12 @@ export function updateRelayCache(pubkey: string, relays: string[]) {
   }
 }
 
+/** Clear relay cache on account switch so stale relay data doesn't leak between users */
+// eslint-disable-next-line react-refresh/only-export-components
+export function clearRelayCache(): void {
+  relayCache = new Map();
+}
+
 // Get cached relays for a pubkey (updates LRU order on every access)
 // eslint-disable-next-line react-refresh/only-export-components
 export function getRelayCache(pubkey: string): string[] {

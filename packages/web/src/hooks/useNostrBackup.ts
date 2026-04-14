@@ -354,12 +354,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   const manifestEventRef = useRef<NostrEvent | null>(null);
   const manifestDataRef = useRef<Record<string, unknown> | null>(null);
   const idbReadyChecked = useRef(false);
-  // True while the forced background check (for returning users) is in progress.
-  // Prevents auto-save from overwriting a potentially newer remote state.
-  const bgCheckInProgress = useRef(false);
-  // Cross-device update notification — set when forced check finds a newer backup
-  // from a different device, so the UI can show a toast offering restore.
-  const [crossDeviceUpdate, setCrossDeviceUpdate] = useState<RemoteCheckpoint | null>(null);
 
   // Persistent device ID for cross-device sync — stays local, never backed up.
   // Included in backup manifests so we can detect when a different device saved.
@@ -638,8 +632,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   const autoSaveBackup = useCallback(async (): Promise<boolean> => {
     if (!user || isSaving.current || isRestoring.current) return false;
     // Block auto-save while a forced background check is running — prevents
-    // overwriting a potentially newer remote state from another device.
-    if (bgCheckInProgress.current) return false;
     if (!hasUnsavedChanges()) return false;
     isSaving.current = true;
 
@@ -843,7 +835,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   }, [log, user]);
 
    // Check for remote backup (runs on every login/refresh)
-   // Set force=true to override "already checked" and re-check
+   // Check for remote backup (runs on every login/refresh)
+   // Set force=true to bypass the "already checked" guard (e.g. user-triggered re-check)
    const checkRemoteBackup = useCallback(async (force = false) => {
      if (!user) {
        log('Check skipped: no user');
@@ -851,7 +844,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        return;
      }
 
-     // Skip if already checked this session (module-level guard persists across remounts) - unless forced
+     // Skip if already checked this session (module-level guard persists across remounts) — unless forced
      if (!force && _checkedPubkey === user.pubkey) {
        log('Check skipped: already checked this session');
        // Ensure checkpoints are loaded (React state may have been empty at mount)
@@ -883,7 +876,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        log('IDB ready, memCache populated');
      }
 
-     // Skip if backup was already checked/restored for this user (persisted across refreshes) - unless forced
+     // Skip if backup was already checked/restored for this user (persisted across refreshes) — unless forced
      const checkedKey = `${BACKUP_CHECKED_KEY}:${user.pubkey}`;
      if (!force && idbGetSync(checkedKey)) {
        log('Check skipped: backup already checked for this user (flag found after IDB ready)');
@@ -1129,43 +1122,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         });
       }
 
-      // Cross-device detection: if this is a forced check for a returning user,
-      // compare device IDs. If the newest backup is from a different device and
-      // is newer than our last save, notify the UI instead of blocking with splash.
-      const manifestDeviceId = manifest?.deviceId as string | undefined;
-      const localLastTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
-      const remoteTs = manifest?.timestamp as number || bestManifestEvent.created_at;
-      const isCrossDevice = manifestDeviceId && manifestDeviceId !== deviceId;
-      const isNewer = remoteTs > localLastTs;
-
-      if (force && isReturningUser && isCrossDevice && isNewer) {
-        // Don't block with 'found' — instead notify via crossDeviceUpdate
-        // so the UI can show a non-blocking toast.
-        const newestCp = dedupedCheckpoints.sort((a, b) => b.timestamp - a.timestamp)[0];
-        if (newestCp) {
-          log(`Cross-device update detected (device ${manifestDeviceId?.slice(0, 8)}, ${formatTimeAgo(remoteTs)})`);
-          setCrossDeviceUpdate(newestCp);
-        }
-        setCheckSettled(true);
-        bgCheckInProgress.current = false;
-        return;
-      }
-
-      // Forced re-check but user already dismissed/restored — don't re-show splash.
-      // The backup-checked flag is set by dismissRemoteBackup() and loadRemoteBackup(),
-      // so if it exists, the user already made their choice this session.
-      // Also reset status to 'idle' so the splash screen clears if it was showing
-      // (can happen if browser evicted localStorage, losing the returning-user flag).
-      const checkedKey2 = `${BACKUP_CHECKED_KEY}:${user.pubkey}`;
-      if (force && idbGetSync(checkedKey2)) {
-        log('Forced re-check: backup already dismissed/restored, skipping splash');
-        markBackupCheckedSync(user.pubkey); // Re-set localStorage flag in case browser evicted it
-        setStatus('idle');
-        setCheckSettled(true);
-        bgCheckInProgress.current = false;
-        return;
-      }
-
       // If local data already exists (corkboards, dismissed notes), this is likely
       // a storage eviction scenario — the browser cleared localStorage/IDB flags but
       // the user's actual data survived. Auto-dismiss instead of blocking with splash.
@@ -1178,7 +1134,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         markBackupCheckedSync(user.pubkey);
         setStatus('idle');
         setCheckSettled(true);
-        bgCheckInProgress.current = false;
         return;
       }
 
@@ -1205,8 +1160,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setCheckSettled(true);
         setMessage(friendly);
       }
-    } finally {
-      bgCheckInProgress.current = false;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- checkpoints declared after this hook (forward ref); deviceId is stable useState
   }, [user, queryAll, log, deviceId, isReturningUser]);
@@ -1600,31 +1553,10 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   }, [user, log, autoSaveBackup, hasUnsavedChanges]);
 
   // Check on initial load — retry until successful, splash stays visible throughout.
-  // For returning users: the non-forced call settles immediately (IDB flag found),
-  // then a forced background check runs to pick up cross-device changes without blocking UI.
   // After final retry, settle with an error so the user isn't stuck forever.
   useEffect(() => {
     if (!user) return;
     checkRemoteBackup();
-    // For returning users, also kick off a forced background check after the
-    // non-forced one settles instantly — this discovers cross-device changes.
-    // Set bgCheckInProgress to prevent auto-save from overwriting newer remote state.
-    if (isReturningUser) {
-      // Skip the forced background check if this is an account switch (not a new session).
-      // Account switches set a sessionStorage flag — the user's local state is already
-      // correct from switchActiveUser stash/restore, no need to fetch from relays.
-      const isAccountSwitch = (() => { try { return !!sessionStorage.getItem('corkboard:account-switch'); } catch { return false; } })();
-      if (isAccountSwitch) {
-        try { sessionStorage.removeItem('corkboard:account-switch'); } catch { /* */ }
-        log('Skipping forced background check (account switch, not new session)');
-      } else {
-        bgCheckInProgress.current = true;
-        const bgCheck = setTimeout(() => checkRemoteBackup(true), 500);
-        // Safety fallback: clear bgCheckInProgress after 20s in case check hangs
-        const safety = setTimeout(() => { bgCheckInProgress.current = false; }, 20000);
-        return () => { clearTimeout(bgCheck); clearTimeout(safety); };
-      }
-    }
     const retry1 = setTimeout(() => {
       if (_checkedPubkey === null) checkRemoteBackup();
     }, 5000);
@@ -1642,7 +1574,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       }
     }, 25000);
     return () => { clearTimeout(retry1); clearTimeout(retry2); clearTimeout(finalSettle); };
-  }, [user, checkRemoteBackup, isReturningUser, log]);
+  }, [user, checkRemoteBackup, log]);
 
   // Refresh checkpoints list after save completes
   useEffect(() => {
@@ -1721,11 +1653,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     }
   }, [user, isScanning, queryAll, log]);
 
-  // Dismiss cross-device notification (user chose not to restore)
-  const dismissCrossDeviceUpdate = useCallback(() => {
-    setCrossDeviceUpdate(null);
-  }, []);
-
   return {
     backupStatus: status,
     backupCheckSettled: checkSettled,
@@ -1741,10 +1668,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     lastBackupTs,
     hasUnsavedChanges,
     isReturningUser,
-    // Cross-device sync
-    bgCheckInProgress: bgCheckInProgress.current,
-    crossDeviceUpdate,
-    dismissCrossDeviceUpdate,
     // Checkpoint management
     checkpoints,
     renameCheckpoint: renameCheckpointFn,

@@ -6,6 +6,8 @@ import { getUserRelays, FALLBACK_RELAYS } from '@/components/NostrProvider'
 import { idbSetSync } from '@/lib/idb'
 import { STORAGE_KEYS } from '@/lib/storageKeys'
 import type { NostrEvent } from '@nostrify/nostrify'
+import { NRelay1 } from '@nostrify/nostrify'
+import { normalizeRelay } from '@core/normalizeRelay'
 
 const IDB_KEY = STORAGE_KEYS.PINNED_NOTE_IDS
 
@@ -42,7 +44,9 @@ export function usePinnedNotes() {
     }
   }, [pinnedIds])
 
-  // Fetch pin list (kind 10001) from relays
+  // Fetch pin list (kind 10001) from relays — query ALL write relays and
+  // pick the newest event by created_at. Promise.any() previously raced
+  // relays and could return stale data from a fast-but-outdated relay.
   const { data: pinListResult, isLoading: isLoadingPinList } = useQuery({
     queryKey: ['pinned-notes', user?.pubkey],
     queryFn: async (): Promise<{ ids: string[]; status: 'found' | 'none' | 'no-list' }> => {
@@ -51,30 +55,34 @@ export function usePinnedNotes() {
       const userRelays = getUserRelays()
       const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
 
-      let pinList: NostrEvent | null = null
-      try {
-        pinList = await Promise.any(
-          writeRelays.map(async (relayUrl) => {
-            const relay = nostr.relay(relayUrl)
-            const [ev] = await relay.query(
+      // Query all write relays in parallel, collect all responses
+      const results = await Promise.allSettled(
+        writeRelays.map(async (relayUrl) => {
+          const relay = new NRelay1(normalizeRelay(relayUrl), { backoff: false })
+          try {
+            const events = await relay.query(
               [{ kinds: [10001], authors: [user.pubkey], limit: 1 }],
-              { signal: AbortSignal.timeout(3000) }
+              { signal: AbortSignal.timeout(4000) }
             )
-            if (!ev) throw new Error('no pin list')
-            return ev
-          })
-        )
-      } catch {
-        return { ids: [], status: 'no-list' }
+            return events.filter(ev => ev.kind === 10001)
+          } finally {
+            try { relay.close() } catch { /* */ }
+          }
+        })
+      )
+
+      // Pick the newest kind 10001 event across all relays
+      let best: NostrEvent | null = null
+      for (const r of results) {
+        if (r.status !== 'fulfilled') continue
+        for (const ev of r.value) {
+          if (!best || ev.created_at > best.created_at) best = ev
+        }
       }
 
-      if (!pinList) return { ids: [], status: 'no-list' }
+      if (!best) return { ids: [], status: 'no-list' }
 
-      // Defensive: verify relay returned the correct kind (some relays may
-      // return wrong-kind events, e.g. kind 10003 bookmarks instead of 10001)
-      if (pinList.kind !== 10001) return { ids: [], status: 'no-list' }
-
-      const ids = pinList.tags
+      const ids = best.tags
         .filter(t => t[0] === 'e' && t[1])
         .map(t => t[1])
 
@@ -146,7 +154,9 @@ export function usePinnedNotes() {
 
   const pinnedSet = useMemo(() => new Set(pinnedIds), [pinnedIds])
 
-  // Publish updated kind 10001 pin list to relays
+  // Publish updated kind 10001 pin list directly to each relay.
+  // Uses fresh NRelay1 connections instead of the NPool to avoid stale
+  // WebSocket issues after idle periods that caused unpins to be lost.
   const publishPinList = useCallback(async (newIds: string[]) => {
     if (!user) return
 
@@ -158,12 +168,28 @@ export function usePinnedNotes() {
       created_at: Math.floor(Date.now() / 1000),
     })
 
-    try {
-      await nostr.event(event, { signal: AbortSignal.timeout(8000) })
-    } catch (err) {
-      console.warn('[pinnedNotes] Some relays may have rejected:', err)
+    const userRelays = getUserRelays()
+    const relays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
+    let published = 0
+    await Promise.allSettled(
+      relays.map(async (url) => {
+        const relay = new NRelay1(normalizeRelay(url), { backoff: false })
+        try {
+          await relay.event(event, { signal: AbortSignal.timeout(8000) })
+          published++
+        } catch (err) {
+          console.warn(`[pinnedNotes] ${url} rejected:`, err)
+        } finally {
+          try { relay.close() } catch { /* */ }
+        }
+      })
+    )
+    if (published === 0) {
+      console.error('[pinnedNotes] No relays accepted the pin list update')
+    } else {
+      console.log(`[pinnedNotes] Pin list published to ${published}/${relays.length} relays`)
     }
-  }, [user, nostr])
+  }, [user])
 
   // Toggle pin: add or remove, publish, update local + set optimistic cache.
   // We use setQueryData (not invalidateQueries) for the pin list to prevent

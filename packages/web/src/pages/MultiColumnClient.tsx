@@ -995,7 +995,7 @@ export function MultiColumnClient() {
   }, [addBookmark, removeBookmark]);
 
   // Nostr backup/restore
-  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, isReturningUser, bgCheckInProgress, crossDeviceUpdate, dismissCrossDeviceUpdate, checkpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
+  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, isReturningUser, checkpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
 
   // Logout: visible step-by-step — autosave to :auto slot, wipe, reload
   const [logoutStep, setLogoutStep] = useState<string | null>(null);
@@ -1187,9 +1187,8 @@ export function MultiColumnClient() {
     let changeDetectedAt: number | null = null;
 
     const triggerBlossomIfReady = (source: string) => {
-      // Never auto-save while a restore is in progress, just found, or a background
-      // cross-device check is running — prevents overwriting newer remote state.
-      if (bgCheckInProgress || backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored') {
+      // Never auto-save while a restore is in progress or just found.
+      if (backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored') {
         debugLog(`[AutoSave] skip (${source}): backup ${backupStatus}, waiting for restore to complete`);
         return;
       }
@@ -1258,11 +1257,10 @@ export function MultiColumnClient() {
       document.removeEventListener('visibilitychange', onVisibilityHidden);
       window.removeEventListener('beforeunload', onBeforeUnload);
     };
-  }, [user, backupCheckSettled, backupStatus, bgCheckInProgress, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
+  }, [user, backupCheckSettled, backupStatus, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
 
   // Auto-restore: load newest checkpoint that has more dismissed notes than local.
   // This is the best indicator that another session (or device) progressed further.
-  // Also fires on crossDeviceUpdate as a fallback.
   const [autoRestoreTarget, setAutoRestoreTarget] = useState<{ checkpoint: typeof checkpoints[0]; reason: string } | null>(null);
   const [autoRestoreCountdown, setAutoRestoreCountdown] = useState<number | null>(null);
   const autoRestoreCheckedRef = useRef(false);
@@ -1287,14 +1285,6 @@ export function MultiColumnClient() {
       setAutoRestoreTarget({ checkpoint: best, reason: `Backup found (${bestDismissed - dismissedCount} more dismissed)` });
     }
   }, [initialRestoreDone, checkpoints, dismissedCount, isReturningUser]);
-
-  // Cross-device update fallback (if dismissed count didn't catch it)
-  useEffect(() => {
-    if (!crossDeviceUpdate || autoRestoreTarget || autoRestoreCheckedRef.current) return;
-    autoRestoreCheckedRef.current = true;
-    setAutoRestoreTarget({ checkpoint: crossDeviceUpdate, reason: 'Newer backup found' });
-    dismissCrossDeviceUpdate();
-  }, [crossDeviceUpdate, autoRestoreTarget, dismissCrossDeviceUpdate]);
 
   // Countdown timer
   useEffect(() => {

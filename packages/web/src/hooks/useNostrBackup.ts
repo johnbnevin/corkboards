@@ -74,9 +74,7 @@ const LS_BACKUP_CHECKED_PREFIX = 'corkboard:backup-checked-ls:';
 function markBackupCheckedSync(pubkey: string) {
   try { localStorage.setItem(LS_BACKUP_CHECKED_PREFIX + pubkey, '1'); } catch { /* unavailable in private/restricted contexts */ }
 }
-function isBackupCheckedSync(pubkey: string): boolean {
-  try { return !!localStorage.getItem(LS_BACKUP_CHECKED_PREFIX + pubkey); } catch { return false; }
-}
+
 function clearBackupCheckedSync(pubkey: string) {
   try { localStorage.removeItem(LS_BACKUP_CHECKED_PREFIX + pubkey); } catch { /* unavailable in private/restricted contexts */ }
 }
@@ -331,17 +329,10 @@ const _backupRelaysUsed = new Set<string>();
 export function getBackupRelaysUsed(): Set<string> { return _backupRelaysUsed; }
 
 export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
-  // Start idle — the check runs in the background. Only transition to 'checking'
-  // once we've confirmed IDB is ready and the checked flag is NOT set.
-  // This avoids a splash screen flash on reload after a successful restore.
+  // No blocking check on login — app goes straight to idle.
+  // Remote checks only happen: (1) after 5 min idle return, (2) manual trigger.
   const [status, setStatus] = useState<BackupStatus>('idle');
-  // True once the initial backup check has resolved (skipped, completed, or errored).
-  // For returning users (localStorage flag set from a previous session), start settled
-  // immediately so the blocking splash never shows — they get a non-blocking toast instead.
-  const [isReturningUser] = useState(() => !!user && isBackupCheckedSync(user.pubkey));
-  const [checkSettled, setCheckSettled] = useState(() =>
-    _checkedPubkey === user?.pubkey || (!!user && isBackupCheckedSync(user.pubkey))
-  );
+  const [checkSettled] = useState(true);
   const [message, setMessage] = useState('');
   const [remoteBackup, setRemoteBackup] = useState<RemoteBackup | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
@@ -840,7 +831,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
    const checkRemoteBackup = useCallback(async (force = false) => {
      if (!user) {
        log('Check skipped: no user');
-       setCheckSettled(true);
+
        return;
      }
 
@@ -850,7 +841,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        // Ensure checkpoints are loaded (React state may have been empty at mount)
        const stored = getStoredCheckpoints();
        if (stored.length > 0 && checkpoints.length === 0) setCheckpoints(stored);
-       setCheckSettled(true);
+
        return;
      }
 
@@ -862,7 +853,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        const stored = getStoredCheckpoints();
        if (stored.length > 0) setCheckpoints(stored);
        setStatus('idle');
-       setCheckSettled(true);
+
        return;
      }
 
@@ -885,7 +876,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        const stored = getStoredCheckpoints();
        if (stored.length > 0) setCheckpoints(stored);
        setStatus('idle');
-       setCheckSettled(true);
+
        return;
      }
 
@@ -979,7 +970,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
           markBackupCheckedSync(user.pubkey);
         }
         setStatus('no-backup');
-        setCheckSettled(true);
+ 
         setMessage('No backup found on Nostr');
         return;
       }
@@ -1133,14 +1124,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
         markBackupCheckedSync(user.pubkey);
         setStatus('idle');
-        setCheckSettled(true);
+ 
         return;
       }
 
       // Present the found backup to the user — let them decide.
       log(`Found restore point from ${ago}`);
       setStatus('found');
-      setCheckSettled(true);
       setMessage(`Restore point from ${ago}`);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -1157,12 +1147,12 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       } else {
         // Non-connection error — settle so UI can show
         setStatus('idle');
-        setCheckSettled(true);
+ 
         setMessage(friendly);
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- checkpoints declared after this hook (forward ref); deviceId is stable useState
-  }, [user, queryAll, log, deviceId, isReturningUser]);
+  }, [user, queryAll, log, deviceId]);
 
   // Load remote backup
   const loadRemoteBackup = useCallback(async () => {
@@ -1552,29 +1542,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     }
   }, [user, log, autoSaveBackup, hasUnsavedChanges]);
 
-  // Check on initial load — retry until successful, splash stays visible throughout.
-  // After final retry, settle with an error so the user isn't stuck forever.
-  useEffect(() => {
-    if (!user) return;
-    checkRemoteBackup();
-    const retry1 = setTimeout(() => {
-      if (_checkedPubkey === null) checkRemoteBackup();
-    }, 5000);
-    const retry2 = setTimeout(() => {
-      if (_checkedPubkey === null) checkRemoteBackup();
-    }, 15000);
-    // After all retries, if still not settled, give up and let the user through
-    const finalSettle = setTimeout(() => {
-      if (_checkedPubkey === null) {
-        log('All relay attempts failed — settling as no-backup', 'warn');
-        _checkedPubkey = user.pubkey;
-        setStatus('no-backup');
-        setCheckSettled(true);
-        setMessage('Could not reach relays. Check your connection and reload to try again.');
-      }
-    }, 25000);
-    return () => { clearTimeout(retry1); clearTimeout(retry2); clearTimeout(finalSettle); };
-  }, [user, checkRemoteBackup, log]);
+  // No automatic check on login — the app goes straight to idle.
+  // Checks happen only after 5 min idle return or manual trigger from the menu.
 
   // Refresh checkpoints list after save completes
   useEffect(() => {
@@ -1667,7 +1636,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     logs,
     lastBackupTs,
     hasUnsavedChanges,
-    isReturningUser,
     // Checkpoint management
     checkpoints,
     renameCheckpoint: renameCheckpointFn,

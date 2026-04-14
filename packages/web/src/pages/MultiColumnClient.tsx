@@ -84,7 +84,7 @@ import { useNostrBackup } from '@/hooks/useNostrBackup';
 import { getActiveUserPubkey, clearActiveUserData, switchActiveUser, STORAGE_KEYS } from '@/lib/storageKeys';
 import { idbGetSync, idbSetSync, idbSet } from '@/lib/idb';
 import { getCachedProfiles, setCachedProfiles, getProfilesNeedingRefresh, markProfileRefreshed } from '@/lib/profileCache';
-import { BackupSplashScreen } from '@/components/BackupSplashScreen';
+
 import { TIPS } from '@/lib/tips';
 import { BackupDownloadPrompt } from '@/components/BackupDownloadPrompt';
 import { downloadSettingsBackup, shouldPromptBackupDownload, restoreFromBackupFile, preflightRestore, saveCheckpoint } from '@/lib/downloadBackup';
@@ -995,7 +995,7 @@ export function MultiColumnClient() {
   }, [addBookmark, removeBookmark]);
 
   // Nostr backup/restore
-  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, isReturningUser, checkpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
+  const { backupStatus, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
 
   // Logout: visible step-by-step — autosave to :auto slot, wipe, reload
   const [logoutStep, setLogoutStep] = useState<string | null>(null);
@@ -1107,35 +1107,11 @@ export function MultiColumnClient() {
   const _customFeedsSync = useNostrCustomFeedsSync(user, nostr);
   const _dismissedSync = useNostrDismissedSync(user, nostr);
 
-  // Auto-restore when a backup is found — use a ref guard so this fires exactly once
-  // per check cycle. Reset when a new check starts so return-from-idle can re-trigger.
-  // When true, the check was triggered by the user clicking "Backup & Restore" menu —
-  // skip the splash and just let the modal show the results.
-  const userInitiatedCheckRef = useRef(false);
-
   const _backupTs = lastBackupTs; // read so React re-renders after saves
   const hasChanges = user ? hasUnsavedChanges() : false;
-  const _isFirstBackup = lastBackupTs === 0;
-  
-  // New users (just created npub) skip the backup check entirely — nothing to restore.
-  const [isNewUser] = useState(() => {
-    const flag = sessionStorage.getItem('corkboard:new-user');
-    if (flag) { sessionStorage.removeItem('corkboard:new-user'); return true; }
-    return false;
-  });
 
-  // Block ALL feed loading until the backup check/restore is fully done.
-  // New users and returning users skip the delay — go straight to UI.
-  const [loadDelayDone, setLoadDelayDone] = useState(isNewUser || isReturningUser);
-  useEffect(() => {
-    if (isNewUser || isReturningUser) return; // Already done
-    if (backupCheckSettled && backupStatus !== 'restoring' && backupStatus !== 'restored') {
-      const t = setTimeout(() => setLoadDelayDone(true), 1000);
-      return () => clearTimeout(t);
-    }
-    setLoadDelayDone(false);
-  }, [backupCheckSettled, backupStatus, isNewUser, isReturningUser]);
-  const canLoadNotes = !!user && loadDelayDone;
+  // No blocking delay — app loads immediately, backup is purely background.
+  const canLoadNotes = !!user;
   useEffect(() => { if (canLoadNotes) setProfileFetchEnabled(true); }, [canLoadNotes]);
 
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
@@ -1167,20 +1143,19 @@ export function MultiColumnClient() {
   // Prompt to download settings backup every 30 days
   const hasCheckedDownloadPrompt = useRef(false);
   useEffect(() => {
-    if (user && !hasCheckedDownloadPrompt.current && backupStatus !== 'checking' && backupStatus !== 'found' && backupStatus !== 'restoring' && backupStatus !== 'restored') {
+    if (user && !hasCheckedDownloadPrompt.current) {
       hasCheckedDownloadPrompt.current = true;
       if (shouldPromptBackupDownload()) {
-        // Small delay so it doesn't compete with backup splash
         setTimeout(() => setShowDownloadPrompt(true), 2000);
       }
     }
-  }, [user, backupStatus]);
+  }, [user]);
 
   // Auto-save: triggers 2 minutes after the last data change, not after idle.
   // Polls every 30s to check if unsaved changes exist and enough time has passed.
   // Also triggers immediately on visibilitychange to 'hidden' (tab switch, mobile bg).
   useEffect(() => {
-    if (!user || !backupCheckSettled) return;
+    if (!user) return;
 
     const MIN_BLOSSOM_INTERVAL_MS = 30 * 1000;
     // Track when we first detected unsaved changes (null = no pending changes)
@@ -1257,36 +1232,47 @@ export function MultiColumnClient() {
       document.removeEventListener('visibilitychange', onVisibilityHidden);
       window.removeEventListener('beforeunload', onBeforeUnload);
     };
-  }, [user, backupCheckSettled, backupStatus, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
+  }, [user, backupStatus, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
 
-  // Auto-restore: load newest checkpoint that has more dismissed notes than local.
-  // This is the best indicator that another session (or device) progressed further.
+  // Auto-restore after returning from 5+ min of TRUE idle (tab hidden, not just
+  // scrolling or watching a video). Fires once per return — not repeatedly.
   const [autoRestoreTarget, setAutoRestoreTarget] = useState<{ checkpoint: typeof checkpoints[0]; reason: string } | null>(null);
   const [autoRestoreCountdown, setAutoRestoreCountdown] = useState<number | null>(null);
-  const autoRestoreCheckedRef = useRef(false);
+  const idleCheckDoneRef = useRef(false);
 
-  // Detect when ANY checkpoint has more dismissed notes than local state.
-  // Only for NEW users on this device (not returning users) — returning users
-  // get the cross-device path below instead. This prevents false auto-restore
-  // triggers when switching between accounts on the same device.
-  const initialRestoreDone = backupCheckSettled && backupStatus !== 'found' && backupStatus !== 'restoring' && backupStatus !== 'restored';
   useEffect(() => {
-    if (autoRestoreCheckedRef.current || !initialRestoreDone || !checkpoints.length) return;
-    if (isReturningUser) return; // Returning users only get cross-device restore
-    let best: typeof checkpoints[0] | null = null;
-    let bestDismissed = dismissedCount;
-    for (const cp of checkpoints) {
-      const d = cp.stats?.dismissed ?? 0;
-      if (d > bestDismissed) { best = cp; bestDismissed = d; }
-    }
-    // Only auto-restore if the backup has significantly more dismissed notes (>5)
-    if (best && (bestDismissed - dismissedCount) > 5) {
-      autoRestoreCheckedRef.current = true;
-      setAutoRestoreTarget({ checkpoint: best, reason: `Backup found (${bestDismissed - dismissedCount} more dismissed)` });
-    }
-  }, [initialRestoreDone, checkpoints, dismissedCount, isReturningUser]);
+    if (!user) return;
+    let lastHidden = 0;
+    const onVisChange = () => {
+      if (document.visibilityState === 'hidden') {
+        lastHidden = Date.now();
+        idleCheckDoneRef.current = false; // reset so next return can check
+      } else if (document.visibilityState === 'visible' && lastHidden > 0 && !idleCheckDoneRef.current) {
+        const awayMs = Date.now() - lastHidden;
+        if (awayMs >= 5 * 60 * 1000) {
+          idleCheckDoneRef.current = true; // only once per return
+          // Silent background check — find newest checkpoint and auto-restore if ahead
+          checkRemoteBackup(true).then(() => {
+            const cps = checkpoints;
+            if (!cps.length) return;
+            let best: typeof cps[0] | null = null;
+            let bestDismissed = dismissedCount;
+            for (const cp of cps) {
+              const d = cp.stats?.dismissed ?? 0;
+              if (d > bestDismissed) { best = cp; bestDismissed = d; }
+            }
+            if (best && (bestDismissed - dismissedCount) > 5) {
+              setAutoRestoreTarget({ checkpoint: best, reason: `Newer backup found (${bestDismissed - dismissedCount} more dismissed)` });
+            }
+          });
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisChange);
+    return () => document.removeEventListener('visibilitychange', onVisChange);
+  }, [user, checkRemoteBackup, checkpoints, dismissedCount]);
 
-  // Countdown timer
+  // Countdown timer for auto-restore
   useEffect(() => {
     if (!autoRestoreTarget) { setAutoRestoreCountdown(null); return; }
     setAutoRestoreCountdown(5);
@@ -1305,32 +1291,6 @@ export function MultiColumnClient() {
     loadCheckpointFn(autoRestoreTarget.checkpoint);
     setAutoRestoreTarget(null);
   }, [autoRestoreCountdown, autoRestoreTarget, loadCheckpointFn]);
-
-  // Re-check for cross-device changes when tab becomes visible after being hidden
-  // for more than 2 minutes, and periodically every 5 minutes while active.
-  useEffect(() => {
-    if (!user || !backupCheckSettled) return;
-    let lastHidden = 0;
-    const onVisChange = () => {
-      if (document.visibilityState === 'hidden') {
-        lastHidden = Date.now();
-      } else if (document.visibilityState === 'visible' && lastHidden > 0) {
-        const awayMs = Date.now() - lastHidden;
-        if (awayMs > 2 * 60 * 1000) {
-          checkRemoteBackup(true);
-        }
-      }
-    };
-    document.addEventListener('visibilitychange', onVisChange);
-    // Periodic re-check every 5 minutes for cross-device updates
-    const periodicCheck = setInterval(() => {
-      if (document.visibilityState === 'visible') checkRemoteBackup(true);
-    }, 5 * 60 * 1000);
-    return () => {
-      document.removeEventListener('visibilitychange', onVisChange);
-      clearInterval(periodicCheck);
-    };
-  }, [user, backupCheckSettled, checkRemoteBackup]);
 
   // Theme management
   const { theme, setTheme } = useTheme();
@@ -2159,7 +2119,7 @@ export function MultiColumnClient() {
   } = useFollowNotesCache({
     contacts: contacts ?? [],
     selfPubkey: user?.pubkey,
-    enabled: canLoadNotes && contacts !== undefined && (contacts.length > 0 || !isNewUser),
+    enabled: canLoadNotes && contacts !== undefined && contacts.length > 0,
     limit: feedLimit,
     multiplier: feedLimitMultiplier, // 1x/2x/3x for initial time window
     includeSelf: true, // Always include self in follow cache for other tabs to use
@@ -3431,40 +3391,8 @@ export function MultiColumnClient() {
     );
   }
 
-  // Show backup splash only for first-time users (never checked before).
-  // Returning users (localStorage flag set) skip the blocking splash — they get
-  // a non-blocking toast on return-from-idle instead.
-  // Show splash only for automatic (login-triggered) backup checks, not user-initiated ones
-  const isBackupActive = !isNewUser && !isReturningUser && !userInitiatedCheckRef.current && (!backupCheckSettled || backupStatus === 'checking' || backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored');
-  if (isBackupActive) {
-    // Pick the checkpoint with the most dismissed notes as the default restore
-    // target. This avoids restoring a newer but less-progressed checkpoint first,
-    // then having the auto-restore overwrite it with a better one.
-    const bestCheckpoint = checkpoints.length > 0
-      ? checkpoints.reduce((best, cp) => (cp.stats?.dismissed ?? 0) > (best.stats?.dismissed ?? 0) ? cp : best, checkpoints[0])
-      : null;
-    return (
-      <BackupSplashScreen
-        backupStatus={!backupCheckSettled ? 'checking' : backupStatus}
-        message={!backupCheckSettled ? 'Checking for backup...' : backupMessage}
-        remoteBackup={bestCheckpoint ? {
-          timestamp: bestCheckpoint.timestamp,
-          keys: [],
-          stats: bestCheckpoint.stats,
-          corkboardNames: bestCheckpoint.corkboardNames,
-        } : remoteBackup}
-        onRestore={bestCheckpoint ? () => loadCheckpointFn(bestCheckpoint) : loadRemoteBackup}
-        onDismiss={dismissRemoteBackup}
-        scanOlderStates={scanOlderStates}
-        isScanning={isScanning}
-        checkpoints={checkpoints}
-        loadCheckpoint={loadCheckpointFn}
-        logs={backupLogs}
-      />
-    );
-  }
-
-  // No more splash screens - go straight to UI
+  // No backup splash — app loads instantly. Restore is handled by
+  // return-from-idle auto-restore or manual Backup & Restore menu.
 
   return (
     <div className="min-h-screen bg-background">
@@ -3552,10 +3480,10 @@ export function MultiColumnClient() {
                     <DropdownMenuItem onClick={() => {
                       // Debounce: don't open during active check/restore
                       if (backupStatus === 'checking' || backupStatus === 'restoring') return;
-                      userInitiatedCheckRef.current = true;
+
                       setShowBackupConfirm(true);
                       // Skip re-check if login already found states (check settled recently)
-                      if (backupCheckSettled && (backupStatus === 'idle' || backupStatus === 'no-backup')) {
+                      if (backupStatus === 'idle' || backupStatus === 'no-backup') {
                         checkRemoteBackup(true);
                       }
                     }} className="gap-2"><HardDrive className="h-4 w-4" />Backup &amp; Restore</DropdownMenuItem>
@@ -3701,10 +3629,10 @@ export function MultiColumnClient() {
                   <DropdownMenuItem onClick={() => {
                       // Debounce: don't open during active check/restore
                       if (backupStatus === 'checking' || backupStatus === 'restoring') return;
-                      userInitiatedCheckRef.current = true;
+
                       setShowBackupConfirm(true);
                       // Skip re-check if login already found states (check settled recently)
-                      if (backupCheckSettled && (backupStatus === 'idle' || backupStatus === 'no-backup')) {
+                      if (backupStatus === 'idle' || backupStatus === 'no-backup') {
                         checkRemoteBackup(true);
                       }
                     }} className="gap-2">
@@ -3833,7 +3761,7 @@ export function MultiColumnClient() {
         </Dialog>
 
         {/* Backup &amp; Restore — autosave history + restore */}
-        <Dialog open={showBackupConfirm} onOpenChange={(open) => { setShowBackupConfirm(open); if (!open) userInitiatedCheckRef.current = false; }}>
+        <Dialog open={showBackupConfirm} onOpenChange={setShowBackupConfirm}>
           <DialogContent className="sm:max-w-[450px] max-h-[80dvh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2"><CloudUpload className="h-4 w-4" />Backup &amp; Restore</DialogTitle>

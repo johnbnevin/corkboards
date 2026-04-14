@@ -329,10 +329,10 @@ const _backupRelaysUsed = new Set<string>();
 export function getBackupRelaysUsed(): Set<string> { return _backupRelaysUsed; }
 
 export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
-  // No blocking check on login — app goes straight to idle.
-  // Remote checks only happen: (1) after 5 min idle return, (2) manual trigger.
   const [status, setStatus] = useState<BackupStatus>('idle');
-  const [checkSettled] = useState(true);
+  // True once the single login check has resolved (found, no-backup, or error).
+  // Starts settled if we already checked this session (module-level guard).
+  const [checkSettled, setCheckSettled] = useState(() => _checkedPubkey === user?.pubkey);
   const [message, setMessage] = useState('');
   const [remoteBackup, setRemoteBackup] = useState<RemoteBackup | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
@@ -831,7 +831,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
    const checkRemoteBackup = useCallback(async (force = false) => {
      if (!user) {
        log('Check skipped: no user');
-
+       setCheckSettled(true);
        return;
      }
 
@@ -841,7 +841,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        // Ensure checkpoints are loaded (React state may have been empty at mount)
        const stored = getStoredCheckpoints();
        if (stored.length > 0 && checkpoints.length === 0) setCheckpoints(stored);
-
+       setCheckSettled(true);
        return;
      }
 
@@ -853,7 +853,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        const stored = getStoredCheckpoints();
        if (stored.length > 0) setCheckpoints(stored);
        setStatus('idle');
-
+       setCheckSettled(true);
        return;
      }
 
@@ -871,12 +871,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
      const checkedKey = `${BACKUP_CHECKED_KEY}:${user.pubkey}`;
      if (!force && idbGetSync(checkedKey)) {
        log('Check skipped: backup already checked for this user (flag found after IDB ready)');
-       _checkedPubkey = user.pubkey; // prevent retries and safety timer
-       // Reload checkpoints from IDB in case React state was empty at mount (memCache wasn't ready)
+       _checkedPubkey = user.pubkey;
        const stored = getStoredCheckpoints();
        if (stored.length > 0) setCheckpoints(stored);
        setStatus('idle');
-
+       setCheckSettled(true);
        return;
      }
 
@@ -937,14 +936,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setMessage('Checking for backup...');
       }
 
-      // Fetch recent backup manifests from all known relays (limit to 5 for fast login).
-      // User can manually scan for older states via the Checkpoints dialog.
+      // Fetch recent backup manifests — one attempt, try ALL known relays.
       const allEvents = await queryAll(
         { kinds: [30078], authors: [pubkey], limit: 5 },
         'backup manifest events',
         undefined,
-        false,
-        15000,
+        true, // checkAll — query every relay in one pass
+        20000,
         8000
       );
       // Filter for backup manifests (d-tag starts with the prefix)
@@ -955,23 +953,12 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       log(`Total: ${manifestEvents.length} backup manifest events (from ${allEvents.length} kind:30078, limit 5)`);
 
       if (manifestEvents.length === 0) {
-        if (allEvents.length === 0) {
-          // Relays returned nothing at all — likely timed out.
-          // Don't settle (keep splash visible) so retries can try again.
-          log('No events returned from relays (may have timed out) — will retry');
-          _checkedPubkey = null; // allow retry this session
-          setStatus('checking');
-          setMessage('Waiting for relay connection...');
-          return;
-        } else {
-          // Got kind:30078 events but none were backup manifests — genuinely no backup
-          log('No remote backup found');
-          idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
-          markBackupCheckedSync(user.pubkey);
-        }
+        log(allEvents.length === 0 ? 'No events returned from relays' : 'No remote backup found');
+        idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
+        markBackupCheckedSync(user.pubkey);
         setStatus('no-backup');
- 
-        setMessage('No backup found on Nostr');
+        setCheckSettled(true);
+        setMessage('No backup found');
         return;
       }
 
@@ -1119,37 +1106,24 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const localFeeds = idbGetSync('nostr-custom-feeds');
       const hasLocalData = localFeeds && localFeeds !== '[]' && localFeeds !== 'null';
       if (hasLocalData && !force) {
-        log('Local data exists — auto-dismissing backup splash (likely storage eviction)');
+        log('Local data exists — auto-dismissing (likely storage eviction)');
         _checkedPubkey = user.pubkey;
         idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
         markBackupCheckedSync(user.pubkey);
         setStatus('idle');
- 
+        setCheckSettled(true);
         return;
       }
 
-      // Present the found backup to the user — let them decide.
       log(`Found restore point from ${ago}`);
       setStatus('found');
+      setCheckSettled(true);
       setMessage(`Restore point from ${ago}`);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      const isConnectionError = errMsg.includes('aborted') || errMsg.includes('timeout') || errMsg.includes('timed out');
-      const friendly = isConnectionError
-        ? 'Waiting for relay connection...'
-        : 'Check failed: ' + errMsg;
       log('Check failed: ' + errMsg, 'error');
-      // Allow retry on connection errors — keep splash visible
-      if (isConnectionError) {
-        _checkedPubkey = null;
-        setStatus('checking');
-        setMessage(friendly);
-      } else {
-        // Non-connection error — settle so UI can show
-        setStatus('idle');
- 
-        setMessage(friendly);
-      }
+      setStatus('idle');
+      setCheckSettled(true);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- checkpoints declared after this hook (forward ref); deviceId is stable useState
   }, [user, queryAll, log, deviceId]);
@@ -1542,8 +1516,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     }
   }, [user, log, autoSaveBackup, hasUnsavedChanges]);
 
-  // No automatic check on login — the app goes straight to idle.
-  // Checks happen only after 5 min idle return or manual trigger from the menu.
+  // Single check on login — one attempt, all relays, no retries.
+  // Shows splash with tips while checking. If a checkpoint is found,
+  // MultiColumnClient auto-restores the best one.
+  useEffect(() => {
+    if (!user) return;
+    checkRemoteBackup();
+  }, [user, checkRemoteBackup]);
 
   // Refresh checkpoints list after save completes
   useEffect(() => {

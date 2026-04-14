@@ -86,6 +86,7 @@ import { idbGetSync, idbSetSync, idbSet } from '@/lib/idb';
 import { getCachedProfiles, setCachedProfiles, getProfilesNeedingRefresh, markProfileRefreshed } from '@/lib/profileCache';
 
 import { TIPS } from '@/lib/tips';
+import { BackupSplashScreen } from '@/components/BackupSplashScreen';
 import { BackupDownloadPrompt } from '@/components/BackupDownloadPrompt';
 import { downloadSettingsBackup, shouldPromptBackupDownload, restoreFromBackupFile, preflightRestore, saveCheckpoint } from '@/lib/downloadBackup';
 import { useNostrCustomFeedsSync } from '@/hooks/useNostrCustomFeedsSync';
@@ -995,7 +996,7 @@ export function MultiColumnClient() {
   }, [addBookmark, removeBookmark]);
 
   // Nostr backup/restore
-  const { backupStatus, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
+  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
 
   // Logout: visible step-by-step — autosave to :auto slot, wipe, reload
   const [logoutStep, setLogoutStep] = useState<string | null>(null);
@@ -1110,9 +1111,32 @@ export function MultiColumnClient() {
   const _backupTs = lastBackupTs; // read so React re-renders after saves
   const hasChanges = user ? hasUnsavedChanges() : false;
 
-  // No blocking delay — app loads immediately, backup is purely background.
-  const canLoadNotes = !!user;
+  // Wait for the single login check to settle before loading notes.
+  // Once settled (or after restore), load everything.
+  const canLoadNotes = !!user && backupCheckSettled && backupStatus !== 'restoring';
   useEffect(() => { if (canLoadNotes) setProfileFetchEnabled(true); }, [canLoadNotes]);
+
+  // Auto-restore best checkpoint when login check finds backups.
+  // Picks by: most saved notes > most dismissed > newest timestamp. Fires once.
+  const loginRestoreDone = useRef(false);
+  useEffect(() => {
+    if (loginRestoreDone.current) return;
+    if (!backupCheckSettled || backupStatus !== 'found') return;
+    if (!checkpoints.length) return;
+    loginRestoreDone.current = true;
+
+    // Pick the best checkpoint
+    const best = checkpoints.reduce((a, b) => {
+      const aSaved = a.stats?.savedForLater ?? 0;
+      const bSaved = b.stats?.savedForLater ?? 0;
+      if (aSaved !== bSaved) return bSaved > aSaved ? b : a;
+      const aDismissed = a.stats?.dismissed ?? 0;
+      const bDismissed = b.stats?.dismissed ?? 0;
+      if (aDismissed !== bDismissed) return bDismissed > aDismissed ? b : a;
+      return b.timestamp > a.timestamp ? b : a;
+    });
+    loadCheckpointFn(best);
+  }, [backupCheckSettled, backupStatus, checkpoints, loadCheckpointFn]);
 
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
   const [showBackupConfirm, setShowBackupConfirm] = useState(false);
@@ -1151,11 +1175,11 @@ export function MultiColumnClient() {
     }
   }, [user]);
 
-  // Auto-save: triggers 2 minutes after the last data change, not after idle.
+  // Auto-save: triggers 30s after the last data change.
   // Polls every 30s to check if unsaved changes exist and enough time has passed.
   // Also triggers immediately on visibilitychange to 'hidden' (tab switch, mobile bg).
   useEffect(() => {
-    if (!user) return;
+    if (!user || !backupCheckSettled) return;
 
     const MIN_BLOSSOM_INTERVAL_MS = 30 * 1000;
     // Track when we first detected unsaved changes (null = no pending changes)
@@ -1232,7 +1256,7 @@ export function MultiColumnClient() {
       document.removeEventListener('visibilitychange', onVisibilityHidden);
       window.removeEventListener('beforeunload', onBeforeUnload);
     };
-  }, [user, backupStatus, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
+  }, [user, backupCheckSettled, backupStatus, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
 
   // Auto-restore after returning from 5+ min of TRUE idle (tab hidden, not just
   // scrolling or watching a video). Fires once per return — not repeatedly.
@@ -3391,8 +3415,25 @@ export function MultiColumnClient() {
     );
   }
 
-  // No backup splash — app loads instantly. Restore is handled by
-  // return-from-idle auto-restore or manual Backup & Restore menu.
+  // Show splash during the single login check + auto-restore.
+  // No user choice — best checkpoint is auto-restored, splash shows tips + log.
+  const showLoginSplash = !backupCheckSettled || backupStatus === 'checking' || backupStatus === 'found' || backupStatus === 'restoring';
+  if (showLoginSplash) {
+    return (
+      <BackupSplashScreen
+        backupStatus={!backupCheckSettled ? 'checking' : backupStatus}
+        message={!backupCheckSettled ? 'Checking for backup...' : backupMessage}
+        remoteBackup={remoteBackup}
+        onRestore={loadRemoteBackup}
+        onDismiss={dismissRemoteBackup}
+        scanOlderStates={scanOlderStates}
+        isScanning={isScanning}
+        checkpoints={checkpoints}
+        loadCheckpoint={loadCheckpointFn}
+        logs={backupLogs}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -3479,7 +3520,7 @@ export function MultiColumnClient() {
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => {
                       // Debounce: don't open during active check/restore
-                      if (backupStatus === 'checking' || backupStatus === 'restoring') return;
+                      if ((backupStatus as string) === 'checking' || (backupStatus as string) === 'restoring') return;
 
                       setShowBackupConfirm(true);
                       // Skip re-check if login already found states (check settled recently)
@@ -3628,7 +3669,7 @@ export function MultiColumnClient() {
                 <DropdownMenuContent align="start">
                   <DropdownMenuItem onClick={() => {
                       // Debounce: don't open during active check/restore
-                      if (backupStatus === 'checking' || backupStatus === 'restoring') return;
+                      if ((backupStatus as string) === 'checking' || (backupStatus as string) === 'restoring') return;
 
                       setShowBackupConfirm(true);
                       // Skip re-check if login already found states (check settled recently)
@@ -3770,7 +3811,7 @@ export function MultiColumnClient() {
             <div className="space-y-4">
               <p className="text-xs text-muted-foreground">
                 Changes are automatically saved to Blossom. You can restore any of the last 5 autosave states below.
-                {backupStatus === 'checking' && (
+                {(backupStatus as string) === 'checking' && (
                   <span className="inline-flex items-center gap-1 ml-1 text-orange-500">
                     <Loader2 className="h-3 w-3 animate-spin inline" /> Checking for updates...
                   </span>
@@ -3851,7 +3892,7 @@ export function MultiColumnClient() {
                   size="sm"
                   className="w-full text-xs gap-2"
                   onClick={scanOlderStates}
-                  disabled={isScanning || backupStatus === 'checking'}
+                  disabled={isScanning || (backupStatus as string) === 'checking'}
                 >
                   {isScanning ? (
                     <><Loader2 className="h-3 w-3 animate-spin" />Scanning relays...</>

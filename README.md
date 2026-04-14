@@ -4,6 +4,60 @@ A private, uncensorable social feed reader and builder — built on Nostr.
 
 Build social feeds by arranging posts from friends or news sources like notecards on a personalized corkboard. No central server, no algorithm you can't control, no ads, no tracking.
 
+## Install
+
+### Use the web app (easiest)
+
+Go to [corkboards.me](https://corkboards.me) in any modern browser. That's it — nothing to install.
+
+### <a id="desktop"></a>Build the desktop app (Windows, macOS, or Linux)
+
+The desktop app gives you a native window with OS keychain storage for your keys. You build it from source — it takes about 5 minutes the first time.
+
+**Step 1 — Install the prerequisites**
+
+You need two things installed on your computer: **Node.js** and **Rust**. If you already have them, skip to Step 2.
+
+- **Node.js 22+** — Download from [nodejs.org](https://nodejs.org/). Pick the LTS version. The installer does everything for you. When it's done, open a terminal and type `node -v` to confirm it worked.
+- **Rust** — Follow the instructions for your OS at [tauri.app/start/prerequisites](https://v2.tauri.app/start/prerequisites/). This page walks you through installing Rust and the system libraries Tauri needs. On macOS you'll need Xcode command line tools. On Windows you'll need Visual Studio Build Tools. On Linux you'll need a few packages via apt.
+
+**Step 2 — Download the source code**
+
+Open a terminal (Terminal on macOS/Linux, PowerShell on Windows) and run:
+
+```bash
+git clone https://github.com/johnbnevin/corkboards.git
+cd corkboards
+npm install
+```
+
+If you don't have `git`, you can also download the source as a zip from [the GitHub page](https://github.com/johnbnevin/corkboards) — click the green "Code" button, then "Download ZIP". Unzip it, open a terminal in that folder, and run `npm install`.
+
+**Step 3 — Build it**
+
+```bash
+cd packages/desktop/src-tauri
+npx @tauri-apps/cli build
+```
+
+This takes a few minutes the first time (Rust compiles everything from scratch). When it's done, you'll have a native installer in the `target/release/bundle/` folder:
+
+- **Windows** — `.msi` installer and `.exe` in `target/release/bundle/msi/`
+- **macOS** — `.dmg` disk image in `target/release/bundle/dmg/`
+- **Linux** — `.AppImage` and `.deb` in `target/release/bundle/appimage/` and `target/release/bundle/deb/`
+
+Double-click the installer to install it like any other app.
+
+### Build the mobile app (Android)
+
+The mobile app is in testing. You'll need the [Expo](https://expo.dev/) development environment set up.
+
+```bash
+cd packages/mobile
+npm install
+npx expo run:android
+```
+
 ## Features
 
 - **Feed builder** — create corkboards from one friend's posts, a group of friends, or combine news sources into a newspaper-style board
@@ -18,7 +72,24 @@ Build social feeds by arranging posts from friends or news sources like notecard
 - **Cross-platform** — web PWA, desktop (Tauri), mobile (Expo)
 - **Censorship resistant** — built on Nostr, no central authority
 
-## Architecture
+## Development
+
+### Running locally
+
+```bash
+npm run dev      # Web dev server on port 3000
+npm run test     # Full suite: tsc + eslint + vitest + build
+npm run build    # Production build
+```
+
+Desktop dev mode (run the web dev server first, then in another terminal):
+
+```bash
+cd packages/desktop/src-tauri
+npx @tauri-apps/cli dev
+```
+
+### Architecture
 
 Monorepo with four packages:
 
@@ -68,44 +139,7 @@ All data is stored locally in IndexedDB (web) or MMKV (mobile). The only externa
 
 ## RSS Protocol Support
 
-Optional hostable RSS proxy allows feeds to include RSS sources chronologically with NOstr notes
-
-## Setup
-
-Prerequisites: Node.js 22+, npm 10+
-
-```bash
-git clone https://github.com/johnbnevin/corkboards.git
-cd corkboards
-npm install
-```
-
-### Web | Working, Tested
-
-```bash
-npm run dev      # Dev server on port 3000
-npm run test     # Full suite: tsc + eslint + vitest + build
-npm run build    # Production build
-```
-
-### Desktop (Tauri) | Working, Tested
-
-Requires Rust toolchain. See [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
-
-```bash
-cd packages/desktop/src-tauri
-npx @tauri-apps/cli dev      # Dev mode (needs web dev server on port 3000)
-npx @tauri-apps/cli build    # Production build
-```
-
-### Mobile (Expo) | In testing
-
-```bash
-cd packages/mobile
-npx expo start               # Expo dev client
-npx expo run:ios              # iOS simulator | Haven't looked
-npx expo run:android          # Android emulator | In testing
-```
+Optional hostable RSS proxy allows feeds to include RSS sources chronologically with Nostr notes.
 
 ## Self-Hosting
 

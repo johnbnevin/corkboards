@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Download corkboards.me — a customizable multi-column social feed reader built on Nostr. Available for web, Android, and iOS (coming soon).">
-  <meta name="keywords" content="corkboards.me, download, nostr, social feed, android, apk, ios, bitcoin, zap">
+  <meta name="description" content="Download corkboards.me — a customizable multi-column social feed reader built on Nostr. Available for web, desktop (Windows, macOS, Linux), Android, and iOS (coming soon).">
+  <meta name="keywords" content="corkboards.me, download, nostr, social feed, desktop, windows, macos, linux, android, apk, ios, bitcoin, zap">
   <meta property="og:type" content="website">
   <meta property="og:title" content="Get corkboards.me">
   <meta property="og:description" content="Download corkboards.me — a customizable multi-column social feed reader built on Nostr.">
@@ -88,7 +88,8 @@
     .btn-orange:hover { background: var(--orange-hover); color: #fff; }
 
     /* Download row */
-    .download-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; max-width: 860px; margin: 0 auto; }
+    .download-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; max-width: 860px; margin: 0 auto; }
+    @media (max-width: 500px) { .download-grid { grid-template-columns: 1fr; } }
     .download-card {
       background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
       padding: 1.5rem; text-align: center;
@@ -118,18 +119,6 @@
       transition: background 0.15s, border-color 0.3s, box-shadow 0.3s;
     }
     .note-card:hover { background: var(--accent); }
-    .note-card.saved {
-      border-color: var(--green);
-      box-shadow: 0 0 0 2px rgba(34,197,94,0.25);
-    }
-    .note-card.saving {
-      border-color: var(--green);
-      box-shadow: 0 0 0 2px rgba(34,197,94,0.25);
-    }
-    .note-card.fade-out {
-      opacity: 0; transform: scale(0.97);
-      transition: opacity 0.4s, transform 0.4s;
-    }
     .note-card.gone { display: none; }
 
     /* Dismissed placeholder — shows Undo */
@@ -138,7 +127,7 @@
       border: 1px dashed var(--border);
       border-radius: var(--radius);
       padding: 0.5rem 1rem;
-      display: flex; align-items: center; justify-content: space-between;
+      display: flex; align-items: center; justify-content: center; gap: 0.75rem;
       font-size: 0.8rem; color: var(--muted-foreground);
       transition: opacity 0.3s, max-height 0.3s;
     }
@@ -239,6 +228,11 @@
     .status-bar button.consolidate-btn { color: var(--purple); border-color: var(--purple); }
     .status-bar button.consolidate-btn:hover { background: rgba(124,58,237,0.1); }
 
+    /* Top card stacks */
+    .top-cards { display: flex; flex-direction: column; gap: 1rem; max-width: 860px; margin: 0 auto; }
+    .top-cards .note-card { cursor: pointer; }
+    .top-cards .note-card .note-content a { position: relative; z-index: 25; }
+
     /* Advanced section */
     .advanced-wrap { text-align: center; margin-bottom: 1rem; }
     .advanced-spoiler { max-width: 700px; margin: 0 auto; }
@@ -301,21 +295,65 @@
   <section id="download">
     <div class="container">
       <div class="download-grid">
-        <div class="download-card">
-          <div class="platform-icon">&#x1F310;</div>
-          <h3>Web App</h3>
-          <p>Works in any modern browser. No install needed.</p>
-          <a href="https://corkboards.me" class="btn btn-primary">Open corkboards.me</a>
+        <div class="note-card download-card" id="card-dl-0">
+          <button class="tri-btn tri-green-tl" onclick="cardAction('card-dl-0','save')" title="Save"><div class="tri"></div></button>
+          <button class="tri-btn tri-red-tr" onclick="cardAction('card-dl-0','dismiss')" title="Dismiss"><div class="tri"></div></button>
+          <div class="note-header">
+            <div class="note-avatar">&#x1F310;</div>
+            <div class="note-meta">
+              <div class="note-name">Web App</div>
+              <div class="note-time">just now</div>
+            </div>
+          </div>
+          <div class="note-content"><p>Works in any modern browser. No install needed.</p></div>
+          <div class="note-actions" style="justify-content:center; padding-bottom:1rem;">
+            <a href="https://corkboards.me" class="btn btn-primary" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="position:relative; z-index:25;">Open corkboards.me</a>
+          </div>
         </div>
-        <div class="download-card">
-          <div class="platform-icon">&#x1F4F1;</div>
-          <h3>Android</h3>
-          <span class="btn btn-outline" style="opacity:0.6; cursor:default;">In Testing</span>
+        <div class="note-card download-card" id="card-dl-1">
+          <button class="tri-btn tri-green-tl" onclick="cardAction('card-dl-1','save')" title="Save"><div class="tri"></div></button>
+          <button class="tri-btn tri-red-tr" onclick="cardAction('card-dl-1','dismiss')" title="Dismiss"><div class="tri"></div></button>
+          <div class="note-header">
+            <div class="note-avatar">&#x1F5A5;</div>
+            <div class="note-meta">
+              <div class="note-name">Desktop</div>
+              <div class="note-time">just now</div>
+            </div>
+          </div>
+          <div class="note-content"><p>Windows, macOS &amp; Linux. Build from source &mdash; just clone and run one command.</p></div>
+          <div class="note-actions" style="justify-content:center; padding-bottom:1rem;">
+            <a href="https://github.com/johnbnevin/corkboards#desktop" class="btn btn-primary" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="position:relative; z-index:25;">Build Instructions</a>
+          </div>
         </div>
-        <div class="download-card">
-          <div class="platform-icon">&#x1F34F;</div>
-          <h3>iPhone / iPad</h3>
-          <span class="btn btn-outline" style="opacity:0.6; cursor:default;">Seeking Contributors</span>
+        <div class="note-card download-card" id="card-dl-2">
+          <button class="tri-btn tri-green-tl" onclick="cardAction('card-dl-2','save')" title="Save"><div class="tri"></div></button>
+          <button class="tri-btn tri-red-tr" onclick="cardAction('card-dl-2','dismiss')" title="Dismiss"><div class="tri"></div></button>
+          <div class="note-header">
+            <div class="note-avatar">&#x1F4F1;</div>
+            <div class="note-meta">
+              <div class="note-name">Android</div>
+              <div class="note-time">just now</div>
+            </div>
+          </div>
+          <div class="note-content"><p>Native mobile app for Android devices.</p></div>
+          <div class="note-actions" style="justify-content:center; padding-bottom:1rem;">
+            <span class="btn btn-outline" style="opacity:0.6; cursor:default;">In Testing</span>
+          </div>
+        </div>
+        <div class="note-card download-card" id="card-dl-3">
+          <button class="tri-btn tri-green-tl" onclick="cardAction('card-dl-3','save')" title="Save"><div class="tri"></div></button>
+          <button class="tri-btn tri-red-tr" onclick="cardAction('card-dl-3','dismiss')" title="Dismiss"><div class="tri"></div></button>
+          <div class="note-header">
+            <div class="note-avatar">&#x1F34F;</div>
+            <div class="note-meta">
+              <div class="note-name">iPhone / iPad</div>
+              <div class="note-time">just now</div>
+            </div>
+          </div>
+          <div class="note-content"><p>iOS app for iPhone and iPad.</p></div>
+          <div class="note-actions" style="justify-content:center; padding-bottom:1rem;">
+            <span class="btn btn-outline" style="opacity:0.6; cursor:default;">Seeking Contributors</span>
+          </div>
         </div>
       </div>
     </div>
@@ -325,7 +363,7 @@
   <section id="try-it">
     <div class="container">
       <h2 class="section-title">Try It &mdash; Save or Dismiss</h2>
-      <p class="section-sub">This is how reading feels on corkboards. Hover over a card and click the green triangle (top-left) to save or the red triangle (top-right) to dismiss.</p>
+      <p class="section-sub">This is how reading your friends' notes feels on corkboards. Hover over a card and click the green triangle (top-left) to save or the red triangle (top-right) to dismiss.</p>
       <div class="feed-grid" id="feedGrid"></div>
       <div class="status-bar" id="statusBar">
         <span class="stat stat-green" id="statSaved">Saved: 0</span>
@@ -353,10 +391,8 @@
               <ul class="signer-list">
                 <li><strong>iPhone:</strong></li>
                 <li>&nbsp;&nbsp;<a href="https://apps.apple.com/us/app/alby-go/id6471335774" target="_blank" rel="noopener">Alby Go</a> <span>Signer + Lightning wallet</span></li>
-                <li>&nbsp;&nbsp;<a href="https://apps.apple.com/us/app/nostur-nostr-client/id1672780508" target="_blank" rel="noopener">Nostur</a> <span>Full client with key management</span></li>
                 <li style="margin-top:0.35rem;"><strong>Android:</strong></li>
                 <li>&nbsp;&nbsp;<a href="https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner" target="_blank" rel="noopener">Amber</a> <span>Dedicated signer (recommended)</span></li>
-                <li>&nbsp;&nbsp;<a href="https://play.google.com/store/apps/details?id=com.vitorpamplona.amethyst" target="_blank" rel="noopener">Amethyst</a> <span>Full client with key management</span></li>
               </ul>
             </div>
             <div class="signer-group">
@@ -364,7 +400,7 @@
               <ul class="signer-list">
                 <li><strong>Chrome / Brave:</strong></li>
                 <li>&nbsp;&nbsp;<a href="https://chromewebstore.google.com/detail/soapbox-signer/bcoopbammbdnfkbalnfaljhdhhmajnoo" target="_blank" rel="noopener">Soapbox Signer</a> <span>Simple NIP-07 signer</span></li>
-                <li>&nbsp;&nbsp;<a href="https://github.com/nicol-ograve/nicol-ograve.github.io/releases/tag/nostr-keyx-v1.0.4" target="_blank" rel="noopener">nostr-keyx</a> <span>OS keychain / YubiKey</span></li>
+                <li>&nbsp;&nbsp;<a href="https://chromewebstore.google.com/detail/nos2x/kpgefcfmnafjgpblomihpgrejdlepgij" target="_blank" rel="noopener">nos2x</a> <span>Lightweight NIP-07 signer</span></li>
                 <li style="margin-top:0.35rem;"><strong>Firefox:</strong></li>
                 <li>&nbsp;&nbsp;<a href="https://addons.mozilla.org/en-US/firefox/addon/soapbox-signer/" target="_blank" rel="noopener">Soapbox Signer</a> <span>Simple NIP-07 signer</span></li>
                 <li style="margin-top:0.35rem;"><strong>Safari:</strong></li>
@@ -372,7 +408,8 @@
               </ul>
             </div>
           </div>
-          <p style="text-align:center; margin-top:1rem; font-size:0.85rem; color:var(--muted-foreground);">Your credentials work across many Nostr apps. <a href="https://nostrapps.com/" target="_blank" rel="noopener">See just some of what you can do with Nostr</a> &bull; <a href="https://nostr.how/en/what-is-nostr" target="_blank" rel="noopener">Learn about Nostr</a></p>
+          <p style="text-align:center; margin-top:1rem; font-size:0.85rem; color:var(--muted-foreground);">Your credentials work across many Nostr apps.</p>
+          <p style="text-align:center; margin-top:0.5rem; font-size:0.85rem;"><a href="https://nostrapps.com/" target="_blank" rel="noopener">See just some of what you can do with Nostr</a> &bull; <a href="https://nostr.how/en/what-is-nostr" target="_blank" rel="noopener">Learn about Nostr</a></p>
           <!-- APK checksum section — uncomment when APK downloads are available
           <div class="checksum-section">
             <h4>&#x1F512; Verify Your APK Download</h4>
@@ -409,6 +446,20 @@
 
   <script>
     // --- Card data ---
+    // Pinned explainer cards (appear pinned at top of grid)
+    var PINNED_CARDS = [
+      { avatar: '\uD83D\uDCF1\uD83D\uDCBB', name: 'corkboards.me', time: 'just now',
+        text: '<strong>Never lose your reading position.</strong> Switch from desktop to phone and pick up exactly where you left off.' },
+      { avatar: '\uD83D\uDCCB', name: 'corkboards.me', time: 'just now',
+        text: '<strong>Make a custom page</strong> with notes from a group of friends, a few news sources together, or mix and match any way you like.' },
+      { avatar: '\u2705', name: 'corkboards.me', time: 'just now',
+        text: '<strong>Never miss a note.</strong> Read in chronological order at your own pace, and dismiss what you\'ve already read.' },
+      { avatar: '\uD83D\uDEAB', name: 'corkboards.me', time: 'just now',
+        text: '<strong>Algorithms no longer choose for you.</strong> You choose for yourself.' },
+      { avatar: '\uD83D\uDCDA', name: 'corkboards.me', time: 'just now',
+        text: '<strong>Choose how many columns you like.</strong> One on phone, 2 on tablet, 3 on desktop?' },
+    ];
+
     var CARDS = [
       { avatar: '\uD83D\uDCCC', name: 'corkboards.me', time: '2m',
         text: 'Save notes you want to keep with the <strong>green triangle</strong> in the top-left corner. Dismiss notes you\'ve already read with the <strong>red triangle</strong> in the top-right. Never miss a thing or scroll past the same post twice.' },
@@ -450,8 +501,16 @@
       { avatar: '\uD83D\uDCA1', name: 'corkboards tips', time: '38m', isTip: true,
         text: 'No more doom scrolling. With care, you can build corkboards with people who add to your experience, rather than detract from it.' },
       { avatar: '\uD83D\uDCA1', name: 'corkboards tips', time: '42m', isTip: true,
-        text: 'Browser extensions like Soapbox Signer or nostr-keyx can manage your keys more securely than pasting an nsec.' },
+        text: 'Browser extensions like Soapbox Signer or nos2x can manage your keys more securely than pasting an nsec.' },
     ];
+
+    // IDs for static top cards (explainer + download) so reset can restore them
+    var TOP_CARD_IDS = [
+      'card-dl-0', 'card-dl-1', 'card-dl-2', 'card-dl-3'
+    ];
+
+    // Store original HTML for top cards so reset can rebuild them
+    var topCardOriginals = {};
 
     // --- State ---
     var saved = 0, dismissed = 0;
@@ -459,6 +518,14 @@
     var gridEl = document.getElementById('feedGrid');
     var toastEl = document.getElementById('toast');
     var toastTimer = null;
+
+    // Snapshot top cards on load
+    (function() {
+      TOP_CARD_IDS.forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) topCardOriginals[id] = { html: el.outerHTML, parent: el.parentNode, next: el.nextSibling };
+      });
+    })();
 
     function shuffle(arr) {
       var a = arr.slice();
@@ -492,17 +559,19 @@
       document.getElementById('consolidateBtn').disabled = placeholders === 0;
     }
 
-    function renderCard(card, idx) {
+    function renderCard(card, id) {
       var tipStyle = card.isTip ? ' style="border-left: 3px solid var(--purple);"' : '';
-      return '<div class="note-card" id="card-' + idx + '"' + tipStyle + '>' +
-        '<button class="tri-btn tri-green-tl" onclick="cardAction(' + idx + ',\'save\')" title="Save"><div class="tri"></div></button>' +
-        '<button class="tri-btn tri-red-tr" onclick="cardAction(' + idx + ',\'dismiss\')" title="Dismiss"><div class="tri"></div></button>' +
+      var pinnedClass = card.startPinned ? ' pinned' : '';
+      var timeLabel = card.time === 'just now' ? card.time : card.time + ' ago';
+      return '<div class="note-card' + pinnedClass + '" id="' + id + '"' + tipStyle + '>' +
+        '<button class="tri-btn tri-green-tl" onclick="cardAction(\'' + id + '\',\'save\')" title="Save"><div class="tri"></div></button>' +
+        '<button class="tri-btn tri-red-tr" onclick="cardAction(\'' + id + '\',\'dismiss\')" title="Dismiss"><div class="tri"></div></button>' +
         '<span class="pinned-badge">\uD83D\uDCCC Pinned</span>' +
         '<div class="note-header">' +
           '<div class="note-avatar">' + card.avatar + '</div>' +
           '<div class="note-meta">' +
             '<div class="note-name">' + card.name + '</div>' +
-            '<div class="note-time">' + card.time + ' ago</div>' +
+            '<div class="note-time">' + timeLabel + '</div>' +
           '</div>' +
         '</div>' +
         '<div class="note-content"><p>' + card.text + '</p></div>' +
@@ -511,7 +580,7 @@
           '<span class="note-action-btn">\uD83D\uDD04</span>' +
           '<span class="note-action-btn">\u2764\uFE0F</span>' +
           '<span class="note-action-btn">\u26A1</span>' +
-          '<button class="note-action-btn pin-btn" onclick="event.stopPropagation();pinCard(' + idx + ')" title="Pin to top">\uD83D\uDCCC</button>' +
+          '<button class="note-action-btn pin-btn" onclick="event.stopPropagation();pinCard(\'' + id + '\')" title="Pin to top">\uD83D\uDCCC</button>' +
         '</div>' +
       '</div>';
     }
@@ -529,11 +598,25 @@
       }
       while (ti < tips.length) mixed.push(tips[ti++]);
 
+      // Prepend pinned explainer cards
+      var pinnedCards = PINNED_CARDS.map(function(c) {
+        var pc = Object.assign({}, c);
+        pc.startPinned = true;
+        return pc;
+      });
+
       var cols = getColumnCount();
       var columns = [];
       for (var c = 0; c < cols; c++) columns.push([]);
+
+      // Distribute pinned cards across columns first
+      for (var i = 0; i < pinnedCards.length; i++) {
+        columns[i % cols].push({ card: pinnedCards[i], id: 'card-pin-' + i });
+      }
+
+      // Then distribute regular cards
       for (var i = 0; i < mixed.length; i++) {
-        columns[i % cols].push({ card: mixed[i], idx: i });
+        columns[i % cols].push({ card: mixed[i], id: 'card-' + i });
       }
 
       gridEl.innerHTML = '';
@@ -541,7 +624,7 @@
         var colEl = document.createElement('div');
         colEl.className = 'feed-column';
         for (var j = 0; j < columns[c].length; j++) {
-          colEl.innerHTML += renderCard(columns[c][j].card, columns[c][j].idx);
+          colEl.innerHTML += renderCard(columns[c][j].card, columns[c][j].id);
         }
         gridEl.appendChild(colEl);
       }
@@ -553,42 +636,38 @@
       updateStatus();
     }
 
-    function cardAction(idx, action) {
-      var el = document.getElementById('card-' + idx);
-      if (!el || el.classList.contains('gone') || el.classList.contains('saving') || el.classList.contains('fade-out')) return;
+    function cardAction(id, action) {
+      var el = document.getElementById(id);
+      if (!el || el.classList.contains('gone') || el.classList.contains('saving')) return;
+
+      var height = el.offsetHeight;
+      el.style.display = 'none';
+
+      var ph = document.createElement('div');
+      ph.className = 'dismiss-placeholder';
+      ph.id = 'ph-' + id;
+      ph.style.height = height + 'px';
 
       if (action === 'save') {
-        // Green glow + toast, then fade out
-        el.classList.add('saving');
-        showToast('Note saved');
-        setTimeout(function() {
-          el.classList.add('fade-out');
-          setTimeout(function() {
-            el.classList.add('gone');
-            updateStatus();
-          }, 400);
-        }, 800);
+        ph.innerHTML = '<span>Saved</span>';
         saved++;
-        updateStatus();
       } else {
-        // Dismiss: hide card, show undo placeholder
-        el.style.display = 'none';
+        ph.innerHTML = '<span>Dismissed</span><button onclick="undoAction(\'' + id + '\')">Undo</button>';
         dismissed++;
-
-        var ph = document.createElement('div');
-        ph.className = 'dismiss-placeholder';
-        ph.id = 'ph-' + idx;
-        ph.innerHTML = '<span>Dismissed</span><button onclick="undoDismiss(' + idx + ')">Undo</button>';
-        el.parentNode.insertBefore(ph, el.nextSibling);
-
-        updateStatus();
       }
+
+      el.classList.add('gone');
+      el.parentNode.insertBefore(ph, el.nextSibling);
+      updateStatus();
     }
 
-    function undoDismiss(idx) {
-      var el = document.getElementById('card-' + idx);
-      var ph = document.getElementById('ph-' + idx);
-      if (el) el.style.display = '';
+    function undoAction(id) {
+      var el = document.getElementById(id);
+      var ph = document.getElementById('ph-' + id);
+      if (el) {
+        el.style.display = '';
+        el.classList.remove('gone', 'saving');
+      }
       if (ph) ph.remove();
       dismissed--;
       updateStatus();
@@ -599,18 +678,16 @@
       placeholders.forEach(function(ph) {
         ph.classList.add('consolidated');
       });
-      // Also hide the actual dismissed cards' remaining DOM
       updateStatus();
       showToast('Consolidated');
     }
 
     var nextPinColumn = 0;
 
-    function pinCard(idx) {
-      var el = document.getElementById('card-' + idx);
+    function pinCard(id) {
+      var el = document.getElementById(id);
       if (!el) return;
 
-      // Toggle pinned state
       var wasPinned = el.classList.contains('pinned');
       if (wasPinned) {
         el.classList.remove('pinned');
@@ -620,21 +697,50 @@
 
       el.classList.add('pinned');
 
-      // Round-robin: move to top of column 1, 2, 3, 1, 2, 3...
-      var columns = gridEl.querySelectorAll('.feed-column');
-      var targetCol = columns[nextPinColumn % columns.length];
-      nextPinColumn++;
+      // Only move cards that are inside the feed grid
+      if (el.closest('#feedGrid')) {
+        var columns = gridEl.querySelectorAll('.feed-column');
+        var targetCol = columns[nextPinColumn % columns.length];
+        nextPinColumn++;
+        if (el.parentNode) el.parentNode.removeChild(el);
+        targetCol.insertBefore(el, targetCol.firstChild);
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
 
-      // Remove from current column, prepend to target column
-      if (el.parentNode) el.parentNode.removeChild(el);
-      targetCol.insertBefore(el, targetCol.firstChild);
-
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       showToast('Pinned to top');
     }
 
+    function resetTopCards() {
+      // Remove any dismiss placeholders from top card areas
+      TOP_CARD_IDS.forEach(function(id) {
+        var ph = document.getElementById('ph-' + id);
+        if (ph) ph.remove();
+      });
+      // Restore original HTML for each top card
+      TOP_CARD_IDS.forEach(function(id) {
+        var orig = topCardOriginals[id];
+        if (!orig) return;
+        var existing = document.getElementById(id);
+        if (existing) {
+          existing.outerHTML = orig.html;
+        } else {
+          // Card was removed (gone), re-insert it
+          var temp = document.createElement('div');
+          temp.innerHTML = orig.html;
+          var newEl = temp.firstChild;
+          if (orig.next && orig.next.parentNode) {
+            orig.parent.insertBefore(newEl, orig.next);
+          } else {
+            orig.parent.appendChild(newEl);
+          }
+        }
+      });
+    }
+
     function resetDemo() {
+      resetTopCards();
       buildFeed();
+      nextPinColumn = 0;
       showToast('Feed reset');
     }
 

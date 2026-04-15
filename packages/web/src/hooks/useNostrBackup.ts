@@ -1323,6 +1323,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       setStatus('restored');
       setMessage(`Restored ${restoredCount} keys`);
       log('Restore complete');
+      // Resume auto-save after a brief flash of "restored" status
+      setTimeout(() => setStatus('idle'), 3000);
     } catch (err) {
       const errMsg = err instanceof Error
         ? (err.message || (err as DOMException).name || err.constructor.name)
@@ -1486,6 +1488,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       setStatus('restored');
       setMessage(`Restored ${restoredCount} keys`);
       log('Restore complete');
+      // Resume auto-save after a brief flash of "restored" status
+      setTimeout(() => setStatus('idle'), 3000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log('Checkpoint restore failed: ' + msg, 'error');

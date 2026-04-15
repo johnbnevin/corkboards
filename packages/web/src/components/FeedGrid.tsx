@@ -5,7 +5,7 @@
  * Extracted from MultiColumnClient.tsx to keep that file manageable.
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { type NoteClassification } from '@/lib/noteClassifier';
 import { NoteCard } from '@/components/NoteCard';

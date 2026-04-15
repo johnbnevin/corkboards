@@ -1,3 +1,34 @@
+// ─── CORS HEAD whitelist ─────────────────────────────────────────────────
+// Hosts known to support CORS HEAD requests. Only these get pre-checked for
+// file size. All other hosts skip the HEAD and show a placeholder instead.
+
+const CORS_HEAD_HOSTS = new Set([
+  'nostr.build', 'image.nostr.build', 'i.nostr.build', 'cdn.nostr.build',
+  'blossom.band', 'blossom.yakihonne.com', 'blossom.f7z.io', 'blossom.ditto.pub',
+  'blossom.primal.net', 'blossom.nostr.build', 'nostr.download',
+  'cdn.sovbit.host', 'files.primal.net', 'cdn.satellite.earth',
+  'void.cat', 'imgprxy.stacker.news', 'media.nostr.band',
+])
+
+/** Hosts that responded successfully to a HEAD during this session */
+const learnedCorsHosts = new Set<string>()
+
+/** True if the host is known to support CORS HEAD requests */
+export function supportsCorsHead(url: string): boolean {
+  try {
+    const h = new URL(url).hostname
+    if (learnedCorsHosts.has(h)) return true
+    return CORS_HEAD_HOSTS.has(h) || [...CORS_HEAD_HOSTS].some(known => h.endsWith('.' + known))
+  } catch { return false }
+}
+
+/** Mark a host as CORS-HEAD-capable after a successful response */
+export function learnCorsHost(host: string): void {
+  learnedCorsHosts.add(host)
+}
+
+// ─── Image URL detection ─────────────────────────────────────────────────
+
 // Check if URL is a direct image
 export function isImageUrl(url: string): boolean {
   // Don't classify as image if it has a video extension

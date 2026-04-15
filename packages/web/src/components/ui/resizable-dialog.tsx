@@ -76,33 +76,50 @@ const ResizableDialogContent = React.forwardRef<
   const dragStartRef = React.useRef({ x: 0, y: 0, posX: 0, posY: 0 })
   const resizeStartRef = React.useRef({ x: 0, y: 0, width: 0, height: 0, posX: 0, posY: 0 })
 
-  // Center on mount, or auto-maximize on mobile
+  // Center on mount, or auto-maximize on mobile.
+  // Clamp saved size to viewport so nothing extends off-screen.
   const initializedRef = React.useRef(false)
   React.useEffect(() => {
     if (!initializedRef.current) {
-      const isMobileViewport = window.innerWidth < 768
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      const isMobileViewport = vw < 768
       if (isMobileViewport) {
         setPosition({ x: 0, y: 0 })
-        setSize({ width: window.innerWidth, height: window.innerHeight })
+        setSize({ width: vw, height: vh })
         setIsMaximized(true)
       } else if (savedState) {
-        const x = Math.max(0, Math.min(savedState.x, window.innerWidth - size.width))
-        const y = Math.max(0, Math.min(savedState.y, window.innerHeight - size.height))
+        // Clamp size first — saved dimensions may exceed current viewport
+        const w = Math.min(savedState.w, vw)
+        const h = Math.min(savedState.h, vh)
+        if (w !== size.width || h !== size.height) setSize({ width: w, height: h })
+        // Then clamp position so the dialog stays fully on-screen
+        const x = Math.max(0, Math.min(savedState.x, vw - w))
+        const y = Math.max(0, Math.min(savedState.y, vh - h))
         setPosition({ x, y })
       } else {
-        const x = (window.innerWidth - defaultWidth) / 2
-        const y = (window.innerHeight - defaultHeight) / 2
+        const x = (vw - defaultWidth) / 2
+        const y = (vh - defaultHeight) / 2
         setPosition({ x: Math.max(0, x), y: Math.max(0, y) })
       }
       initializedRef.current = true
     }
   }, [defaultWidth, defaultHeight, savedState, size.width, size.height])
 
-  // Keep dialog within viewport bounds
+  // Keep dialog within viewport bounds (handles browser resize too)
   React.useEffect(() => {
     if (isMaximized) return
-    const maxX = Math.max(0, window.innerWidth - size.width)
-    const maxY = Math.max(0, window.innerHeight - size.height)
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    // Clamp size if it exceeds viewport
+    const clampedW = Math.min(size.width, vw)
+    const clampedH = Math.min(size.height, vh)
+    if (clampedW !== size.width || clampedH !== size.height) {
+      setSize({ width: clampedW, height: clampedH })
+    }
+    // Clamp position so the dialog stays fully on-screen
+    const maxX = Math.max(0, vw - clampedW)
+    const maxY = Math.max(0, vh - clampedH)
     if (position.x > maxX || position.y > maxY) {
       setPosition({
         x: Math.min(position.x, maxX),
@@ -174,6 +191,8 @@ const ResizableDialogContent = React.forwardRef<
         const dx = e.clientX - resizeStartRef.current.x
         const dy = e.clientY - resizeStartRef.current.y
         const start = resizeStartRef.current
+        const vw = window.innerWidth
+        const vh = window.innerHeight
 
         let newWidth = start.width
         let newHeight = start.height
@@ -181,23 +200,25 @@ const ResizableDialogContent = React.forwardRef<
         let newY = start.posY
 
         if (isResizing.includes('e')) {
-          newWidth = Math.max(minWidth, start.width + dx)
+          newWidth = Math.min(Math.max(minWidth, start.width + dx), vw - newX)
         }
         if (isResizing.includes('w')) {
           const proposedWidth = start.width - dx
-          if (proposedWidth >= minWidth) {
+          const proposedX = start.posX + dx
+          if (proposedWidth >= minWidth && proposedX >= 0) {
             newWidth = proposedWidth
-            newX = start.posX + dx
+            newX = proposedX
           }
         }
         if (isResizing.includes('s')) {
-          newHeight = Math.max(minHeight, start.height + dy)
+          newHeight = Math.min(Math.max(minHeight, start.height + dy), vh - newY)
         }
         if (isResizing.includes('n')) {
           const proposedHeight = start.height - dy
-          if (proposedHeight >= minHeight) {
+          const proposedY = start.posY + dy
+          if (proposedHeight >= minHeight && proposedY >= 0) {
             newHeight = proposedHeight
-            newY = start.posY + dy
+            newY = proposedY
           }
         }
 

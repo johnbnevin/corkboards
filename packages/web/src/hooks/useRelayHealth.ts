@@ -12,7 +12,6 @@ export interface RelayHealth {
   errorCount: number;
 }
 
-const HEALTH_CHECK_INTERVAL = 120000;
 const SLOW_THRESHOLD = 3000;
 const ERROR_THRESHOLD = 3;
 
@@ -130,9 +129,9 @@ export function useRelayHealth() {
 
   const checkAllRelays = useCallback(async () => {
     const relays = activeRelays();
-    // Check relays in batches of 3 to avoid connection storms
-    for (let i = 0; i < relays.length; i += 3) {
-      const batch = relays.slice(i, i + 3);
+    // Check relays in batches of 6 to balance throughput vs connection storms
+    for (let i = 0; i < relays.length; i += 6) {
+      const batch = relays.slice(i, i + 6);
       await Promise.allSettled(batch.map(checkRelay));
     }
   }, [activeRelays, checkRelay]);
@@ -146,34 +145,3 @@ export function useRelayHealth() {
   };
 }
 
-export function useRelayHealthAuto() {
-  const { relayHealth, checkAllRelays, activeRelays, getShortName } = useRelayHealth();
-
-  useEffect(() => {
-    // Always populate relay list first
-    const relays = activeRelays();
-    relays.forEach(url => {
-      if (!relayHealthMap.has(url)) {
-        relayHealthMap.set(url, {
-          url,
-          status: 'unknown',
-          latency: null,
-          lastCheck: 0,
-          errorCount: 0,
-        });
-      }
-    });
-    notifyListeners();
-    
-    // Delay the first health check to let feeds and backup check settle first
-    const timeout = setTimeout(checkAllRelays, 30000);
-    return () => clearTimeout(timeout);
-  }, [activeRelays, checkAllRelays]);
-
-  useEffect(() => {
-    const interval = setInterval(checkAllRelays, HEALTH_CHECK_INTERVAL);
-    return () => clearInterval(interval);
-  }, [checkAllRelays]);
-
-  return { relayHealth, getShortName, checkAllRelays };
-}

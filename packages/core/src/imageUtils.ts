@@ -93,17 +93,42 @@ export function optimizeMediaUrl(url: string, isPreview: boolean = false): strin
 export function shouldRejectUrl(url: string, type: 'avatar' | 'media'): boolean {
   try {
     const u = new URL(url);
-    
+
     const suspiciousExtensions = ['.exe', '.dmg', '.app', '.deb', '.rpm', '.msi'];
     const ext = u.pathname.toLowerCase();
     if (suspiciousExtensions.some(e => ext.endsWith(e))) {
       return true;
     }
-    
+
     if (type === 'avatar' && u.protocol !== 'https:') {
       return true;
     }
-    
+
+    // Block private/localhost IPs to prevent SSRF probing via image URLs
+    const host = u.hostname.toLowerCase();
+    if (host === 'localhost') return true;
+    // IPv4 private ranges
+    const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4Match) {
+      const [, a, b, c, d] = ipv4Match.map(Number);
+      // Reject malformed octets (>255)
+      if (a > 255 || b > 255 || c > 255 || d > 255) return true;
+      if (a === 0 || a === 10 || a === 127 || a === 255) return true;
+      if (a === 192 && b === 168) return true;
+      if (a === 172 && b >= 16 && b <= 31) return true;
+      if (a === 169 && b === 254) return true; // AWS metadata endpoint
+    }
+    // IPv6 private ranges
+    if (host.startsWith('[')) {
+      const ipv6 = host.slice(1, -1);
+      if (ipv6 === '::1') return true;
+      if (ipv6.startsWith('fe80:')) return true;
+      if (ipv6.startsWith('fc') || ipv6.startsWith('fd')) return true;
+      if (ipv6.startsWith('::ffff:')) return true;
+    }
+    // Block credentials in URL
+    if (u.username || u.password) return true;
+
     return false;
   } catch {
     return true;

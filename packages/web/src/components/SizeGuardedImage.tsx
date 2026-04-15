@@ -9,6 +9,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { useImageSizeLimit } from '@/hooks/useImageSizeLimit';
+import { supportsCorsHead, learnCorsHost } from '@/lib/mediaUtils';
 import { ImageOff } from 'lucide-react';
 
 // ─── HEAD-based size cache ──────────────────────────────────────────────────
@@ -24,19 +25,22 @@ function getHost(url: string): string {
   try { return new URL(url).host; } catch { return ''; }
 }
 
+/** Sentinel size value: host not whitelisted, size unknown */
+const SIZE_UNKNOWN = -1;
+
 async function checkImageSize(url: string): Promise<SizeCheckResult> {
   if (sizeCache.has(url)) return sizeCache.get(url)!;
 
-  // Skip HEAD for hosts we already know block CORS
-  const host = getHost(url);
-  if (host && corsBlockedHosts.has(host)) {
-    const result: SizeCheckResult = { size: null, isVideo: false };
+  // Skip HEAD for hosts not on the CORS whitelist
+  if (!supportsCorsHead(url)) {
+    const result: SizeCheckResult = { size: SIZE_UNKNOWN, isVideo: false };
     sizeCache.set(url, result);
     return result;
   }
 
   if (pendingChecks.has(url)) return pendingChecks.get(url)!;
 
+  const host = getHost(url);
   const promise = (async () => {
     try {
       const res = await fetch(url, {
@@ -54,6 +58,8 @@ async function checkImageSize(url: string): Promise<SizeCheckResult> {
         if (oldest !== undefined) sizeCache.delete(oldest);
       }
       sizeCache.set(url, result);
+      // Learn: this host supports CORS HEAD
+      if (host) learnCorsHost(host);
       return result;
     } catch {
       // Remember this host blocks CORS so we don't flood it with failed requests
@@ -91,7 +97,7 @@ interface SizeGuardedImageProps extends React.ImgHTMLAttributes<HTMLImageElement
 
 export function SizeGuardedImage({ src, compact = false, className, alt, ...imgProps }: SizeGuardedImageProps) {
   const limitBytes = useImageSizeLimit();
-  const [status, setStatus] = useState<'checking' | 'allowed' | 'blocked' | 'override'>('checking');
+  const [status, setStatus] = useState<'checking' | 'allowed' | 'blocked' | 'unknown' | 'override'>('checking');
   const [fileSize, setFileSize] = useState<number | null>(null);
   const mountedRef = useRef(true);
 
@@ -101,6 +107,12 @@ export function SizeGuardedImage({ src, compact = false, className, alt, ...imgP
   }, []);
 
   useEffect(() => {
+    const resolve = (result: SizeCheckResult) => {
+      if (result.size === SIZE_UNKNOWN) return 'unknown' as const;
+      if (!result.isVideo && result.size !== null && result.size > limitBytes) return 'blocked' as const;
+      return 'allowed' as const;
+    };
+
     if (limitBytes === 0) {
       setStatus('allowed');
       return;
@@ -109,17 +121,16 @@ export function SizeGuardedImage({ src, compact = false, className, alt, ...imgP
     // Check cache first (sync)
     if (sizeCache.has(src)) {
       const cached = sizeCache.get(src)!;
-      setFileSize(cached.size);
-      // Never block videos — they only load metadata until user clicks play
-      setStatus(!cached.isVideo && cached.size !== null && cached.size > limitBytes ? 'blocked' : 'allowed');
+      setFileSize(cached.size === SIZE_UNKNOWN ? null : cached.size);
+      setStatus(resolve(cached));
       return;
     }
 
     setStatus('checking');
     checkImageSize(src).then(result => {
       if (!mountedRef.current) return;
-      setFileSize(result.size);
-      setStatus(!result.isVideo && result.size !== null && result.size > limitBytes ? 'blocked' : 'allowed');
+      setFileSize(result.size === SIZE_UNKNOWN ? null : result.size);
+      setStatus(resolve(result));
     });
   }, [src, limitBytes]);
 
@@ -131,16 +142,17 @@ export function SizeGuardedImage({ src, compact = false, className, alt, ...imgP
     );
   }
 
-  if (status === 'blocked') {
+  if (status === 'blocked' || status === 'unknown') {
+    const label = status === 'unknown' ? 'Unknown size' : `Image too large (${fileSize ? formatBytes(fileSize) : '?'})`;
     if (compact) {
       return (
         <span
           className="inline-flex items-center justify-center bg-muted/50 rounded text-muted-foreground cursor-pointer hover:bg-muted/80 transition-colors"
           style={{ width: imgProps.width || 32, height: imgProps.height || 32 }}
           onClick={(e) => { e.stopPropagation(); e.preventDefault(); setStatus('override') }}
-          title={`Image blocked: ${fileSize ? formatBytes(fileSize) : 'unknown size'} (click to load)`}
+          title={`${label} (click to load)`}
           role="button"
-          aria-label={`Load blocked image (${fileSize ? formatBytes(fileSize) : 'unknown size'})`}
+          aria-label={`Load image (${label})`}
         >
           <ImageOff className="h-3 w-3" />
         </span>
@@ -150,7 +162,7 @@ export function SizeGuardedImage({ src, compact = false, className, alt, ...imgP
     return (
       <div className="flex items-center gap-2 p-3 bg-muted/30 rounded-lg border border-dashed border-muted-foreground/20 my-1 text-xs text-muted-foreground">
         <ImageOff className="h-4 w-4 shrink-0" />
-        <span>Image too large ({fileSize ? formatBytes(fileSize) : '?'})</span>
+        <span>{label}</span>
         <button
           className="text-primary hover:underline shrink-0"
           onClick={(e) => { e.stopPropagation(); e.preventDefault(); setStatus('override') }}

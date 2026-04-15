@@ -3,6 +3,7 @@ import * as AvatarPrimitive from "@radix-ui/react-avatar"
 
 import { cn } from "@/lib/utils"
 import { useAvatarSizeLimit } from "@/hooks/useImageSizeLimit"
+import { supportsCorsHead, learnCorsHost } from "@/lib/mediaUtils"
 
 const Avatar = React.forwardRef<
   React.ElementRef<typeof AvatarPrimitive.Root>,
@@ -31,24 +32,29 @@ function getHost(url: string): string {
   try { return new URL(url).host } catch { return '' }
 }
 
-function checkAvatarSize(url: string): Promise<number | null> {
+/** Sentinel: host not on whitelist, size unknown */
+const AVATAR_SIZE_UNKNOWN = -1
+
+function checkAvatarSize(url: string): Promise<number | null | typeof AVATAR_SIZE_UNKNOWN> {
   if (avatarSizeCache.has(url)) return Promise.resolve(avatarSizeCache.get(url)!)
 
-  // Skip HEAD for hosts we already know block CORS
-  const host = getHost(url)
-  if (host && avatarCorsBlockedHosts.has(host)) {
-    avatarSizeCache.set(url, null)
-    return Promise.resolve(null)
+  // Skip HEAD for hosts not on the CORS whitelist — return unknown sentinel
+  if (!supportsCorsHead(url)) {
+    avatarSizeCache.set(url, AVATAR_SIZE_UNKNOWN)
+    return Promise.resolve(AVATAR_SIZE_UNKNOWN)
   }
 
   if (avatarPendingChecks.has(url)) return avatarPendingChecks.get(url)!
 
+  const host = getHost(url)
   const promise = (async () => {
     try {
       const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) })
       const cl = res.headers.get('content-length')
       const size = cl ? parseInt(cl, 10) : null
       avatarSizeCache.set(url, size)
+      // Learn: this host supports CORS HEAD
+      if (host) learnCorsHost(host)
       return size
     } catch {
       if (host) avatarCorsBlockedHosts.add(host)
@@ -75,7 +81,7 @@ const AvatarImage = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Image>
 >(({ className, src, ...props }, ref) => {
   const limitBytes = useAvatarSizeLimit()
-  const [status, setStatus] = React.useState<'checking' | 'allowed' | 'blocked' | 'override'>('checking')
+  const [status, setStatus] = React.useState<'checking' | 'allowed' | 'blocked' | 'unknown' | 'override'>('checking')
   const [sizeBytes, setSizeBytes] = React.useState<number | null>(null)
 
   React.useEffect(() => {
@@ -86,26 +92,31 @@ const AvatarImage = React.forwardRef<
     // Check cache synchronously first
     if (avatarSizeCache.has(src)) {
       const size = avatarSizeCache.get(src)!
+      if (size === AVATAR_SIZE_UNKNOWN) { setStatus('unknown'); return }
       setSizeBytes(size)
       setStatus(size !== null && size > limitBytes ? 'blocked' : 'allowed')
       return
     }
     // Don't render <img> until HEAD check completes — prevents browser from downloading
+    let cancelled = false
     setStatus('checking')
     checkAvatarSize(src).then(size => {
+      if (cancelled) return
+      if (size === AVATAR_SIZE_UNKNOWN) { setStatus('unknown'); return }
       setSizeBytes(size)
       setStatus(size !== null && size > limitBytes ? 'blocked' : 'allowed')
     })
+    return () => { cancelled = true }
   }, [src, limitBytes])
 
   // While checking, render nothing — AvatarFallback will show instead
   if (status === 'checking') return null
 
-  if (status === 'blocked') {
+  if (status === 'blocked' || status === 'unknown') {
     return (
       <button
         className="flex h-full w-full items-center justify-center rounded-lg bg-muted/80 border border-dashed border-orange-400/60 cursor-pointer hover:bg-muted transition-colors"
-        title={`Avatar blocked (${sizeBytes ? formatBytes(sizeBytes) : 'unknown size'}) — click to load`}
+        title={status === 'unknown' ? 'Avatar size unknown — click to load' : `Avatar blocked (${sizeBytes ? formatBytes(sizeBytes) : 'unknown size'}) — click to load`}
         onClick={(e) => {
           e.stopPropagation()
           e.preventDefault()
@@ -114,7 +125,7 @@ const AvatarImage = React.forwardRef<
         }}
       >
         <span className="text-[7px] leading-tight text-center text-orange-500 font-medium px-0.5">
-          {sizeBytes ? formatBytes(sizeBytes) : '?'}
+          {status === 'unknown' ? '?' : (sizeBytes ? formatBytes(sizeBytes) : '?')}
         </span>
       </button>
     )

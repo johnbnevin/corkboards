@@ -259,21 +259,29 @@ export function useFeedPagination({
     }
   }, [showOwnNotes, userPubkey, activeTab, nostr, queryClient]);
 
-  // When "include my notes" is toggled ON, immediately fetch user notes so they
-  // appear in the feed without waiting for the next loadNewer/loadMoreByCount call.
-  // Only fetch within the time window of currently visible notes — never beyond.
+  // When "include my notes" is toggled ON or when switching to a tab that already
+  // has it on, immediately fetch user notes so they appear without waiting for pagination.
   const prevShowOwnNotes = useRef(showOwnNotes);
+  const prevActiveTab = useRef(activeTab);
   useEffect(() => {
-    if (showOwnNotes && !prevShowOwnNotes.current && userPubkey && activeTab !== 'me') {
+    const toggledOn = showOwnNotes && !prevShowOwnNotes.current;
+    const switchedTab = activeTab !== prevActiveTab.current;
+    prevShowOwnNotes.current = showOwnNotes;
+    prevActiveTab.current = activeTab;
+
+    if (showOwnNotes && (toggledOn || switchedTab) && userPubkey && activeTab !== 'me') {
       // Determine the time window from currently visible notes
       const notesFromOthers = currentNotes.filter(n => n.pubkey !== userPubkey);
       if (notesFromOthers.length > 0) {
         const oldest = notesFromOthers.reduce((min, n) => n.created_at < min ? n.created_at : min, notesFromOthers[0].created_at);
         fetchAndMergeUserNotes({ since: oldest, limit: 200 });
+      } else if (switchedTab) {
+        // Tab just switched and has no notes yet — fetch recent user notes
+        // so they're available when the feed loads
+        const now = Math.floor(Date.now() / 1000);
+        fetchAndMergeUserNotes({ since: now - 3600 * 24, limit: 200 });
       }
-      // If no notes visible yet, don't fetch — pagination will pick them up later
     }
-    prevShowOwnNotes.current = showOwnNotes;
   }, [showOwnNotes, userPubkey, activeTab, fetchAndMergeUserNotes, currentNotes]);
 
   // ─── Load Older (pagination) ────────────────────────────────────────────────

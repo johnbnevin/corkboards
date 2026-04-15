@@ -50,11 +50,33 @@ export interface RemoteCheckpoint {
   wrappedKey: string;
   signerMethod: 'nip44' | 'nip04';
   stats?: { corkboards: number; savedForLater: number; dismissed: number };
+  corkboardNames?: string[];
+  name?: string;
 }
 
 const D_TAG_PREFIX = 'corkboard:backup';
 const LAST_BACKUP_TS_KEY = STORAGE_KEYS.LAST_BACKUP_TS;
 const CHECKPOINTS_KEY = STORAGE_KEYS.REMOTE_CHECKPOINTS;
+
+// Relay blacklist — persists across sessions (mirrors web)
+const BLOCKED_RELAYS_KEY = 'corkboard:blocked-relays';
+
+export function getBlockedRelays(): Set<string> {
+  const stored = mobileStorage.getSync(BLOCKED_RELAYS_KEY);
+  return stored ? new Set(JSON.parse(stored)) : new Set();
+}
+
+export function blockRelay(url: string): void {
+  const normalized = url.endsWith('/') ? url : url + '/';
+  const blocked = getBlockedRelays();
+  blocked.add(normalized);
+  mobileStorage.setSync(BLOCKED_RELAYS_KEY, JSON.stringify(Array.from(blocked)));
+}
+
+export function isRelayBlocked(url: string): boolean {
+  const normalized = url.endsWith('/') ? url : url + '/';
+  return getBlockedRelays().has(normalized);
+}
 
 export const DEFAULT_BLOSSOM_SERVERS = [
   'https://blossom.primal.net/',
@@ -116,6 +138,56 @@ function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
   }
   const deduped = [...byStats.values()].sort((a, b) => b.timestamp - a.timestamp);
   mobileStorage.setSync(CHECKPOINTS_KEY, JSON.stringify(deduped));
+}
+
+// Keys checked for change detection — subset of BACKED_UP_KEYS that
+// represent meaningful user data (mirrors web's SNAPSHOT_KEYS).
+const SNAPSHOT_KEYS = [
+  'nostr-custom-feeds', 'collapsed-notes', 'dismissed-notes', 'nostr-friends',
+  'nostr-browse-relays', 'nostr-rss-feeds', 'saved-minimized-notes',
+  'corkboard:tab-filters', 'corkboard:onboarding-skipped',
+  'corkboard:banner-height-pct', 'corkboard:banner-fit-mode',
+] as const;
+
+function hasUnsavedChanges(): boolean {
+  const saved = mobileStorage.getSync(STORAGE_KEYS.LAST_BACKUP_DATA);
+  if (!saved) {
+    const feeds = mobileStorage.getSync('nostr-custom-feeds');
+    const dismissed = mobileStorage.getSync('dismissed-notes');
+    const collapsed = mobileStorage.getSync('collapsed-notes');
+    const onboardingSkipped = mobileStorage.getSync('corkboard:onboarding-skipped');
+    return !!((feeds && feeds !== '[]') || (dismissed && dismissed !== '[]') || (collapsed && collapsed !== '[]') || onboardingSkipped === 'true');
+  }
+  try {
+    const lastData = JSON.parse(saved);
+    for (const key of SNAPSHOT_KEYS) {
+      if ((mobileStorage.getSync(key) || '') !== (lastData[key] || '')) return true;
+    }
+    return false;
+  } catch {
+    return parseInt(mobileStorage.getSync(LAST_BACKUP_TS_KEY) || '0', 10) === 0;
+  }
+}
+
+function saveSnapshot(): void {
+  const snapshot: Record<string, string> = {};
+  for (const key of SNAPSHOT_KEYS) snapshot[key] = mobileStorage.getSync(key) || '';
+  mobileStorage.setSync(STORAGE_KEYS.LAST_BACKUP_DATA, JSON.stringify(snapshot));
+}
+
+function parseIdArr(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const arr = JSON.parse(json);
+    return Array.isArray(arr) ? arr.filter((s: unknown): s is string => typeof s === 'string') : [];
+  } catch { return []; }
+}
+
+/** Count saved notes = union of collapsed-notes + nostr-bookmark-ids (matches web) */
+function savedNoteCount(): number {
+  const collapsed = parseIdArr(mobileStorage.getSync('collapsed-notes'));
+  const bookmarks = parseIdArr(mobileStorage.getSync('nostr-bookmark-ids'));
+  return new Set([...collapsed, ...bookmarks]).size;
 }
 
 function serializeBackup(): string {
@@ -274,14 +346,14 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
       if (!blossomUrl) throw new Error('All Blossom servers failed');
 
-      // Publish manifest (kind 30078)
+      // Publish manifest (kind 30078) — manual saves use timestamp d-tags (matches web)
       const now = Math.floor(Date.now() / 1000);
-      const dTag = `${D_TAG_PREFIX}:auto`;
+      const dTag = `${D_TAG_PREFIX}:${now}`;
       const keysPresent = BACKED_UP_KEYS.filter(k => mobileStorage.getSync(k) !== null);
       const jsonLen = (k: string) => { try { return JSON.parse(mobileStorage.getSync(k) || '[]').length; } catch { return 0; } };
       const stats = {
         corkboards: jsonLen('nostr-custom-feeds'),
-        savedForLater: jsonLen('collapsed-notes'),
+        savedForLater: savedNoteCount(),
         dismissed: jsonLen('dismissed-notes'),
       };
       let corkboardNames: string[] = [];
@@ -298,7 +370,9 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       // Encrypt manifest so stats and Blossom URL aren't leaked
       const encryptedManifest = signer.nip44
         ? await signer.nip44.encrypt(pubkey, manifestJson)
-        : manifestJson;
+        : signer.nip04
+          ? await signer.nip04.encrypt(pubkey, manifestJson)
+          : manifestJson;
 
       const manifestEvent = await signer.signEvent({
         kind: 30078,
@@ -341,6 +415,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
       mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(now));
       setLastBackupTs(now);
+      saveSnapshot();
       setStatus('saved');
       setMessage(`Backup saved (${published} relays, Blossom: ${blossomUrl})`);
       log(`Done: manifest on ${published}/${relays.length} relays`);
@@ -353,6 +428,119 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       isSaving.current = false;
     }
   }, [pubkey, signer, log]);
+
+  // Silent auto-save — same logic as saveBackup but no status/message updates.
+  // Returns true on success, false on failure. Used by auto-save orchestration.
+  const autoSaveBackup = useCallback(async (): Promise<boolean> => {
+    if (!pubkey || !signer || isSaving.current || isRestoring.current) return false;
+    if (!signer.nip04 && !signer.nip44) return false;
+    if (!hasUnsavedChanges()) return false;
+
+    isSaving.current = true;
+    try {
+      const json = serializeBackup();
+
+      const { raw: aesRaw, key: aesKey } = await generateAesKey();
+      const aesKeyHex = rawKeyToHex(aesRaw);
+      const signerMethod: 'nip44' | 'nip04' = signer.nip44 ? 'nip44' : 'nip04';
+      const wrappedKey = signerMethod === 'nip44'
+        ? await signer.nip44!.encrypt(pubkey, aesKeyHex)
+        : await signer.nip04!.encrypt(pubkey, aesKeyHex);
+      const encryptedData = await aesEncrypt(aesKey, json);
+
+      let blossomUrl: string | null = null;
+      let blossomHash: string | undefined;
+      for (const server of getActiveBlossomServers()) {
+        const result = await blossomUpload(server, encryptedData, signer);
+        if (result) { blossomUrl = result.url; blossomHash = result.hash; break; }
+      }
+      if (!blossomUrl) return false;
+
+      const now = Math.floor(Date.now() / 1000);
+      const dTag = `${D_TAG_PREFIX}:auto`;
+      const jsonLen = (k: string) => { try { return JSON.parse(mobileStorage.getSync(k) || '[]').length; } catch { return 0; } };
+      const stats = {
+        corkboards: jsonLen('nostr-custom-feeds'),
+        savedForLater: savedNoteCount(),
+        dismissed: jsonLen('dismissed-notes'),
+      };
+      let corkboardNames: string[] = [];
+      try {
+        const feeds = JSON.parse(mobileStorage.getSync('nostr-custom-feeds') || '[]');
+        corkboardNames = feeds.map((f: { title?: string }) => f.title).filter(Boolean) as string[];
+      } catch { /* ignore */ }
+
+      const manifestJson = JSON.stringify({
+        v: 4, timestamp: now, encryption: 'aes-gcm',
+        wrappedKey, signerMethod, blossomUrl, deviceId,
+        ...(blossomHash ? { blossomHash } : {}),
+        keys: BACKED_UP_KEYS.filter(k => mobileStorage.getSync(k) !== null),
+        stats, corkboardNames,
+      });
+      const encryptedManifest = signer.nip44
+        ? await signer.nip44.encrypt(pubkey, manifestJson)
+        : signer.nip04
+          ? await signer.nip04.encrypt(pubkey, manifestJson)
+          : manifestJson;
+
+      const manifestEvent = await signer.signEvent({
+        kind: 30078,
+        content: encryptedManifest,
+        tags: [['d', dTag]],
+        created_at: now,
+      });
+
+      const relays = getPublishRelays(pubkey);
+      for (const url of relays) {
+        const relay = new NRelay1(url, { backoff: false });
+        try { await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) }); }
+        catch { /* continue */ }
+        finally { try { relay.close(); } catch { /* */ } }
+      }
+
+      // Update local state
+      mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(now));
+      setLastBackupTs(now);
+      saveSnapshot();
+
+      // Update checkpoint list — keep last 5 autosaves
+      const cps = getStoredCheckpoints();
+      const autoEntry: RemoteCheckpoint = {
+        eventId: manifestEvent.id, dTag, timestamp: now,
+        blossomUrl: blossomUrl!, ...(blossomHash ? { blossomHash } : {}),
+        wrappedKey, signerMethod, stats,
+      };
+      const latestAuto = cps.find(c => c.dTag?.includes(':auto'));
+      const statsChanged = !latestAuto?.stats
+        || latestAuto.stats.corkboards !== stats.corkboards
+        || latestAuto.stats.savedForLater !== stats.savedForLater
+        || latestAuto.stats.dismissed !== stats.dismissed;
+      if (statsChanged) {
+        cps.unshift(autoEntry);
+      } else if (latestAuto) {
+        latestAuto.timestamp = now;
+        latestAuto.eventId = manifestEvent.id;
+        latestAuto.blossomUrl = blossomUrl!;
+        if (blossomHash) latestAuto.blossomHash = blossomHash;
+        latestAuto.wrappedKey = wrappedKey;
+      } else {
+        cps.unshift(autoEntry);
+      }
+      const manualCps = cps.filter(c => !c.dTag?.includes(':auto'));
+      const autoCps = cps.filter(c => c.dTag?.includes(':auto')).slice(0, 5);
+      const merged = [...manualCps, ...autoCps].sort((a, b) => b.timestamp - a.timestamp);
+      setStoredCheckpoints(merged);
+      setCheckpoints(merged);
+
+      if (__DEV__) console.log('[backup] Auto-save complete');
+      return true;
+    } catch {
+      if (__DEV__) console.warn('[backup] Auto-save failed');
+      return false;
+    } finally {
+      isSaving.current = false;
+    }
+  }, [pubkey, signer, deviceId]);
 
   const checkForBackup = useCallback(async () => {
     if (!pubkey || !signer) return;
@@ -495,6 +683,8 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
       setStatus('restored');
       setMessage('Backup restored! Restart the app to apply all settings.');
+      // Resume auto-save after a brief flash of "restored" status
+      setTimeout(() => setStatus('idle'), 3000);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log('Restore failed: ' + errMsg);
@@ -515,7 +705,12 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
     lastBackupTs,
     lastBackupAgo,
     saveBackup,
+    autoSaveBackup,
+    hasUnsavedChanges,
     checkForBackup,
     restoreBackup,
   };
 }
+
+// Re-export for use outside the hook (e.g. AppState listeners)
+export { hasUnsavedChanges };

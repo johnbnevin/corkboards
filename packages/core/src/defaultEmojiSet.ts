@@ -57,7 +57,7 @@ export const CORKBOARDS_DEFAULT_EMOJIS: { shortcode: string; url: string }[] = [
   { shortcode: 'cb-thumbsdown', url: 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f44e.png' },
   { shortcode: 'cb-fist', url: 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/270a.png' },
   { shortcode: 'cb-fist-bump', url: 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f44a.png' },
-  { shortcode: 'db-clap', url: 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f44f.png' },
+  { shortcode: 'cb-clap', url: 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f44f.png' },
   { shortcode: 'cb-hands-heart', url: 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1faf6.png' },
   { shortcode: 'cb-prayer', url: 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f64f.png' },
   { shortcode: 'cb-flex', url: 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f4aa.png' },

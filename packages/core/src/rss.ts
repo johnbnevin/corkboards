@@ -57,27 +57,6 @@ export function rssItemsToEvents(
   } as NostrEvent));
 }
 
-// ─── Social media URL → RSS feed conversion ─────────────────────────────────
-//
-// Only platforms with NATIVE RSS support. No third-party bridges — they get
-// rate-limited and break. Twitter/X, Facebook, Instagram, and TikTok actively
-// block open access to content. That's why we Nostr.
-
-interface SocialRssResult {
-  rssUrl: string;
-  platform: string;
-  label: string;
-}
-
-/**
- * Social URL to RSS conversion is no longer supported — platforms keep
- * breaking their RSS endpoints. Users should paste direct RSS feed URLs
- * (typically ending in .rss, /feed, /rss, or .xml).
- */
-export function socialUrlToRss(_url: string): SocialRssResult | null {
-  return null;
-}
-
 /**
  * Calculate the base time window for fetching based on author count.
  */

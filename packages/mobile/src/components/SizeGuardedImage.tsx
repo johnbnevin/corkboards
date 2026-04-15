@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { STORAGE_KEYS } from '../lib/storageKeys';
+import { supportsCorsHead, learnCorsHost } from '../lib/mediaUtils';
 
 type SizeLimitOption = 'small' | 'default' | 'large' | 'none';
 
@@ -51,11 +52,29 @@ interface SizeCheckResult { size: number | null; isVideo: boolean }
 const MAX_SIZE_CACHE = 2000;
 const sizeCache = new Map<string, SizeCheckResult>();
 const pendingChecks = new Map<string, Promise<SizeCheckResult>>();
+/** Hosts where HEAD requests fail — skip future checks for any URL on these hosts */
+const corsBlockedHosts = new Set<string>();
+
+/** Sentinel size value: host not whitelisted, size unknown */
+const SIZE_UNKNOWN = -1;
+
+function getHost(url: string): string {
+  try { return new URL(url).host; } catch { return ''; }
+}
 
 async function checkSize(url: string): Promise<SizeCheckResult> {
   if (sizeCache.has(url)) return sizeCache.get(url)!;
+
+  // Skip HEAD for hosts that previously failed or aren't on the whitelist
+  if (corsBlockedHosts.has(getHost(url)) || !supportsCorsHead(url)) {
+    const result: SizeCheckResult = { size: SIZE_UNKNOWN, isVideo: false };
+    sizeCache.set(url, result);
+    return result;
+  }
+
   if (pendingChecks.has(url)) return pendingChecks.get(url)!;
 
+  const host = getHost(url);
   const promise = (async () => {
     try {
       const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
@@ -70,8 +89,11 @@ async function checkSize(url: string): Promise<SizeCheckResult> {
         if (oldest !== undefined) sizeCache.delete(oldest);
       }
       sizeCache.set(url, result);
+      if (host) learnCorsHost(host);
       return result;
     } catch {
+      // Remember this host blocks HEAD so we don't flood it with failed requests
+      if (host) corsBlockedHosts.add(host);
       const result: SizeCheckResult = { size: null, isVideo: false };
       if (sizeCache.size >= MAX_SIZE_CACHE) {
         const oldest = sizeCache.keys().next().value;
@@ -102,7 +124,7 @@ interface SizeGuardedImageProps {
 
 export function SizeGuardedImage({ uri, style, type = 'image', resizeMode = 'cover' }: SizeGuardedImageProps) {
   const limitBytes = getLimitBytes(type);
-  const [status, setStatus] = useState<'checking' | 'allowed' | 'blocked' | 'override'>('checking');
+  const [status, setStatus] = useState<'checking' | 'allowed' | 'blocked' | 'unknown' | 'override'>('checking');
   const [fileSize, setFileSize] = useState<number | null>(null);
   const mountedRef = useRef(true);
 
@@ -111,33 +133,46 @@ export function SizeGuardedImage({ uri, style, type = 'image', resizeMode = 'cov
     return () => { mountedRef.current = false; };
   }, []);
 
+  const resolveStatus = (result: SizeCheckResult) => {
+    if (result.size === SIZE_UNKNOWN) return 'unknown' as const;
+    if (!result.isVideo && result.size !== null && result.size > limitBytes) return 'blocked' as const;
+    return 'allowed' as const;
+  };
+
   useEffect(() => {
     if (limitBytes === 0) { setStatus('allowed'); return; }
     if (sizeCache.has(uri)) {
       const cached = sizeCache.get(uri)!;
-      setFileSize(cached.size);
-      // Never block videos — they only load metadata until user taps play
-      setStatus(!cached.isVideo && cached.size !== null && cached.size > limitBytes ? 'blocked' : 'allowed');
+      setFileSize(cached.size === SIZE_UNKNOWN ? null : cached.size);
+      setStatus(resolveStatus(cached));
       return;
     }
     setStatus('checking');
     checkSize(uri).then(result => {
       if (!mountedRef.current) return;
-      setFileSize(result.size);
-      setStatus(!result.isVideo && result.size !== null && result.size > limitBytes ? 'blocked' : 'allowed');
+      setFileSize(result.size === SIZE_UNKNOWN ? null : result.size);
+      setStatus(resolveStatus(result));
     });
   }, [uri, limitBytes]);
 
-  if (status === 'checking' || status === 'allowed' || status === 'override') {
+  if (status === 'checking') {
+    // Show placeholder while HEAD request checks size — don't render <Image>
+    // because React Native would start downloading the full image immediately.
+    return <View style={[style as object, localStyles.checkingPlaceholder]} />;
+  }
+
+  if (status === 'allowed' || status === 'override') {
     return <Image source={{ uri }} style={style} resizeMode={resizeMode} />;
   }
 
-  // Blocked
+  // Blocked or unknown
+  const label = status === 'unknown' ? 'Unknown size' : `Image too large (${fileSize ? formatBytes(fileSize) : '?'})`;
+
   if (type === 'avatar') {
     return (
       <TouchableOpacity onPress={() => setStatus('override')}>
         <View style={[style as object, localStyles.avatarPlaceholder]}>
-          <Text style={localStyles.avatarX}>X</Text>
+          <Text style={localStyles.avatarX}>{status === 'unknown' ? '?' : 'X'}</Text>
         </View>
       </TouchableOpacity>
     );
@@ -146,13 +181,18 @@ export function SizeGuardedImage({ uri, style, type = 'image', resizeMode = 'cov
   return (
     <TouchableOpacity style={localStyles.blockedContainer} onPress={() => setStatus('override')}>
       <Text style={localStyles.blockedText}>
-        Image too large ({fileSize ? formatBytes(fileSize) : '?'}) — tap to load
+        {label} — tap to load
       </Text>
     </TouchableOpacity>
   );
 }
 
 const localStyles = StyleSheet.create({
+  checkingPlaceholder: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 8,
+    minHeight: 48,
+  },
   avatarPlaceholder: {
     backgroundColor: '#333',
     alignItems: 'center',

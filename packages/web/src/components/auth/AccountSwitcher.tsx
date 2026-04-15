@@ -1,7 +1,7 @@
 // NOTE: This file is stable and usually should not be modified.
 // It is important that all functionality in this file is preserved, and should only be modified if explicitly requested.
 
-import { ChevronDown, LogOut, Trash2, UserIcon, UserPlus } from 'lucide-react';
+import { ChevronDown, LogOut, Trash2, UserIcon, UserPlus, Wallet } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,9 +17,11 @@ interface AccountSwitcherProps {
   onAddAccountClick: () => void;
   onLogout?: () => void;
   onDeleteAccount?: () => void;
+  onEditProfile?: () => void;
+  onConnectWallet?: () => void;
 }
 
-export function AccountSwitcher({ onAddAccountClick, onLogout, onDeleteAccount }: AccountSwitcherProps) {
+export function AccountSwitcher({ onAddAccountClick, onLogout, onDeleteAccount, onEditProfile, onConnectWallet }: AccountSwitcherProps) {
   const { currentUser, otherUsers, setLogin, removeLogin } = useLoggedInAccounts();
 
   if (!currentUser) return null;
@@ -43,7 +45,19 @@ export function AccountSwitcher({ onAddAccountClick, onLogout, onDeleteAccount }
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className='w-56 p-2 animate-scale-in'>
-        <div className='font-medium text-sm px-2 py-1.5'>Switch Account</div>
+        {onEditProfile && (
+          <DropdownMenuItem onClick={onEditProfile} className='flex items-center gap-2 cursor-pointer p-2 rounded-md'>
+            <UserPlus className='w-4 h-4' />
+            <span>Customize Profile</span>
+          </DropdownMenuItem>
+        )}
+        {onConnectWallet && (
+          <DropdownMenuItem onClick={onConnectWallet} className='flex items-center gap-2 cursor-pointer p-2 rounded-md'>
+            <Wallet className='w-4 h-4' />
+            <span>Connect Wallet</span>
+          </DropdownMenuItem>
+        )}
+        {(onEditProfile || onConnectWallet) && <DropdownMenuSeparator />}
         {otherUsers.map((user) => (
           <DropdownMenuItem
             key={user.id}

@@ -29,7 +29,7 @@ import {
 import { useAppContext } from '@/hooks/useAppContext';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
-import { useRelayHealthAuto, type RelayHealth } from '@/hooks/useRelayHealth';
+import { useRelayHealth, type RelayHealth } from '@/hooks/useRelayHealth';
 import { useToast } from '@/hooks/useToast';
 import { FALLBACK_RELAYS } from '@/components/NostrProvider';
 import {
@@ -223,7 +223,7 @@ function RelaySection({ onBack }: { onBack: () => void }) {
   const { user } = useCurrentUser();
   const { mutate: publishEvent } = useNostrPublish();
   const { toast } = useToast();
-  const { relayHealth, getShortName, checkAllRelays } = useRelayHealthAuto();
+  const { relayHealth, getShortName, checkAllRelays } = useRelayHealth();
 
   const [relays, setRelays] = useState<Relay[]>(config.relayMetadata.relays);
   const [newRelayUrl, setNewRelayUrl] = useState('');

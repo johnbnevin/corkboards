@@ -212,6 +212,29 @@ export function useFeedPagination({
     }
   }, [showOwnNotes, userPubkey, activeTab, nostr, queryClient]);
 
+  // When "include my notes" is toggled ON or when switching to a tab that already
+  // has it on, immediately fetch user notes so they appear without waiting for pagination.
+  const prevShowOwnNotes = useRef(showOwnNotes);
+  const prevActiveTab = useRef(activeTab);
+  useEffect(() => {
+    const toggledOn = showOwnNotes && !prevShowOwnNotes.current;
+    const switchedTab = activeTab !== prevActiveTab.current;
+    prevShowOwnNotes.current = showOwnNotes;
+    prevActiveTab.current = activeTab;
+
+    if (showOwnNotes && (toggledOn || switchedTab) && userPubkey && activeTab !== 'me') {
+      const notesFromOthers = currentNotes.filter(n => n.pubkey !== userPubkey);
+      if (notesFromOthers.length > 0) {
+        const oldest = notesFromOthers.reduce((min, n) => n.created_at < min ? n.created_at : min, notesFromOthers[0].created_at);
+        fetchAndMergeUserNotes({ since: oldest, limit: 200 });
+      } else if (switchedTab) {
+        // Tab just switched and has no notes yet — fetch recent user notes
+        const now = Math.floor(Date.now() / 1000);
+        fetchAndMergeUserNotes({ since: now - 3600 * 24, limit: 200 });
+      }
+    }
+  }, [showOwnNotes, userPubkey, activeTab, fetchAndMergeUserNotes, currentNotes]);
+
   // ─── Load Older (time-based pagination) ────────────────────────────────────
 
   const loadMoreNotes = useCallback(async (hours: number) => {

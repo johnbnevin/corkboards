@@ -10,6 +10,7 @@ import { AppProvider } from './src/lib/AppContext';
 import { ToastProvider } from './src/hooks/useToast';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { NostrSync } from './src/components/NostrSync';
+import { AutoSaveManager } from './src/components/AutoSaveManager';
 import { HomeScreen } from './src/screens/HomeScreen';
 import { DiscoverScreen } from './src/screens/DiscoverScreen';
 import { SavedScreen } from './src/screens/SavedScreen';
@@ -38,6 +39,7 @@ export default function App() {
       <AuthProvider>
       <NwcProvider>
       <NostrSync />
+      <AutoSaveManager />
       <NavigationContainer>
         <Tab.Navigator
           screenOptions={{

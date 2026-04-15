@@ -73,7 +73,7 @@ export function classifyNote(event: NostrEvent): NoteClassification {
     isOriginal: !hasReplyETags && !hasQTags,
     parentEventId: hasReplyETags ? parentEventId : undefined,
     rootEventId: hasReplyETags ? rootEventId : undefined,
-    quotedEventId: hasQTags && quotedEventId ? quotedEventId : undefined,
+    quotedEventId: quotedEventId || undefined,
   };
 }
 
@@ -120,7 +120,7 @@ export function getReferencedEventIds(event: NostrEvent): string[] {
 export function buildReplyTags(replyTo: NostrEvent): string[][] {
   const tags: string[][] = [];
   const rootTag = replyTo.tags.find(t => t[0] === 'e' && t[3] === 'root');
-  const rootId = rootTag?.[1] || replyTo.id;
+  const rootId = (rootTag?.[1] && isValidEventId(rootTag[1])) ? rootTag[1] : replyTo.id;
 
   if (rootId !== replyTo.id) {
     tags.push(['e', rootId, '', 'root']);

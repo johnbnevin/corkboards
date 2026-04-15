@@ -39,7 +39,6 @@ import { genUserName } from '@/lib/genUserName';
 import type { KindFilter } from '@/components/NoteKindToggles';
 import { ALL_NOTE_KIND_FILTERS } from '@/components/NoteKindToggles';
 import type { ContentFilterConfig, ContentFilterKey } from '@/components/ContentFilters';
-import { socialUrlToRss } from '@core/rss';
 import {
   profileModalState,
   PROFILE_ACTION_NEW_CORKBOARD,
@@ -104,7 +103,6 @@ import { FeedInfoCard } from '@/components/FeedInfoCard';
 import { StatusBar } from '@/components/StatusBar';
 import { TabBar } from '@/components/TabBar';
 import { NotificationsCorkboard } from '@/components/NotificationsCorkboard';
-import { RelayHealthIndicator } from '@/components/RelayHealthIndicator';
 
 
 
@@ -1140,7 +1138,7 @@ export function MultiColumnClient() {
 
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
   const [showBackupConfirm, setShowBackupConfirm] = useState(false);
-  const [backupSaveFlash, setBackupSaveFlash] = useState(false);
+  const [backupIndicator, setBackupIndicator] = useState<'idle' | 'unsaved' | 'saved'>('idle');
   const [showDownloadPrompt, setShowDownloadPrompt] = useState(false);
 
   // Soft refresh: re-fetch broken avatars/nicknames and failed notes without disrupting the UI
@@ -1204,7 +1202,7 @@ export function MultiColumnClient() {
       // First time we see unsaved changes — record the timestamp
       if (changeDetectedAt === null) {
         changeDetectedAt = Date.now();
-        setBackupSaveFlash(false);
+        setBackupIndicator('unsaved');
         debugLog(`[AutoSave] changes detected (${source}), will save in ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
         return;
       }
@@ -1218,7 +1216,7 @@ export function MultiColumnClient() {
       changeDetectedAt = null;
       autoSaveBackup().then((saved) => {
         if (saved) {
-          setBackupSaveFlash(true);
+          setBackupIndicator('saved');
         } else {
           debugWarn('[AutoSave] Blossom upload failed');
           toast({
@@ -1606,21 +1604,11 @@ export function MultiColumnClient() {
       return { type: 'relay', value: input };
     }
     if (input.startsWith('http://') || input.startsWith('https://')) {
-      // Try social media URL → RSS conversion first
-      const social = socialUrlToRss(input);
-      if (social) {
-        return { type: 'rss', value: social.rssUrl, platform: social.platform, label: social.label };
-      }
       return { type: 'rss', value: input };
     }
     // Bare domain/URL without protocol — auto-prepend https://
     if (input.includes('.') && !input.startsWith('npub') && !input.startsWith('nprofile')) {
-      const withProto = 'https://' + input;
-      const social = socialUrlToRss(withProto);
-      if (social) {
-        return { type: 'rss', value: social.rssUrl, platform: social.platform, label: social.label };
-      }
-      return { type: 'rss', value: withProto };
+      return { type: 'rss', value: 'https://' + input };
     }
     try {
       const decoded = nip19.decode(input);
@@ -2796,17 +2784,20 @@ export function MultiColumnClient() {
 
     if (!baseNotes || baseNotes.length === 0) {
       const hasPinnedOnMe = activeTab === 'me' && pinnedNoteEvents && pinnedNoteEvents.length > 0;
+      const canShowOwnNotes = showOwnNotes && activeTab !== 'me' && !isDiscoverTab && user?.pubkey;
       if (hasPinnedOnMe) {
         baseNotes = [];
-      } else {
+      } else if (!canShowOwnNotes) {
         return { deduplicatedNotes: [] as NostrEvent[], noteClassifications: new Map<string, NoteClassification>(), parentIdsNeeded: [] as string[], eventLookup: new Map<string, NostrEvent>() };
+      } else {
+        baseNotes = [];
       }
     }
 
     if (showOwnNotes && activeTab !== 'me' && !isDiscoverTab && user?.pubkey) {
       // On custom feed tabs, don't mix in self-notes until the feed has loaded.
       // Showing only self-notes while waiting for other authors is disorienting.
-      const feedStillLoading = isCustomFeedTab && isLoadingCustomFeedNotes && (!baseNotes || baseNotes.length === 0);
+      const feedStillLoading = isCustomFeedTab && isLoadingCustomFeedNotes;
       if (!feedStillLoading) {
         // Mix in self notes from follow cache AND userNotes (me-tab source) for reliability.
         // followNotesCache may not always include self notes (relay timing, batch ordering).
@@ -2821,12 +2812,14 @@ export function MultiColumnClient() {
             allSelfNotes.push(n);
           }
         }
-        if (baseNotes && baseNotes.length > 0 && allSelfNotes.length > 0) {
+        if (baseNotes.length > 0 && allSelfNotes.length > 0) {
           const oldestTimestamp = baseNotes.reduce((min, n) => n.created_at < min ? n.created_at : min, baseNotes[0].created_at);
           const filteredUserNotes = allSelfNotes.filter(n => n.created_at >= oldestTimestamp);
           baseNotes = [...baseNotes, ...filteredUserNotes];
+        } else if (baseNotes.length === 0 && allSelfNotes.length > 0) {
+          // Feed is empty but user has notes — show them unfiltered
+          baseNotes = [...allSelfNotes];
         }
-        // When baseNotes is empty, don't show self notes — there's no time window to filter against
       }
     }
 
@@ -3453,10 +3446,7 @@ export function MultiColumnClient() {
                     <Button variant="ghost" size="sm" className="h-8 w-8 p-0"><Settings className="h-4 w-4" /></Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start">
-                    <DropdownMenuItem onClick={() => setEditProfileOpen(true)} className="gap-2"><UserPlus className="h-4 w-4" />Customize Profile</DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => setWalletSettingsOpen(true)} className="gap-2"><Wallet className="h-4 w-4" />Connect Wallet</DropdownMenuItem>
                     <DropdownMenuItem onClick={() => setEmojiSetsOpen(true)} className="gap-2"><Smile className="h-4 w-4" />Emoji Sets</DropdownMenuItem>
-                    <DropdownMenuSeparator />
                     <DropdownMenuSub>
                       <DropdownMenuSubTrigger className="gap-2">
                         <Volume2 className="h-4 w-4" />Sound: {consolidateSound === 'solitaire' ? 'Solitaire' : consolidateSound === 'chimes' ? 'Chimes' : 'Off'}
@@ -3499,7 +3489,7 @@ export function MultiColumnClient() {
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Backup & Restore">
-                      <HardDrive className={`h-4 w-4 transition-all duration-700 ${backupSaveFlash ? 'text-green-500 animate-[backup-pulse_0.8s_ease-in-out_infinite]' : ''}`} />
+                      <HardDrive className={`h-4 w-4 transition-colors duration-700 ${backupIndicator === 'unsaved' ? 'text-red-500' : backupIndicator === 'saved' ? 'text-green-500' : ''}`} />
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start">
@@ -3519,22 +3509,28 @@ export function MultiColumnClient() {
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => {
-                      // Debounce: don't open during active check/restore
+                      // Just open the dialog — don't trigger a re-check that would
+                      // flash the splash screen. The dialog shows existing checkpoints
+                      // and has a "Search for more" button if the user wants to scan.
                       if ((backupStatus as string) === 'checking' || (backupStatus as string) === 'restoring') return;
-
                       setShowBackupConfirm(true);
-                      // Skip re-check if login already found states (check settled recently)
-                      if (backupStatus === 'idle' || backupStatus === 'no-backup') {
-                        checkRemoteBackup(true);
-                      }
                     }} className="gap-2"><HardDrive className="h-4 w-4" />Backup &amp; Restore</DropdownMenuItem>
                     <DropdownMenuItem onClick={() => setLocalBackupOpen(true)} className="gap-2"><HardDrive className="h-4 w-4" />Local File Backup</DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('relays'); }} className="gap-2"><Wifi className="h-4 w-4" />Relays</DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('blossom'); }} className="gap-2"><Server className="h-4 w-4" />Blossom Servers</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
-                {canLoadNotes && <RelayHealthIndicator />}
+                {canLoadNotes && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Relays & Servers">
+                        <Wifi className="h-3.5 w-3.5 text-muted-foreground" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('relays'); }} className="gap-2"><Wifi className="h-4 w-4" />Relays</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('blossom'); }} className="gap-2"><Server className="h-4 w-4" />Blossom Servers</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
                 {canLoadNotes && (
                   <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Refresh failed content" onClick={handleSoftRefresh}>
                     <RefreshCw className={`h-3.5 w-3.5 text-muted-foreground ${isRefreshing ? 'animate-spin' : ''}`} />
@@ -3556,7 +3552,15 @@ export function MultiColumnClient() {
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-56 p-2">
-                    <div className="font-medium text-sm px-2 py-1.5">Switch Account</div>
+                    <DropdownMenuItem onClick={() => setEditProfileOpen(true)} className="flex items-center gap-2 cursor-pointer p-2 rounded-md">
+                      <UserPlus className="h-4 w-4" />
+                      <span className="text-sm">Customize Profile</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setWalletSettingsOpen(true)} className="flex items-center gap-2 cursor-pointer p-2 rounded-md">
+                      <Wallet className="h-4 w-4" />
+                      <span className="text-sm">Connect Wallet</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => setAddAccountDialogOpen(true)} className="flex items-center gap-2 cursor-pointer p-2 rounded-md">
                       <UserPlus className="h-4 w-4" />
                       <span className="text-sm">Add Account</span>
@@ -3608,19 +3612,10 @@ export function MultiColumnClient() {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
-                  <DropdownMenuItem onClick={() => setEditProfileOpen(true)} className="gap-2">
-                    <UserPlus className="h-4 w-4" />
-                    Customize Profile
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setWalletSettingsOpen(true)} className="gap-2">
-                    <Wallet className="h-4 w-4" />
-                    Connect Wallet
-                  </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => setEmojiSetsOpen(true)} className="gap-2">
                     <Smile className="h-4 w-4" />
                     Emoji Sets
                   </DropdownMenuItem>
-                  <DropdownMenuSeparator />
                   <DropdownMenuSub>
                     <DropdownMenuSubTrigger className="gap-2">
                       <Volume2 className="h-4 w-4" />Sound: {consolidateSound === 'solitaire' ? 'Solitaire' : consolidateSound === 'chimes' ? 'Chimes' : 'Off'}
@@ -3663,19 +3658,13 @@ export function MultiColumnClient() {
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Backup & Restore">
-                    <HardDrive className={`h-4 w-4 transition-all duration-700 ${backupSaveFlash ? 'text-green-500 animate-[backup-pulse_0.8s_ease-in-out_infinite]' : ''}`} />
+                    <HardDrive className={`h-4 w-4 transition-colors duration-700 ${backupIndicator === 'unsaved' ? 'text-red-500' : backupIndicator === 'saved' ? 'text-green-500' : ''}`} />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
                   <DropdownMenuItem onClick={() => {
-                      // Debounce: don't open during active check/restore
                       if ((backupStatus as string) === 'checking' || (backupStatus as string) === 'restoring') return;
-
                       setShowBackupConfirm(true);
-                      // Skip re-check if login already found states (check settled recently)
-                      if (backupStatus === 'idle' || backupStatus === 'no-backup') {
-                        checkRemoteBackup(true);
-                      }
                     }} className="gap-2">
                     <CloudUpload className="h-4 w-4" />
                     Backup &amp; Restore
@@ -3684,12 +3673,21 @@ export function MultiColumnClient() {
                     <HardDrive className="h-4 w-4" />
                     Local File Backup
                   </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('relays'); }} className="gap-2"><Wifi className="h-4 w-4" />Relays</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('blossom'); }} className="gap-2"><Server className="h-4 w-4" />Blossom Servers</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              {canLoadNotes && <RelayHealthIndicator />}
+              {canLoadNotes && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Relays & Servers">
+                      <Wifi className="h-3.5 w-3.5 text-muted-foreground" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start">
+                    <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('relays'); }} className="gap-2"><Wifi className="h-4 w-4" />Relays</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('blossom'); }} className="gap-2"><Server className="h-4 w-4" />Blossom Servers</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
               {canLoadNotes && (
                 <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Refresh failed content" onClick={handleSoftRefresh}>
                   <RefreshCw className={`h-3.5 w-3.5 text-muted-foreground ${isRefreshing ? 'animate-spin' : ''}`} />
@@ -3708,7 +3706,7 @@ export function MultiColumnClient() {
               New Post
             </Button>
             <Separator orientation="vertical" className="h-8 mx-2" />
-            <AccountSwitcher onAddAccountClick={() => setAddAccountDialogOpen(true)} onLogout={handleLogout} />
+            <AccountSwitcher onAddAccountClick={() => setAddAccountDialogOpen(true)} onLogout={handleLogout} onEditProfile={() => setEditProfileOpen(true)} onConnectWallet={() => setWalletSettingsOpen(true)} />
             <Dialog open={addAccountDialogOpen} onOpenChange={setAddAccountDialogOpen}>
               <DialogContent className="max-w-[95vw] sm:max-w-lg max-h-[90dvh] overflow-y-auto" aria-describedby={undefined}>
                 <DialogTitle className="sr-only">Add another account</DialogTitle>
@@ -4234,7 +4232,17 @@ export function MultiColumnClient() {
         </div>
 
         {/* Onboard search widget — shown during onboard procedure on discover tab */}
-        {isOnboarding && isDiscoverTab && <OnboardSearchWidget contactCount={contacts?.length ?? 0} followTarget={onboardFollowTarget} onSkip={() => { setOnboardingSkipped(true); setActiveTab('me'); autoSaveBackup().then((saved) => { if (saved) { setBackupSaveFlash(true); } else { toast({ title: 'Backup failed', description: 'Onboarding preference could not be saved to cloud. It will retry automatically.', variant: 'destructive' }); } }).catch(() => {}); }} />}
+        {isOnboarding && isDiscoverTab && <OnboardSearchWidget contactCount={contacts?.length ?? 0} followTarget={onboardFollowTarget} onSkip={() => { setOnboardingSkipped(true); setActiveTab('me'); autoSaveBackup().then((saved) => { if (saved) { setBackupIndicator('saved'); } else { toast({ title: 'Backup failed', description: 'Onboarding preference could not be saved to cloud. It will retry automatically.', variant: 'destructive' }); } }).catch(() => {}); }} />}
+
+        {/* Customize Profile shortcut on me tab */}
+        {activeTab === 'me' && user && (
+          <div className="flex justify-center mb-2">
+            <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={() => setEditProfileOpen(true)}>
+              <UserPlus className="h-3.5 w-3.5" />
+              Customize Profile
+            </Button>
+          </div>
+        )}
 
         {/* Masonry feed columns + load older/newer/consolidate buttons */}
         {!isNotificationsTab && <FeedGrid

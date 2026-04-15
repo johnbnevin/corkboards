@@ -230,7 +230,7 @@ const LoginDialog: React.FC<LoginDialogProps> = ({ isOpen, onClose, onLogin }) =
             </>
           )}
 
-          <p className="text-center text-xs text-muted-foreground/50">v2026.03.06-republish</p>
+          <p className="text-center text-xs text-muted-foreground/50">v0.5.1</p>
         </div>
       </DialogContent>
     </Dialog>

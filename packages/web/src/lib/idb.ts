@@ -57,6 +57,7 @@ let idbAvailable = true;
 
 // ─── IndexedDB open ──────────────────────────────────────────────────────────
 let db: IDBDatabase | null = null;
+let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -75,13 +76,19 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 async function getDb(): Promise<IDBDatabase> {
-  if (!db) {
-    db = await openDb();
-    // Invalidate cached handle if the browser closes the connection
-    db.onclose = () => { db = null; };
-    db.onerror = () => { db = null; };
+  if (db) return db;
+  if (!dbPromise) {
+    dbPromise = openDb().then(d => {
+      db = d;
+      db.onclose = () => { db = null; dbPromise = null; };
+      db.onerror = () => { db = null; dbPromise = null; };
+      return d;
+    }).catch(err => {
+      dbPromise = null;
+      throw err;
+    });
   }
-  return db;
+  return dbPromise;
 }
 
 // ─── Core async helpers ───────────────────────────────────────────────────────
@@ -133,6 +140,7 @@ export async function idbClear(): Promise<void> {
   // Close the connection so deleteDatabase() won't be blocked
   database.close();
   db = null;
+  dbPromise = null;
   broadcastChange({ type: 'clear' });
 }
 
@@ -244,8 +252,8 @@ async function init(): Promise<void> {
   try {
     const database = await openDb();
     db = database;
-    db.onclose = () => { db = null; };
-    db.onerror = () => { db = null; };
+    db.onclose = () => { db = null; dbPromise = null; };
+    db.onerror = () => { db = null; dbPromise = null; };
 
     await migrateFromLocalStorage(database);
 

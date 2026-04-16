@@ -6,12 +6,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useNostr, getUserRelays, FALLBACK_RELAYS } from '../lib/NostrProvider';
+import { useNostr, getUserRelays, FALLBACK_RELAYS, createRelay } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { STORAGE_KEYS } from '../lib/storageKeys';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { NRelay1 } from '@nostrify/nostrify';
 import { normalizeRelay } from '@core/normalizeRelay';
 
 const MMKV_KEY = STORAGE_KEYS.PINNED_NOTE_IDS;
@@ -48,7 +47,7 @@ export function usePinnedNotes() {
       // Query all write relays in parallel, collect all responses
       const results = await Promise.allSettled(
         writeRelays.map(async (relayUrl) => {
-          const relay = new NRelay1(normalizeRelay(relayUrl), { backoff: false });
+          const relay = createRelay(normalizeRelay(relayUrl), { backoff: false });
           try {
             const events = await relay.query(
               [{ kinds: [10001], authors: [pubkey], limit: 1 }],
@@ -139,7 +138,7 @@ export function usePinnedNotes() {
   const pinnedSet = useMemo(() => new Set(pinnedIds), [pinnedIds]);
 
   // Publish updated kind 10001 pin list directly to each relay.
-  // Uses fresh NRelay1 connections instead of the NPool to avoid stale
+  // Uses fresh createRelay connections instead of the NPool to avoid stale
   // WebSocket issues after idle periods that caused unpins to be lost.
   const publishPinList = useCallback(async (newIds: string[]) => {
     if (!signer) return;
@@ -157,7 +156,7 @@ export function usePinnedNotes() {
     let published = 0;
     await Promise.allSettled(
       relays.map(async (url) => {
-        const relay = new NRelay1(normalizeRelay(url), { backoff: false });
+        const relay = createRelay(normalizeRelay(url), { backoff: false });
         try {
           await relay.event(event, { signal: AbortSignal.timeout(8000) });
           published++;

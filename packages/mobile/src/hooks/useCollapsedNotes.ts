@@ -204,6 +204,9 @@ export function useCollapsedNotes() {
     });
     _softDismissedSet = new Set();
     _setSoftDismissedIds([]);
+    // Clear undo state — consolidate is an explicit user action
+    _dismissedUndoMap.clear();
+    setUndoMapVersion(v => v + 1);
     _sessionCollapsedIds = new Set();
     _sessionCollapsedCounter++;
     notifyListeners();

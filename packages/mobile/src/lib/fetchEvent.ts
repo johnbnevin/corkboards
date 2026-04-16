@@ -4,7 +4,8 @@
  * Port of packages/web/src/lib/fetchEvent.ts for mobile.
  * Uses mobile's NostrProvider relay cache instead of web IDB.
  */
-import { type NostrEvent, NRelay1 } from '@nostrify/nostrify';
+import type { NostrEvent, NRelay1 } from '@nostrify/nostrify';
+import { createRelay } from './NostrProvider';
 import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS } from './NostrProvider';
 import { isSecureRelay } from '@core/nostrUtils';
 
@@ -58,7 +59,7 @@ export async function queryRelay(
   let timeout: ReturnType<typeof setTimeout> | undefined;
 
   try {
-    relay = new NRelay1(relayUrl, { backoff: false });
+    relay = createRelay(relayUrl, { backoff: false });
     timeout = setTimeout(() => relay!.close(), timeoutMs);
     for await (const msg of relay.req([filter])) {
       if (msg[0] === 'EVENT') events.push(msg[2] as NostrEvent);

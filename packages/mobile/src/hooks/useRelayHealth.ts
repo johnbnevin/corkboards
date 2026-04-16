@@ -5,8 +5,7 @@
  * Uses MMKV instead of IDB for user relay config access.
  */
 import { useState, useEffect, useCallback } from 'react';
-import { NRelay1 } from '@nostrify/nostrify';
-import { FALLBACK_RELAYS, getRelayCache, getUserRelays } from '../lib/NostrProvider';
+import { FALLBACK_RELAYS, getRelayCache, getUserRelays, createRelay } from '../lib/NostrProvider';
 import { normalizeRelay } from '@core/normalizeRelay';
 import { mobileStorage } from '../storage/MmkvStorage';
 
@@ -73,7 +72,7 @@ export function useRelayHealth() {
 
   const checkRelay = useCallback(async (url: string): Promise<RelayHealth> => {
     const existing = relayHealthMap.get(url);
-    const relay = new NRelay1(url, { backoff: false });
+    const relay = createRelay(url, { backoff: false });
     const start = Date.now();
 
     try {

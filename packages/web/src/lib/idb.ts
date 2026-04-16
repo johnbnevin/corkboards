@@ -55,6 +55,17 @@ function dispatchSyncEvent(key: string, value: unknown): void {
 // ─── Availability flag (false when IDB is unavailable, e.g. Safari private mode) ──
 let idbAvailable = true;
 
+// ─── Persistence health tracking ────────────────────────────────────────────
+// Tracks consecutive IDB write failures. When > 0, auto-save should avoid
+// overwriting cloud backups because memCache data may not match disk.
+let consecutiveWriteFailures = 0;
+const MAX_WRITE_FAILURES_BEFORE_UNHEALTHY = 3;
+
+/** Returns true if IDB writes are succeeding. Auto-save should check this. */
+export function isIdbHealthy(): boolean {
+  return idbAvailable && consecutiveWriteFailures < MAX_WRITE_FAILURES_BEFORE_UNHEALTHY;
+}
+
 // ─── IndexedDB open ──────────────────────────────────────────────────────────
 let db: IDBDatabase | null = null;
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -119,9 +130,28 @@ export async function idbGet(key: string): Promise<string | null> {
 export async function idbSet(key: string, value: string): Promise<void> {
   memCache.set(key, value);
   if (!idbAvailable) return;
-  const database = await getDb();
-  await wrapRequest(tx(database, 'readwrite').put(value, key));
-  broadcastChange({ type: 'set', key, value });
+  try {
+    const database = await getDb();
+    await wrapRequest(tx(database, 'readwrite').put(value, key));
+    consecutiveWriteFailures = 0;
+    broadcastChange({ type: 'set', key, value });
+  } catch {
+    // Connection may have died — force reopen and retry once
+    db = null;
+    dbPromise = null;
+    try {
+      const database = await getDb();
+      await wrapRequest(tx(database, 'readwrite').put(value, key));
+      consecutiveWriteFailures = 0;
+      broadcastChange({ type: 'set', key, value });
+    } catch (retryErr) {
+      consecutiveWriteFailures++;
+      if (consecutiveWriteFailures === MAX_WRITE_FAILURES_BEFORE_UNHEALTHY) {
+        console.error('[idb] Persistence unhealthy — IDB writes failing repeatedly. Auto-save will pause to protect cloud backups.');
+      }
+      throw retryErr;
+    }
+  }
 }
 
 export async function idbRemove(key: string): Promise<void> {
@@ -183,11 +213,11 @@ export function idbSetSync(key: string, value: string): void {
     }
     memCache.set(key, value);
   }
-  // Dispatch the sync event only after a confirmed IDB write so that
-  // listeners don't act on data that was never actually persisted.
+  // Dispatch the sync event after IDB write (includes retry on failure).
+  // If both attempts fail, data lives only in memCache until next successful write.
   idbSet(key, value).then(
     () => dispatchSyncEvent(key, tryParse(value)),
-    (err) => console.warn('[idb] Failed to persist key', key, err),
+    (err) => console.warn('[idb] Failed to persist key (after retry)', key, err),
   );
 }
 

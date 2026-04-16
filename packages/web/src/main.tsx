@@ -8,7 +8,7 @@ import App from './App.tsx';
 import './index.css';
 
 createRoot(document.getElementById("root")!).render(
-  <ErrorBoundary>
+  <ErrorBoundary reloadOnDomError>
     <App />
   </ErrorBoundary>
 );

@@ -7,6 +7,8 @@ import { ThreadReplyRow } from './ThreadReplyRow'
 interface ThreadTreeProps {
   rows: FlatThreadRow[]
   targetId: string | null
+  /** ID of a just-posted reply — auto-scrolls to it once */
+  scrollToReplyId?: string | null
   collapsedIds: Set<string>
   onToggleCollapse: (eventId: string) => void
   onViewThread?: (eventId: string) => void
@@ -19,7 +21,7 @@ interface ThreadTreeProps {
 }
 
 export function ThreadTree({
-  rows, targetId, collapsedIds, onToggleCollapse,
+  rows, targetId, scrollToReplyId, collapsedIds, onToggleCollapse,
   onViewThread, onReply, onQuote, onRepost, onZap, onPinToBoard, onReactionPublished,
 }: ThreadTreeProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -51,6 +53,19 @@ export function ThreadTree({
     prevTarget.current = targetId
     hasScrolled.current = false
   }
+
+  // Auto-scroll to a just-posted reply so the user sees it immediately
+  const lastScrolledReply = useRef<string | null>(null)
+  useEffect(() => {
+    if (!scrollToReplyId || scrollToReplyId === lastScrolledReply.current) return
+    const idx = rows.findIndex(r => r.node.event.id === scrollToReplyId)
+    if (idx >= 0) {
+      lastScrolledReply.current = scrollToReplyId
+      requestAnimationFrame(() => {
+        virtualizer.scrollToIndex(idx, { align: 'center', behavior: 'smooth' })
+      })
+    }
+  }, [scrollToReplyId, rows, virtualizer])
 
   const handleReply = useCallback((event: NostrEvent) => onReply?.(event), [onReply])
 

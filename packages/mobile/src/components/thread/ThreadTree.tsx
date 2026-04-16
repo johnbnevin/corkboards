@@ -110,6 +110,8 @@ function ThreadNoteCard({
 interface ThreadTreeProps {
   rows: FlatThreadRow[];
   targetId: string | null;
+  /** ID of a just-posted reply — auto-scrolls to it once */
+  scrollToReplyId?: string | null;
   collapsedIds: Set<string>;
   onToggleCollapse: (eventId: string) => void;
   onReply?: (event: NostrEvent) => void;
@@ -118,6 +120,7 @@ interface ThreadTreeProps {
 export function ThreadTree({
   rows,
   targetId,
+  scrollToReplyId,
   collapsedIds,
   onToggleCollapse,
   onReply,
@@ -135,6 +138,19 @@ export function ThreadTree({
       }, 300);
     }
   }, [rows.length > 0, targetId]); // only on first load
+
+  // Auto-scroll to a just-posted reply so the user sees it immediately
+  const lastScrolledReply = useRef<string | null>(null);
+  useEffect(() => {
+    if (!scrollToReplyId || scrollToReplyId === lastScrolledReply.current) return;
+    const idx = rows.findIndex((r) => r.node.event.id === scrollToReplyId);
+    if (idx >= 0) {
+      lastScrolledReply.current = scrollToReplyId;
+      setTimeout(() => {
+        flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.3 });
+      }, 200);
+    }
+  }, [scrollToReplyId, rows]);
 
   const renderRow = useCallback(
     ({ item }: { item: FlatThreadRow }) => (

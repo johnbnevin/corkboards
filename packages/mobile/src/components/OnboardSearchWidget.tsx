@@ -14,8 +14,8 @@ import {
   ActivityIndicator,
   StyleSheet,
 } from 'react-native';
-import { NRelay1 } from '@nostrify/nostrify';
-import type { NostrEvent } from '@nostrify/nostrify';
+import type { NRelay1, NostrEvent } from '@nostrify/nostrify';
+import { createRelay } from '../lib/NostrProvider';
 import { nip19 } from 'nostr-tools';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { NIP50_SEARCH_RELAY } from '../lib/relayConstants';
@@ -96,7 +96,7 @@ export function OnboardSearchWidget({
       }
       setIsSearching(true);
       try {
-        const relay = new NRelay1(NIP50_SEARCH_RELAY, { backoff: false });
+        const relay = createRelay(NIP50_SEARCH_RELAY, { backoff: false });
         relayRef.current = relay;
 
         const events: NostrEvent[] = [];

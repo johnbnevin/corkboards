@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
-import { NRelay1 } from '@nostrify/nostrify'
-import type { NostrEvent } from '@nostrify/nostrify'
+import type { NRelay1, NostrEvent } from '@nostrify/nostrify'
+import { createRelay } from '@/components/NostrProvider'
 import { nip19 } from 'nostr-tools'
 import { Search, X } from 'lucide-react'
 import { Input } from '@/components/ui/input'
@@ -72,7 +72,7 @@ export function OnboardSearchWidget({ contactCount = 0, followTarget = 10, onSki
       }
       setIsSearching(true)
       try {
-        const relay = new NRelay1(NIP50_SEARCH_RELAY, { backoff: false })
+        const relay = createRelay(NIP50_SEARCH_RELAY, { backoff: false })
         relayRef.current = relay
 
         const events: NostrEvent[] = []

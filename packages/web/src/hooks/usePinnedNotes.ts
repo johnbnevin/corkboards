@@ -2,11 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNostr } from '@nostrify/react'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getUserRelays, FALLBACK_RELAYS } from '@/components/NostrProvider'
+import { getUserRelays, FALLBACK_RELAYS, createRelay } from '@/components/NostrProvider'
 import { idbSetSync } from '@/lib/idb'
 import { STORAGE_KEYS } from '@/lib/storageKeys'
 import type { NostrEvent } from '@nostrify/nostrify'
-import { NRelay1 } from '@nostrify/nostrify'
 import { normalizeRelay } from '@core/normalizeRelay'
 
 const IDB_KEY = STORAGE_KEYS.PINNED_NOTE_IDS
@@ -58,7 +57,7 @@ export function usePinnedNotes() {
       // Query all write relays in parallel, collect all responses
       const results = await Promise.allSettled(
         writeRelays.map(async (relayUrl) => {
-          const relay = new NRelay1(normalizeRelay(relayUrl), { backoff: false })
+          const relay = createRelay(normalizeRelay(relayUrl), { backoff: false })
           try {
             const events = await relay.query(
               [{ kinds: [10001], authors: [user.pubkey], limit: 1 }],
@@ -173,7 +172,7 @@ export function usePinnedNotes() {
     let published = 0
     await Promise.allSettled(
       relays.map(async (url) => {
-        const relay = new NRelay1(normalizeRelay(url), { backoff: false })
+        const relay = createRelay(normalizeRelay(url), { backoff: false })
         try {
           await relay.event(event, { signal: AbortSignal.timeout(8000) })
           published++

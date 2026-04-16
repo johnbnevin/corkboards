@@ -15,12 +15,11 @@
  *   5. Restore: find manifest → unwrap AES key → download + decrypt → write to MMKV
  */
 import { useState, useCallback, useRef } from 'react';
-import { NRelay1 } from '@nostrify/nostrify';
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { NSecSigner } from '@nostrify/nostrify';
-import { mobileStorage } from '../storage/MmkvStorage';
+import { mobileStorage, isStorageHealthy } from '../storage/MmkvStorage';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '../lib/storageKeys';
-import { FALLBACK_RELAYS, APP_CONFIG_KEY, getUserRelays, getRelayCache } from '../lib/NostrProvider';
+import { FALLBACK_RELAYS, APP_CONFIG_KEY, getUserRelays, getRelayCache, createRelay } from '../lib/NostrProvider';
 import {
   generateAesKey, importAesKey,
   aesEncrypt, aesDecrypt, rawKeyToHex, hexToRawKey,
@@ -384,7 +383,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       const relays = getPublishRelays(pubkey);
       let published = 0;
       for (const url of relays) {
-        const relay = new NRelay1(url, { backoff: false });
+        const relay = createRelay(url, { backoff: false });
         try {
           await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
           log(`  ${url} ← manifest OK`);
@@ -435,6 +434,24 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
     if (!pubkey || !signer || isSaving.current || isRestoring.current) return false;
     if (!signer.nip04 && !signer.nip44) return false;
     if (!hasUnsavedChanges()) return false;
+
+    // Guard: don't overwrite a good cloud backup with empty/corrupt local state.
+    // If MMKV writes have been failing, local data may not reflect what's on disk.
+    if (!isStorageHealthy()) {
+      if (__DEV__) console.warn('[backup] Auto-save blocked: MMKV writes are failing — protecting cloud backup');
+      return false;
+    }
+
+    // Guard: don't save if the data is essentially empty (no feeds, no dismissed, no collapsed).
+    // This prevents overwriting a good backup after storage was wiped.
+    const feeds = mobileStorage.getSync('nostr-custom-feeds');
+    const dismissed = mobileStorage.getSync('dismissed-notes');
+    const collapsed = mobileStorage.getSync('collapsed-notes');
+    const hasMeaningfulData = (feeds && feeds !== '[]') || (dismissed && dismissed !== '[]') || (collapsed && collapsed !== '[]');
+    if (!hasMeaningfulData) {
+      if (__DEV__) console.warn('[backup] Auto-save blocked: no meaningful data to save');
+      return false;
+    }
 
     isSaving.current = true;
     try {
@@ -492,7 +509,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
       const relays = getPublishRelays(pubkey);
       for (const url of relays) {
-        const relay = new NRelay1(url, { backoff: false });
+        const relay = createRelay(url, { backoff: false });
         try { await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) }); }
         catch { /* continue */ }
         finally { try { relay.close(); } catch { /* */ } }
@@ -560,7 +577,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
     for (let i = 0; i < relays.length; i += 3) {
       const batch = relays.slice(i, i + 3);
       await Promise.allSettled(batch.map(async url => {
-        const relay = new NRelay1(url, { backoff: false });
+        const relay = createRelay(url, { backoff: false });
         try {
           const events = await relay.query(
             [{ kinds: [30078], authors: [pubkey], limit: 5 }],

@@ -90,6 +90,8 @@ interface ProfileCardProps {
   visibleNotesCount?: number
   /** When true, show placeholder banner/avatar when user has no image set (used on the me tab) */
   showPlaceholders?: boolean
+  /** Callback to open the edit profile modal (renders a green button in the top-left corner) */
+  onEditProfile?: () => void
 }
 
 export function ProfileCard({
@@ -119,6 +121,7 @@ export function ProfileCard({
   dismissedCount,
   visibleNotesCount,
   showPlaceholders = false,
+  onEditProfile,
 }: ProfileCardProps) {
   const hasActiveFilters = (kindFilters?.size ?? 0) > 0 || (hashtagFilters?.size ?? 0) > 0 || !!hasActiveContentFilters
   const { data: author, isLoading } = useAuthor(pubkey)
@@ -264,6 +267,13 @@ export function ProfileCard({
     <>
       {/* Profile card — banner, avatar, full info */}
       <Card className={`relative overflow-hidden ${className} ${isMobile ? 'max-h-[70vh] overflow-y-auto' : ''}`}>
+        {onEditProfile && (
+          <button
+            onClick={onEditProfile}
+            className="absolute top-0 left-0 z-10 w-0 h-0 border-r-[24px] border-r-transparent border-t-[24px] border-t-green-600/70 hover:border-t-green-500/70 transition-colors"
+            title="Customize Profile"
+          />
+        )}
         {metadata?.banner ? (
           effectiveBannerPct > 0 ? (
             <div className="w-full relative" style={{ paddingBottom: `${effectiveBannerPct}%` }}>

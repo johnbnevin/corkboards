@@ -237,30 +237,22 @@ export function useCollapsedNotes() {
 
   /** Consolidate: move soft-dismissed AND collapsed (saved-for-later) placeholder
    *  notes into the permanent dismissed list, removing all blank spaces from the grid.
-   *  Collapsed notes remain in the collapsed list so they still appear above the fold. */
+   *  Collapsed notes remain in the collapsed list so they still appear above the fold.
+   *  All soft-dismissed notes are consolidated, including those still in their undo window. */
   const consolidate = useCallback(() => {
     if (_softDismissedSet.size === 0 && collapsedIds.length === 0) return
-    // Partition soft-dismissed: skip notes still within their undo window
-    const now = Date.now()
-    const readyToConsolidate: string[] = []
-    const stillUndoable: string[] = []
-    for (const id of _softDismissedSet) {
-      const dismissedAt = _dismissedUndoMap.get(id)
-      if (dismissedAt && now - dismissedAt <= UNDO_WINDOW_MS) {
-        stillUndoable.push(id)
-      } else {
-        readyToConsolidate.push(id)
-      }
-    }
+    const allSoftDismissed = [..._softDismissedSet]
     setDismissedIds(prev => {
-      const unique = [...new Set([...prev, ...readyToConsolidate, ...collapsedIds])]
+      const unique = [...new Set([...prev, ...allSoftDismissed, ...collapsedIds])]
       return unique.length > MAX_DISMISSED_NOTES ? unique.slice(-MAX_DISMISSED_NOTES) : unique
     })
-    // Keep undoable notes as soft-dismissed so their undo buttons still work
-    _softDismissedSet = new Set(stillUndoable)
-    _setSoftDismissedIds(stillUndoable)
+    // Clear all soft-dismissed and undo state — consolidate is an explicit user action
+    _softDismissedSet = new Set()
+    _setSoftDismissedIds([])
     persistSoftDismissed()
     notifySoftDismissChange()
+    _dismissedUndoMap.clear()
+    setUndoMapVersion(v => v + 1)
     // Clear session collapsed tracking since consolidate removes the blank spaces
     _sessionCollapsedIds = new Set()
     _sessionCollapsedCounter++

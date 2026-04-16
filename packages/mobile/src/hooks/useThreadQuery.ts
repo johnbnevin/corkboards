@@ -129,7 +129,14 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
   const injectReply = useCallback((event: NostrEvent) => {
     setInjectedReply(event);
     setCachedEvent(event.id, event);
-  }, []);
+    // Merge into TanStack Query cache so reply persists across navigation
+    if (rootId) {
+      queryClient.setQueryData<NostrEvent[]>(
+        ['thread-tree', rootId],
+        (old) => old ? [...old, event] : [event],
+      );
+    }
+  }, [rootId, queryClient]);
 
   const toggleCollapse = useCallback((id: string) => {
     setCollapsedIds(prev => {

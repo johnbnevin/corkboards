@@ -5,7 +5,7 @@ export const TIPS = [
   'Tip: Use the kind filter toggles to show only replies, reposts, or original posts.',
   'Tip: The Discover tab finds notes your friends engage with from people you don\'t follow.',
   'Tip: Your settings are encrypted and backed up to Blossom servers — log in anywhere and restore.',
-  'Tip: You can follow someone directly from their Discover card — click their name.',
+  'Tip: You can follow someone directly from their Discover card — click the button below their avatar.',
   'Tip: You can use your same login credentials to use the same account on lots of different websites. See a list of just a few at https://nostrapps.com/',
   'Tip: Nostr is very versatile, and so are your login credentials. Find out more at https://nostr.how/en/what-is-nostr',
   'Tip: Use the Discover tab to branch out. Curate your experience carefully and your feeds will accentuate your life.',

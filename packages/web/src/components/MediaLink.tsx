@@ -458,7 +458,7 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
         src={embed.url}
         className={`w-full ${aspectClass}`}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-        sandbox="allow-scripts allow-presentation allow-fullscreen allow-same-origin"
+        sandbox="allow-scripts allow-presentation allow-same-origin"
       />
     </div>
   )

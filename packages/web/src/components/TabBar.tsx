@@ -111,6 +111,8 @@ interface TabBarProps {
   onEditFeed?: (feedId: string) => void;
   /** Delete a custom feed */
   onDeleteFeed?: (feedId: string) => void;
+  /** Called when the user clicks the already-active tab (e.g. to refresh) */
+  onRefreshTab?: () => void;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -162,8 +164,17 @@ export function TabBar({
   isOnboarding = false,
   onEditFeed,
   onDeleteFeed,
+  onRefreshTab,
 }: TabBarProps) {
   const isMobile = useIsMobile();
+  // Wrap setActiveTab to detect same-tab clicks and call onRefreshTab
+  const handleTabClick = useCallback((tab: string) => {
+    if (tab === activeTab) {
+      onRefreshTab?.();
+    } else {
+      setActiveTab(tab);
+    }
+  }, [activeTab, setActiveTab, onRefreshTab]);
   const [sourcesHelpOpen, setSourcesHelpOpen] = useState(false);
 
   // Shared "New Corkboard" dialog content — used in both mobile and desktop
@@ -371,7 +382,7 @@ export function TabBar({
   // ── Mobile pill strip ──────────────────────────────────────────────────────
   if (isMobile) {
     return (
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+      <Tabs value={activeTab} onValueChange={handleTabClick} className="w-full">
         <div>
           {/* Tab switch loading indicator */}
           {isPending && (
@@ -384,13 +395,13 @@ export function TabBar({
             <div className="flex items-center gap-1.5 pb-1 min-w-max">
               {/* Built-in tabs */}
               {!isOnboarding && (
-                <MobilePill active={activeTab === 'me'} onClick={() => setActiveTab('me')}>
+                <MobilePill active={activeTab === 'me'} onClick={() => handleTabClick('me')}>
                   <UserIcon className="h-3.5 w-3.5" />
                   Me
                 </MobilePill>
               )}
               {!isOnboarding && userPubkey && (
-                <MobilePill active={activeTab === 'notifications'} onClick={() => setActiveTab('notifications')}>
+                <MobilePill active={activeTab === 'notifications'} onClick={() => handleTabClick('notifications')}>
                   <span className="relative">
                     <Bell className="h-3.5 w-3.5" />
                     {newNotificationCount > 0 && (
@@ -403,20 +414,20 @@ export function TabBar({
                 </MobilePill>
               )}
               {!isOnboarding && (userPubkey || activeTab === 'all-follows' || activeTab === 'discover') && (
-                <MobilePill active={activeTab === 'all-follows'} onClick={() => setActiveTab('all-follows')}>
+                <MobilePill active={activeTab === 'all-follows'} onClick={() => handleTabClick('all-follows')}>
                   <Users className="h-3.5 w-3.5" />
                   Follows
                 </MobilePill>
               )}
               {(userPubkey || activeTab === 'discover') && (
-                <MobilePill active={activeTab === 'discover'} onClick={() => setActiveTab('discover')} accent="amber">
+                <MobilePill active={activeTab === 'discover'} onClick={() => handleTabClick('discover')} accent="amber">
                   <Compass className="h-3.5 w-3.5" />
                   Discover
                 </MobilePill>
               )}
               {!isOnboarding && (
                 <>
-                  <MobilePill active={activeTab === 'saved'} onClick={() => setActiveTab('saved')} accent="green">
+                  <MobilePill active={activeTab === 'saved'} onClick={() => handleTabClick('saved')} accent="green">
                     <Save className="h-3.5 w-3.5" />
                     Saved
                     {collapsedCount > 0 && (
@@ -436,7 +447,7 @@ export function TabBar({
                     const isActive = activeTab === `feed:${feed.id}`;
                     return (
                       <div key={`feed:${feed.id}`} className="inline-flex items-center shrink-0">
-                        <MobilePill active={isActive} onClick={() => setActiveTab(`feed:${feed.id}`)}>
+                        <MobilePill active={isActive} onClick={() => handleTabClick(`feed:${feed.id}`)}>
                           <Layers className="h-3.5 w-3.5" />
                           {feed.title}
                         </MobilePill>
@@ -458,7 +469,7 @@ export function TabBar({
                   })}
 
                   {browseRelays.map((relayUrl) => (
-                    <MobilePill key={relayUrl} active={activeTab === relayUrl} onClick={() => setActiveTab(relayUrl)}>
+                    <MobilePill key={relayUrl} active={activeTab === relayUrl} onClick={() => handleTabClick(relayUrl)}>
                       <Radio className="h-3.5 w-3.5" />
                       {relayUrl.replace('wss://', '').replace('ws://', '').split('/')[0]}
                     </MobilePill>
@@ -467,7 +478,7 @@ export function TabBar({
                   {rssFeeds.map((feedUrl) => {
                     const shortName = (() => { try { return new URL(feedUrl).hostname.replace('www.', '').split('.')[0]; } catch { return 'RSS'; } })();
                     return (
-                      <MobilePill key={`rss:${feedUrl}`} active={activeTab === `rss:${feedUrl}`} onClick={() => setActiveTab(`rss:${feedUrl}`)} accent="orange">
+                      <MobilePill key={`rss:${feedUrl}`} active={activeTab === `rss:${feedUrl}`} onClick={() => handleTabClick(`rss:${feedUrl}`)} accent="orange">
                         <Rss className="h-3.5 w-3.5" />
                         {shortName}
                       </MobilePill>
@@ -528,14 +539,18 @@ export function TabBar({
 
   // ── Desktop tab bar ────────────────────────────────────────────────────────
   return (
-    <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+    <Tabs value={activeTab} onValueChange={handleTabClick} className="w-full">
       <div className="relative">
         {isPending && (
           <div className="absolute right-0 top-0 bottom-0 flex items-center z-10 pr-1">
             <div className="animate-spin h-3 w-3 border-2 border-purple-500 border-t-transparent rounded-full" />
           </div>
         )}
-        <ScrollArea className="w-full whitespace-nowrap">
+        <ScrollArea className="w-full whitespace-nowrap" onClick={(e) => {
+          // Catch clicks on the already-active desktop tab trigger (Radix won't fire onValueChange)
+          const trigger = (e.target as HTMLElement).closest('[role="tab"][data-state="active"]');
+          if (trigger) onRefreshTab?.();
+        }}>
           <TabsList className="flex space-x-1 p-0 h-auto bg-transparent">
             {!isOnboarding && (
               <TabsTrigger value="me" className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600">

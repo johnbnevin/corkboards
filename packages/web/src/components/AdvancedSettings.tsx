@@ -31,7 +31,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useRelayHealth, type RelayHealth } from '@/hooks/useRelayHealth';
 import { useToast } from '@/hooks/useToast';
-import { FALLBACK_RELAYS } from '@/components/NostrProvider';
+import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/components/NostrProvider';
 import {
   getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS,
 } from '@/hooks/useNostrBackup';
@@ -132,8 +132,8 @@ export function AdvancedSettings({
 
   const active = confirm ? confirmMessages[confirm] : null;
 
-  if (section === 'relays') return <RelaySection onBack={() => setSection('main')} />;
-  if (section === 'blossom') return <BlossomSection onBack={() => setSection('main')} />;
+  if (section === 'relays') return <RelaySection />;
+  if (section === 'blossom') return <BlossomSection />;
 
   return (
     <>
@@ -218,16 +218,24 @@ export function AdvancedSettings({
 
 // ─── Relay Management Section ─────────────────────────────────────────────
 
-function RelaySection({ onBack }: { onBack: () => void }) {
+function RelaySection() {
   const { config, updateConfig } = useAppContext();
   const { user } = useCurrentUser();
   const { mutate: publishEvent } = useNostrPublish();
   const { toast } = useToast();
   const { relayHealth, getShortName, checkAllRelays } = useRelayHealth();
 
+  // User relays are everything in their NIP-65 event (config.relayMetadata.relays).
+  // This includes relays that happen to match hardcoded fallbacks — those are the
+  // user's own choices and must be shown and never silently removed.
   const [relays, setRelays] = useState<Relay[]>(config.relayMetadata.relays);
   const [newRelayUrl, setNewRelayUrl] = useState('');
-  const [showDefaults, setShowDefaults] = useState(true);
+  const [includeFallbacks, setIncludeFallbacks] = useState(true);
+
+  /** Normalize relay URL for comparison (strip trailing slash) */
+  const norm = (url: string) => url.replace(/\/+$/, '');
+  /** Check if a relay URL is already in the user's NIP-65 list */
+  const isInUserList = (url: string) => relays.some(r => norm(r.url) === norm(url));
 
   useEffect(() => {
     setRelays(config.relayMetadata.relays);
@@ -274,14 +282,19 @@ function RelaySection({ onBack }: { onBack: () => void }) {
     saveRelays(newRelays);
   };
 
-  const saveRelays = useCallback((newRelays: Relay[]) => {
+  const saveRelays = useCallback((userRelays: Relay[]) => {
+    // Config stores ONLY the user's NIP-65 relays — hardcoded relays are always
+    // added by NostrProvider's reqRouter/eventRouter separately. This ensures
+    // NostrSync won't see hardcoded relays as "user relays" and we never
+    // accidentally overwrite the user's Nostr relay list with our defaults.
     const now = Math.floor(Date.now() / 1000);
     updateConfig((current) => ({
       ...current,
-      relayMetadata: { relays: newRelays, updatedAt: now },
+      relayMetadata: { relays: userRelays, updatedAt: now },
     }));
+    // Publish the user's relay list to Nostr (NIP-65 kind:10002)
     if (user) {
-      const tags = newRelays.map(relay => {
+      const tags = userRelays.map(relay => {
         if (relay.read && relay.write) return ['r', relay.url];
         if (relay.read) return ['r', relay.url, 'read'];
         if (relay.write) return ['r', relay.url, 'write'];
@@ -290,7 +303,7 @@ function RelaySection({ onBack }: { onBack: () => void }) {
       publishEvent(
         { kind: 10002, content: '', tags },
         {
-          onSuccess: () => toast({ title: 'Relay list published' }),
+          onSuccess: () => toast({ title: 'Relay list published to Nostr' }),
           onError: () => toast({ title: 'Failed to publish relay list', variant: 'destructive' }),
         }
       );
@@ -307,98 +320,124 @@ function RelaySection({ onBack }: { onBack: () => void }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <Button variant="ghost" size="sm" onClick={onBack} className="h-7 px-2 text-xs">&larr; Back</Button>
         <span className="text-sm font-medium flex-1">Relays</span>
         <span className="text-xs text-muted-foreground">{healthy}/{total} healthy</span>
         <Button variant="ghost" size="sm" onClick={checkAllRelays} className="h-7 px-2 text-xs">Check</Button>
       </div>
 
-      {/* Relay list with health */}
-      <div className="space-y-1.5 max-h-[40vh] overflow-y-auto">
-        {relays.map((relay) => {
-          const health = getHealthForRelay(relay.url);
-          return (
-            <div key={relay.url} className="flex items-center gap-2 p-2 rounded-md border bg-muted/20 text-xs">
-              <StatusDot status={health?.status || 'unknown'} />
-              <span className="font-mono flex-1 truncate" title={relay.url}>{getShortName(relay.url)}</span>
-              {/* Status inline — latency or status text */}
-              {health && health.status !== 'unknown' && (
-                <span className={`text-[10px] shrink-0 ${health.status === 'healthy' ? 'text-green-500' : health.status === 'slow' ? 'text-yellow-500' : 'text-red-500'}`}>
-                  {health.latency !== null ? `${health.latency}ms` : health.status}
-                </span>
-              )}
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button variant="ghost" size="icon" className="size-5 text-muted-foreground shrink-0">
-                    <Settings className="h-3.5 w-3.5" />
+      {/* ── Your Relays (NIP-65, editable) ── */}
+      <div>
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-1">Your Relays (NIP-65)</p>
+        <p className="text-[10px] text-muted-foreground mb-1.5">Synced from your Nostr relay list. Changes publish a new kind:10002 event.</p>
+        {relays.length === 0 ? (
+          <p className="text-xs text-muted-foreground italic py-2">No relays in your Nostr relay list. Add one below.</p>
+        ) : (
+          <div className="space-y-1.5 max-h-[30vh] overflow-y-auto">
+            {relays.map((relay) => {
+              const health = getHealthForRelay(relay.url);
+              return (
+                <div key={relay.url} className="flex items-center gap-2 p-2 rounded-md border bg-muted/20 text-xs">
+                  <StatusDot status={health?.status || 'unknown'} />
+                  <span className="font-mono flex-1 truncate" title={relay.url}>{relay.url}</span>
+                  {health && health.status !== 'unknown' && (
+                    <span className={`text-[10px] shrink-0 ${health.status === 'healthy' ? 'text-green-500' : health.status === 'slow' ? 'text-yellow-500' : 'text-red-500'}`}>
+                      {health.latency !== null ? `${health.latency}ms` : health.status}
+                    </span>
+                  )}
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button variant="ghost" size="icon" className="size-5 text-muted-foreground shrink-0">
+                        <Settings className="h-3.5 w-3.5" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-44" align="end">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs cursor-pointer">Read</Label>
+                          <Switch checked={relay.read} onCheckedChange={() => handleToggleRead(relay.url)} className="data-[state=checked]:bg-purple-500 scale-75" />
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs cursor-pointer">Write</Label>
+                          <Switch checked={relay.write} onCheckedChange={() => handleToggleWrite(relay.url)} className="data-[state=checked]:bg-orange-500 scale-75" />
+                        </div>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                  <Button
+                    variant="ghost" size="icon"
+                    onClick={() => handleRemoveRelay(relay.url)}
+                    className="size-5 text-muted-foreground hover:text-destructive shrink-0"
+                  >
+                    <X className="h-3.5 w-3.5" />
                   </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-44" align="end">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs cursor-pointer">Read</Label>
-                      <Switch checked={relay.read} onCheckedChange={() => handleToggleRead(relay.url)} className="data-[state=checked]:bg-purple-500 scale-75" />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs cursor-pointer">Write</Label>
-                      <Switch checked={relay.write} onCheckedChange={() => handleToggleWrite(relay.url)} className="data-[state=checked]:bg-orange-500 scale-75" />
-                    </div>
-                  </div>
-                </PopoverContent>
-              </Popover>
-              <Button
-                variant="ghost" size="icon"
-                onClick={() => handleRemoveRelay(relay.url)}
-                className="size-5 text-muted-foreground hover:text-destructive shrink-0"
-                disabled={relays.length <= 1}
-              >
-                <X className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Add relay */}
-      <div className="flex gap-1.5">
-        <Input
-          placeholder="wss://relay.example.com"
-          value={newRelayUrl}
-          onChange={(e) => setNewRelayUrl(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') handleAddRelay(); }}
-          className="h-8 text-xs"
-        />
-        <Button onClick={handleAddRelay} disabled={!newRelayUrl.trim()} variant="outline" size="sm" className="h-8 shrink-0">
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
-      </div>
-
-      {/* Default relays toggle */}
-      <div className="flex items-center justify-between p-2 rounded-md border bg-muted/10">
-        <div>
-          <p className="text-xs font-medium">Default relays</p>
-          <p className="text-[10px] text-muted-foreground">{FALLBACK_RELAYS.length} fallback relays used for discovery</p>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {/* Add relay */}
+        <div className="flex gap-1.5 mt-2">
+          <Input
+            placeholder="wss://relay.example.com"
+            value={newRelayUrl}
+            onChange={(e) => setNewRelayUrl(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleAddRelay(); }}
+            className="h-8 text-xs"
+          />
+          <Button onClick={handleAddRelay} disabled={!newRelayUrl.trim()} variant="outline" size="sm" className="h-8 shrink-0">
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
         </div>
-        <Switch
-          checked={showDefaults}
-          onCheckedChange={setShowDefaults}
-          className="scale-75"
-        />
       </div>
-      {showDefaults && (
-        <div className="space-y-0.5 pl-2">
+
+      <Separator />
+
+      {/* ── Fallback Relays (hardcoded, read/write, include toggle) ── */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Fallback Relays</p>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-muted-foreground">Include</span>
+            <Switch checked={includeFallbacks} onCheckedChange={setIncludeFallbacks} className="scale-75" />
+          </div>
+        </div>
+        <p className="text-[10px] text-muted-foreground mb-1.5">Read + write relays used for discovery and bootstrapping</p>
+        <div className="space-y-0.5">
           {FALLBACK_RELAYS.map(url => {
             const health = getHealthForRelay(url);
+            const inUserList = isInUserList(url);
             return (
-              <div key={url} className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              <div key={url} className={`flex items-center gap-1.5 text-[10px] px-2 py-1 rounded ${includeFallbacks ? 'text-foreground' : 'text-muted-foreground/40'}`}>
                 <StatusDot status={health?.status || 'unknown'} />
-                <span className="truncate">{getShortName(url)}</span>
-                {health?.latency !== null && health?.latency !== undefined && <span className="shrink-0">{health.latency}ms</span>}
+                <span className="font-mono truncate">{url}</span>
+                {inUserList && <span className="text-green-500 shrink-0">in your list</span>}
+                {health?.latency != null && <span className="shrink-0">{health.latency}ms</span>}
               </div>
             );
           })}
         </div>
-      )}
+      </div>
+
+      <Separator />
+
+      {/* ── Indexer / Archive Relays (hardcoded, read-only, no write toggle) ── */}
+      <div>
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-1.5">Indexer Relays</p>
+        <p className="text-[10px] text-muted-foreground mb-1.5">Read-only archive relays for event lookup and discovery</p>
+        <div className="space-y-0.5">
+          {READ_ONLY_RELAYS.map(url => {
+            const health = getHealthForRelay(url);
+            return (
+              <div key={url} className="flex items-center gap-1.5 text-[10px] px-2 py-1 rounded text-foreground">
+                <StatusDot status={health?.status || 'unknown'} />
+                <span className="font-mono truncate">{url}</span>
+                <span className="text-muted-foreground shrink-0">read-only</span>
+                {health?.latency != null && <span className="shrink-0">{health.latency}ms</span>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
 
       {!user && (
         <p className="text-xs text-muted-foreground">Log in to sync your relay list with Nostr</p>
@@ -409,14 +448,24 @@ function RelaySection({ onBack }: { onBack: () => void }) {
 
 // ─── Blossom Server Management Section ────────────────────────────────────
 
-function BlossomSection({ onBack }: { onBack: () => void }) {
+function BlossomSection() {
   const { toast } = useToast();
-  const [servers, setServers] = useState<string[]>(getBlossomServers);
+  const allServers = getBlossomServers();
+  // Separate user servers (not in defaults) from fallback servers
+  const [userServers, setUserServers] = useState<string[]>(() =>
+    allServers.filter(s => !DEFAULT_BLOSSOM_SERVERS.includes(s))
+  );
+  const [includeFallbacks, setIncludeFallbacks] = useState(true);
   const [newUrl, setNewUrl] = useState('');
   const [testing, setTesting] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Map<string, 'ok' | 'error'>>(new Map());
 
-  const isDefault = (url: string) => DEFAULT_BLOSSOM_SERVERS.includes(url);
+  // Persist: user servers first (priority), then fallbacks if included
+  const persistServers = useCallback((users: string[], withFallbacks: boolean) => {
+    const combined = [...users, ...(withFallbacks ? DEFAULT_BLOSSOM_SERVERS : [])];
+    // Deduplicate while preserving order
+    setBlossomServers([...new Set(combined)]);
+  }, []);
 
   const handleAdd = () => {
     let url = newUrl.trim();
@@ -427,27 +476,26 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
       toast({ title: 'Invalid URL', variant: 'destructive' });
       return;
     }
-    if (servers.includes(url)) {
+    if (userServers.includes(url) || DEFAULT_BLOSSOM_SERVERS.includes(url)) {
       toast({ title: 'Server already in list', variant: 'destructive' });
       return;
     }
-    const updated = [...servers, url];
-    setServers(updated);
-    setBlossomServers(updated);
+    const updated = [...userServers, url];
+    setUserServers(updated);
+    persistServers(updated, includeFallbacks);
     setNewUrl('');
     toast({ title: 'Server added' });
   };
 
-  const handleRemove = (url: string) => {
-    const updated = servers.filter(s => s !== url);
-    setServers(updated);
-    setBlossomServers(updated);
+  const handleRemoveUser = (url: string) => {
+    const updated = userServers.filter(s => s !== url);
+    setUserServers(updated);
+    persistServers(updated, includeFallbacks);
   };
 
-  const handleResetDefaults = () => {
-    setServers([...DEFAULT_BLOSSOM_SERVERS]);
-    setBlossomServers([...DEFAULT_BLOSSOM_SERVERS]);
-    toast({ title: 'Reset to defaults' });
+  const handleToggleFallbacks = (checked: boolean) => {
+    setIncludeFallbacks(checked);
+    persistServers(userServers, checked);
   };
 
   const testServer = async (url: string) => {
@@ -461,72 +509,90 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
     setTesting(null);
   };
 
+  const ServerStatusIcon = ({ url }: { url: string }) => {
+    const result = testResults.get(url);
+    if (result === 'ok') return <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />;
+    if (result === 'error') return <WifiOff className="h-3 w-3 text-red-500 shrink-0" />;
+    return <Server className="h-3 w-3 text-muted-foreground shrink-0" />;
+  };
+
+  const ServerHostname = ({ url }: { url: string }) => {
+    try { return <>{new URL(url).hostname}</>; } catch { return <>{url}</>; }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <Button variant="ghost" size="sm" onClick={onBack} className="h-7 px-2 text-xs">&larr; Back</Button>
         <span className="text-sm font-medium flex-1">Blossom Servers</span>
       </div>
       <p className="text-xs text-muted-foreground">
-        Blossom servers store encrypted backup files. Servers are tried in order until one succeeds.
+        Blossom servers store encrypted backup files. Your servers are tried first, then fallbacks.
       </p>
 
-      <div className="space-y-1.5">
-        {servers.map((url, i) => {
-          const result = testResults.get(url);
-          return (
-            <div key={url} className="flex items-center gap-2 p-2 rounded-md border bg-muted/20 text-xs">
-              {result === 'ok' ? (
-                <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />
-              ) : result === 'error' ? (
-                <WifiOff className="h-3 w-3 text-red-500 shrink-0" />
-              ) : (
-                <Server className="h-3 w-3 text-muted-foreground shrink-0" />
+      {/* ── Your Servers (priority, editable) ── */}
+      <div>
+        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-1.5">Your Servers</p>
+        {userServers.length === 0 ? (
+          <p className="text-xs text-muted-foreground italic py-2">No custom servers. Add one below or use the defaults.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {userServers.map((url, i) => (
+              <div key={url} className="flex items-center gap-2 p-2 rounded-md border bg-muted/20 text-xs">
+                <ServerStatusIcon url={url} />
+                <span className="font-mono flex-1 truncate" title={url}>{url}</span>
+                <span className="text-[9px] text-muted-foreground shrink-0">#{i + 1}</span>
+                <Button variant="ghost" size="icon" onClick={() => testServer(url)} disabled={testing === url} className="size-5 text-muted-foreground shrink-0" title="Test server">
+                  <Wifi className={`h-3 w-3 ${testing === url ? 'animate-pulse' : ''}`} />
+                </Button>
+                <Button variant="ghost" size="icon" onClick={() => handleRemoveUser(url)} className="size-5 text-muted-foreground hover:text-destructive shrink-0">
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Add server */}
+        <div className="flex gap-1.5 mt-2">
+          <Input
+            placeholder="https://blossom.example.com"
+            value={newUrl}
+            onChange={(e) => setNewUrl(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
+            className="h-8 text-xs"
+          />
+          <Button onClick={handleAdd} disabled={!newUrl.trim()} variant="outline" size="sm" className="h-8 shrink-0">
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </div>
+
+      <Separator />
+
+      {/* ── Fallback Servers (hardcoded, include toggle) ── */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Fallback Servers</p>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-muted-foreground">Include</span>
+            <Switch checked={includeFallbacks} onCheckedChange={handleToggleFallbacks} className="scale-75" />
+          </div>
+        </div>
+        <p className="text-[10px] text-muted-foreground mb-1.5">Default servers used when your servers are unavailable</p>
+        <div className="space-y-0.5">
+          {DEFAULT_BLOSSOM_SERVERS.map((url, i) => (
+            <div key={url} className={`flex items-center gap-1.5 text-[10px] px-2 py-1 rounded ${includeFallbacks ? 'text-foreground' : 'text-muted-foreground/40'}`}>
+              <ServerStatusIcon url={url} />
+              <span className="font-mono truncate">{url}</span>
+              <span className="text-muted-foreground shrink-0">#{userServers.length + i + 1}</span>
+              {includeFallbacks && (
+                <Button variant="ghost" size="icon" onClick={() => testServer(url)} disabled={testing === url} className="size-4 text-muted-foreground shrink-0" title="Test server">
+                  <Wifi className={`h-2.5 w-2.5 ${testing === url ? 'animate-pulse' : ''}`} />
+                </Button>
               )}
-              <span className="font-mono flex-1 truncate" title={url}>
-                {(() => { try { return new URL(url).hostname; } catch { return url; } })()}
-              </span>
-              {isDefault(url) && <span className="text-[9px] px-1 py-0.5 rounded bg-muted text-muted-foreground shrink-0">default</span>}
-              <span className="text-[9px] text-muted-foreground shrink-0">#{i + 1}</span>
-              <Button
-                variant="ghost" size="icon"
-                onClick={() => testServer(url)}
-                disabled={testing === url}
-                className="size-5 text-muted-foreground shrink-0"
-                title="Test server"
-              >
-                <Wifi className={`h-3 w-3 ${testing === url ? 'animate-pulse' : ''}`} />
-              </Button>
-              <Button
-                variant="ghost" size="icon"
-                onClick={() => handleRemove(url)}
-                className="size-5 text-muted-foreground hover:text-destructive shrink-0"
-                disabled={servers.length <= 1}
-              >
-                <X className="h-3.5 w-3.5" />
-              </Button>
             </div>
-          );
-        })}
+          ))}
+        </div>
       </div>
-
-      {/* Add server */}
-      <div className="flex gap-1.5">
-        <Input
-          placeholder="https://blossom.example.com"
-          value={newUrl}
-          onChange={(e) => setNewUrl(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
-          className="h-8 text-xs"
-        />
-        <Button onClick={handleAdd} disabled={!newUrl.trim()} variant="outline" size="sm" className="h-8 shrink-0">
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
-      </div>
-
-      <Button variant="outline" size="sm" onClick={handleResetDefaults} className="w-full text-xs">
-        Reset to defaults
-      </Button>
     </div>
   );
 }

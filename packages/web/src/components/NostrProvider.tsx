@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { NostrEvent, NostrFilter, NPool, NRelay1 } from '@nostrify/nostrify';
+import type { NRelay, NostrRelayEVENT, NostrRelayEOSE, NostrRelayCLOSED } from '@nostrify/nostrify';
 import { NostrContext } from '@nostrify/react';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
@@ -19,6 +20,224 @@ const APP_CONFIG_KEY = 'corkboard:app-config';
 const DEBUG = false;
 
 // ============================================================================
+// Per-relay rate limiter — max 3 requests per second per relay URL.
+// Prevents WebSocket flooding and relay rate-limiting.
+// ============================================================================
+
+const MAX_REQUESTS_PER_SECOND = 3;
+const RATE_WINDOW_MS = 1000;
+
+/** Tracks timestamps of recent requests per relay URL */
+const _relayRequestLog = new Map<string, number[]>();
+
+/**
+ * Returns a promise that resolves when the next request to this relay is allowed.
+ * Uses a sliding window: max MAX_REQUESTS_PER_SECOND requests within the last RATE_WINDOW_MS.
+ */
+function waitForRateLimit(url: string): Promise<void> {
+  const now = Date.now();
+  const key = url.replace(/\/+$/, '');
+  let timestamps = _relayRequestLog.get(key);
+  if (!timestamps) {
+    timestamps = [];
+    _relayRequestLog.set(key, timestamps);
+  }
+  // Prune old entries outside the window
+  while (timestamps.length > 0 && timestamps[0] <= now - RATE_WINDOW_MS) {
+    timestamps.shift();
+  }
+  if (timestamps.length < MAX_REQUESTS_PER_SECOND) {
+    // Under the limit — proceed immediately
+    timestamps.push(now);
+    return Promise.resolve();
+  }
+  // Over the limit — wait until the oldest request expires
+  const waitMs = timestamps[0] + RATE_WINDOW_MS - now + 1;
+  return new Promise(resolve => setTimeout(() => {
+    // Re-prune and record after waiting
+    const ts = _relayRequestLog.get(key)!;
+    const n = Date.now();
+    while (ts.length > 0 && ts[0] <= n - RATE_WINDOW_MS) ts.shift();
+    ts.push(n);
+    resolve();
+  }, waitMs));
+}
+
+// ============================================================================
+// Connection cache + failure backoff for standalone relay calls.
+// NPool caches its own relay instances, but hooks that call createRelay()
+// directly were creating fresh NRelay1 + WebSocket per call.
+// ============================================================================
+
+/** Cached relay instances by URL — reused across all createRelay() calls */
+const _relayCache = new Map<string, { relay: NRelay1; createdAt: number }>();
+/** Max age before a cached relay is evicted (connections go stale) */
+const RELAY_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Failure backoff: URL → { failCount, blockedUntil } */
+const _relayBackoff = new Map<string, { failCount: number; blockedUntil: number }>();
+const BACKOFF_BASE_MS = 5_000;   // 5s after first failure
+const BACKOFF_MAX_MS = 120_000;  // cap at 2 minutes
+
+function getBackoffMs(failCount: number): number {
+  // Exponential: 5s, 10s, 20s, 40s, 80s, 120s (capped)
+  return Math.min(BACKOFF_BASE_MS * Math.pow(2, failCount - 1), BACKOFF_MAX_MS);
+}
+
+/** Record a connection failure for a relay URL.
+ *  Only increments once per backoff window — multiple queries failing on the
+ *  same broken cached connection don't escalate the backoff. */
+function recordRelayFailure(url: string): void {
+  const key = url.replace(/\/+$/, '');
+  const existing = _relayBackoff.get(key);
+  // If already in an active backoff window, don't increment — this is just
+  // another query failing on the same broken connection.
+  if (existing && Date.now() < existing.blockedUntil) return;
+  const failCount = (existing?.failCount ?? 0) + 1;
+  const backoffMs = getBackoffMs(failCount);
+  _relayBackoff.set(key, { failCount, blockedUntil: Date.now() + backoffMs });
+  // Evict the cached relay so the next caller after backoff gets a fresh connection
+  _relayCache.delete(key);
+}
+
+/** Record a successful operation — clears the backoff */
+function recordRelaySuccess(url: string): void {
+  _relayBackoff.delete(url.replace(/\/+$/, ''));
+}
+
+/** Check if a relay is currently in backoff (should not be contacted) */
+function isRelayBlocked(url: string): boolean {
+  const entry = _relayBackoff.get(url.replace(/\/+$/, ''));
+  if (!entry) return false;
+  if (Date.now() >= entry.blockedUntil) return false; // backoff expired
+  return true;
+}
+
+/**
+ * Create a rate-limited, cached relay. Use this instead of `new NRelay1(url)`.
+ * - Reuses existing connections (5-minute TTL)
+ * - Respects failure backoff (exponential, up to 2 minutes)
+ * - Rate-limits queries to 3/sec per relay
+ */
+/**
+ * Create a rate-limited, cached relay.
+ * Use `createRelayDirect()` for critical bootstrap paths (login, backup discovery)
+ * that must bypass the failure backoff.
+ */
+export function createRelay(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
+  // Normalize URL for cache/backoff lookups (trailing slash differences)
+  const key = url.replace(/\/+$/, '');
+
+  // Check backoff — if relay is blocked, return a dummy that rejects immediately
+  if (isRelayBlocked(key)) {
+    return new BlockedRelay(url) as unknown as NRelay1;
+  }
+
+  // Check cache
+  const cached = _relayCache.get(key);
+  if (cached && Date.now() - cached.createdAt < RELAY_CACHE_TTL_MS) {
+    return cached.relay;
+  }
+
+  // Evict stale entries periodically
+  if (_relayCache.size > 50) {
+    const now = Date.now();
+    for (const [key, entry] of _relayCache) {
+      if (now - entry.createdAt > RELAY_CACHE_TTL_MS) _relayCache.delete(key);
+    }
+  }
+
+  const relay = new RateLimitedRelay(url, opts) as unknown as NRelay1;
+  _relayCache.set(key, { relay, createdAt: Date.now() });
+  return relay;
+}
+
+/**
+ * Create a relay that bypasses the failure backoff.
+ * Use for critical bootstrap paths (login, backup discovery) where we must
+ * try relays even if they failed recently — the user can't proceed without them.
+ * Still rate-limited and cached.
+ */
+export function createRelayDirect(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
+  const key = url.replace(/\/+$/, '');
+  const cached = _relayCache.get(key);
+  if (cached && Date.now() - cached.createdAt < RELAY_CACHE_TTL_MS) return cached.relay;
+  const relay = new RateLimitedRelay(url, opts) as unknown as NRelay1;
+  _relayCache.set(key, { relay, createdAt: Date.now() });
+  return relay;
+}
+
+/** Dummy relay returned when a URL is in backoff — fails fast without opening a WebSocket */
+class BlockedRelay implements NRelay {
+  private url: string;
+  constructor(url: string) { this.url = url; }
+  async *req(): AsyncGenerator<NostrRelayEVENT | NostrRelayEOSE | NostrRelayCLOSED> {
+    throw new Error(`Relay ${this.url} is temporarily blocked (backoff)`);
+  }
+  async query(): Promise<NostrEvent[]> { return []; }
+  async event(): Promise<void> {
+    throw new Error(`Relay ${this.url} is temporarily blocked (backoff)`);
+  }
+  async close(): Promise<void> {}
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+
+class RateLimitedRelay implements NRelay {
+  private inner: NRelay1;
+  private url: string;
+
+  constructor(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]) {
+    this.url = url;
+    this.inner = new NRelay1(url, opts);
+  }
+
+  async *req(
+    filters: NostrFilter[],
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<NostrRelayEVENT | NostrRelayEOSE | NostrRelayCLOSED> {
+    await waitForRateLimit(this.url);
+    try {
+      yield* this.inner.req(filters, opts);
+      recordRelaySuccess(this.url);
+    } catch (e) {
+      recordRelayFailure(this.url);
+      throw e;
+    }
+  }
+
+  async query(filters: NostrFilter[], opts?: { signal?: AbortSignal }): Promise<NostrEvent[]> {
+    await waitForRateLimit(this.url);
+    try {
+      const result = await this.inner.query(filters, opts);
+      recordRelaySuccess(this.url);
+      return result;
+    } catch (e) {
+      recordRelayFailure(this.url);
+      throw e;
+    }
+  }
+
+  async event(event: NostrEvent, opts?: { signal?: AbortSignal }): Promise<void> {
+    await waitForRateLimit(this.url);
+    try {
+      await this.inner.event(event, opts);
+      recordRelaySuccess(this.url);
+    } catch (e) {
+      recordRelayFailure(this.url);
+      throw e;
+    }
+  }
+
+  async close(): Promise<void> {
+    return this.inner.close();
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
+  }
+}
+
+// ============================================================================
 // Relay Cache with BroadcastChannel for cross-tab sync
 // ============================================================================
 
@@ -27,7 +246,8 @@ const MAX_RELAY_CACHE = 5000;
 
 // Tiered relay routing thresholds (see reqRouter below)
 const BULK_AUTHOR_THRESHOLD = 10; // >= this many authors → bulk tier (no per-author expansion)
-const MAX_BULK_RELAYS = 8;        // cap on relay count for bulk feed queries
+const MAX_BULK_RELAYS = 2;        // query only 2 relays at a time; expand if results disagree
+const MAX_TARGETED_RELAYS = 3;    // cap for targeted queries (threads, profiles)
 let relayCache: Map<string, string[]> = new Map();
 
 // BroadcastChannel for cross-tab communication (replaces localStorage polling)
@@ -168,6 +388,11 @@ export function getRelayCache(pubkey: string): string[] {
   return relays;
 }
 
+/** Normalize a relay URL for deduplication — strips trailing slashes */
+function normalizeRelayUrl(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
 // Extract authors from filters for outbox routing
 function extractAuthorsFromFilters(filters: NostrFilter[]): string[] {
   const authors = new Set<string>();
@@ -209,8 +434,9 @@ function extractAuthorsFromFilters(filters: NostrFilter[]): string[] {
 function createPool(): NPool {
   return new NPool({
     open(url: string) {
-      // backoff: false — no auto-reconnect; connections only happen when queries are made
-      return new NRelay1(url, { backoff: false });
+      // Rate-limited relay wrapper — max 3 req/sec per relay URL.
+      // backoff: false — no auto-reconnect; connections only happen when queries are made.
+      return new RateLimitedRelay(url, { backoff: false });
     },
 
     // Tiered routing for reading (see comment block above)
@@ -223,12 +449,15 @@ function createPool(): NPool {
 
       if (authors.length >= BULK_AUTHOR_THRESHOLD) {
         // Tier 1 — Bulk feed query: skip per-author expansion, use a small fixed set
-        userRelays.read.forEach(relay => relaysToQuery.add(relay));
-        FALLBACK_RELAYS.forEach(relay => relaysToQuery.add(relay));
-        READ_ONLY_RELAYS.forEach(relay => relaysToQuery.add(relay));
+        userRelays.read.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
+        FALLBACK_RELAYS.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
+        READ_ONLY_RELAYS.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
 
-        // Hard cap to prevent excessive WebSocket connections
-        const capped = Array.from(relaysToQuery).slice(0, MAX_BULK_RELAYS);
+        // Prefer relays not in backoff; pick 2 healthy ones first
+        const all = Array.from(relaysToQuery);
+        const healthy = all.filter(r => !isRelayBlocked(r));
+        const blocked = all.filter(r => isRelayBlocked(r));
+        const capped = [...healthy, ...blocked].slice(0, MAX_BULK_RELAYS);
 
         // Batch author lists at 500 per filter to avoid silent relay truncation
         const MAX_AUTHORS_PER_FILTER = 500;
@@ -256,16 +485,21 @@ function createPool(): NPool {
         authors.forEach(author => {
           const authorRelays = getRelayCache(author);
           if (authorRelays.length > 0) {
-            authorRelays.slice(0, 3).forEach(relay => relaysToQuery.add(relay));
+            authorRelays.slice(0, 3).forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
           }
         });
-        userRelays.read.forEach(relay => relaysToQuery.add(relay));
+        userRelays.read.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
         // Always include fallback + read-only relays — critical for #p queries (notifications)
         // where the user has read relays but the event may live on a fallback relay.
-        FALLBACK_RELAYS.forEach(relay => relaysToQuery.add(relay));
-        READ_ONLY_RELAYS.forEach(relay => relaysToQuery.add(relay));
+        FALLBACK_RELAYS.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
+        READ_ONLY_RELAYS.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
 
-        for (const relay of relaysToQuery) {
+        // Prefer healthy relays, cap to MAX_TARGETED_RELAYS
+        const allTargeted = Array.from(relaysToQuery);
+        const healthyTargeted = allTargeted.filter(r => !isRelayBlocked(r));
+        const blockedTargeted = allTargeted.filter(r => isRelayBlocked(r));
+        const cappedTargeted = [...healthyTargeted, ...blockedTargeted].slice(0, MAX_TARGETED_RELAYS);
+        for (const relay of cappedTargeted) {
           routes.set(relay, filters);
         }
       }
@@ -280,17 +514,17 @@ function createPool(): NPool {
 
       // 1. User's configured write relays (primary - user sovereignty)
       const userRelays = getUserRelays();
-      userRelays.write.forEach(relay => relaysToPublish.add(relay));
+      userRelays.write.forEach(relay => relaysToPublish.add(normalizeRelayUrl(relay)));
 
       // 2. Author's own relays from cache (outbox model)
       const authorRelays = getRelayCache(event.pubkey);
       if (authorRelays.length > 0) {
-        authorRelays.slice(0, 3).forEach(relay => relaysToPublish.add(relay));
+        authorRelays.slice(0, 3).forEach(relay => relaysToPublish.add(normalizeRelayUrl(relay)));
       }
 
       // 3. Minimal fallback only if user has no relays configured
       if (relaysToPublish.size === 0) {
-        FALLBACK_RELAYS.forEach(relay => relaysToPublish.add(relay));
+        FALLBACK_RELAYS.forEach(relay => relaysToPublish.add(normalizeRelayUrl(relay)));
       }
 
       debugLog('eventRouter:', relaysToPublish.size, 'relays');

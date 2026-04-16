@@ -5,7 +5,7 @@
  * for tapping author names and zap actions on replies.
  * Mirrors web's thread panel in MultiColumnClient.
  */
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -92,7 +92,9 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreen
   const { isBookmarked, toggleBookmark } = useBookmarks();
   const [replyTarget, setReplyTarget] = useState<NostrEvent | null>(null);
   const [zapTarget, setZapTarget] = useState<NostrEvent | null>(null);
+  const [scrollToReplyId, setScrollToReplyId] = useState<string | null>(null);
 
+  const flatListRef = useRef<FlatList>(null);
   const totalReplies = rows.length > 0 ? rows.length - 1 : 0;
 
   // Build ancestor chain: notes from root to the target's parent
@@ -125,6 +127,7 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreen
     (event: NostrEvent) => {
       injectReply(event);
       setReplyTarget(null);
+      setScrollToReplyId(event.id);
     },
     [injectReply],
   );
@@ -149,6 +152,21 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreen
     }
     return items as ({ type: 'ancestor'; event: NostrEvent } | { type: 'row'; row: FlatThreadRow })[];
   }, [ancestors, rows]);
+
+  // Auto-scroll to a just-posted reply so the user sees it immediately
+  const lastScrolledReply = useRef<string | null>(null);
+  useEffect(() => {
+    if (!scrollToReplyId || scrollToReplyId === lastScrolledReply.current) return;
+    const idx = listData.findIndex(
+      (item) => item.type === 'row' && item.row.node.event.id === scrollToReplyId,
+    );
+    if (idx >= 0) {
+      lastScrolledReply.current = scrollToReplyId;
+      setTimeout(() => {
+        flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.3 });
+      }, 200);
+    }
+  }, [scrollToReplyId, listData]);
 
   const renderItem = useCallback(
     ({ item }: { item: typeof listData[number] }) => {
@@ -221,11 +239,13 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreen
         </View>
       ) : listData.length > 0 ? (
         <FlatList
+          ref={flatListRef}
           data={listData}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           contentContainerStyle={styles.list}
           removeClippedSubviews
+          onScrollToIndexFailed={() => {}}
           ListEmptyComponent={
             <Text style={styles.emptyText}>No thread data found.</Text>
           }

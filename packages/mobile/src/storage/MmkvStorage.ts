@@ -13,6 +13,17 @@ export let mmkvInitFailed = false;
 /** Error message from MMKV init failure (for user-facing display). */
 export let mmkvInitError: string | null = null;
 
+// ─── Persistence health tracking (parity with web's isIdbHealthy) ───────────
+// Tracks consecutive write failures. When > 0, auto-save should avoid
+// overwriting cloud backups because local data may not match disk.
+let consecutiveWriteFailures = 0;
+const MAX_WRITE_FAILURES_BEFORE_UNHEALTHY = 3;
+
+/** Returns true if storage writes are succeeding. Auto-save should check this. */
+export function isStorageHealthy(): boolean {
+  return !mmkvInitFailed && consecutiveWriteFailures < MAX_WRITE_FAILURES_BEFORE_UNHEALTHY;
+}
+
 try {
   mmkv = new MMKV();
 } catch (e) {
@@ -37,7 +48,16 @@ export const mobileStorage: KVStorage = {
     return mmkv.getString(key) ?? null;
   },
   async set(key: string, value: string): Promise<void> {
-    mmkv.set(key, value);
+    try {
+      mmkv.set(key, value);
+      consecutiveWriteFailures = 0;
+    } catch (err) {
+      consecutiveWriteFailures++;
+      if (consecutiveWriteFailures === MAX_WRITE_FAILURES_BEFORE_UNHEALTHY) {
+        console.error('[MmkvStorage] Persistence unhealthy — writes failing repeatedly. Auto-save will pause to protect cloud backups.');
+      }
+      throw err;
+    }
   },
   async remove(key: string): Promise<void> {
     mmkv.delete(key);
@@ -62,7 +82,16 @@ export const mobileStorage: KVStorage = {
     return mmkv.getString(key) ?? null;
   },
   setSync(key: string, value: string): void {
-    mmkv.set(key, value);
+    try {
+      mmkv.set(key, value);
+      consecutiveWriteFailures = 0;
+    } catch (err) {
+      consecutiveWriteFailures++;
+      if (consecutiveWriteFailures === MAX_WRITE_FAILURES_BEFORE_UNHEALTHY) {
+        console.error('[MmkvStorage] Persistence unhealthy — writes failing repeatedly. Auto-save will pause to protect cloud backups.');
+      }
+      throw err;
+    }
   },
   removeSync(key: string): void {
     mmkv.delete(key);

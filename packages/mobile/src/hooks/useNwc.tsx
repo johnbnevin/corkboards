@@ -6,7 +6,8 @@
  * The URI contains a wallet secret; ephemeral state prevents exfiltration.
  */
 import React, { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from 'react';
-import { NRelay1 } from '@nostrify/nostrify';
+import type { NRelay1 } from '@nostrify/nostrify';
+import { createRelay } from '../lib/NostrProvider';
 import { getPublicKey } from 'nostr-tools';
 import { hexToBytes, bytesToHex } from 'nostr-tools/utils';
 import { encrypt as nip44Encrypt, decrypt as nip44Decrypt, getConversationKey } from 'nostr-tools/nip44';
@@ -94,7 +95,7 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
       relayRef.current = null;
       return;
     }
-    relayRef.current = new NRelay1(parsed.relay, { backoff: false });
+    relayRef.current = createRelay(parsed.relay, { backoff: false });
     return () => {
       relayRef.current?.close();
       relayRef.current = null;

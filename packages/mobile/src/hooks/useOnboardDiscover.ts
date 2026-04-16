@@ -5,7 +5,8 @@
  * Uses MMKV cache store instead of web IDB.
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { type NostrEvent, NSchema as n, NRelay1 } from '@nostrify/nostrify';
+import { type NostrEvent, NSchema as n } from '@nostrify/nostrify';
+import { createRelay } from '../lib/NostrProvider';
 import { useQueryClient } from '@tanstack/react-query';
 import { cacheProfile } from '../lib/cacheStore';
 import { nip19 } from 'nostr-tools';
@@ -38,7 +39,7 @@ async function queryRelay(
   timeoutMs = 4000,
 ): Promise<NostrEvent[]> {
   try {
-    const relay = new NRelay1(url, { backoff: false });
+    const relay = createRelay(url, { backoff: false });
     const events = await relay.query([filter], { signal: AbortSignal.timeout(timeoutMs) });
     try { relay.close(); } catch { /* */ }
     return events;

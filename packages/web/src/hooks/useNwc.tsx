@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from 'react';
-import { NRelay1 } from '@nostrify/nostrify';
+import type { NRelay1 } from '@nostrify/nostrify';
+import { createRelay } from '@/components/NostrProvider';
 import { debugLog } from '@/lib/debug';
 import { getPublicKey } from 'nostr-tools';
 import { hexToBytes, bytesToHex } from 'nostr-tools/utils';
@@ -105,7 +106,7 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
       relayRef.current = null;
       return;
     }
-    relayRef.current = new NRelay1(parsed.relay, { backoff: false });
+    relayRef.current = createRelay(parsed.relay, { backoff: false });
     return () => {
       relayRef.current?.close();
       relayRef.current = null;

@@ -31,6 +31,7 @@ export function ThreadContent({
   } = useThreadQuery(eventId)
 
   const [replyingTo, setReplyingTo] = useState<NostrEvent | null>(null)
+  const [scrollToReplyId, setScrollToReplyId] = useState<string | null>(null)
 
   // Auto-reply: open composer when autoReplyTo is set and thread is loaded
   const autoReplyFiredRef = useRef<string | null>(null)
@@ -42,11 +43,12 @@ export function ThreadContent({
   }, [autoReplyTo, tree])
 
   // Reset reply state when eventId changes
-  useEffect(() => { setReplyingTo(null) }, [eventId])
+  useEffect(() => { setReplyingTo(null); setScrollToReplyId(null) }, [eventId])
 
   const handleReplyPublished = useCallback((newEvent: NostrEvent) => {
     injectReply(newEvent)
     setReplyingTo(null)
+    setScrollToReplyId(newEvent.id)
     onReplyPublished?.(newEvent)
   }, [injectReply, onReplyPublished])
 
@@ -110,6 +112,7 @@ export function ThreadContent({
         <ThreadTree
           rows={rows}
           targetId={eventId}
+          scrollToReplyId={scrollToReplyId}
           collapsedIds={collapsedIds}
           onToggleCollapse={toggleCollapse}
           onViewThread={onNavigateThread}

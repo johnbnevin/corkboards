@@ -27,7 +27,8 @@ const MAX_RELAY_CACHE = 3000; // 3000 vs 5000 on web — conservative mobile mem
 
 // Tiered relay routing thresholds (keep in sync with web NostrProvider)
 const BULK_AUTHOR_THRESHOLD = 10;
-const MAX_BULK_RELAYS = 8;
+const MAX_BULK_RELAYS = 2;
+const MAX_TARGETED_RELAYS = 3;
 const MAX_AUTHORS_PER_FILTER = 500;
 
 // ============================================================================
@@ -128,13 +129,109 @@ export function getUserRelays(): { read: string[]; write: string[] } {
 }
 
 // ============================================================================
+// Per-relay rate limiter — max 3 requests per second per relay URL
+// ============================================================================
+
+const MAX_REQUESTS_PER_SECOND = 3;
+const RATE_WINDOW_MS = 1000;
+const _relayRequestLog = new Map<string, number[]>();
+
+function waitForRateLimit(url: string): Promise<void> {
+  const now = Date.now();
+  let timestamps = _relayRequestLog.get(url);
+  if (!timestamps) { timestamps = []; _relayRequestLog.set(url, timestamps); }
+  while (timestamps.length > 0 && timestamps[0] <= now - RATE_WINDOW_MS) timestamps.shift();
+  if (timestamps.length < MAX_REQUESTS_PER_SECOND) {
+    timestamps.push(now);
+    return Promise.resolve();
+  }
+  const waitMs = timestamps[0] + RATE_WINDOW_MS - now + 1;
+  return new Promise(resolve => setTimeout(() => {
+    const ts = _relayRequestLog.get(url)!;
+    const n = Date.now();
+    while (ts.length > 0 && ts[0] <= n - RATE_WINDOW_MS) ts.shift();
+    ts.push(n);
+    resolve();
+  }, waitMs));
+}
+
+// ── Connection cache + failure backoff ───────────────────────────────────
+
+const _relayCache = new Map<string, { relay: NRelay1; createdAt: number }>();
+const RELAY_CACHE_TTL_MS = 5 * 60 * 1000;
+const _relayBackoff = new Map<string, { failCount: number; blockedUntil: number }>();
+const BACKOFF_BASE_MS = 5_000;
+const BACKOFF_MAX_MS = 120_000;
+
+function getBackoffMs(failCount: number): number {
+  return Math.min(BACKOFF_BASE_MS * Math.pow(2, failCount - 1), BACKOFF_MAX_MS);
+}
+function recordRelayFailure(url: string): void {
+  const existing = _relayBackoff.get(url);
+  if (existing && Date.now() < existing.blockedUntil) return;
+  const failCount = (existing?.failCount ?? 0) + 1;
+  _relayBackoff.set(url, { failCount, blockedUntil: Date.now() + getBackoffMs(failCount) });
+  _relayCache.delete(url);
+}
+function recordRelaySuccess(url: string): void { _relayBackoff.delete(url); }
+function isRelayBlocked(url: string): boolean {
+  const entry = _relayBackoff.get(url);
+  return !!entry && Date.now() < entry.blockedUntil;
+}
+
+/** Dummy relay returned during backoff — returns empty results without opening a connection */
+const blockedQuery = async () => [] as NostrEvent[];
+const blockedEvent = async () => { /* noop */ };
+
+/**
+ * Create a rate-limited, cached relay with failure backoff.
+ */
+export function createRelay(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
+  if (isRelayBlocked(url)) {
+    // Return a stub that fails fast without opening a WebSocket
+    const stub = new NRelay1(url, { ...opts, backoff: false, idleTimeout: 1 });
+    // Immediately close to prevent connection, override methods
+    stub.close().catch(() => {});
+    stub.query = blockedQuery;
+    stub.event = blockedEvent;
+    return stub;
+  }
+
+  const cached = _relayCache.get(url);
+  if (cached && Date.now() - cached.createdAt < RELAY_CACHE_TTL_MS) return cached.relay;
+
+  if (_relayCache.size > 50) {
+    const now = Date.now();
+    for (const [key, entry] of _relayCache) {
+      if (now - entry.createdAt > RELAY_CACHE_TTL_MS) _relayCache.delete(key);
+    }
+  }
+
+  const inner = new NRelay1(url, opts);
+  const origQuery = inner.query.bind(inner);
+  const origEvent = inner.event.bind(inner);
+  inner.query = async (filters, qOpts) => {
+    await waitForRateLimit(url);
+    try { const r = await origQuery(filters, qOpts); recordRelaySuccess(url); return r; }
+    catch (e) { recordRelayFailure(url); throw e; }
+  };
+  inner.event = async (event, eOpts) => {
+    await waitForRateLimit(url);
+    try { await origEvent(event, eOpts); recordRelaySuccess(url); }
+    catch (e) { recordRelayFailure(url); throw e; }
+  };
+  _relayCache.set(url, { relay: inner, createdAt: Date.now() });
+  return inner;
+}
+
+// ============================================================================
 // Pool factory
 // ============================================================================
 
 function createPool(): NPoolType {
   return new NPool({
     open(url: string) {
-      return new NRelay1(url, { backoff: false });
+      return createRelay(url, { backoff: false });
     },
 
     // Tiered routing (keep in sync with web NostrProvider)
@@ -188,7 +285,9 @@ function createPool(): NPoolType {
         FALLBACK_RELAYS.forEach(r => relaysToQuery.add(r));
         READ_ONLY_RELAYS.forEach(r => relaysToQuery.add(r));
 
-        for (const relay of relaysToQuery) {
+        // Cap targeted queries to prevent WebSocket storms
+        const cappedTargeted = Array.from(relaysToQuery).slice(0, MAX_TARGETED_RELAYS);
+        for (const relay of cappedTargeted) {
           routes.set(relay, filters);
         }
       }

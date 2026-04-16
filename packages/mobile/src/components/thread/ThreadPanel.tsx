@@ -37,6 +37,7 @@ export function ThreadPanel({ eventId, onClose, onNavigateThread }: ThreadPanelP
   } = useThreadQuery(eventId);
 
   const [replyTarget, setReplyTarget] = useState<NostrEvent | null>(null);
+  const [scrollToReplyId, setScrollToReplyId] = useState<string | null>(null);
   const totalReplies = rows.length > 0 ? rows.length - 1 : 0;
 
   const handleReply = useCallback((event: NostrEvent) => {
@@ -47,6 +48,7 @@ export function ThreadPanel({ eventId, onClose, onNavigateThread }: ThreadPanelP
     (event: NostrEvent) => {
       injectReply(event);
       setReplyTarget(null);
+      setScrollToReplyId(event.id);
     },
     [injectReply],
   );
@@ -96,6 +98,7 @@ export function ThreadPanel({ eventId, onClose, onNavigateThread }: ThreadPanelP
         <ThreadTree
           rows={rows}
           targetId={eventId}
+          scrollToReplyId={scrollToReplyId}
           collapsedIds={collapsedIds}
           onToggleCollapse={toggleCollapse}
           onReply={handleReply}

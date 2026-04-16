@@ -8,8 +8,8 @@
  *   Phase 1: NPool query + relay hints + cached author relays + fallbacks (parallel race)
  *   Phase 2: Discover author's NIP-65 relay list and query those relays
  */
-import { type NostrEvent, NRelay1 } from '@nostrify/nostrify'
-import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/components/NostrProvider'
+import type { NostrEvent, NRelay1 } from '@nostrify/nostrify'
+import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS, createRelay } from '@/components/NostrProvider'
 import { isSecureRelay } from '@core/nostrUtils'
 
 // ── Session cache (shared with thread system) ─────────────────────────────
@@ -62,7 +62,7 @@ export async function queryRelay(
   let timeout: ReturnType<typeof setTimeout> | undefined
 
   try {
-    relay = new NRelay1(relayUrl, { backoff: false })
+    relay = createRelay(relayUrl, { backoff: false })
     timeout = setTimeout(() => relay!.close(), timeoutMs)
     for await (const msg of relay.req([filter])) {
       if (msg[0] === 'EVENT') events.push(msg[2] as NostrEvent)

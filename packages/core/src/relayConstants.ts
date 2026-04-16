@@ -16,8 +16,8 @@
  * These relays accept both reads AND writes.
  */
 export const FALLBACK_RELAYS = [
-  'wss://relay.damus.io',
   'wss://nos.lol',
+  'wss://relay.damus.io',
   'wss://relay.ditto.pub',
 ];
 

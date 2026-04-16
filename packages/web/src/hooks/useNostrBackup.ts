@@ -17,16 +17,15 @@
  * Relevant NIPs: 04 (encryption), 78 (app-specific data), 94 (file metadata).
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { NRelay1 } from '@nostrify/nostrify';
 import { triggerDownload } from '@/lib/triggerDownload';
 import { BlossomUploader } from '@nostrify/nostrify/uploaders';
 import type { NostrEvent, NPool } from '@nostrify/nostrify';
 import type { NUser } from '@nostrify/react/login';
-import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache } from '@/components/NostrProvider';
+import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache, createRelay, createRelayDirect } from '@/components/NostrProvider';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '@/lib/storageKeys';
 import { formatTimeAgo } from '@/lib/formatTimeAgo';
 import { debugLog, debugWarn } from '@/lib/debug';
-import { idbGetSync, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady } from '@/lib/idb';
+import { idbGetSync, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy } from '@/lib/idb';
 import {
   generateAesKey, importAesKey,
   aesEncrypt, aesDecrypt, rawKeyToHex, hexToRawKey,
@@ -528,7 +527,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const allRelayUrls = [...primary, ...fallback];
       const succeeded: RelayResult[] = [];
       for (const url of allRelayUrls) {
-        const relay = new NRelay1(url, { backoff: false });
+        const relay = createRelayDirect(url, { backoff: false });
         try {
           await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
           log(`  ${url} <- manifest OK`);
@@ -552,7 +551,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
             kind: 30078, content: '', tags: [['d', `${D_TAG_PREFIX}:${i}`]], created_at: now,
           });
           for (const r of succeeded) {
-            const relay = new NRelay1(r.url, { backoff: false });
+            const relay = createRelayDirect(r.url, { backoff: false });
             try { await relay.event(tombstone, { signal: AbortSignal.timeout(5000) }); } catch { /* ignore */ }
             finally { try { relay.close(); } catch { /* ignore */ } }
           }
@@ -609,8 +608,26 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   // Auto-save: silent background save using a fixed d-tag (overwrites itself).
   const autoSaveBackup = useCallback(async (): Promise<boolean> => {
     if (!user || isSaving.current || isRestoring.current) return false;
-    // Block auto-save while a forced background check is running — prevents
     if (!hasUnsavedChanges()) return false;
+
+    // Guard: don't overwrite a good cloud backup with empty/corrupt local state.
+    // If IDB writes have been failing, memCache may not reflect what's on disk.
+    if (!isIdbHealthy()) {
+      debugWarn('[backup]', 'Auto-save blocked: IDB writes are failing — protecting cloud backup');
+      return false;
+    }
+
+    // Guard: don't save if the data is essentially empty (no feeds, no dismissed, no collapsed).
+    // This prevents overwriting a good backup after IDB was wiped (e.g. browser cleanup).
+    const feeds = idbGetSync('nostr-custom-feeds');
+    const dismissed = idbGetSync('dismissed-notes');
+    const collapsed = idbGetSync('collapsed-notes');
+    const hasMeaningfulData = (feeds && feeds !== '[]') || (dismissed && dismissed !== '[]') || (collapsed && collapsed !== '[]');
+    if (!hasMeaningfulData) {
+      debugWarn('[backup]', 'Auto-save blocked: no meaningful data to save (feeds/dismissed/collapsed all empty)');
+      return false;
+    }
+
     isSaving.current = true;
 
     try {
@@ -684,7 +701,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
       const { primary, fallback } = getPublishRelays(pubkey);
       for (const url of [...primary, ...fallback]) {
-        const relay = new NRelay1(url, { backoff: false });
+        const relay = createRelayDirect(url, { backoff: false });
         try { await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) }); }
         catch { /* continue */ }
         finally { try { relay.close(); } catch { /* */ } }
@@ -761,8 +778,10 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       if (!relayUrls.includes(r)) relayUrls.push(r);
     }
 
+    // Only filter user-blocked relays, NOT rate-limit backoff — backup queries
+    // are critical for login and must try every relay even if it failed recently.
     const activeRelayUrls = relayUrls.filter(url => !isRelayBlocked(url));
-    log(`  Checking ${activeRelayUrls.length} relays for ${label} (batches of 3)`);
+    log(`  Checking up to ${activeRelayUrls.length} relays for ${label} (sequential, stop on first result)`);
 
     const seen = new Set<string>();
     const allEvents: NostrEvent[] = [];
@@ -771,7 +790,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
     const queryRelay = async (url: string): Promise<NostrEvent[]> => {
       try {
-        const relay = new NRelay1(normalizeRelay(url), { backoff: false });
+        // Bypass backoff — backup queries are critical for login
+        const relay = createRelayDirect(normalizeRelay(url), { backoff: false });
         const signal = AbortSignal.any([AbortSignal.timeout(perRelayTimeoutMs), overallAbort.signal]);
         const events = await relay.query([filter], { signal });
         log(`  ${url}: ${events.length} ${label}`);
@@ -787,17 +807,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       }
     };
 
-    // Query relays in batches of 3, stop early once we have results (unless checkAll)
-    for (let i = 0; i < activeRelayUrls.length; i += 3) {
+    // Query relays one at a time — stop as soon as we get results (unless checkAll).
+    // This avoids opening connections to relays that are down when another works.
+    for (const url of activeRelayUrls) {
       if (overallAbort.signal.aborted) break;
-      const batch = activeRelayUrls.slice(i, i + 3);
-      const results = await Promise.allSettled(batch.map(queryRelay));
-      for (const r of results) {
-        if (r.status === 'fulfilled') {
-          for (const ev of r.value) {
-            if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
-          }
-        }
+      const events = await queryRelay(url);
+      for (const ev of events) {
+        if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
       }
       if (!_checkAll && allEvents.length > 0) break;
     }
@@ -881,22 +897,19 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setMessage('Finding your relays...');
         log('Fetching kind 10002 relay list from fallback relays...');
         const relayEvents: NostrEvent[] = [];
-        const relayResults = await Promise.allSettled(
-          FALLBACK_RELAYS.map(async (url) => {
-            const relay = new NRelay1(normalizeRelay(url), { backoff: false });
-            try {
-              const evts = await relay.query(
-                [{ kinds: [10002], authors: [pubkey], limit: 1 }],
-                { signal: AbortSignal.timeout(6000) }
-              );
-              return evts;
-            } finally {
-              try { relay.close(); } catch { /* */ }
+        // Try relays one at a time — stop at the first that returns results
+        for (const url of FALLBACK_RELAYS) {
+          try {
+            const relay = createRelayDirect(normalizeRelay(url), { backoff: false });
+            const evts = await relay.query(
+              [{ kinds: [10002], authors: [pubkey], limit: 1 }],
+              { signal: AbortSignal.timeout(6000) }
+            );
+            if (evts.length > 0) {
+              relayEvents.push(...evts);
+              break; // Got results, no need to try more relays
             }
-          })
-        );
-        for (const r of relayResults) {
-          if (r.status === 'fulfilled') relayEvents.push(...r.value);
+          } catch { /* try next relay */ }
         }
         if (relayEvents.length > 0) {
           const best = relayEvents.reduce((a, b) => a.created_at > b.created_at ? a : b);
@@ -1394,7 +1407,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
           });
           const { primary, fallback } = getPublishRelays(user.pubkey);
           for (const url of [...primary, ...fallback].slice(0, 5)) {
-            const relay = new NRelay1(url, { backoff: false });
+            const relay = createRelayDirect(url, { backoff: false });
             try { await relay.event(delEvent, { signal: AbortSignal.timeout(5000) }); }
             catch { /* best effort */ }
             finally { try { relay.close(); } catch { /* */ } }

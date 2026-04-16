@@ -114,9 +114,14 @@ export async function batchFetchByAuthors(opts: BatchFetchOpts): Promise<NostrEv
       chunks.push(authors.slice(i, i + MAX_AUTHORS_PER_QUERY));
     }
 
-    const allEvents = await Promise.all(
-      chunks.map(chunk =>
-        nostr.query(
+    // Query chunks sequentially with a pause between each to avoid flooding relays.
+    // Each chunk goes to 4-8 relays via NPool, so spacing prevents connection storms.
+    const allEvents: NostrEvent[][] = [];
+    for (let ci = 0; ci < chunks.length; ci++) {
+      if (ci > 0) await new Promise(r => setTimeout(r, 500)); // 500ms between chunks
+      const chunk = chunks[ci];
+      try {
+        const events = await nostr.query(
           [{
             kinds,
             authors: chunk,
@@ -125,15 +130,16 @@ export async function batchFetchByAuthors(opts: BatchFetchOpts): Promise<NostrEv
             ...(until !== undefined ? { until } : {}),
           }],
           { signal: AbortSignal.timeout(timeout) },
-        ).catch((err) => {
-          debugWarn('[batchFetch] Chunk query failed:', err);
-          return [] as NostrEvent[];
-        })
-      )
-    );
+        );
+        allEvents.push(events);
+      } catch (err) {
+        debugWarn('[batchFetch] Chunk query failed:', err);
+        allEvents.push([]);
+      }
+      onProgress?.(ci + 1, chunks.length);
+    }
 
     const events = allEvents.flat();
-    onProgress?.(1, 1);
     debugLog(`[batchFetch] Got ${events.length} events from ${authors.length} authors (${chunks.length} chunks)`);
 
     // Deduplicate and sort

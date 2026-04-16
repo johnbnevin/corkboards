@@ -88,8 +88,6 @@ import { TIPS } from '@/lib/tips';
 import { BackupSplashScreen } from '@/components/BackupSplashScreen';
 import { BackupDownloadPrompt } from '@/components/BackupDownloadPrompt';
 import { downloadSettingsBackup, shouldPromptBackupDownload, restoreFromBackupFile, preflightRestore, saveCheckpoint } from '@/lib/downloadBackup';
-import { useNostrCustomFeedsSync } from '@/hooks/useNostrCustomFeedsSync';
-import { useNostrDismissedSync } from '@/hooks/useNostrDismissedSync';
 import { FEED_KINDS } from '@/lib/feedUtils';
 // NostrProvider relay utilities used by components but no longer needed in this file
 import { getCacheStatsForPubkeys, clearNotesCache } from '@/lib/notesCache';
@@ -941,7 +939,51 @@ export function MultiColumnClient() {
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [advancedSection, setAdvancedSection] = useState<'main' | 'relays' | 'blossom'>('main');
   const [emojiSetsOpen, setEmojiSetsOpen] = useState(false);
-  const [consolidateSound, setConsolidateSound] = useLocalStorage<string>('corkboard:consolidate-sound', 'solitaire');
+  const [consolidateSound, setConsolidateSoundRaw] = useLocalStorage<string>('corkboard:consolidate-sound', 'solitaire');
+  const [soundAccelerate, setSoundAccelerate] = useLocalStorage<boolean>('corkboard:sound-accelerate', true);
+  /** Play 3 sound previews — starts slow, graduates faster (like a consolidate ramping up) */
+  const previewSound = useCallback((style: string) => {
+    if (style === 'off') return;
+    try {
+      const ctx = new AudioContext();
+      void ctx.resume();
+      // Gaps: 0.25s then 0.15s — starts slow, gets faster
+      const gaps = [0, 0.25, 0.40];
+      for (let i = 0; i < 3; i++) {
+        const t = ctx.currentTime + gaps[i];
+        if (style === 'chimes') {
+          const scale = [523, 659, 880];
+          const freq = scale[i];
+          const osc = ctx.createOscillator(); osc.type = 'sine'; osc.frequency.value = freq;
+          const osc2 = ctx.createOscillator(); osc2.type = 'triangle'; osc2.frequency.value = freq * 3;
+          const g = ctx.createGain(); const g2 = ctx.createGain();
+          g.gain.setValueAtTime(0.045, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+          g2.gain.setValueAtTime(0.011, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.21);
+          osc.connect(g).connect(ctx.destination); osc2.connect(g2).connect(ctx.destination);
+          osc.start(t); osc.stop(t + 0.35); osc2.start(t); osc2.stop(t + 0.21);
+        } else {
+          // Solitaire swoosh
+          const bufLen = Math.floor(ctx.sampleRate * 0.08);
+          const buf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+          const data = buf.getChannelData(0);
+          for (let j = 0; j < bufLen; j++) data[j] = Math.random() * 2 - 1;
+          const noise = ctx.createBufferSource(); noise.buffer = buf;
+          const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2000; hp.Q.value = 0.5;
+          const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 4000 + Math.random() * 1000; bp.Q.value = 0.7;
+          const env = ctx.createGain();
+          env.gain.setValueAtTime(0.001, t);
+          env.gain.linearRampToValueAtTime(0.1125, t + 0.015);
+          env.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+          noise.connect(hp).connect(bp).connect(env).connect(ctx.destination);
+          noise.start(t); noise.stop(t + 0.08);
+        }
+      }
+    } catch { /* audio not available */ }
+  }, []);
+  const setConsolidateSound = useCallback((val: string) => {
+    setConsolidateSoundRaw(val);
+    previewSound(val);
+  }, [setConsolidateSoundRaw, previewSound]);
   const [imageSizeLimit, setImageSizeLimit] = useImageSizeLimitSetting();
   const [avatarSizeLimit, setAvatarSizeLimit] = useAvatarSizeLimitSetting();
   const [autofetchIntervalSecs, setAutofetchIntervalSecs] = useLocalStorage<number>(STORAGE_KEYS.AUTOFETCH_INTERVAL_SECS, 120);
@@ -1102,9 +1144,6 @@ export function MultiColumnClient() {
     }
   }, [user?.pubkey, otherUsers, autoSaveBackup, loginActions, hasUnsavedChanges, lastBackupTs, logLogout, switchToAccount]);
 
-  // Encrypted per-kind sync (corkboards + dismissed notes)
-  const _customFeedsSync = useNostrCustomFeedsSync(user, nostr);
-  const _dismissedSync = useNostrDismissedSync(user, nostr);
 
   const _backupTs = lastBackupTs; // read so React re-renders after saves
   const hasChanges = user ? hasUnsavedChanges() : false;
@@ -1113,6 +1152,7 @@ export function MultiColumnClient() {
   // Once settled (or after restore), load everything.
   const canLoadNotes = !!user && backupCheckSettled && backupStatus !== 'restoring';
   useEffect(() => { if (canLoadNotes) setProfileFetchEnabled(true); }, [canLoadNotes]);
+
 
   // Auto-restore best checkpoint when login check finds backups.
   // Picks by: most saved notes > most dismissed > newest timestamp. Fires once.
@@ -1323,7 +1363,39 @@ export function MultiColumnClient() {
   // App config (for settings like publishClientTag)
   const { config: appConfig, updateConfig } = useAppContext();
 
-  // Relay health for splash screen - also trigger check on mount
+  // Sync NIP-65 relay list from Nostr once after login settles.
+  // Populates config.relayMetadata.relays so the relay settings UI shows the user's relays.
+  const nip65SyncDone = useRef(false);
+  useEffect(() => {
+    if (!canLoadNotes || !user || nip65SyncDone.current) return;
+    nip65SyncDone.current = true;
+    (async () => {
+      try {
+        const events = await nostr.query(
+          [{ kinds: [10002], authors: [user.pubkey], limit: 1 }],
+          { signal: AbortSignal.timeout(5000) }
+        );
+        if (events.length > 0 && events[0].created_at > appConfig.relayMetadata.updatedAt) {
+          const relays = events[0].tags
+            .filter(([name]) => name === 'r')
+            .map(([, url, marker]) => ({
+              url,
+              read: !marker || marker === 'read',
+              write: !marker || marker === 'write',
+            }));
+          if (relays.length > 0) {
+            updateConfig((current) => ({
+              ...current,
+              relayMetadata: { relays, updatedAt: events[0].created_at },
+            }));
+          }
+        }
+      } catch { /* best-effort */ }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once after login settles
+  }, [canLoadNotes]);
+
+  // Relay health — manual only, triggered from settings menu
   const { relayHealth: _relayHealth, checkAllRelays, activeRelays: _activeRelays } = useRelayHealth();
 
   // After page load settles, retry any referenced notes that failed on first attempt
@@ -1331,10 +1403,8 @@ export function MultiColumnClient() {
 
 
 
-  // Check relays on mount
-  useEffect(() => {
-    checkAllRelays();
-  }, [checkAllRelays]);
+  // Relay health checks are manual-only — triggered from the settings menu.
+  // No automatic checks on mount to avoid unnecessary relay connections.
 
   // Per-tab filter settings type (complete set of all filter state for a tab)
   interface TabFilterSettings {
@@ -1717,6 +1787,7 @@ export function MultiColumnClient() {
     setFeedHashtags(new Set());
     setEditingFeedId(null);
     setShowAddFriendDialog(false);
+    setBackupIndicator('unsaved');
   }, [feedTitle, feedPubkeys, feedRelays, feedRssUrls, feedHashtags, newFriendInput, editingFeedId, customFeeds, parseFeedSource, setCustomFeeds, toast]);
 
   // Pinned notes
@@ -3193,6 +3264,8 @@ export function MultiColumnClient() {
 
   const consolidateSoundRef = useRef(consolidateSound);
   consolidateSoundRef.current = consolidateSound;
+  const soundAccelerateRef = useRef(soundAccelerate);
+  soundAccelerateRef.current = soundAccelerate;
 
   // Consolidate wrapper: find the first visible note after the last blank, then consolidate and scroll
   const consolidate = useCallback(() => {
@@ -3222,15 +3295,24 @@ export function MultiColumnClient() {
         void ctx.resume();
         const blanks = actualBlanks;
         const count = Math.min(blanks, 2000);
-        const duration = Math.min(count * 0.005, 10);
-        const spacing = duration / count;
+
+        // Timing: accelerate mode starts slow (~0.25s gap) and graduates to fast.
+        // Shuffle mode uses fast uniform spacing like a card shuffle.
+        const accelerate = soundAccelerateRef.current;
+        const shuffleGap = 0.04;
+        const startGap = accelerate ? 0.25 : shuffleGap;
+        const endGap = accelerate ? (count > 1 ? Math.max(0.005, 10 / (count * count)) : startGap) : shuffleGap;
 
         if (style === 'chimes') {
-          // Chime cascade — layered bell tones walking down a pentatonic scale
+          // Chime cascade — layered bell tones walking up a pentatonic scale
           const scale = [523, 587, 659, 784, 880, 1047, 1175, 1319, 1568, 1760];
+          let elapsed = 0;
           for (let i = 0; i < count; i++) {
-            const t = ctx.currentTime + i * spacing;
-            const noteIdx = Math.floor((1 - i / count) * (scale.length - 1));
+            const t = ctx.currentTime + elapsed;
+            const progress = count > 1 ? i / (count - 1) : 0;
+            // Ease-in: gap shrinks from startGap → endGap as progress² ramps up
+            elapsed += startGap - (startGap - endGap) * (progress ** 2);
+            const noteIdx = Math.floor(progress * (scale.length - 1));
             const freq = scale[noteIdx] + (Math.random() - 0.5) * 10;
             const osc1 = ctx.createOscillator(); osc1.type = 'sine'; osc1.frequency.value = freq;
             const osc2 = ctx.createOscillator(); osc2.type = 'triangle'; osc2.frequency.value = freq * 3;
@@ -3244,16 +3326,14 @@ export function MultiColumnClient() {
           }
         } else {
           // Solitaire — one short swoosh/shuffle per 3 notes consolidated
-          // Spacing accelerates: close together at start, farther apart at end
-          // Max gap reaches 0.18s only at 1000+ blanks; below that, proportionally smaller
+          // Starts slow (~0.5s gap), graduates faster
           const swooshCount = Math.max(1, Math.ceil(blanks / 3));
-          const minGap = 0.04;
-          const maxGap = Math.min(0.18, 0.18 * (blanks / 1000));
+          const swooshEndGap = swooshCount > 1 ? Math.max(0.02, 10 / (swooshCount * swooshCount)) : startGap;
           let elapsed = 0;
           for (let i = 0; i < swooshCount; i++) {
             const t = ctx.currentTime + elapsed;
             const progress = swooshCount > 1 ? i / (swooshCount - 1) : 0;
-            elapsed += minGap + (maxGap - minGap) * (progress ** 1.5);
+            elapsed += startGap - (startGap - swooshEndGap) * (progress ** 2);
             // Filtered noise swoosh — longer than a click, shorter than wind
             const bufLen = Math.floor(ctx.sampleRate * 0.08);
             const buf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
@@ -3416,13 +3496,7 @@ export function MultiColumnClient() {
       <BackupSplashScreen
         backupStatus={!backupCheckSettled ? 'checking' : backupStatus}
         message={!backupCheckSettled ? 'Checking for backup...' : backupMessage}
-        remoteBackup={remoteBackup}
-        onRestore={loadRemoteBackup}
         onDismiss={dismissRemoteBackup}
-        scanOlderStates={scanOlderStates}
-        isScanning={isScanning}
-        checkpoints={checkpoints}
-        loadCheckpoint={loadCheckpointFn}
         logs={backupLogs}
       />
     );
@@ -3461,6 +3535,14 @@ export function MultiColumnClient() {
                             {consolidateSound === opt.val ? '✓ ' : '\u2003'}{opt.label}
                           </DropdownMenuItem>
                         ))}
+                        {consolidateSound !== 'off' && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onClick={() => setSoundAccelerate(!soundAccelerate)}>
+                              {'\u2003'}{soundAccelerate ? 'Accelerate' : 'Shuffle'}
+                            </DropdownMenuItem>
+                          </>
+                        )}
                       </DropdownMenuSubContent>
                     </DropdownMenuSub>
                     <DropdownMenuSub>
@@ -3498,6 +3580,7 @@ export function MultiColumnClient() {
                       onClick={async () => {
                         try {
                           await saveBackup();
+                          setBackupIndicator('saved');
                           toast({ title: 'Saved', description: 'Backup saved to Blossom.' });
                         } catch {
                           toast({ title: 'Save failed', description: 'Could not save to Blossom.', variant: 'destructive' });
@@ -3630,6 +3713,14 @@ export function MultiColumnClient() {
                           {consolidateSound === opt.val ? '✓ ' : '\u2003'}{opt.label}
                         </DropdownMenuItem>
                       ))}
+                      {consolidateSound !== 'off' && (
+                        <>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => setSoundAccelerate(!soundAccelerate)}>
+                            {soundAccelerate ? '✓ ' : '\u2003'}Accelerate
+                          </DropdownMenuItem>
+                        </>
+                      )}
                     </DropdownMenuSubContent>
                   </DropdownMenuSub>
                   <DropdownMenuSub>
@@ -3738,6 +3829,7 @@ export function MultiColumnClient() {
                     setCustomFeeds(customFeeds.filter(f => f.id !== deleteFeedId));
                     setActiveTab('me');
                     setDeleteFeedId(null);
+                    setBackupIndicator('unsaved');
                   }
                 }}
               >
@@ -4022,6 +4114,7 @@ export function MultiColumnClient() {
                 setShowAddFriendDialog(true);
               }}
               onDeleteFeed={(feedId) => setDeleteFeedId(feedId)}
+              onRefreshTab={loadNewerNotes}
             />
             <div className="absolute top-0 left-0 flex">
               <button
@@ -4095,6 +4188,7 @@ export function MultiColumnClient() {
               hasActiveContentFilters={hasActiveContentFilters}
               dismissedCount={dismissedCount}
               visibleNotesCount={notes.length}
+              onEditProfile={() => setEditProfileOpen(true)}
             />
           ) : isFriendTab ? (
             <>
@@ -4234,15 +4328,7 @@ export function MultiColumnClient() {
         {/* Onboard search widget — shown during onboard procedure on discover tab */}
         {isOnboarding && isDiscoverTab && <OnboardSearchWidget contactCount={contacts?.length ?? 0} followTarget={onboardFollowTarget} onSkip={() => { setOnboardingSkipped(true); setActiveTab('me'); autoSaveBackup().then((saved) => { if (saved) { setBackupIndicator('saved'); } else { toast({ title: 'Backup failed', description: 'Onboarding preference could not be saved to cloud. It will retry automatically.', variant: 'destructive' }); } }).catch(() => {}); }} />}
 
-        {/* Customize Profile shortcut on me tab */}
-        {activeTab === 'me' && user && (
-          <div className="flex justify-center mb-2">
-            <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={() => setEditProfileOpen(true)}>
-              <UserPlus className="h-3.5 w-3.5" />
-              Customize Profile
-            </Button>
-          </div>
-        )}
+
 
         {/* Masonry feed columns + load older/newer/consolidate buttons */}
         {!isNotificationsTab && <FeedGrid

@@ -1,9 +1,10 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
+import { useImageSizeLimitSetting, useAvatarSizeLimitSetting } from '@/hooks/useImageSizeLimit';
 import { Button } from '@/components/ui/button';
 import {
   Form,
@@ -16,7 +17,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
-import { Loader2, Camera, Zap, Upload } from 'lucide-react';
+import { Loader2, Camera, Zap, Upload, AlertTriangle } from 'lucide-react';
 import { NSchema as n, type NostrMetadata } from '@nostrify/nostrify';
 import { useQueryClient } from '@tanstack/react-query';
 import { useUploadFile } from '@/hooks/useUploadFile';
@@ -25,6 +26,16 @@ import { STORAGE_KEYS } from '@/lib/storageKeys';
 import { Slider } from '@/components/ui/slider';
 import { cacheProfile } from '@/lib/cacheStore';
 import { debugLog, debugError } from '@/lib/debug';
+
+// Upload size thresholds — largest non-unlimited tier from useImageSizeLimit
+const AVATAR_UPLOAD_WARN_BYTES = 1.5 * 1024 * 1024;  // 1.5 MB
+const BANNER_UPLOAD_WARN_BYTES = 4.5 * 1024 * 1024;   // 4.5 MB
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 /** Placeholder banner: green hills + blue sky gradient */
 function BannerPlaceholder() {
@@ -71,6 +82,17 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
 
   const bannerInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
+  const [avatarSizeLimit] = useAvatarSizeLimitSetting();
+  const [imageSizeLimit] = useImageSizeLimitSetting();
+
+  // Size warning state: holds the pending file + metadata until user decides
+  const [sizeWarning, setSizeWarning] = useState<{
+    file: File;
+    field: 'picture' | 'banner';
+    fileSize: number;
+    limit: number;
+    blockedByDefault: boolean; // true if corkboards would block display at current settings
+  } | null>(null);
 
   const form = useForm<ProfileFormData>({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- zodResolver expects ZodType<any> which is incompatible with nostrify's Zod version
@@ -104,10 +126,10 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
     }
   }, [metadata, form]);
 
-  const handleUpload = async (file: File, field: 'picture' | 'banner') => {
+  const doUpload = async (file: File, field: 'picture' | 'banner') => {
     try {
       const [[, url]] = await uploadFile(file);
-      form.setValue(field, url);
+      form.setValue(field, url, { shouldDirty: true });
     } catch (error) {
       debugError(`Failed to upload ${field}:`, error);
       toast({
@@ -116,6 +138,22 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
         variant: 'destructive',
       });
     }
+  };
+
+  const handleUpload = (file: File, field: 'picture' | 'banner') => {
+    const limit = field === 'picture' ? AVATAR_UPLOAD_WARN_BYTES : BANNER_UPLOAD_WARN_BYTES;
+    if (file.size > limit) {
+      // Check if corkboards would block this image at the user's current settings
+      const AVATAR_LIMITS: Record<string, number> = { small: 250*1024, default: 750*1024, large: 1.5*1024*1024 };
+      const IMAGE_LIMITS: Record<string, number> = { small: 750*1024, default: 2.25*1024*1024, large: 4.5*1024*1024 };
+      const userLimit = field === 'picture'
+        ? (AVATAR_LIMITS[avatarSizeLimit] ?? 0)
+        : (IMAGE_LIMITS[imageSizeLimit] ?? 0);
+      const blockedByDefault = userLimit > 0 && file.size > userLimit;
+      setSizeWarning({ file, field, fileSize: file.size, limit, blockedByDefault });
+      return;
+    }
+    doUpload(file, field);
   };
 
   const onSubmit = async (values: ProfileFormData) => {
@@ -378,6 +416,40 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
           {(isPending || isUploading) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
           Save Profile
         </Button>
+
+        {/* Size warning dialog */}
+        {sizeWarning && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setSizeWarning(null)}>
+            <div className="bg-background rounded-lg border shadow-lg max-w-sm mx-4 p-4 space-y-3" onClick={e => e.stopPropagation()}>
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-medium">Large {sizeWarning.field === 'picture' ? 'avatar' : 'banner'} image</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    This image is {formatBytes(sizeWarning.fileSize)} (recommended max: {formatBytes(sizeWarning.limit)}).
+                  </p>
+                </div>
+              </div>
+              <div className="text-xs text-muted-foreground space-y-1.5 pl-7">
+                <p>Low-bandwidth peers will appreciate a smaller image.</p>
+                <p>Some Nostr clients won't display large images by default to protect users on slow connections{sizeWarning.blockedByDefault ? ', including corkboards at your current size limit settings' : ''}.</p>
+                <p>Consider resizing before uploading for the best experience across all clients.</p>
+              </div>
+              <div className="flex gap-2 justify-end pt-1">
+                <Button variant="outline" size="sm" className="text-xs" onClick={() => setSizeWarning(null)}>
+                  Cancel
+                </Button>
+                <Button variant="default" size="sm" className="text-xs" onClick={() => {
+                  const { file, field } = sizeWarning;
+                  setSizeWarning(null);
+                  doUpload(file, field);
+                }}>
+                  Upload Anyway
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </form>
     </Form>
   );

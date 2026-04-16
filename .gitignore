@@ -43,3 +43,4 @@ session-*.md
 .env
 .env.*
 !.env.example
+screen.png

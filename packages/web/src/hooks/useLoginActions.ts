@@ -24,7 +24,8 @@
  */
 import { useNostr } from '@nostrify/react';
 import { NLogin, useNostrLogin } from '@nostrify/react/login';
-import { NConnectSigner, NRelay1, NSecSigner } from '@nostrify/nostrify';
+import { NConnectSigner, NSecSigner } from '@nostrify/nostrify';
+import { createRelayDirect } from '@/components/NostrProvider';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { idbSetSync, idbClear } from '@/lib/idb';
 import { clearNotesCache } from '@/lib/notesCache';
@@ -92,7 +93,7 @@ export function useLoginActions() {
       onUri(uri);
 
       // Open direct relay connections (not through NPool, which uses backoff:false)
-      const relays = connectRelays.map(url => new NRelay1(url, { backoff: false, idleTimeout: false }));
+      const relays = connectRelays.map(url => createRelayDirect(url, { backoff: false, idleTimeout: false }));
       const subs = relays.map(relay =>
         relay.req(
           [{ kinds: [24133], '#p': [clientPubkey] }],
@@ -166,7 +167,7 @@ export function useLoginActions() {
       params.append('perms', 'get_public_key,sign_event,nip44_encrypt,nip44_decrypt');
 
       // Open direct relay connections (not through NPool)
-      const relays = connectRelays.map(url => new NRelay1(url, { backoff: false, idleTimeout: false }));
+      const relays = connectRelays.map(url => createRelayDirect(url, { backoff: false, idleTimeout: false }));
       const subs = relays.map(relay =>
         relay.req(
           [{ kinds: [24133], '#p': [clientPubkey] }],

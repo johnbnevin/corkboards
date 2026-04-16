@@ -15,7 +15,8 @@
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { type NostrEvent, NRelay1 } from '@nostrify/nostrify';
+import type { NostrEvent } from '@nostrify/nostrify';
+import { createRelay } from '@/components/NostrProvider';
 import { useNostr } from '@/hooks/useNostr';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -525,7 +526,7 @@ export function useFeedPagination({
         setBatchProgress({ loaded: 1, total: 1 });
 
       } else if (isRelayTab) {
-        const relay = new NRelay1(activeTab, { backoff: false });
+        const relay = createRelay(activeTab, { backoff: false });
         try {
           for await (const msg of relay.req([{
             kinds: [1, 30023],

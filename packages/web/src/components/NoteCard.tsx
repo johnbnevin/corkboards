@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react'
 import { toast } from '@/hooks/useToast'
 import { type NostrEvent } from '@nostrify/nostrify'
+import { EngagementBar } from '@/components/EngagementBar'
 import { useNostr } from '@nostrify/react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuthor } from '@/hooks/useAuthor'
@@ -240,6 +241,12 @@ interface NoteCardProps {
   mediaFilterActive?: boolean;
   /** Called when a reaction (kind 7) is successfully published — used for optimistic feed insertion */
   onReactionPublished?: (event: NostrEvent) => void;
+  /** Aggregated engagement data (reactions, reposts, zaps) for this note */
+  engagement?: { reactions: NostrEvent[]; reposts: NostrEvent[]; zaps: NostrEvent[] };
+  /** When true, this is an engagement stub (reaction/repost standing in for a missing original) */
+  isEngagementStub?: boolean;
+  /** Dismiss this note and all associated notes (replies, parent, reactions) */
+  onDismissThread?: () => void;
 }
 
 /** Compact display of the parent note for replies */
@@ -496,12 +503,15 @@ export const NoteCard = React.memo(function NoteCard({
   onDelete,
   mediaFilterActive = false,
   onReactionPublished,
+  engagement,
+  isEngagementStub,
+  onDismissThread,
 }: NoteCardProps) {
   // When a media filter is active, override blurMedia to show all media
   const effectiveBlurMedia = mediaFilterActive ? false : blurMedia;
   const isRss = note.pubkey === 'rss-feed'
   const { data: author, isFetching: isAuthorFetching } = useAuthor(isRss ? undefined : note.pubkey)
-  const { isCollapsed, isCollapsedThisSession, isSoftDismissed, toggleCollapsed, dismiss, undoDismiss, canUndoDismiss } = useCollapsedNotes()
+  const { isCollapsed, isCollapsedThisSession, isSoftDismissed, toggleCollapsed, dismiss, undoDismiss, canUndoDismiss, isBatchTrigger } = useCollapsedNotes()
   const queryClient = useQueryClient()
   const metadata = author?.metadata
   const profileLoading = !isRss && isAuthorFetching && !metadata
@@ -746,13 +756,15 @@ export const NoteCard = React.memo(function NoteCard({
   // Soft-dismissed placeholder — blank card at exact original height
   if (softDismissed && !forceExpanded) {
     const canUndo = canUndoDismiss(note.id)
+    const isTrigger = isBatchTrigger(note.id)
+    const undoLabel = canUndo ? (isTrigger ? 'undo all' : 'undo') : 'dismissed'
     return (
-      <Card 
-        className={`border-dashed border-muted-foreground/15 bg-transparent flex items-center justify-center ${canUndo ? 'cursor-pointer hover:bg-accent/20 transition-colors' : ''}`} 
+      <Card
+        className={`border-dashed border-muted-foreground/15 bg-transparent flex items-center justify-center ${canUndo ? 'cursor-pointer hover:bg-accent/20 transition-colors' : ''}`}
         style={placeholderStyle}
         onClick={canUndo ? () => undoDismiss(note.id) : undefined}
       >
-        <span className="text-[11px] text-muted-foreground/30 select-none">{canUndo ? 'undo' : 'dismissed'}</span>
+        <span className="text-[11px] text-muted-foreground/30 select-none">{undoLabel}</span>
       </Card>
     )
   }
@@ -1403,6 +1415,12 @@ export const NoteCard = React.memo(function NoteCard({
           </span>
         </div>
       )}
+      {/* Engagement badges (aggregated reactions, reposts, zaps) */}
+      {engagement && (engagement.reactions.length > 0 || engagement.reposts.length > 0 || engagement.zaps.length > 0) && !isMinimized && (
+        <div className="px-6 pt-1">
+          <EngagementBar reactions={engagement.reactions} reposts={engagement.reposts} zaps={engagement.zaps} />
+        </div>
+      )}
       {/* Action buttons row */}
       {!isMinimized && (
         <div className="flex items-center gap-1 px-6 pb-2 pt-1">
@@ -1528,6 +1546,25 @@ export const NoteCard = React.memo(function NoteCard({
             {onDelete && <DeleteNoteButton onDelete={onDelete} />}
           </div>
         </div>
+      )}
+      {onDismissThread && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onDismissThread(); }}
+          title="Dismiss this and all associated notes"
+          className="absolute bottom-0 right-0 overflow-hidden transition-opacity opacity-40 hover:opacity-90"
+          style={{ width: 28, height: 28 }}
+        >
+          <svg width="28" height="28" viewBox="0 0 28 28">
+            <defs>
+              <pattern id={`ds-${note.id.slice(0, 8)}`} patternUnits="userSpaceOnUse" width="5" height="5" patternTransform="rotate(-45)">
+                <rect width="2.5" height="5" fill="white" />
+                <rect x="2.5" width="2.5" height="5" fill="#ef4444" />
+              </pattern>
+            </defs>
+            <polygon points="0,28 28,0 28,28" fill={`url(#ds-${note.id.slice(0, 8)})`} />
+          </svg>
+        </button>
       )}
     </Card>
     </div>

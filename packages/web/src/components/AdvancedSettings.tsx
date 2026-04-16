@@ -48,6 +48,8 @@ interface AdvancedSettingsProps {
   initialSection?: 'main' | 'relays' | 'blossom';
   isOnboarding: boolean;
   onResetOnboarding: () => void;
+  collapseReactions: boolean;
+  onToggleCollapseReactions: () => void;
 }
 
 type ConfirmAction = 'dismissed' | 'cache' | 'clientTag' | 'bookmarks' | 'delete' | null;
@@ -77,6 +79,8 @@ export function AdvancedSettings({
   initialSection = 'main',
   isOnboarding,
   onResetOnboarding,
+  collapseReactions,
+  onToggleCollapseReactions,
 }: AdvancedSettingsProps) {
   const [confirm, setConfirm] = useState<ConfirmAction>(null);
   const [section, setSection] = useState<'main' | 'relays' | 'blossom'>(initialSection);
@@ -183,6 +187,14 @@ export function AdvancedSettings({
             <p className="text-xs text-muted-foreground mt-0.5 pl-6">Show the discover/follow guide again</p>
           </button>
         )}
+
+        <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={onToggleCollapseReactions}>
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Eye className="h-4 w-4 shrink-0" />
+            {collapseReactions ? '✓ ' : ''}Collapse Reactions
+          </div>
+          <p className="text-xs text-muted-foreground mt-0.5 pl-6">Group reactions, reposts, and zaps into badges on the original note</p>
+        </button>
 
         <Separator className="my-2" />
 

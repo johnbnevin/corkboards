@@ -940,7 +940,8 @@ export function MultiColumnClient() {
   const [advancedSection, setAdvancedSection] = useState<'main' | 'relays' | 'blossom'>('main');
   const [emojiSetsOpen, setEmojiSetsOpen] = useState(false);
   const [consolidateSound, setConsolidateSoundRaw] = useLocalStorage<string>('corkboard:consolidate-sound', 'solitaire');
-  const [soundAccelerate, setSoundAccelerate] = useLocalStorage<boolean>('corkboard:sound-accelerate', true);
+  const [soundAccelerate, setSoundAccelerate] = useLocalStorage<boolean>('corkboard:sound-accelerate', false);
+  const [collapseReactions, setCollapseReactions] = useLocalStorage<boolean>('corkboard:collapse-reactions', true);
   /** Play 3 sound previews — starts slow, graduates faster (like a consolidate ramping up) */
   const previewSound = useCallback((style: string) => {
     if (style === 'off') return;
@@ -1018,7 +1019,7 @@ export function MultiColumnClient() {
   const [isFiltersCollapsed, setIsFiltersCollapsed] = useLocalStorage<boolean>('filter-panel-collapsed', isMobile);
 
   // Collapsed notes management
-  const { dismissedCount, isDismissed, isCollapsedThisSession, isSoftDismissed, consolidate: rawConsolidate, clearDismissed, collapsedCount: _collapsedCount, collapsedIds, dismiss } = useCollapsedNotes();
+  const { dismissedCount, isDismissed, isCollapsedThisSession, isSoftDismissed, consolidate: rawConsolidate, clearDismissed, collapsedCount: _collapsedCount, collapsedIds, dismiss, dismissMultiple } = useCollapsedNotes();
   const { newCount: newNotificationCount, markSeen: markNotificationsSeen } = useNotificationCount();
 
   // NIP-51 bookmarks (kind 10003) — syncs with collapsed notes
@@ -1216,17 +1217,28 @@ export function MultiColumnClient() {
   // Auto-save: triggers 30s after the last data change.
   // Polls every 30s to check if unsaved changes exist and enough time has passed.
   // Also triggers immediately on visibilitychange to 'hidden' (tab switch, mobile bg).
+  // SAFETY: auto-save is blocked for 2 minutes after page load to prevent overwriting
+  // a good cloud backup with empty/stale state after an unexpected page refresh.
+  const pageLoadTime = useRef(Date.now());
+  const initialLoginDoneRef = useRef(false);
+  const AUTO_SAVE_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes after page load
   useEffect(() => {
     if (!user || !backupCheckSettled) return;
 
     const MIN_BLOSSOM_INTERVAL_MS = 30 * 1000;
-    // Track when we first detected unsaved changes (null = no pending changes)
     let changeDetectedAt: number | null = null;
 
     const triggerBlossomIfReady = (source: string) => {
       // Never auto-save while a restore is in progress or just found.
       if (backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored') {
         debugLog(`[AutoSave] skip (${source}): backup ${backupStatus}, waiting for restore to complete`);
+        return;
+      }
+      // Block auto-save shortly after page load — prevents overwriting good state
+      // when the page refreshes and loads with empty/default IDB before restore completes.
+      const msSinceLoad = Date.now() - pageLoadTime.current;
+      if (msSinceLoad < AUTO_SAVE_COOLDOWN_MS) {
+        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceLoad / 1000)}s since page load, need ${AUTO_SAVE_COOLDOWN_MS / 1000}s cooldown`);
         return;
       }
       const lastUploadMs = (lastBackupTs ?? 0) * 1000;
@@ -1268,16 +1280,15 @@ export function MultiColumnClient() {
       }).catch((e) => debugWarn('[AutoSave] Unexpected error during Blossom auto-save:', e));
     };
 
-    // Force-save immediately on app background/close — bypass the interval check.
-    // This ensures cross-device sync has the latest state when the user leaves.
+    // Force-save on app background/close — but only after the cooldown period.
     const onVisibilityHidden = () => {
-      if (document.visibilityState === 'hidden' && hasUnsavedChanges()) {
+      if (document.visibilityState === 'hidden' && hasUnsavedChanges() && Date.now() - pageLoadTime.current >= AUTO_SAVE_COOLDOWN_MS) {
         debugLog('[AutoSave] forcing save on background (cross-device sync)');
         autoSaveBackup().catch(e => debugWarn('[AutoSave] bg save failed:', e));
       }
     };
     const onBeforeUnload = () => {
-      if (hasUnsavedChanges()) {
+      if (hasUnsavedChanges() && Date.now() - pageLoadTime.current >= AUTO_SAVE_COOLDOWN_MS) {
         autoSaveBackup().catch(e => debugWarn('[AutoSave] close save failed:', e));
       }
     };
@@ -2619,6 +2630,9 @@ export function MultiColumnClient() {
     setLastAutofetchTime(Date.now());
     const intervalMs = autofetchIntervalSecs * 1000;
     const timer = setInterval(() => {
+      // Don't fetch when tab is hidden — no point loading notes nobody sees,
+      // and it hammers relays that may be down (231 failures overnight from this).
+      if (document.visibilityState === 'hidden') return;
       if (autofetchRef.current && !isLoadingRef.current) {
         loadNewerRef.current();
         setLastAutofetchTime(Date.now());
@@ -2823,7 +2837,7 @@ export function MultiColumnClient() {
 
   // Classify and prepare notes for display
   // ── Stage 1: Deduplicate & classify (only re-runs when source data changes) ──
-  const { deduplicatedNotes, noteClassifications, parentIdsNeeded, eventLookup } = useMemo(() => {
+  const { deduplicatedNotes, noteClassifications, parentIdsNeeded, eventLookup, engagementByTarget, stubNoteIds } = useMemo(() => {
     let baseNotes: NostrEvent[] | undefined;
     if (activeTab === 'me') {
       baseNotes = userNotes;
@@ -2859,7 +2873,7 @@ export function MultiColumnClient() {
       if (hasPinnedOnMe) {
         baseNotes = [];
       } else if (!canShowOwnNotes) {
-        return { deduplicatedNotes: [] as NostrEvent[], noteClassifications: new Map<string, NoteClassification>(), parentIdsNeeded: [] as string[], eventLookup: new Map<string, NostrEvent>() };
+        return { deduplicatedNotes: [] as NostrEvent[], noteClassifications: new Map<string, NoteClassification>(), parentIdsNeeded: [] as string[], eventLookup: new Map<string, NostrEvent>(), engagementByTarget: new Map<string, { reactions: NostrEvent[]; reposts: NostrEvent[]; zaps: NostrEvent[] }>(), stubNoteIds: new Set<string>() };
       } else {
         baseNotes = [];
       }
@@ -2927,9 +2941,28 @@ export function MultiColumnClient() {
 
     const seen = new Set<string>();
     const seenRepostedIds = new Set<string>();
-    // Track which original note IDs are referenced by reactions/reposts/zaps
-    // so we can suppress the wrapper when the original is already in the feed.
     const referencedOriginalIds = new Set<string>();
+
+    // Engagement aggregation: group reactions/reposts/zaps by target note.
+    // When collapseReactions is on, engagement events are suppressed as cards
+    // and instead rendered as badges on the target note.
+    type EngagementEntry = { reactions: NostrEvent[]; reposts: NostrEvent[]; zaps: NostrEvent[] };
+    const engagementByTarget = new Map<string, EngagementEntry>();
+    const stubNoteIds = new Set<string>(); // engagement events kept as stubs (target not in feed)
+    const seenEngagementTargets = new Set<string>();
+
+    // Determine if collapsing is active for this tab
+    const isMeTab = activeTab === 'me';
+    const isSingleNpubTab = isFriendTab || (isCustomFeedTab && activeCustomFeed?.pubkeys?.length === 1);
+    const shouldCollapse = collapseReactions && !isMeTab && !isSingleNpubTab;
+
+    function getOrCreateEngagement(targetId: string): EngagementEntry {
+      let entry = engagementByTarget.get(targetId);
+      if (!entry) { entry = { reactions: [], reposts: [], zaps: [] }; engagementByTarget.set(targetId, entry); }
+      return entry;
+    }
+
+    // Pre-scan to build referencedOriginalIds (used for old dedup path when collapse is off)
     for (const note of displayableNotes) {
       if (note.kind === 6 || note.kind === 16) {
         let origId: string | undefined;
@@ -2943,35 +2976,108 @@ export function MultiColumnClient() {
         if (eTag?.[1]) referencedOriginalIds.add(eTag[1]);
       }
     }
+
     const deduped = displayableNotes.filter(note => {
       if (seen.has(note.id)) return false;
       seen.add(note.id);
-      // Repost dedup: if we already have the original note in the feed, skip the repost
-      if (note.kind === 6 || note.kind === 16) {
-        let originalId: string | undefined;
-        if (note.content && note.content.startsWith('{')) {
-          try { originalId = JSON.parse(note.content).id; } catch { /* ignore */ }
+
+      if (shouldCollapse) {
+        // ── Collapse mode: aggregate engagement into badges ──
+
+        // Reactions (kind 7) → aggregate, suppress card
+        if (note.kind === 7) {
+          const targetId = note.tags.find(t => t[0] === 'e')?.[1];
+          if (targetId) {
+            getOrCreateEngagement(targetId).reactions.push(note);
+            // If target is in feed, just suppress. If not, first one becomes a stub.
+            if (eventLookup.has(targetId)) return false;
+            if (seenEngagementTargets.has(targetId)) return false;
+            seenEngagementTargets.add(targetId);
+            stubNoteIds.add(note.id);
+            return true; // keep as stub
+          }
         }
-        if (!originalId) {
-          const eTag = note.tags.find(t => t[0] === 'e');
-          originalId = eTag?.[1];
+
+        // Zaps (kind 9735) → aggregate, suppress card
+        if (note.kind === 9735) {
+          const targetId = note.tags.find(t => t[0] === 'e')?.[1];
+          if (targetId) {
+            getOrCreateEngagement(targetId).zaps.push(note);
+            if (eventLookup.has(targetId)) return false;
+            if (seenEngagementTargets.has(targetId)) return false;
+            seenEngagementTargets.add(targetId);
+            stubNoteIds.add(note.id);
+            return true;
+          }
         }
-        if (originalId) {
-          if (seen.has(originalId) || seenRepostedIds.has(originalId)) return false;
-          seenRepostedIds.add(originalId);
+
+        // Reposts (kind 6/16) → aggregate, suppress card
+        if (note.kind === 6 || note.kind === 16) {
+          let originalId: string | undefined;
+          if (note.content && note.content.startsWith('{')) {
+            try { originalId = JSON.parse(note.content).id; } catch { /* ignore */ }
+          }
+          if (!originalId) originalId = note.tags.find(t => t[0] === 'e')?.[1];
+          if (originalId) {
+            getOrCreateEngagement(originalId).reposts.push(note);
+            if (eventLookup.has(originalId) || seen.has(originalId)) return false;
+            if (seenEngagementTargets.has(originalId)) return false;
+            seenEngagementTargets.add(originalId);
+            stubNoteIds.add(note.id);
+            return true;
+          }
         }
-      }
-      // Reaction/zap dedup: if the original note they reference is already in the
-      // feed as a kind-1 post, suppress the reaction/zap wrapper to avoid showing
-      // the same content twice (once as the original, once embedded in the reaction).
-      if (note.kind === 7 || note.kind === 9735) {
-        const targetId = note.tags.find(t => t[0] === 'e')?.[1];
-        if (targetId && eventLookup.has(targetId) && (eventLookup.get(targetId)!.kind === 1 || eventLookup.get(targetId)!.kind === 30023)) {
+
+        // Quote notes (kind 1 with q-tags) → suppress from feed (shown in threads)
+        // Exception: pinned notes are never suppressed
+        if (note.kind === 1 && note.tags.some(t => t[0] === 'q') && !pinnedIdSet.has(note.id)) {
           return false;
         }
+
+        // Original note that has engagement: if a stub was already placed, suppress the stub
+        // by letting the original take its place (stub will be filtered downstream or replaced)
+        if ((note.kind === 1 || note.kind === 30023) && seenEngagementTargets.has(note.id)) {
+          // Original arrived — remove stub marker, original takes over
+          seenEngagementTargets.delete(note.id);
+        }
+
+        // Regular notes pass through
+        return true;
+      } else {
+        // ── Legacy mode (collapse off): original dedup + still build engagement map ──
+        // Cards are NOT suppressed, but engagement data is still collected so
+        // badges can show on original notes (e.g. single-npub corkboards).
+
+        if (note.kind === 7) {
+          const targetId = note.tags.find(t => t[0] === 'e')?.[1];
+          if (targetId) getOrCreateEngagement(targetId).reactions.push(note);
+          // Suppress if target is already visible (original dedup behavior)
+          if (targetId && eventLookup.has(targetId) && (eventLookup.get(targetId)!.kind === 1 || eventLookup.get(targetId)!.kind === 30023)) {
+            return false;
+          }
+        }
+        if (note.kind === 9735) {
+          const targetId = note.tags.find(t => t[0] === 'e')?.[1];
+          if (targetId) getOrCreateEngagement(targetId).zaps.push(note);
+          if (targetId && eventLookup.has(targetId) && (eventLookup.get(targetId)!.kind === 1 || eventLookup.get(targetId)!.kind === 30023)) {
+            return false;
+          }
+        }
+        if (note.kind === 6 || note.kind === 16) {
+          let originalId: string | undefined;
+          if (note.content && note.content.startsWith('{')) {
+            try { originalId = JSON.parse(note.content).id; } catch { /* ignore */ }
+          }
+          if (!originalId) originalId = note.tags.find(t => t[0] === 'e')?.[1];
+          if (originalId) {
+            getOrCreateEngagement(originalId).reposts.push(note);
+            if (seen.has(originalId) || seenRepostedIds.has(originalId)) return false;
+            seenRepostedIds.add(originalId);
+          }
+        }
+        if (note.kind === 1 && seenRepostedIds.has(note.id)) return false;
+        return true;
       }
-      if (note.kind === 1 && seenRepostedIds.has(note.id)) return false;
-      return true;
     });
 
     const classifications = new Map<string, NoteClassification>();
@@ -2993,8 +3099,10 @@ export function MultiColumnClient() {
       noteClassifications: classifications,
       parentIdsNeeded: Array.from(parentRequests.values()),
       eventLookup,
+      engagementByTarget,
+      stubNoteIds,
     };
-  }, [activeTab, userNotes, friendNotes, relayNotes, customFeedNotes, stableDiscoverNotes, allFollowsNotes, rssNotes, isRelayTab, isCustomFeedTab, isLoadingCustomFeedNotes, isDiscoverTab, isAllFollowsTab, isRssTab, pinnedNoteEvents, showOwnNotes, newerNotes, mutedPubkeys, followNotesCache, pinnedIdSet, user?.pubkey]);
+  }, [activeTab, userNotes, friendNotes, relayNotes, customFeedNotes, stableDiscoverNotes, allFollowsNotes, rssNotes, isRelayTab, isCustomFeedTab, isLoadingCustomFeedNotes, isDiscoverTab, isAllFollowsTab, isRssTab, pinnedNoteEvents, showOwnNotes, newerNotes, mutedPubkeys, followNotesCache, pinnedIdSet, user?.pubkey, collapseReactions, isFriendTab, activeCustomFeed?.pubkeys?.length]);
 
   // ── Bulk Author Prefetch ─────────────────────────────────────────────────────
   // Prefetch author profiles for notes being displayed (up to feedLimit).
@@ -3025,16 +3133,80 @@ export function MultiColumnClient() {
     };
   }, [deduplicatedNotes, feedLimit, prefetchFromNotes, canLoadNotes]);
 
+  // ── Lazy engagement fetch: query reactions/reposts/zaps for visible notes ──
+  // Fires once after feed loads, single batched query, respects rate limiting.
+  const lazyEngagementNoteIds = useMemo(() => {
+    if (!canLoadNotes || deduplicatedNotes.length === 0) return '';
+    // Collect IDs of original notes (kind 1/30023) — these are the targets we want engagement for
+    const ids = deduplicatedNotes
+      .filter(n => n.kind === 1 || n.kind === 30023)
+      .slice(0, 100) // cap to avoid huge queries
+      .map(n => n.id);
+    return ids.join(',');
+  }, [canLoadNotes, deduplicatedNotes]);
+
+  const { data: lazyEngagement } = useQuery({
+    queryKey: ['lazy-engagement', lazyEngagementNoteIds],
+    queryFn: async () => {
+      const ids = lazyEngagementNoteIds.split(',').filter(Boolean);
+      if (ids.length === 0) return [] as NostrEvent[];
+      // Single batched query for all engagement on visible notes
+      const events = await nostr.query(
+        [{ kinds: [7, 9735, 6, 16], '#e': ids, limit: 500 }],
+        { signal: AbortSignal.timeout(8000) },
+      );
+      return events;
+    },
+    enabled: lazyEngagementNoteIds.length > 0,
+    staleTime: 5 * 60 * 1000, // 5 min — don't re-fetch constantly
+    gcTime: 10 * 60 * 1000,
+  });
+
+  // Merge lazy-fetched engagement into the engagement map
+  const mergedEngagementByTarget = useMemo(() => {
+    if (!lazyEngagement || lazyEngagement.length === 0) return engagementByTarget;
+    // Clone the map so we don't mutate the original
+    const merged = new Map(engagementByTarget);
+    for (const ev of lazyEngagement) {
+      const targetId = ev.tags.find(t => t[0] === 'e')?.[1];
+      if (!targetId) continue;
+      let entry = merged.get(targetId);
+      if (!entry) { entry = { reactions: [], reposts: [], zaps: [] }; merged.set(targetId, entry); }
+      // Deduplicate by event ID
+      if (ev.kind === 7 && !entry.reactions.some(r => r.id === ev.id)) entry.reactions.push(ev);
+      else if (ev.kind === 9735 && !entry.zaps.some(z => z.id === ev.id)) entry.zaps.push(ev);
+      else if ((ev.kind === 6 || ev.kind === 16) && !entry.reposts.some(r => r.id === ev.id)) entry.reposts.push(ev);
+    }
+    return merged;
+  }, [engagementByTarget, lazyEngagement]);
+
   // ── Stage 2: Apply filters (re-runs when filters change, but skips dedup/classify) ──
   const { notes, filteredHashtags, hasFilteredNotes, allDismissed } = useMemo(() => {
     if (deduplicatedNotes.length === 0) {
       return { notes: [] as NostrEvent[], filteredHashtags: [] as { tag: string; count: number }[], allDismissed: false };
     }
 
-    // Dismiss filter — skip on 'me' tab (dismissing elsewhere shouldn't hide own notes)
-    let filteredNotes = activeTab === 'me'
-      ? deduplicatedNotes
-      : deduplicatedNotes.filter(note => !isDismissed(note.id));
+    // Dismiss filter — skip on 'me' tab (dismissing elsewhere shouldn't hide own notes).
+    // Also auto-dismiss notes that reference (reply to, react to, repost) a dismissed note,
+    // so future notes arriving via autofetch are caught too.
+    let filteredNotes: NostrEvent[];
+    if (activeTab === 'me') {
+      filteredNotes = deduplicatedNotes;
+    } else {
+      // Build a set of dismissed IDs for fast lookup
+      const dismissedIds = new Set<string>();
+      for (const note of deduplicatedNotes) {
+        if (isDismissed(note.id)) dismissedIds.add(note.id);
+      }
+      filteredNotes = deduplicatedNotes.filter(note => {
+        if (dismissedIds.has(note.id)) return false;
+        // Auto-dismiss: if this note references a dismissed note, hide it too
+        for (const tag of note.tags) {
+          if (tag[0] === 'e' && tag[1] && dismissedIds.has(tag[1])) return false;
+        }
+        return true;
+      });
+    }
 
     // "Include my notes" toggle: when OFF, exclude user's own notes from all non-me tabs
     if (!showOwnNotes && activeTab !== 'me' && user?.pubkey) {
@@ -3262,6 +3434,58 @@ export function MultiColumnClient() {
     requestAnimationFrame(tryScroll);
   }, []);
 
+  // Dismiss a note and all associated notes (replies to it, parent, reactions, reposts)
+  const handleDismissThread = useCallback((noteId: string) => {
+    const ids = new Set<string>();
+    ids.add(noteId);
+
+    // Find the root/parent of the clicked note
+    const clickedNote = eventLookup.get(noteId);
+    if (clickedNote) {
+      // Add parent (note this is a reply to)
+      const parentTag = clickedNote.tags.find(t => t[0] === 'e' && (t[3] === 'reply' || t[3] === 'root'));
+      if (parentTag?.[1]) ids.add(parentTag[1]);
+      // Add root
+      const rootTag = clickedNote.tags.find(t => t[0] === 'e' && t[3] === 'root');
+      if (rootTag?.[1]) ids.add(rootTag[1]);
+    }
+
+    // Scan all visible notes for associations
+    for (const note of deduplicatedNotes) {
+      // Replies TO the target note or its parent/root
+      if (note.kind === 1 || note.kind === 30023) {
+        const eTags = note.tags.filter(t => t[0] === 'e');
+        for (const tag of eTags) {
+          if (tag[1] && ids.has(tag[1])) { ids.add(note.id); break; }
+        }
+      }
+      // Reactions/zaps targeting any note in the set
+      if (note.kind === 7 || note.kind === 9735) {
+        const targetId = note.tags.find(t => t[0] === 'e')?.[1];
+        if (targetId && ids.has(targetId)) ids.add(note.id);
+      }
+      // Reposts of any note in the set
+      if (note.kind === 6 || note.kind === 16) {
+        let origId: string | undefined;
+        if (note.content?.startsWith('{')) { try { origId = JSON.parse(note.content).id; } catch {} }
+        if (!origId) origId = note.tags.find(t => t[0] === 'e')?.[1];
+        if (origId && ids.has(origId)) ids.add(note.id);
+      }
+    }
+
+    // Also dismiss engagement from the merged map
+    for (const targetId of [...ids]) {
+      const eng = mergedEngagementByTarget.get(targetId);
+      if (eng) {
+        for (const r of eng.reactions) ids.add(r.id);
+        for (const r of eng.reposts) ids.add(r.id);
+        for (const z of eng.zaps) ids.add(z.id);
+      }
+    }
+
+    dismissMultiple(Array.from(ids), noteId);
+  }, [deduplicatedNotes, eventLookup, mergedEngagementByTarget, dismissMultiple]);
+
   const consolidateSoundRef = useRef(consolidateSound);
   consolidateSoundRef.current = consolidateSound;
   const soundAccelerateRef = useRef(soundAccelerate);
@@ -3488,9 +3712,12 @@ export function MultiColumnClient() {
     );
   }
 
-  // Show splash during the single login check + auto-restore.
-  // No user choice — best checkpoint is auto-restored, splash shows tips + log.
-  const showLoginSplash = !backupCheckSettled || backupStatus === 'checking' || backupStatus === 'found' || backupStatus === 'restoring';
+  // initialLoginDoneRef is declared earlier (before early returns) to respect Rules of Hooks.
+  // Once the first backup check settles and user sees the main UI, splash never returns.
+  if (backupCheckSettled && backupStatus !== 'checking' && backupStatus !== 'found' && backupStatus !== 'restoring') {
+    initialLoginDoneRef.current = true;
+  }
+  const showLoginSplash = !initialLoginDoneRef.current && (!backupCheckSettled || backupStatus === 'checking' || backupStatus === 'found' || backupStatus === 'restoring');
   if (showLoginSplash) {
     return (
       <BackupSplashScreen
@@ -4364,6 +4591,9 @@ export function MultiColumnClient() {
           onPinToBoard={handlePinToBoard}
           onDeleteNote={handleDeleteNote}
           onReactionPublished={handleReactionPublished}
+          engagementByTarget={mergedEngagementByTarget}
+          stubNoteIds={stubNoteIds}
+          onDismissThread={handleDismissThread}
           userPubkey={user?.pubkey}
           loadAllMedia={loadAllMedia}
           mediaFilterActive={loadAllMedia && kindFilters.size > 0 && (!kindFilters.has('images') || !kindFilters.has('videos'))}
@@ -4604,6 +4834,8 @@ export function MultiColumnClient() {
               initialSection={advancedSection}
               isOnboarding={isOnboarding}
               onResetOnboarding={() => { setOnboardFollowTarget((contacts?.length ?? 0) + 10); setOnboardingSkipped(false); setAdvancedSettingsOpen(false); setActiveTab('discover'); }}
+              collapseReactions={collapseReactions}
+              onToggleCollapseReactions={() => setCollapseReactions(!collapseReactions)}
             />
           </DialogContent>
         </Dialog>

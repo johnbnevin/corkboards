@@ -3,9 +3,6 @@ import React from 'react'
 interface ErrorBoundaryProps {
   children: React.ReactNode
   fallback?: React.ReactNode
-  /** When true, removeChild errors trigger a full page reload instead of re-render
-   *  (re-rendering into a corrupt DOM creates duplicate UI trees). */
-  reloadOnDomError?: boolean
 }
 
 interface ErrorBoundaryState {
@@ -25,17 +22,10 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error('ErrorBoundary caught error:', error, errorInfo)
+    // Auto-recover from transient DOM errors (Radix portal cleanup race conditions).
+    // Never reload the page — reloads lose state and can overwrite good backups.
     const isDomError = error.name === 'NotFoundError' || error.message?.includes('removeChild')
     if (isDomError) {
-      if (this.props.reloadOnDomError) {
-        // DOM is corrupt — re-rendering would create duplicate UI trees.
-        // Full reload is the only safe recovery.
-        console.warn('[ErrorBoundary] DOM corruption detected, reloading page')
-        setTimeout(() => window.location.reload(), 200)
-        return
-      }
-      // Inner (scoped) boundaries can safely re-render since their subtree
-      // gets a clean unmount/remount via React's keyed reconciliation.
       setTimeout(() => this.setState({ hasError: false, error: null }), 100)
     }
   }

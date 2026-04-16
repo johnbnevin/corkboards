@@ -137,6 +137,12 @@ interface FeedGridProps {
   mediaFilterActive?: boolean;
   /** Called when user publishes a reaction — for optimistic feed insertion */
   onReactionPublished?: (event: NostrEvent) => void;
+  /** Aggregated engagement data keyed by target note ID */
+  engagementByTarget?: Map<string, { reactions: NostrEvent[]; reposts: NostrEvent[]; zaps: NostrEvent[] }>;
+  /** IDs of engagement stubs (engagement cards standing in for missing originals) */
+  stubNoteIds?: Set<string>;
+  /** Called to dismiss a note and all associated notes (replies, parent, reactions) */
+  onDismissThread?: (noteId: string) => void;
   /** When true, the discover tab is in onboarding mode */
   isOnboarding?: boolean;
   /** Called when the user clicks "Find more for me" during onboarding */
@@ -188,6 +194,9 @@ export const FeedGrid = React.memo(function FeedGrid({
   onDeleteNote,
   mediaFilterActive = false,
   onReactionPublished,
+  engagementByTarget,
+  stubNoteIds,
+  onDismissThread,
   isOnboarding = false,
   onFindMoreForMe,
   isFindingMore = false,
@@ -408,6 +417,9 @@ export const FeedGrid = React.memo(function FeedGrid({
                         discoverMode={discoverMode}
                         onDelete={onDeleteNote && userPubkey && note.pubkey === userPubkey ? () => onDeleteNote(note) : undefined}
                         onReactionPublished={onReactionPublished}
+                        engagement={engagementByTarget?.get(note.id) || (stubNoteIds?.has(note.id) ? engagementByTarget?.get(note.tags.find(t => t[0] === 'e')?.[1] ?? '') : undefined)}
+                        isEngagementStub={stubNoteIds?.has(note.id)}
+                        onDismissThread={onDismissThread && activeTab !== 'me' && !(userPubkey && note.pubkey === userPubkey) ? () => onDismissThread(note.id) : undefined}
                       />
                     );
                   })}

@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, memo } from 'react'
+import { useState, useCallback, memo } from 'react'
 import type { NostrEvent } from '@nostrify/nostrify'
 import type { ThreadNode } from '@core/threadTree'
 import { useAuthor } from '@/hooks/useAuthor'
@@ -10,7 +10,6 @@ import { ClickableProfile } from '@/components/ProfileModal'
 import { genUserName } from '@/lib/genUserName'
 import { optimizeAvatarUrl } from '@/lib/imageUtils'
 import { EmojiName } from '@/components/EmojiName'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { CombinedEmojiPicker } from '@/components/compose/CombinedEmojiPicker'
 import { getUserZapAmount, getUserReaction, recordUserReaction, CopyEventIdButton } from '@/components/NoteCard'
@@ -47,78 +46,8 @@ function CollapsibleContent({ event, onViewThread, className }: {
 }
 
 // ── Reactor avatar for tooltip ─────────────────────────────────────────────
-function ReactorAvatar({ pubkey }: { pubkey: string }) {
-  const { data: author } = useAuthor(pubkey)
-  const name = author?.metadata?.display_name || author?.metadata?.name || genUserName(pubkey)
-  const pic = optimizeAvatarUrl(author?.metadata?.picture)
-  return (
-    <div className="flex items-center gap-1.5">
-      <Avatar className="h-4 w-4">
-        {pic && <AvatarImage src={pic} />}
-        <AvatarFallback className="text-[6px]">{name.slice(0, 2).toUpperCase()}</AvatarFallback>
-      </Avatar>
-      <span className="text-xs">{name}</span>
-    </div>
-  )
-}
-
-// ── Resolve reaction emoji ─────────────────────────────────────────────────
-function resolveReactionEmoji(r: NostrEvent): { key: string; render: React.ReactNode } | null {
-  const content = r.content || '❤️'
-  if ([...content].length <= 2) {
-    return { key: content, render: <span className="text-lg leading-none">{content}</span> }
-  }
-  const match = content.match(/^:([a-zA-Z0-9_-]+):$/)
-  if (match) {
-    const shortcode = match[1]
-    const url = r.tags.find(t => t[0] === 'emoji' && t[1] === shortcode)?.[2]
-    if (url) {
-      return {
-        key: `:${shortcode}:`,
-        render: <img src={url} alt={`:${shortcode}:`} title={`:${shortcode}:`} className="inline-block h-6 w-6 object-contain align-middle" loading="lazy" referrerPolicy="no-referrer" />,
-      }
-    }
-  }
-  return null
-}
-
-// ── Reaction badges ────────────────────────────────────────────────────────
-function ReactionBadges({ reactions }: { reactions: NostrEvent[] }) {
-  const groups = useMemo(() => {
-    const map = new Map<string, { pubkeys: string[]; render: React.ReactNode }>()
-    for (const r of reactions) {
-      const resolved = resolveReactionEmoji(r)
-      if (!resolved) continue
-      const entry = map.get(resolved.key)
-      if (entry) entry.pubkeys.push(r.pubkey)
-      else map.set(resolved.key, { pubkeys: [r.pubkey], render: resolved.render })
-    }
-    return Array.from(map.entries())
-  }, [reactions])
-
-  if (groups.length === 0) return null
-
-  return (
-    <span className="inline-flex items-center gap-0.5">
-      {groups.map(([key, { pubkeys, render }]) => (
-        <Tooltip key={key}>
-          <TooltipTrigger asChild>
-            <span className="inline-flex items-baseline cursor-default hover:scale-110 transition-transform">
-              {render}
-              {pubkeys.length > 1 && (
-                <span className="text-[9px] text-muted-foreground font-medium -translate-y-1.5 ml-px">{pubkeys.length}</span>
-              )}
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="top" className="p-2 space-y-1 max-h-40 overflow-y-auto">
-            {pubkeys.slice(0, 20).map(pk => <ReactorAvatar key={pk} pubkey={pk} />)}
-            {pubkeys.length > 20 && <span className="text-xs text-muted-foreground">+{pubkeys.length - 20} more</span>}
-          </TooltipContent>
-        </Tooltip>
-      ))}
-    </span>
-  )
-}
+// Shared reaction display components — imported from EngagementBar
+import { ReactionBadges } from '@/components/EngagementBar'
 
 // ── Main ThreadReplyRow ────────────────────────────────────────────────────
 export interface ThreadReplyRowProps {

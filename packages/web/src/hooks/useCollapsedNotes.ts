@@ -30,6 +30,10 @@ function persistSoftDismissed() {
 const MAX_UNDO_MAP = 1000
 const _dismissedUndoMap = new Map<string, number>()
 const UNDO_WINDOW_MS = 20000 // 20 seconds to undo
+
+// Track batch dismissals: trigger noteId → Set of all noteIds dismissed with it.
+// Undoing the trigger undoes the entire batch; undoing a non-trigger undoes only that note.
+const _dismissBatchMap = new Map<string, Set<string>>()
 const LAST_DISMISSED_EVENT = 'last-dismissed-sync'
 
 function notifyLastDismissedChange() {
@@ -210,19 +214,26 @@ export function useCollapsedNotes() {
     notifyLastDismissedChange()
   }, [setCollapsedIds])
 
-  /** Undo a dismiss (within its 20 second window) */
+  /** Undo a dismiss (within its 20 second window).
+   *  If this note was the trigger of a batch dismiss, undo the entire batch. */
   const undoDismiss = useCallback((noteId: string) => {
     const dismissedAt = _dismissedUndoMap.get(noteId)
     if (!dismissedAt || Date.now() - dismissedAt > UNDO_WINDOW_MS) return
 
-    // Remove from soft-dismissed — atomic Set replacement
+    // Check if this was the trigger of a batch — undo all in the batch
+    const batch = _dismissBatchMap.get(noteId)
+    const idsToUndo = batch ? Array.from(batch) : [noteId]
+
     const next = new Set(_softDismissedSet)
-    next.delete(noteId)
+    for (const id of idsToUndo) {
+      next.delete(id)
+      _dismissedUndoMap.delete(id)
+    }
     _softDismissedSet = next
     _setSoftDismissedIds([..._softDismissedSet])
     persistSoftDismissed()
     notifySoftDismissChange()
-    _dismissedUndoMap.delete(noteId)
+    _dismissBatchMap.delete(noteId)
     setUndoMapVersion(v => v + 1)
     notifyLastDismissedChange()
   }, [])
@@ -233,6 +244,12 @@ export function useCollapsedNotes() {
     if (!dismissedAt) return false
     return Date.now() - dismissedAt <= UNDO_WINDOW_MS
   // eslint-disable-next-line react-hooks/exhaustive-deps -- undoMapVersion is an intentional re-run trigger to invalidate downstream useMemos
+  }, [undoMapVersion])
+
+  /** Check if undoing this note would undo an entire batch (it was the trigger) */
+  const isBatchTrigger = useCallback((noteId: string) => {
+    return _dismissBatchMap.has(noteId)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [undoMapVersion])
 
   /** Consolidate: move soft-dismissed AND collapsed (saved-for-later) placeholder
@@ -259,17 +276,27 @@ export function useCollapsedNotes() {
     notifySessionCollapsedChange()
   }, [setDismissedIds, collapsedIds])
 
-  /** Dismiss multiple notes at once — efficient for bulk operations */
-  const dismissMultiple = useCallback((noteIds: string[]) => {
+  /** Dismiss multiple notes at once.
+   *  @param triggerId — the note the user clicked to dismiss. Undoing this note undoes all. */
+  const dismissMultiple = useCallback((noteIds: string[], triggerId?: string) => {
     const idSet = new Set(noteIds)
     setCollapsedIds(prev => prev.filter(id => !idSet.has(id)))
-    // Atomic Set replacement
     const next = new Set(_softDismissedSet)
-    for (const id of noteIds) next.add(id)
+    const now = Date.now()
+    for (const id of noteIds) {
+      next.add(id)
+      _dismissedUndoMap.set(id, now)
+    }
     _softDismissedSet = next
     _setSoftDismissedIds([..._softDismissedSet])
     persistSoftDismissed()
     notifySoftDismissChange()
+    // Track the batch so undoing the trigger undoes all
+    if (triggerId && noteIds.length > 1) {
+      _dismissBatchMap.set(triggerId, new Set(noteIds))
+    }
+    setUndoMapVersion(v => v + 1)
+    notifyLastDismissedChange()
   }, [setCollapsedIds])
 
   /** Dismiss all currently collapsed notes at once */
@@ -308,6 +335,7 @@ export function useCollapsedNotes() {
     dismiss,
     undoDismiss,
     canUndoDismiss,
+    isBatchTrigger,
     consolidate,
     dismissMultiple,
     dismissAllCollapsed,

@@ -25,7 +25,7 @@ import { SecurityInfoDialog } from './SecurityInfoDialog';
 import { SignerRecommendations, getTopSignerForPlatform } from './SignerRecommendations';
 
 type Step = 'welcome' | 'key-backup';
-type LoginView = 'main' | 'nsec' | 'mnemonic' | 'nsecapp' | 'amber';
+type LoginView = 'main' | 'nsec' | 'mnemonic' | 'amber';
 
 interface WelcomePageProps {
   onComplete?: () => void;
@@ -57,16 +57,7 @@ export function WelcomePage({ onComplete }: WelcomePageProps) {
   const [seedLoginLoading, setSeedLoginLoading] = useState(false);
   const [seedLoginError, setSeedLoginError] = useState<string | null>(null);
 
-  // Amber + nsec.app connect hooks
   const amber = useSignerConnect('amber');
-  const nsecApp = useSignerConnect('nsecapp');
-
-  // Auto-navigate on successful signer connect
-  useEffect(() => {
-    if (!amber.connecting && !amber.error && loginView === 'amber') {
-      // If connecting finished without error, must have succeeded
-    }
-  }, [amber.connecting, amber.error, loginView]);
 
   // Clear secrets on unmount
   useEffect(() => {
@@ -168,17 +159,8 @@ export function WelcomePage({ onComplete }: WelcomePageProps) {
     } catch { /* error handled in hook state */ }
   };
 
-  const handleNsecAppConnect = async () => {
-    setLoginView('nsecapp');
-    try {
-      await nsecApp.connect();
-      onComplete?.();
-    } catch { /* error handled in hook state */ }
-  };
-
   const goBack = () => {
     amber.cancel();
-    nsecApp.cancel();
     setLoginView('main');
     setNsecLoginError(null);
     setSeedLoginError(null);
@@ -290,11 +272,6 @@ export function WelcomePage({ onComplete }: WelcomePageProps) {
             <View style={styles.dividerLine} />
           </View>
 
-          {/* Primary: nsec.app */}
-          <TouchableOpacity style={styles.nsecAppBtn} onPress={handleNsecAppConnect}>
-            <Text style={styles.nsecAppBtnText}>Login with nsec.app</Text>
-          </TouchableOpacity>
-
           {/* Amber */}
           <TouchableOpacity style={styles.amberBtn} onPress={handleAmberConnect}>
             <Text style={styles.amberBtnText}>
@@ -312,33 +289,6 @@ export function WelcomePage({ onComplete }: WelcomePageProps) {
             </TouchableOpacity>
           </View>
         </>
-      )}
-
-      {/* ---- nsec.app view ---- */}
-      {loginView === 'nsecapp' && (
-        <View style={styles.signerSection}>
-          <TouchableOpacity onPress={goBack} style={styles.backLinkRow}>
-            <Text style={styles.backLinkText}>{'< Back'}</Text>
-          </TouchableOpacity>
-          <Text style={styles.signerTitle}>Login with nsec.app</Text>
-          <Text style={styles.signerSubtitle}>
-            nsec.app is a web-based Nostr key manager. Your key stays in nsec.app — corkboards never sees it.{'\n\n'}
-            Opening nsec.app in your browser... Approve the connection and return to this app.
-          </Text>
-          {nsecApp.connecting && <ActivityIndicator color="#a855f7" style={{ marginVertical: 16 }} />}
-          {nsecApp.connecting && <Text style={styles.waitingText}>Waiting for nsec.app approval...</Text>}
-          {nsecApp.error && <Text style={styles.errorText}>{nsecApp.error}</Text>}
-          {(nsecApp.connecting || nsecApp.error) && (
-            <TouchableOpacity style={styles.cancelBtn} onPress={goBack}>
-              <Text style={styles.cancelText}>Cancel</Text>
-            </TouchableOpacity>
-          )}
-          {!nsecApp.connecting && !nsecApp.error && (
-            <TouchableOpacity style={styles.nsecAppBtn} onPress={handleNsecAppConnect}>
-              <Text style={styles.nsecAppBtnText}>Open nsec.app</Text>
-            </TouchableOpacity>
-          )}
-        </View>
       )}
 
       {/* ---- Amber view ---- */}
@@ -475,13 +425,6 @@ const styles = StyleSheet.create({
   divider: { flexDirection: 'row', alignItems: 'center', marginVertical: 4 },
   dividerLine: { flex: 1, height: 1, backgroundColor: '#404040' },
   dividerText: { color: '#666', fontSize: 11, paddingHorizontal: 10, textTransform: 'uppercase' },
-
-  // Primary: nsec.app button
-  nsecAppBtn: {
-    backgroundColor: '#7c3aed', paddingVertical: 14, borderRadius: 8,
-    alignItems: 'center', borderWidth: 1, borderColor: '#6d28d9',
-  },
-  nsecAppBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
 
   // Amber button
   amberBtn: {

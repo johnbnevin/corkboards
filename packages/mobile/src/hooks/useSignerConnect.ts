@@ -1,11 +1,7 @@
 /**
- * useSignerConnect — NIP-46 remote signer login for mobile.
- *
- * Supports two flows:
- * - 'amber': Opens Amber (Android intent) or a nostrconnect:// deep link (iOS).
- *   Listens on relay.nsec.app for the NIP-46 connect response.
- * - 'nsecapp': Opens nsec.app in the device browser.
- *   Listens on relay.nsec.app for the NIP-46 connect response.
+ * useSignerConnect — NIP-46 Amber login for mobile.
+ * Opens Amber (Android intent) or a nostrconnect:// deep link (iOS).
+ * Uses relay.nsec.app as the primary signaling relay.
  */
 import { useState, useRef, useCallback } from 'react';
 import { Linking, Platform } from 'react-native';
@@ -14,9 +10,7 @@ import { NSecSigner, NConnectSigner, NRelay1 } from '@nostrify/nostrify';
 import { useAuth } from '../lib/AuthContext';
 import { NSEC_APP_RELAY } from '@core/relayConstants';
 
-export type SignerConnectType = 'amber' | 'nsecapp';
-
-export function useSignerConnect(type: SignerConnectType) {
+export function useSignerConnect(type: 'amber') {
   const { loginWithBunker } = useAuth();
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -49,18 +43,13 @@ export function useSignerConnect(type: SignerConnectType) {
 
       const connectUri = `nostrconnect://${clientPubkey}?${params.toString()}`;
 
-      if (type === 'amber') {
-        if (Platform.OS === 'android') {
-          const fallback = encodeURIComponent('https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner');
-          await Linking.openURL(
-            `intent://${clientPubkey}?${params.toString()}#Intent;scheme=nostrconnect;package=com.greenart7c3.nostrsigner;S.browser_fallback_url=${fallback};end`
-          );
-        } else {
-          await Linking.openURL(connectUri);
-        }
+      if (Platform.OS === 'android') {
+        const fallback = encodeURIComponent('https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner');
+        await Linking.openURL(
+          `intent://${clientPubkey}?${params.toString()}#Intent;scheme=nostrconnect;package=com.greenart7c3.nostrsigner;S.browser_fallback_url=${fallback};end`
+        );
       } else {
-        // nsecapp: open nsec.app in the device browser
-        await Linking.openURL(`https://nsec.app/${connectUri}`);
+        await Linking.openURL(connectUri);
       }
 
       // Listen for NIP-46 connect response on relay.nsec.app

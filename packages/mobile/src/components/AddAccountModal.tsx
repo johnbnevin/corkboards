@@ -24,7 +24,7 @@ import { useAuth } from '../lib/AuthContext';
 import { useNostr } from '../lib/NostrProvider';
 import { useSignerConnect } from '../hooks/useSignerConnect';
 
-type LoginView = 'main' | 'nsec' | 'mnemonic' | 'create-backup' | 'amber' | 'nsecapp';
+type LoginView = 'main' | 'nsec' | 'mnemonic' | 'create-backup' | 'amber';
 
 interface AddAccountModalProps {
   visible: boolean;
@@ -35,7 +35,6 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
   const { loginWithNsec } = useAuth();
   const { nostr } = useNostr();
   const amber = useSignerConnect('amber');
-  const nsecApp = useSignerConnect('nsecapp');
 
   const [view, setView] = useState<LoginView>('main');
 
@@ -75,7 +74,6 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
     setSeedPassphrase('');
     setSeedError(null);
     amber.cancel();
-    nsecApp.cancel();
   };
 
   const handleClose = () => {
@@ -221,12 +219,6 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
             </View>
 
             {/* Signer login options */}
-            <TouchableOpacity style={styles.nsecAppBtn} onPress={async () => {
-              setView('nsecapp');
-              try { await nsecApp.connect(); handleClose(); } catch { /* handled in state */ }
-            }}>
-              <Text style={styles.nsecAppBtnText}>Login with nsec.app</Text>
-            </TouchableOpacity>
             <TouchableOpacity style={styles.amberBtn} onPress={async () => {
               setView('amber');
               try { await amber.connect(); handleClose(); } catch { /* handled in state */ }
@@ -362,28 +354,6 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
                 <Text style={styles.primaryBtnText}>Log in</Text>
               )}
             </TouchableOpacity>
-          </>
-        )}
-
-        {/* ---- nsec.app connect ---- */}
-        {view === 'nsecapp' && (
-          <>
-            <TouchableOpacity onPress={() => { nsecApp.cancel(); setView('main'); }} style={styles.backBtn}>
-              <Text style={styles.backText}>{'< Back'}</Text>
-            </TouchableOpacity>
-            <Text style={styles.sectionLabel}>Login with nsec.app</Text>
-            <Text style={styles.hint}>
-              nsec.app is a web-based Nostr key manager. Your key stays in nsec.app — corkboards never sees it.{'\n\n'}
-              Opening nsec.app in your browser... Approve the connection and return here.
-            </Text>
-            {nsecApp.connecting && <ActivityIndicator color="#7c3aed" style={{ marginVertical: 8 }} />}
-            {nsecApp.connecting && <Text style={[styles.hint, { textAlign: 'center' }]}>Waiting for nsec.app approval...</Text>}
-            {nsecApp.error && <Text style={styles.errorText}>{nsecApp.error}</Text>}
-            {(nsecApp.connecting || nsecApp.error) && (
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => { nsecApp.cancel(); setView('main'); }}>
-                <Text style={styles.cancelText}>Cancel</Text>
-              </TouchableOpacity>
-            )}
           </>
         )}
 
@@ -564,11 +534,6 @@ const styles = StyleSheet.create({
   derivationHint: { color: '#999', fontSize: 11, textAlign: 'center', marginTop: 4 },
   cancelBtn: { padding: 14, alignItems: 'center', borderWidth: 1, borderColor: '#404040', borderRadius: 8, marginTop: 8 },
   cancelText: { color: '#b3b3b3', fontSize: 14 },
-  nsecAppBtn: {
-    backgroundColor: '#7c3aed', padding: 14, borderRadius: 8,
-    alignItems: 'center', marginBottom: 8,
-  },
-  nsecAppBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
   amberBtn: {
     borderWidth: 1, borderColor: '#f97316', padding: 14, borderRadius: 8,
     alignItems: 'center', marginBottom: 8,

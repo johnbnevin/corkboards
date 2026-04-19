@@ -13,7 +13,7 @@ import { SecurityInfoDialog } from '@/components/auth/SecurityInfoDialog';
 import QRCode from 'qrcode';
 
 type Step = 'name' | 'key-backup' | 'done';
-type LoginView = 'main' | 'nsec-app' | 'amber' | 'nsec' | 'mnemonic' | 'signer';
+type LoginView = 'main' | 'amber' | 'nsec' | 'mnemonic' | 'signer';
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -40,11 +40,6 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
   const [copied, setCopied] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loginView, setLoginView] = useState<LoginView>('main');
-
-  // nsec.app connect state
-  const [nsecAppLoading, setNsecAppLoading] = useState(false);
-  const [nsecAppError, setNsecAppError] = useState<string | null>(null);
-  const nsecAppAbortRef = useRef<AbortController | null>(null);
 
   // Amber connect state
   const [amberLoading, setAmberLoading] = useState(false);
@@ -95,7 +90,6 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      nsecAppAbortRef.current?.abort();
       amberAbortRef.current?.abort();
       connectAbortRef.current?.abort();
     };
@@ -119,11 +113,8 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
   }, [isDialog]);
 
   const goBack = () => {
-    nsecAppAbortRef.current?.abort();
     amberAbortRef.current?.abort();
     connectAbortRef.current?.abort();
-    setNsecAppLoading(false);
-    setNsecAppError(null);
     setAmberLoading(false);
     setAmberError(null);
     setConnectWaiting(false);
@@ -179,24 +170,6 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
   };
 
   // ---- Login methods ----
-
-  const handleNsecAppLogin = useCallback(async () => {
-    nsecAppAbortRef.current?.abort();
-    const controller = new AbortController();
-    nsecAppAbortRef.current = controller;
-    setNsecAppLoading(true);
-    setNsecAppError(null);
-    setLoginView('nsec-app');
-    try {
-      await login.nsecAppConnect(controller.signal);
-      onClose?.();
-    } catch (e: unknown) {
-      if (controller.signal.aborted) return;
-      setNsecAppError((e instanceof Error ? e.message : String(e)) || 'Connection failed');
-    } finally {
-      if (!controller.signal.aborted) setNsecAppLoading(false);
-    }
-  }, [login, onClose]);
 
   const handleAmberLogin = useCallback(async () => {
     amberAbortRef.current?.abort();
@@ -448,41 +421,6 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
 
   // ---- Sub-views (login) ----
 
-  const nsecAppView = (
-    <div className="space-y-4 pt-2 border-t">
-      <button type="button" onClick={goBack} className="flex items-center justify-center w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-1">
-        <ChevronLeft className="h-3 w-3 mr-1" />Back
-      </button>
-      <div className="text-center space-y-2">
-        <div className="flex items-center justify-center gap-2">
-          <ShieldCheck className="h-5 w-5 text-purple-500" />
-          <h3 className="font-semibold text-base">Login with nsec.app</h3>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          nsec.app is a web-based Nostr key manager. Your private key stays in nsec.app — corkboards never sees it.
-        </p>
-      </div>
-      {nsecAppLoading && (
-        <div className="space-y-3 text-center">
-          <p className="text-sm font-medium">nsec.app opened in a new tab</p>
-          <p className="text-xs text-muted-foreground">
-            Approve the connection in nsec.app, then come back here.
-          </p>
-          <p className="text-xs text-muted-foreground animate-pulse">Waiting for approval...</p>
-        </div>
-      )}
-      {nsecAppError && <p className="text-xs text-red-500 text-center">{nsecAppError}</p>}
-      {(nsecAppLoading || nsecAppError) && (
-        <Button variant="outline" size="sm" className="w-full" onClick={goBack}>Cancel</Button>
-      )}
-      {!nsecAppLoading && !nsecAppError && (
-        <Button className="w-full gap-2 bg-purple-600 hover:bg-purple-700 text-white h-11" onClick={handleNsecAppLogin}>
-          <ShieldCheck className="h-4 w-4" />Open nsec.app
-        </Button>
-      )}
-    </div>
-  );
-
   const amberView = (
     <div className="space-y-4 pt-2 border-t">
       <button type="button" onClick={goBack} className="flex items-center justify-center w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-1">
@@ -628,16 +566,6 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
         <div className="relative flex justify-center text-xs uppercase"><span className="bg-background px-2 text-muted-foreground">{isDialog ? 'or log in' : 'already have an account?'}</span></div>
       </div>
 
-      {/* Primary: nsec.app */}
-      <Button
-        className="w-full h-11 gap-2 bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white"
-        onClick={handleNsecAppLogin}
-        disabled={nsecAppLoading}
-      >
-        <ShieldCheck className="h-4 w-4" />
-        {nsecAppLoading ? 'Opening nsec.app...' : 'Login with nsec.app'}
-      </Button>
-
       {/* Amber — everywhere except Tauri desktop */}
       {showAmberButton && (
         <Button
@@ -695,7 +623,7 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
 
         {loginView === 'main' && nameScreen}
         {loginView === 'main' && loginOptions}
-        {loginView === 'nsec-app' && nsecAppView}
+
         {loginView === 'amber' && amberView}
         {loginView === 'signer' && signerView}
         {loginView === 'mnemonic' && mnemonicView}
@@ -718,7 +646,7 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
 
         {loginView === 'main' && nameScreen}
         {loginView === 'main' && loginOptions}
-        {loginView === 'nsec-app' && nsecAppView}
+
         {loginView === 'amber' && amberView}
         {loginView === 'signer' && (
           <div className="space-y-4 pt-2 border-t">

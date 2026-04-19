@@ -628,17 +628,32 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       return false;
     }
 
-    // Guard: don't save if dismissed notes regressed significantly vs last snapshot.
-    // A large sudden regression suggests IDB was partially cleared, not that the user
-    // un-dismissed notes. Block save to protect the cloud backup.
+    // Guard: don't save if key data regressed significantly vs last snapshot.
+    // Large sudden regressions suggest IDB was partially cleared, not intentional user action.
+    // Block save to protect the cloud backup.
     const lastSnapshotRaw = idbGetSync('corkboard:last-backup-data');
     if (lastSnapshotRaw) {
       try {
         const prevSnap = JSON.parse(lastSnapshotRaw) as Record<string, string>;
-        const prevCount = JSON.parse(prevSnap['dismissed-notes'] || '[]').length as number;
-        const currCount = JSON.parse(dismissed || '[]').length as number;
-        if (prevCount > 20 && currCount < prevCount * 0.5) {
-          debugWarn('[backup]', `Auto-save blocked: dismissed notes dropped from ${prevCount} to ${currCount} — IDB may be partially cleared`);
+
+        const prevDismissed = JSON.parse(prevSnap['dismissed-notes'] || '[]').length as number;
+        const currDismissed = JSON.parse(dismissed || '[]').length as number;
+        if (prevDismissed > 20 && currDismissed < prevDismissed * 0.5) {
+          debugWarn('[backup]', `Auto-save blocked: dismissed notes dropped from ${prevDismissed} to ${currDismissed} — IDB may be partially cleared`);
+          return false;
+        }
+
+        const prevFeeds = JSON.parse(prevSnap['nostr-custom-feeds'] || '[]') as unknown[];
+        const currFeeds = JSON.parse(feeds || '[]') as unknown[];
+        if (prevFeeds.length > 0 && currFeeds.length === 0) {
+          debugWarn('[backup]', 'Auto-save blocked: custom feeds dropped to zero — IDB may be partially cleared');
+          return false;
+        }
+
+        const prevCollapsed = JSON.parse(prevSnap['collapsed-notes'] || '[]').length as number;
+        const currCollapsed = JSON.parse(collapsed || '[]').length as number;
+        if (prevCollapsed > 10 && currCollapsed < prevCollapsed * 0.5) {
+          debugWarn('[backup]', `Auto-save blocked: saved notes dropped from ${prevCollapsed} to ${currCollapsed} — IDB may be partially cleared`);
           return false;
         }
       } catch { /* ignore parse errors — don't block save on unexpected format */ }
@@ -1110,9 +1125,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // is already as current as the newest remote checkpoint (nothing to restore).
       const localFeeds = idbGetSync('nostr-custom-feeds');
       const localDismissed = idbGetSync('dismissed-notes');
+      const localCollapsed = idbGetSync('collapsed-notes');
       const hasLocalData =
         (localFeeds && localFeeds !== '[]' && localFeeds !== 'null') ||
-        (localDismissed && localDismissed !== '[]' && localDismissed !== 'null');
+        (localDismissed && localDismissed !== '[]' && localDismissed !== 'null') ||
+        (localCollapsed && localCollapsed !== '[]' && localCollapsed !== 'null');
       const localLastBackupTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
       const newestRemoteTs = dedupedCheckpoints.length > 0
         ? Math.max(...dedupedCheckpoints.map(cp => cp.timestamp))

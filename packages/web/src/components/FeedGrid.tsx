@@ -20,7 +20,7 @@ const INITIAL_RENDER_PER_COL = 8;
 /** How many notes per column to add when scrolling near the bottom */
 const RENDER_INCREMENT_PER_COL = 8;
 /** Hard cap on DOM notes per column — prevents unbounded memory growth on long sessions */
-const MAX_RENDER_PER_COL = 100;
+const MAX_RENDER_PER_COL = 1000;
 
 // ─── Discover loading experience ─────────────────────────────────────────────
 
@@ -432,6 +432,12 @@ export const FeedGrid = React.memo(function FeedGrid({
           </div>
           {/* Sentinel for incremental rendering — triggers loading more notes on scroll */}
           {canLoadMore && <div ref={sentinelRef} style={{ height: 1 }} />}
+          {/* Cap reached — nudge user to dismiss notes to free space */}
+          {!canLoadMore && renderLimit >= MAX_RENDER_PER_COL && maxColLength > MAX_RENDER_PER_COL && (
+            <div className="flex justify-center py-6">
+              <p className="text-xs text-muted-foreground">Dismiss notes to load more</p>
+            </div>
+          )}
           {/* Discover "load more" link — regular discover only */}
           {activeTab === 'discover' && !isOnboarding && hasMoreDiscover && (
             <div className="flex justify-center py-8">

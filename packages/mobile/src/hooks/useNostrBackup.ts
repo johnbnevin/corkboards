@@ -453,17 +453,32 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       return false;
     }
 
-    // Guard: don't save if dismissed notes regressed significantly vs last snapshot.
-    // A large sudden regression suggests MMKV was partially cleared, not that the user
-    // un-dismissed notes. Block save to protect the cloud backup.
+    // Guard: don't save if key data regressed significantly vs last snapshot.
+    // Large sudden regressions suggest MMKV was partially cleared, not intentional user action.
+    // Block save to protect the cloud backup.
     const lastSnapshotRaw = mobileStorage.getSync(STORAGE_KEYS.LAST_BACKUP_DATA);
     if (lastSnapshotRaw) {
       try {
         const prevSnap = JSON.parse(lastSnapshotRaw) as Record<string, string>;
-        const prevCount = JSON.parse(prevSnap[STORAGE_KEYS.DISMISSED_NOTES] || '[]').length as number;
-        const currCount = JSON.parse(dismissed || '[]').length as number;
-        if (prevCount > 20 && currCount < prevCount * 0.5) {
-          if (__DEV__) console.warn(`[backup] Auto-save blocked: dismissed notes dropped from ${prevCount} to ${currCount} — MMKV may be partially cleared`);
+
+        const prevDismissed = JSON.parse(prevSnap[STORAGE_KEYS.DISMISSED_NOTES] || '[]').length as number;
+        const currDismissed = JSON.parse(dismissed || '[]').length as number;
+        if (prevDismissed > 20 && currDismissed < prevDismissed * 0.5) {
+          if (__DEV__) console.warn(`[backup] Auto-save blocked: dismissed notes dropped from ${prevDismissed} to ${currDismissed} — MMKV may be partially cleared`);
+          return false;
+        }
+
+        const prevFeeds = JSON.parse(prevSnap[STORAGE_KEYS.CUSTOM_FEEDS] || '[]') as unknown[];
+        const currFeeds = JSON.parse(feeds || '[]') as unknown[];
+        if (prevFeeds.length > 0 && currFeeds.length === 0) {
+          if (__DEV__) console.warn('[backup] Auto-save blocked: custom feeds dropped to zero — MMKV may be partially cleared');
+          return false;
+        }
+
+        const prevCollapsed = JSON.parse(prevSnap[STORAGE_KEYS.COLLAPSED_NOTES] || '[]').length as number;
+        const currCollapsed = JSON.parse(collapsed || '[]').length as number;
+        if (prevCollapsed > 10 && currCollapsed < prevCollapsed * 0.5) {
+          if (__DEV__) console.warn(`[backup] Auto-save blocked: saved notes dropped from ${prevCollapsed} to ${currCollapsed} — MMKV may be partially cleared`);
           return false;
         }
       } catch { /* ignore parse errors — don't block save on unexpected format */ }

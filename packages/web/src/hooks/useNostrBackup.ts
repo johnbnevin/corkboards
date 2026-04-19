@@ -1120,9 +1120,9 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         });
       }
 
-      // Auto-dismiss if local data already exists (storage eviction scenario — browser
-      // cleared IDB flags but the user's actual data survived), or if the local backup
-      // is already as current as the newest remote checkpoint (nothing to restore).
+      // Auto-dismiss only if local data exists AND is already as current as the cloud.
+      // Using AND (not OR) so that stale local data (e.g. months-old desktop IDB that
+      // survived reinstall) still triggers a restore rather than being silently kept.
       const localFeeds = idbGetSync('nostr-custom-feeds');
       const localDismissed = idbGetSync('dismissed-notes');
       const localCollapsed = idbGetSync('collapsed-notes');
@@ -1135,10 +1135,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         ? Math.max(...dedupedCheckpoints.map(cp => cp.timestamp))
         : 0;
       const localIsCurrentOrNewer = localLastBackupTs > 0 && localLastBackupTs >= newestRemoteTs;
-      if ((hasLocalData || localIsCurrentOrNewer) && !force) {
-        log(hasLocalData
-          ? 'Local data exists — auto-dismissing (likely storage eviction)'
-          : 'Local backup is already current — auto-dismissing');
+      if ((hasLocalData && localIsCurrentOrNewer) && !force) {
+        log('Local data is current — auto-dismissing');
         _checkedPubkey = user.pubkey;
         idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
         markBackupCheckedSync(user.pubkey);

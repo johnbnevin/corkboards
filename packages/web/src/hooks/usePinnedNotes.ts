@@ -48,8 +48,8 @@ export function usePinnedNotes() {
   // relays and could return stale data from a fast-but-outdated relay.
   const { data: pinListResult, isLoading: isLoadingPinList } = useQuery({
     queryKey: ['pinned-notes', user?.pubkey],
-    queryFn: async (): Promise<{ ids: string[]; status: 'found' | 'none' | 'no-list' }> => {
-      if (!user?.pubkey) return { ids: [], status: 'no-list' }
+    queryFn: async (): Promise<{ ids: string[]; status: 'found' | 'none' | 'no-list'; relayHints: Record<string, string> }> => {
+      if (!user?.pubkey) return { ids: [], status: 'no-list', relayHints: {} }
 
       const userRelays = getUserRelays()
       const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
@@ -61,7 +61,7 @@ export function usePinnedNotes() {
           try {
             const events = await relay.query(
               [{ kinds: [10001], authors: [user.pubkey], limit: 1 }],
-              { signal: AbortSignal.timeout(4000) }
+              { signal: AbortSignal.timeout(8000) }
             )
             return events.filter(ev => ev.kind === 10001)
           } finally {
@@ -79,14 +79,18 @@ export function usePinnedNotes() {
         }
       }
 
-      if (!best) return { ids: [], status: 'no-list' }
+      if (!best) return { ids: [], status: 'no-list', relayHints: {} }
 
-      const ids = best.tags
-        .filter(t => t[0] === 'e' && t[1])
-        .map(t => t[1])
+      const eTags = best.tags.filter(t => t[0] === 'e' && t[1])
+      const ids = eTags.map(t => t[1])
+      // Extract per-note relay hints from the e-tags (["e", id, relay-hint])
+      const relayHints: Record<string, string> = {}
+      for (const t of eTags) {
+        if (t[2]) relayHints[t[1]] = t[2]
+      }
 
-      if (ids.length === 0) return { ids: [], status: 'none' }
-      return { ids, status: 'found' }
+      if (ids.length === 0) return { ids: [], status: 'none', relayHints: {} }
+      return { ids, status: 'found', relayHints }
     },
     enabled: !!user?.pubkey,
     staleTime: 5 * 60 * 1000,
@@ -112,40 +116,48 @@ export function usePinnedNotes() {
 
   const pinnedNotesStatus: 'loading' | 'found' | 'none' | 'no-list' = isLoadingPinList ? 'loading' : (pinListResult?.status ?? 'no-list')
 
-  // Fetch actual pinned note events
+  // Fetch actual pinned note events — use NPool (outbox routing + fallback relays
+  // in parallel) instead of querying only the user's write relays sequentially.
+  // Notes pinned from other authors live on their relays, not the user's write relays.
   const { data: pinnedNoteEvents, isLoading: isLoadingPinnedEvents } = useQuery({
     queryKey: ['pinned-note-events', pinnedIds],
     queryFn: async () => {
       if (pinnedIds.length === 0) return []
 
-      const userRelays = getUserRelays()
-      const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
-      const foundNotes: NostrEvent[] = []
+      const found = new Map<string, NostrEvent>()
 
-      // Batch query all write relays
-      for (const relayUrl of writeRelays) {
-        try {
-          const relay = nostr.relay(relayUrl)
-          const missingIds = pinnedIds.filter(id => !foundNotes.some(n => n.id === id))
-          if (missingIds.length === 0) break
-          const events = await relay.query(
-            [{ ids: missingIds }],
-            { signal: AbortSignal.timeout(3000) }
+      // Primary: NPool routes to outbox relays + fallbacks in parallel
+      try {
+        const events = await nostr.query(
+          [{ ids: pinnedIds }],
+          { signal: AbortSignal.timeout(10000) }
+        )
+        events.forEach(ev => found.set(ev.id, ev))
+      } catch { /* pool failed — fall through to hint relays */ }
+
+      // Fallback: for notes still missing, try the relay hints embedded in the pin list
+      const missing = pinnedIds.filter(id => !found.has(id))
+      if (missing.length > 0) {
+        const cached = queryClient.getQueryData<{ relayHints: Record<string, string> }>(
+          ['pinned-notes', user?.pubkey]
+        )
+        const hints = cached?.relayHints ?? {}
+        const hinted = missing.filter(id => hints[id])
+        if (hinted.length > 0) {
+          await Promise.allSettled(
+            hinted.map(async id => {
+              const relay = createRelay(normalizeRelay(hints[id]), { backoff: false })
+              try {
+                const evs = await relay.query([{ ids: [id] }], { signal: AbortSignal.timeout(5000) })
+                evs.forEach(ev => found.set(ev.id, ev))
+              } catch { /* skip */ }
+              finally { try { relay.close() } catch { /* */ } }
+            })
           )
-          for (const ev of events) {
-            if (!foundNotes.some(n => n.id === ev.id)) {
-              foundNotes.push(ev)
-            }
-          }
-        } catch {
-          // Try next relay
         }
       }
 
-      // Return in pinned order
-      return pinnedIds
-        .map(id => foundNotes.find(n => n.id === id))
-        .filter((n): n is NostrEvent => !!n)
+      return pinnedIds.map(id => found.get(id)).filter((n): n is NostrEvent => !!n)
     },
     enabled: pinnedIds.length > 0,
     staleTime: 5 * 60 * 1000,

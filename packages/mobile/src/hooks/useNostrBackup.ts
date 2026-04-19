@@ -115,8 +115,9 @@ function getStoredCheckpoints(): RemoteCheckpoint[] {
 }
 
 function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
-  // Always dedup before storing:
-  // 1. By d-tag (addressable events replace each other — keep newest)
+  // Dedup by d-tag only — addressable events replace each other, keep newest per tag.
+  // Stats-based dedup was removed: it silently discarded valid checkpoints that
+  // happened to share the same corkboard/dismissed counts.
   const byDTag = new Map<string, RemoteCheckpoint>();
   for (const cp of cps) {
     const key = cp.dTag || cp.eventId;
@@ -125,17 +126,7 @@ function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
       byDTag.set(key, cp);
     }
   }
-  // 2. Collapse checkpoints with identical stats (keep newest per stats signature)
-  const byStats = new Map<string, RemoteCheckpoint>();
-  for (const cp of byDTag.values()) {
-    const key = `${cp.stats?.corkboards ?? '?'}:${cp.stats?.savedForLater ?? '?'}:${cp.stats?.dismissed ?? '?'}`;
-    const existing = byStats.get(key);
-    if (!existing || cp.timestamp > existing.timestamp) {
-      if (existing?.name && !cp.name) cp.name = existing.name;
-      byStats.set(key, cp);
-    }
-  }
-  const deduped = [...byStats.values()].sort((a, b) => b.timestamp - a.timestamp);
+  const deduped = [...byDTag.values()].sort((a, b) => b.timestamp - a.timestamp);
   mobileStorage.setSync(CHECKPOINTS_KEY, JSON.stringify(deduped));
 }
 
@@ -498,9 +489,14 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
       let blossomUrl: string | null = null;
       let blossomHash: string | undefined;
+      let blossomServerCount = 0;
       for (const server of getActiveBlossomServers()) {
         const result = await blossomUpload(server, encryptedData, signer);
-        if (result) { blossomUrl = result.url; blossomHash = result.hash; break; }
+        if (result) {
+          if (!blossomUrl) { blossomUrl = result.url; blossomHash = result.hash; }
+          blossomServerCount++;
+          if (blossomServerCount >= 2) break; // two copies is sufficient redundancy
+        }
       }
       if (!blossomUrl) return false;
 

@@ -154,8 +154,9 @@ function getStoredCheckpoints(): RemoteCheckpoint[] {
 }
 
 function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
-  // Always dedup before storing:
-  // 1. By d-tag (addressable events replace each other — keep newest)
+  // Dedup by d-tag only — addressable events replace each other, keep newest per tag.
+  // Stats-based dedup was removed: it silently discarded valid checkpoints that
+  // happened to share the same corkboard/dismissed counts.
   const byDTag = new Map<string, RemoteCheckpoint>();
   for (const cp of cps) {
     const key = cp.dTag || cp.eventId;
@@ -164,18 +165,7 @@ function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
       byDTag.set(key, cp);
     }
   }
-  // 2. Collapse checkpoints with identical stats (keep newest per stats signature)
-  const byStats = new Map<string, RemoteCheckpoint>();
-  for (const cp of byDTag.values()) {
-    const key = `${cp.stats?.corkboards ?? '?'}:${cp.stats?.savedForLater ?? '?'}:${cp.stats?.dismissed ?? '?'}`;
-    const existing = byStats.get(key);
-    if (!existing || cp.timestamp > existing.timestamp) {
-      // Preserve user-given names
-      if (existing?.name && !cp.name) cp.name = existing.name;
-      byStats.set(key, cp);
-    }
-  }
-  const deduped = [...byStats.values()].sort((a, b) => b.timestamp - a.timestamp);
+  const deduped = [...byDTag.values()].sort((a, b) => b.timestamp - a.timestamp);
   idbSetSync(CHECKPOINTS_KEY, JSON.stringify(deduped));
 }
 
@@ -681,6 +671,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
       let blossomUrl: string | null = null;
       let blossomHash: string | null = null;
+      let blossomServerCount = 0;
       for (const server of getActiveBlossomServers()) {
         try {
           const uploader = new BlossomUploader({ servers: [server], signer });
@@ -691,9 +682,9 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
           const urlTag = tags.find((t: string[]) => t[0] === 'url');
           const hashTag = tags.find((t: string[]) => t[0] === 'x' || t[0] === 'sha256');
           if (urlTag?.[1]) {
-            blossomUrl = urlTag[1];
-            blossomHash = hashTag?.[1] ?? null;
-            break;
+            if (!blossomUrl) { blossomUrl = urlTag[1]; blossomHash = hashTag?.[1] ?? null; }
+            blossomServerCount++;
+            if (blossomServerCount >= 2) break; // two copies is sufficient redundancy
           }
         } catch { /* continue */ }
       }

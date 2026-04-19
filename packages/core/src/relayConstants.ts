@@ -51,6 +51,9 @@ export const NOSTRCONNECT_RELAYS = [
   'wss://relay.ditto.pub',
 ];
 
+/** Primary relay used by nsec.app (noauth) for NIP-46 signer communication. */
+export const NSEC_APP_RELAY = 'wss://relay.nsec.app';
+
 /**
  * NIP-50 full-text search relay used for profile discovery during onboarding.
  * Must support the `search` filter field.

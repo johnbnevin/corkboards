@@ -34,7 +34,7 @@ import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
 import { clearNoteCardCache } from '@/components/NoteCard';
 import { handleLogoutStorageAsync } from '@/lib/storageKeys';
 import { isTauri, keychainStore, keychainDelete } from '@/lib/tauri';
-import { NOSTRCONNECT_RELAYS } from '@/lib/relayConstants';
+import { NOSTRCONNECT_RELAYS, NSEC_APP_RELAY } from '@/lib/relayConstants';
 
 const BACKUP_CHECKED_KEY = 'corkboard:backup-checked';
 
@@ -146,6 +146,68 @@ export function useLoginActions() {
         relays: connectRelays,
       });
       addLogin(login);
+    },
+
+    // Login via nsec.app (noauth) — NIP-46 bunker flow using relay.nsec.app.
+    // Opens https://nsec.app in a new tab; waits for connect response on relay.nsec.app.
+    async nsecAppConnect(signal: AbortSignal): Promise<void> {
+      const sk = generateSecretKey();
+      const clientPubkey = getPublicKey(sk);
+      const clientNsec = nip19.nsecEncode(sk);
+      const clientSigner = new NSecSigner(sk);
+      const secretBytes = crypto.getRandomValues(new Uint8Array(16));
+      const secret = Array.from(secretBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+
+      const params = new URLSearchParams();
+      params.append('relay', NSEC_APP_RELAY);
+      params.append('secret', secret);
+      params.append('name', 'corkboards.me');
+      params.append('url', 'https://corkboards.me');
+      params.append('perms', 'get_public_key,sign_event,nip44_encrypt,nip44_decrypt');
+
+      const connectUri = `nostrconnect://${clientPubkey}?${params.toString()}`;
+      window.open(`https://nsec.app/${connectUri}`, '_blank', 'noopener,noreferrer');
+
+      const relay = createRelayDirect(NSEC_APP_RELAY, { backoff: false, idleTimeout: false });
+      const sub = relay.req([{ kinds: [24133], '#p': [clientPubkey] }], { signal });
+
+      const bunkerPubkey = await new Promise<string>((resolve, reject) => {
+        let resolved = false;
+        signal.addEventListener('abort', () => { if (!resolved) reject(new Error('aborted')); });
+        (async () => {
+          try {
+            for await (const msg of sub) {
+              if (resolved) return;
+              if (msg[0] === 'CLOSED') continue;
+              if (msg[0] === 'EVENT') {
+                const event = msg[2];
+                try {
+                  const decrypted = await clientSigner.nip44!.decrypt(event.pubkey, event.content);
+                  const response = JSON.parse(decrypted);
+                  if (typeof response === 'object' && response !== null && response.result === secret) {
+                    resolved = true;
+                    resolve(event.pubkey);
+                  }
+                } catch { /* not our response */ }
+              }
+            }
+          } catch { /* closed */ }
+        })();
+      });
+
+      const signer = new NConnectSigner({
+        relay,
+        pubkey: bunkerPubkey,
+        signer: clientSigner,
+        timeout: 60_000,
+      });
+      const userPubkey = await signer.getPublicKey();
+
+      addLogin(new NLogin('bunker', userPubkey, {
+        bunkerPubkey,
+        clientNsec,
+        relays: [NSEC_APP_RELAY],
+      }));
     },
 
     // Login via nostrconnect:// deep link (Amber on Android)

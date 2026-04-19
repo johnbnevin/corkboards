@@ -15,14 +15,16 @@ import {
   Alert,
   ActivityIndicator,
   ScrollView,
+  Platform,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { nip19, getPublicKey, generateSecretKey } from 'nostr-tools';
 import { privateKeyFromSeedWords, validateWords, generateSeedWords } from 'nostr-tools/nip06';
 import { useAuth } from '../lib/AuthContext';
 import { useNostr } from '../lib/NostrProvider';
+import { useSignerConnect } from '../hooks/useSignerConnect';
 
-type LoginView = 'main' | 'nsec' | 'mnemonic' | 'create-backup';
+type LoginView = 'main' | 'nsec' | 'mnemonic' | 'create-backup' | 'amber' | 'nsecapp';
 
 interface AddAccountModalProps {
   visible: boolean;
@@ -32,6 +34,8 @@ interface AddAccountModalProps {
 export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
   const { loginWithNsec } = useAuth();
   const { nostr } = useNostr();
+  const amber = useSignerConnect('amber');
+  const nsecApp = useSignerConnect('nsecapp');
 
   const [view, setView] = useState<LoginView>('main');
 
@@ -70,6 +74,8 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
     setSeedPhrase('');
     setSeedPassphrase('');
     setSeedError(null);
+    amber.cancel();
+    nsecApp.cancel();
   };
 
   const handleClose = () => {
@@ -214,12 +220,26 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
               <View style={styles.dividerLine} />
             </View>
 
+            {/* Signer login options */}
+            <TouchableOpacity style={styles.nsecAppBtn} onPress={async () => {
+              setView('nsecapp');
+              try { await nsecApp.connect(); handleClose(); } catch { /* handled in state */ }
+            }}>
+              <Text style={styles.nsecAppBtnText}>Login with nsec.app</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.amberBtn} onPress={async () => {
+              setView('amber');
+              try { await amber.connect(); handleClose(); } catch { /* handled in state */ }
+            }}>
+              <Text style={styles.amberBtnText}>Login with Amber</Text>
+            </TouchableOpacity>
+
             {/* Login options */}
             <TouchableOpacity style={styles.optionBtn} onPress={() => { setNsecError(null); setView('nsec'); }}>
               <Text style={styles.optionText}>Log in with nsec password</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.optionBtn} onPress={() => { setSeedError(null); setView('mnemonic'); }}>
-              <Text style={styles.optionText}>Log in with 12 word mnemonic</Text>
+              <Text style={styles.optionText}>Log in with 12-word mnemonic</Text>
             </TouchableOpacity>
 
             <TouchableOpacity style={styles.cancelBtn} onPress={handleClose}>
@@ -342,6 +362,51 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
                 <Text style={styles.primaryBtnText}>Log in</Text>
               )}
             </TouchableOpacity>
+          </>
+        )}
+
+        {/* ---- nsec.app connect ---- */}
+        {view === 'nsecapp' && (
+          <>
+            <TouchableOpacity onPress={() => { nsecApp.cancel(); setView('main'); }} style={styles.backBtn}>
+              <Text style={styles.backText}>{'< Back'}</Text>
+            </TouchableOpacity>
+            <Text style={styles.sectionLabel}>Login with nsec.app</Text>
+            <Text style={styles.hint}>
+              nsec.app is a web-based Nostr key manager. Your key stays in nsec.app — corkboards never sees it.{'\n\n'}
+              Opening nsec.app in your browser... Approve the connection and return here.
+            </Text>
+            {nsecApp.connecting && <ActivityIndicator color="#7c3aed" style={{ marginVertical: 8 }} />}
+            {nsecApp.connecting && <Text style={[styles.hint, { textAlign: 'center' }]}>Waiting for nsec.app approval...</Text>}
+            {nsecApp.error && <Text style={styles.errorText}>{nsecApp.error}</Text>}
+            {(nsecApp.connecting || nsecApp.error) && (
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => { nsecApp.cancel(); setView('main'); }}>
+                <Text style={styles.cancelText}>Cancel</Text>
+              </TouchableOpacity>
+            )}
+          </>
+        )}
+
+        {/* ---- Amber connect ---- */}
+        {view === 'amber' && (
+          <>
+            <TouchableOpacity onPress={() => { amber.cancel(); setView('main'); }} style={styles.backBtn}>
+              <Text style={styles.backText}>{'< Back'}</Text>
+            </TouchableOpacity>
+            <Text style={styles.sectionLabel}>Login with Amber</Text>
+            <Text style={styles.hint}>
+              {Platform.OS === 'android'
+                ? 'Opening Amber... Approve the connection and return here. If Amber isn\'t installed, you\'ll be taken to the Play Store.'
+                : 'Opening your Nostr signer app... Approve the connection and return here.'}
+            </Text>
+            {amber.connecting && <ActivityIndicator color="#f97316" style={{ marginVertical: 8 }} />}
+            {amber.connecting && <Text style={[styles.hint, { textAlign: 'center' }]}>Waiting for Amber...</Text>}
+            {amber.error && <Text style={styles.errorText}>{amber.error}</Text>}
+            {(amber.connecting || amber.error) && (
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => { amber.cancel(); setView('main'); }}>
+                <Text style={styles.cancelText}>Cancel</Text>
+              </TouchableOpacity>
+            )}
           </>
         )}
 
@@ -497,4 +562,16 @@ const styles = StyleSheet.create({
 
   errorText: { color: '#ef4444', fontSize: 13, marginBottom: 8 },
   derivationHint: { color: '#999', fontSize: 11, textAlign: 'center', marginTop: 4 },
+  cancelBtn: { padding: 14, alignItems: 'center', borderWidth: 1, borderColor: '#404040', borderRadius: 8, marginTop: 8 },
+  cancelText: { color: '#b3b3b3', fontSize: 14 },
+  nsecAppBtn: {
+    backgroundColor: '#7c3aed', padding: 14, borderRadius: 8,
+    alignItems: 'center', marginBottom: 8,
+  },
+  nsecAppBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  amberBtn: {
+    borderWidth: 1, borderColor: '#f97316', padding: 14, borderRadius: 8,
+    alignItems: 'center', marginBottom: 8,
+  },
+  amberBtnText: { color: '#f97316', fontSize: 15, fontWeight: '600' },
 });

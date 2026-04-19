@@ -21,7 +21,7 @@ import { triggerDownload } from '@/lib/triggerDownload';
 import { BlossomUploader } from '@nostrify/nostrify/uploaders';
 import type { NostrEvent, NPool } from '@nostrify/nostrify';
 import type { NUser } from '@nostrify/react/login';
-import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache, createRelay, createRelayDirect } from '@/components/NostrProvider';
+import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache, createRelayDirect } from '@/components/NostrProvider';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '@/lib/storageKeys';
 import { formatTimeAgo } from '@/lib/formatTimeAgo';
 import { debugLog, debugWarn } from '@/lib/debug';
@@ -628,6 +628,22 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       return false;
     }
 
+    // Guard: don't save if dismissed notes regressed significantly vs last snapshot.
+    // A large sudden regression suggests IDB was partially cleared, not that the user
+    // un-dismissed notes. Block save to protect the cloud backup.
+    const lastSnapshotRaw = idbGetSync('corkboard:last-backup-data');
+    if (lastSnapshotRaw) {
+      try {
+        const prevSnap = JSON.parse(lastSnapshotRaw) as Record<string, string>;
+        const prevCount = JSON.parse(prevSnap['dismissed-notes'] || '[]').length as number;
+        const currCount = JSON.parse(dismissed || '[]').length as number;
+        if (prevCount > 20 && currCount < prevCount * 0.5) {
+          debugWarn('[backup]', `Auto-save blocked: dismissed notes dropped from ${prevCount} to ${currCount} — IDB may be partially cleared`);
+          return false;
+        }
+      } catch { /* ignore parse errors — don't block save on unexpected format */ }
+    }
+
     isSaving.current = true;
 
     try {
@@ -735,21 +751,19 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         || latestAuto.stats.corkboards !== stats.corkboards
         || latestAuto.stats.savedForLater !== stats.savedForLater
         || latestAuto.stats.dismissed !== stats.dismissed;
-      if (statsChanged) {
-        cps.unshift(autoEntry);
-      } else if (latestAuto) {
-        // Same stats — just update the timestamp on the latest entry
-        latestAuto.timestamp = now;
-        latestAuto.eventId = manifestEvent.id;
-        latestAuto.blossomUrl = blossomUrl!;
-        if (blossomHash) latestAuto.blossomHash = blossomHash;
-        latestAuto.wrappedKey = wrappedKey;
+      let updatedCps: RemoteCheckpoint[];
+      if (statsChanged || !latestAuto) {
+        updatedCps = [autoEntry, ...cps];
       } else {
-        cps.unshift(autoEntry);
+        // Same stats — update the latest entry immutably
+        updatedCps = cps.map(c => c === latestAuto
+          ? { ...c, timestamp: now, eventId: manifestEvent.id, blossomUrl: blossomUrl!, ...(blossomHash ? { blossomHash } : {}), wrappedKey }
+          : c
+        );
       }
       // Keep only last 5 autosaves, preserve any manual checkpoints
-      const manualCps = cps.filter(c => !c.dTag?.includes(':auto'));
-      const autoCps = cps.filter(c => c.dTag?.includes(':auto')).slice(0, 5);
+      const manualCps = updatedCps.filter(c => !c.dTag?.includes(':auto'));
+      const autoCps = updatedCps.filter(c => c.dTag?.includes(':auto')).slice(0, 5);
       const merged = [...manualCps, ...autoCps].sort((a, b) => b.timestamp - a.timestamp);
       setStoredCheckpoints(merged);
       refreshCheckpointsRef.current();
@@ -1091,13 +1105,23 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         });
       }
 
-      // If local data already exists (corkboards, dismissed notes), this is likely
-      // a storage eviction scenario — the browser cleared localStorage/IDB flags but
-      // the user's actual data survived. Auto-dismiss instead of blocking with splash.
+      // Auto-dismiss if local data already exists (storage eviction scenario — browser
+      // cleared IDB flags but the user's actual data survived), or if the local backup
+      // is already as current as the newest remote checkpoint (nothing to restore).
       const localFeeds = idbGetSync('nostr-custom-feeds');
-      const hasLocalData = localFeeds && localFeeds !== '[]' && localFeeds !== 'null';
-      if (hasLocalData && !force) {
-        log('Local data exists — auto-dismissing (likely storage eviction)');
+      const localDismissed = idbGetSync('dismissed-notes');
+      const hasLocalData =
+        (localFeeds && localFeeds !== '[]' && localFeeds !== 'null') ||
+        (localDismissed && localDismissed !== '[]' && localDismissed !== 'null');
+      const localLastBackupTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      const newestRemoteTs = dedupedCheckpoints.length > 0
+        ? Math.max(...dedupedCheckpoints.map(cp => cp.timestamp))
+        : 0;
+      const localIsCurrentOrNewer = localLastBackupTs > 0 && localLastBackupTs >= newestRemoteTs;
+      if ((hasLocalData || localIsCurrentOrNewer) && !force) {
+        log(hasLocalData
+          ? 'Local data exists — auto-dismissing (likely storage eviction)'
+          : 'Local backup is already current — auto-dismissing');
         _checkedPubkey = user.pubkey;
         idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
         markBackupCheckedSync(user.pubkey);
@@ -1376,16 +1400,16 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   useEffect(() => { idbReady.then(() => setCheckpoints(getStoredCheckpoints())); }, []);
 
   const renameCheckpointFn = useCallback((index: number, name: string) => {
-    const cps = getStoredCheckpoints();
+    const cps = [...getStoredCheckpoints()];
     if (index >= 0 && index < cps.length) {
-      cps[index].name = name;
+      cps[index] = { ...cps[index], name };
       setStoredCheckpoints(cps);
       setCheckpoints(getStoredCheckpoints());
     }
   }, []);
 
   const deleteCheckpointFn = useCallback((eventId: string) => {
-    const cps = getStoredCheckpoints();
+    const cps = [...getStoredCheckpoints()];
     const idx = cps.findIndex(c => c.eventId === eventId);
     if (idx < 0) return;
     const cp = cps[idx];
@@ -1425,7 +1449,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     // If current state is newer than the checkpoint being restored,
     // auto-save it as a checkpoint first so it's not lost
     const currentTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
-    if (currentTs > cp.timestamp && hasUnsavedChanges()) {
+    if (currentTs > cp.timestamp) {
       try {
         log('Current state is newer than checkpoint — auto-saving before restore...');
         await autoSaveBackup();
@@ -1483,9 +1507,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const cps = getStoredCheckpoints();
       const idx = cps.findIndex(c => c.eventId === cp.eventId);
       if (idx > 0) {
-        const [moved] = cps.splice(idx, 1);
-        cps.unshift(moved);
-        setStoredCheckpoints(cps);
+        const reordered = [cps[idx], ...cps.slice(0, idx), ...cps.slice(idx + 1)];
+        setStoredCheckpoints(reordered);
       }
 
       idbSetSync(LAST_BACKUP_TS_KEY, String(cp.timestamp));
@@ -1509,7 +1532,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       setStatus('restore-error');
       setMessage('Restore failed: ' + msg);
     }
-  }, [user, log, autoSaveBackup, hasUnsavedChanges]);
+  }, [user, log, autoSaveBackup]);
 
   // Single check on login — one attempt, all relays, no retries.
   // Shows splash with tips while checking. If a checkpoint is found,
@@ -1612,6 +1635,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     hasUnsavedChanges,
     // Checkpoint management
     checkpoints,
+    getCheckpoints: (): RemoteCheckpoint[] => getStoredCheckpoints(),
     renameCheckpoint: renameCheckpointFn,
     deleteCheckpoint: deleteCheckpointFn,
     loadCheckpoint: loadCheckpointFn,

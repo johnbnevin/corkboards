@@ -97,7 +97,11 @@ function recordRelayFailure(url: string): void {
   const backoffMs = getBackoffMs(failCount);
   _relayBackoff.set(key, { failCount, blockedUntil: Date.now() + backoffMs });
   // Evict the cached relay so the next caller after backoff gets a fresh connection
-  _relayCache.delete(key);
+  const staleEntry = _relayCache.get(key);
+  if (staleEntry) {
+    staleEntry.relay.close().catch(() => {});
+    _relayCache.delete(key);
+  }
 }
 
 /** Record a successful operation — clears the backoff */
@@ -143,7 +147,10 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
   if (_relayCache.size > 50) {
     const now = Date.now();
     for (const [key, entry] of _relayCache) {
-      if (now - entry.createdAt > RELAY_CACHE_TTL_MS) _relayCache.delete(key);
+      if (now - entry.createdAt > RELAY_CACHE_TTL_MS) {
+        entry.relay.close().catch(() => {});
+        _relayCache.delete(key);
+      }
     }
   }
 
@@ -171,6 +178,7 @@ export function createRelayDirect(url: string, opts?: ConstructorParameters<type
 class BlockedRelay implements NRelay {
   private url: string;
   constructor(url: string) { this.url = url; }
+  // eslint-disable-next-line require-yield
   async *req(): AsyncGenerator<NostrRelayEVENT | NostrRelayEOSE | NostrRelayCLOSED> {
     throw new Error(`Relay ${this.url} is temporarily blocked (backoff)`);
   }

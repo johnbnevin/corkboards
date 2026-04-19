@@ -80,6 +80,7 @@ export function useLocalStorage<T>(
 
   // Sync with changes from other tabs (BroadcastChannel) and same page
   useEffect(() => {
+    const ac = new AbortController();
     const handleSync = (e: CustomEvent<{ key: string; value: unknown }>) => {
       if (e.detail.key !== key) return;
       const next = (e.detail.value === null ? defaultValue : e.detail.value) as T;
@@ -87,12 +88,9 @@ export function useLocalStorage<T>(
       setState(next);
     };
 
-    window.addEventListener('idb-storage-sync', handleSync as EventListener);
-    return () => {
-      window.removeEventListener('idb-storage-sync', handleSync as EventListener);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+    window.addEventListener('idb-storage-sync', handleSync as EventListener, { signal: ac.signal });
+    return () => ac.abort();
+  }, [key, defaultValue]);
 
   return [state, setValue] as const;
 }

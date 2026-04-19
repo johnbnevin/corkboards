@@ -235,7 +235,7 @@ function RelaySection() {
   const { user } = useCurrentUser();
   const { mutate: publishEvent } = useNostrPublish();
   const { toast } = useToast();
-  const { relayHealth, getShortName, checkAllRelays } = useRelayHealth();
+  const { relayHealth, checkAllRelays } = useRelayHealth();
 
   // User relays are everything in their NIP-65 event (config.relayMetadata.relays).
   // This includes relays that happen to match hardcoded fallbacks — those are the
@@ -528,9 +528,6 @@ function BlossomSection() {
     return <Server className="h-3 w-3 text-muted-foreground shrink-0" />;
   };
 
-  const ServerHostname = ({ url }: { url: string }) => {
-    try { return <>{new URL(url).hostname}</>; } catch { return <>{url}</>; }
-  };
 
   return (
     <div className="space-y-4">

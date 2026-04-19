@@ -453,6 +453,22 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       return false;
     }
 
+    // Guard: don't save if dismissed notes regressed significantly vs last snapshot.
+    // A large sudden regression suggests MMKV was partially cleared, not that the user
+    // un-dismissed notes. Block save to protect the cloud backup.
+    const lastSnapshotRaw = mobileStorage.getSync(STORAGE_KEYS.LAST_BACKUP_DATA);
+    if (lastSnapshotRaw) {
+      try {
+        const prevSnap = JSON.parse(lastSnapshotRaw) as Record<string, string>;
+        const prevCount = JSON.parse(prevSnap[STORAGE_KEYS.DISMISSED_NOTES] || '[]').length as number;
+        const currCount = JSON.parse(dismissed || '[]').length as number;
+        if (prevCount > 20 && currCount < prevCount * 0.5) {
+          if (__DEV__) console.warn(`[backup] Auto-save blocked: dismissed notes dropped from ${prevCount} to ${currCount} — MMKV may be partially cleared`);
+          return false;
+        }
+      } catch { /* ignore parse errors — don't block save on unexpected format */ }
+    }
+
     isSaving.current = true;
     try {
       const json = serializeBackup();

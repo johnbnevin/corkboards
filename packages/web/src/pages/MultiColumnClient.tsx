@@ -167,6 +167,7 @@ const FILTER_URL_ONLY = /^\s*(https?:\/\/\S+\s*)+$/i;
 const FILTER_MEDIA_URL = /\.(jpg|jpeg|png|gif|webp|mp4|webm|mov|ogg|svg)\b/i;
 const FILTER_HTML_PATTERN = /<\/?[a-z][\s\S]*?>/i;
 const FILTER_MD_PATTERN = /(\[.+?\]\(.+?\)|^#{1,6}\s|^\*{1,3}.+?\*{1,3}$|^[-*+]\s|!\[|^>\s|```)/m;
+const AUTO_SAVE_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes after page load — prevents overwriting good backup with empty state
 
 // Check if a note contains video content (by kind or URL)
 function hasVideoContent(note: NostrEvent): boolean {
@@ -1037,7 +1038,7 @@ export function MultiColumnClient() {
   }, [addBookmark, removeBookmark]);
 
   // Nostr backup/restore
-  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
+  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, getCheckpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
 
   // Logout: visible step-by-step — autosave to :auto slot, wipe, reload
   const [logoutStep, setLogoutStep] = useState<string | null>(null);
@@ -1164,17 +1165,19 @@ export function MultiColumnClient() {
     if (!checkpoints.length) return;
     loginRestoreDone.current = true;
 
-    // Pick the best checkpoint
-    const best = checkpoints.reduce((a, b) => {
-      const aSaved = a.stats?.savedForLater ?? 0;
-      const bSaved = b.stats?.savedForLater ?? 0;
-      if (aSaved !== bSaved) return bSaved > aSaved ? b : a;
-      const aDismissed = a.stats?.dismissed ?? 0;
-      const bDismissed = b.stats?.dismissed ?? 0;
-      if (aDismissed !== bDismissed) return bDismissed > aDismissed ? b : a;
-      return b.timestamp > a.timestamp ? b : a;
-    });
+    // Prefer checkpoints that have at least some data; fall back to all if none have stats.
+    const withData = checkpoints.filter(cp =>
+      (cp.stats?.corkboards ?? 0) > 0 ||
+      (cp.stats?.savedForLater ?? 0) > 0 ||
+      (cp.stats?.dismissed ?? 0) > 0
+    );
+    // Always pick the newest — it's the user's most recent state.
+    const best = (withData.length > 0 ? withData : checkpoints)
+      .reduce((a, b) => b.timestamp > a.timestamp ? b : a);
+    // Skip restore if local backup is already at or ahead of this checkpoint.
+    if (lastBackupTs && lastBackupTs >= best.timestamp) return;
     loadCheckpointFn(best);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- lastBackupTs changes after loadCheckpointFn runs; including it would re-trigger the restore
   }, [backupCheckSettled, backupStatus, checkpoints, loadCheckpointFn]);
 
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
@@ -1221,7 +1224,6 @@ export function MultiColumnClient() {
   // a good cloud backup with empty/stale state after an unexpected page refresh.
   const pageLoadTime = useRef(Date.now());
   const initialLoginDoneRef = useRef(false);
-  const AUTO_SAVE_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes after page load
   useEffect(() => {
     if (!user || !backupCheckSettled) return;
 
@@ -1326,7 +1328,7 @@ export function MultiColumnClient() {
           idleCheckDoneRef.current = true; // only once per return
           // Silent background check — find newest checkpoint and auto-restore if ahead
           checkRemoteBackup(true).then(() => {
-            const cps = checkpoints;
+            const cps = getCheckpoints();
             if (!cps.length) return;
             let best: typeof cps[0] | null = null;
             let bestDismissed = dismissedCount;
@@ -1343,7 +1345,7 @@ export function MultiColumnClient() {
     };
     document.addEventListener('visibilitychange', onVisChange);
     return () => document.removeEventListener('visibilitychange', onVisChange);
-  }, [user, checkRemoteBackup, checkpoints, dismissedCount]);
+  }, [user, checkRemoteBackup, getCheckpoints, dismissedCount]);
 
   // Countdown timer for auto-restore
   useEffect(() => {
@@ -1407,7 +1409,7 @@ export function MultiColumnClient() {
   }, [canLoadNotes]);
 
   // Relay health — manual only, triggered from settings menu
-  const { relayHealth: _relayHealth, checkAllRelays, activeRelays: _activeRelays } = useRelayHealth();
+  const { relayHealth: _relayHealth, checkAllRelays: _checkAllRelays, activeRelays: _activeRelays } = useRelayHealth();
 
   // After page load settles, retry any referenced notes that failed on first attempt
   useRetryFailedNotes();
@@ -3467,7 +3469,7 @@ export function MultiColumnClient() {
       // Reposts of any note in the set
       if (note.kind === 6 || note.kind === 16) {
         let origId: string | undefined;
-        if (note.content?.startsWith('{')) { try { origId = JSON.parse(note.content).id; } catch {} }
+        if (note.content?.startsWith('{')) { try { origId = JSON.parse(note.content).id; } catch { /* not JSON */ } }
         if (!origId) origId = note.tags.find(t => t[0] === 'e')?.[1];
         if (origId && ids.has(origId)) ids.add(note.id);
       }

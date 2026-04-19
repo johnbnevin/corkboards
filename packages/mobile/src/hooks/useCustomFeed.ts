@@ -4,13 +4,14 @@
  *
  * Differences from web:
  * - Uses mobile NostrProvider instead of @nostrify/react
- * - RSS support is skipped (no web fetch proxy on mobile)
+ * - RSS fetched via absolute proxy URL (https://corkboards.me/rss-proxy.php)
  * - Uses @core/feedConstants and @core/rss for shared constants
  */
 import { useQuery } from '@tanstack/react-query';
 import { useNostr } from '../lib/NostrProvider';
 import { FEED_KINDS } from '@core/feedConstants';
 import { baseTimeWindow } from '@core/rss';
+import { fetchRssFeed, rssItemsToEvents, rssItemId } from '../lib/feedUtils';
 import type { NostrEvent } from '@nostrify/nostrify';
 
 export interface CustomFeedDef {
@@ -125,7 +126,7 @@ export function useCustomFeed({
         feed?.id,
         feed?.pubkeys,
         feed?.relays,
-        // RSS skipped on mobile
+        feed?.rssUrls,
         limit,
       ],
       queryFn: async () => {
@@ -180,9 +181,33 @@ export function useCustomFeed({
           }
         }
 
-        // RSS skipped on mobile — no web fetch proxy available
+        // Fetch RSS feeds via the corkboards.me proxy
+        const rssEvents: NostrEvent[] = [];
+        if (feed.rssUrls && feed.rssUrls.length > 0) {
+          const feedCount = feed.rssUrls.length;
+          const stillNeed = Math.max(0, limit - nostrEvents.length);
+          const perFeedLimit = stillNeed > 0 ? Math.max(3, Math.floor(stillNeed / feedCount)) : 0;
 
-        return nostrEvents.sort((a, b) => b.created_at - a.created_at);
+          const rssSeen = new Set(nostrEvents.map(e => e.id));
+          for (const feedUrl of feed.rssUrls) {
+            try {
+              const rssFeed = await fetchRssFeed(feedUrl, perFeedLimit);
+              if (!rssFeed) continue;
+              for (const item of rssFeed.items) {
+                const id = rssItemId(item.link || item.title, feedUrl);
+                if (!rssSeen.has(id)) {
+                  rssSeen.add(id);
+                  rssEvents.push(...rssItemsToEvents([item], rssFeed.title, rssFeed.icon, feedUrl));
+                }
+              }
+            } catch (err) {
+              if (__DEV__) console.warn('[customFeed] RSS failed for', feedUrl, err instanceof Error ? err.message : err);
+            }
+          }
+        }
+
+        const allEvents = [...nostrEvents, ...rssEvents];
+        return allEvents.sort((a, b) => b.created_at - a.created_at);
       },
       enabled: enabled && !!feed,
     }),

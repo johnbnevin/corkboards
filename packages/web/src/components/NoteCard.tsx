@@ -504,7 +504,7 @@ export const NoteCard = React.memo(function NoteCard({
   mediaFilterActive = false,
   onReactionPublished,
   engagement,
-  isEngagementStub,
+  isEngagementStub: _isEngagementStub,
   onDismissThread,
 }: NoteCardProps) {
   // When a media filter is active, override blurMedia to show all media

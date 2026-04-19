@@ -19,6 +19,8 @@ const REARRANGE_LOCKOUT_MS = 700;
 const INITIAL_RENDER_PER_COL = 8;
 /** How many notes per column to add when scrolling near the bottom */
 const RENDER_INCREMENT_PER_COL = 8;
+/** Hard cap on DOM notes per column — prevents unbounded memory growth on long sessions */
+const MAX_RENDER_PER_COL = 100;
 
 // ─── Discover loading experience ─────────────────────────────────────────────
 
@@ -217,24 +219,25 @@ export const FeedGrid = React.memo(function FeedGrid({
 
   // Expand render window when user scrolls near the bottom
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const canLoadMore = renderLimit < maxColLength && renderLimit < MAX_RENDER_PER_COL;
   useEffect(() => {
-    if (renderLimit >= maxColLength) return; // already showing everything
+    if (!canLoadMore) return;
     const sentinel = sentinelRef.current;
     if (!sentinel) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting) {
-          setRenderLimit(prev => Math.min(prev + RENDER_INCREMENT_PER_COL, maxColLength));
+          setRenderLimit(prev => Math.min(prev + RENDER_INCREMENT_PER_COL, maxColLength, MAX_RENDER_PER_COL));
         }
       },
       { rootMargin: '600px' },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [renderLimit, maxColLength]);
+  }, [canLoadMore, renderLimit, maxColLength]);
 
-  // Slice columns to only render up to renderLimit per column
-  const visibleColumns = columns.map(col => col.slice(0, renderLimit));
+  // Slice columns to only render up to renderLimit (capped at MAX_RENDER_PER_COL) per column
+  const visibleColumns = columns.map(col => col.slice(0, Math.min(renderLimit, MAX_RENDER_PER_COL)));
 
   // Detect when notes rearrange (new notes prepended / order changes) and briefly
   // suppress pointer events so the user doesn't misclick during layout shift.
@@ -428,7 +431,7 @@ export const FeedGrid = React.memo(function FeedGrid({
             ))}
           </div>
           {/* Sentinel for incremental rendering — triggers loading more notes on scroll */}
-          {renderLimit < maxColLength && <div ref={sentinelRef} style={{ height: 1 }} />}
+          {canLoadMore && <div ref={sentinelRef} style={{ height: 1 }} />}
           {/* Discover "load more" link — regular discover only */}
           {activeTab === 'discover' && !isOnboarding && hasMoreDiscover && (
             <div className="flex justify-center py-8">

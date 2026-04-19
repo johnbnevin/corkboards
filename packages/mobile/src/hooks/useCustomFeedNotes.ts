@@ -20,6 +20,7 @@ import {
   isCustomFeedCacheLoaded,
 } from './useCustomFeedNotesCache';
 import { FEED_KINDS } from '@core/feedConstants';
+import { fetchRssFeed, rssItemsToEvents, rssItemId } from '../lib/feedUtils';
 import { useEffect, useRef, useCallback, useMemo } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 
@@ -146,10 +147,31 @@ export function useCustomFeedNotes({
       await mergeCustomFeedNotes(feed.id, events);
       hoursLoadedRef.current = multiplier;
 
+      // Fetch RSS feeds and merge
+      const rssEvents: NostrEvent[] = [];
+      if (feed.rssUrls && feed.rssUrls.length > 0) {
+        const rssSeen = new Set(events.map(e => e.id));
+        for (const feedUrl of feed.rssUrls) {
+          try {
+            const rssFeed = await fetchRssFeed(feedUrl, 20);
+            if (!rssFeed) continue;
+            for (const item of rssFeed.items) {
+              const id = rssItemId(item.link || item.title, feedUrl);
+              if (!rssSeen.has(id)) {
+                rssSeen.add(id);
+                rssEvents.push(...rssItemsToEvents([item], rssFeed.title, rssFeed.icon, feedUrl));
+              }
+            }
+          } catch (err) {
+            if (__DEV__) console.warn('[customFeedNotes] RSS failed for', feedUrl, err instanceof Error ? err.message : err);
+          }
+        }
+      }
+
       // Merge with any existing cached data already in React Query
       const existing = (queryClient.getQueryData(queryKey) as NostrEvent[] | undefined) ?? [];
       const existingIds = new Set(existing.map(e => e.id));
-      const fresh = events.filter(e => !existingIds.has(e.id));
+      const fresh = [...events, ...rssEvents].filter(e => !existingIds.has(e.id));
       return [...existing, ...fresh].sort((a, b) => b.created_at - a.created_at);
     },
     enabled: isActive && !!feed && feed.pubkeys.length > 0,

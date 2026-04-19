@@ -1,16 +1,58 @@
 /**
- * Mobile feed utilities: batch author fetching and deduplication.
+ * Mobile feed utilities: batch author fetching, RSS helpers, and deduplication.
  *
  * Ported from packages/web/src/lib/feedUtils.ts.
- * Skips RSS-related functions (not used on mobile).
  */
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { useNostr } from './NostrProvider';
 import { FEED_KINDS } from '@core/feedConstants';
 import { baseTimeWindow } from '@core/rss';
+import type { RssFeedResult } from '@core/rss';
 
 // Re-export core constants for convenience
 export { FEED_PAGE_SIZE_MOBILE, FEED_LOAD_MORE_COUNT, AUTHOR_BATCH_SIZE, MAX_PARALLEL_BATCHES, FEED_KINDS } from '@core/feedConstants';
+export { rssItemId, rssItemsToEvents } from '@core/rss';
+
+// RSS proxy — absolute URL so it works from the mobile app (no relative paths)
+const RSS_PROXY = 'https://corkboards.me/rss-proxy.php';
+
+// ─── RSS fetch ──────────────────────────────────────────────────────────────
+
+/**
+ * Fetch and parse an RSS feed via the corkboards.me proxy.
+ * Uses standard fetch (available in React Native).
+ */
+export async function fetchRssFeed(feedUrl: string, maxItems = 20): Promise<RssFeedResult | null> {
+  let feedDomain = '';
+  try { feedDomain = new URL(feedUrl).hostname.replace('www.', ''); } catch { /* ignore */ }
+  const feedIcon = `https://icons.duckduckgo.com/ip3/${feedDomain}.ico`;
+
+  try {
+    const url = `${RSS_PROXY}?url=${encodeURIComponent(feedUrl)}&max=${maxItems}`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    const text = await response.text();
+    let data: Record<string, unknown>;
+    try { data = JSON.parse(text); } catch {
+      if (__DEV__) console.warn('[rss] Non-JSON response for', feedUrl);
+      return null;
+    }
+    if (response.ok) {
+      if (!data.error && (data.items as unknown[])?.length > 0) {
+        if (__DEV__) console.log('[rss] Loaded', (data.items as unknown[]).length, 'items from', feedUrl);
+        return {
+          title: (data.title as string) || feedDomain,
+          icon: (data.icon as string) || feedIcon,
+          items: data.items as RssFeedResult['items'],
+        };
+      }
+      if (data.error && __DEV__) console.warn('[rss] Error for', feedUrl, data.error);
+    }
+  } catch (err) {
+    if (__DEV__) console.warn('[rss] Failed for', feedUrl, err instanceof Error ? err.message : err);
+  }
+
+  return null;
+}
 
 // Max authors per relay query to avoid silent truncation by relays
 const MAX_AUTHORS_PER_QUERY = 500;

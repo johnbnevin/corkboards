@@ -19,7 +19,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import type { NSecSigner } from '@nostrify/nostrify';
 import { mobileStorage, isStorageHealthy } from '../storage/MmkvStorage';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '../lib/storageKeys';
-import { FALLBACK_RELAYS, APP_CONFIG_KEY, getUserRelays, getRelayCache, createRelay } from '../lib/NostrProvider';
+import { FALLBACK_RELAYS, APP_CONFIG_KEY, getUserRelays, getRelayCache, createRelayFresh } from '../lib/NostrProvider';
 import {
   generateAesKey, importAesKey,
   aesEncrypt, aesDecrypt, rawKeyToHex, hexToRawKey,
@@ -374,7 +374,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       const relays = getPublishRelays(pubkey);
       let published = 0;
       for (const url of relays) {
-        const relay = createRelay(url, { backoff: false });
+        const relay = createRelayFresh(url, { backoff: false });
         try {
           await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
           log(`  ${url} ← manifest OK`);
@@ -536,7 +536,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
       const relays = getPublishRelays(pubkey);
       for (const url of relays) {
-        const relay = createRelay(url, { backoff: false });
+        const relay = createRelayFresh(url, { backoff: false });
         try { await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) }); }
         catch { /* continue */ }
         finally { try { relay.close(); } catch { /* */ } }
@@ -604,7 +604,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
     for (let i = 0; i < relays.length; i += 3) {
       const batch = relays.slice(i, i + 3);
       await Promise.allSettled(batch.map(async url => {
-        const relay = createRelay(url, { backoff: false });
+        const relay = createRelayFresh(url, { backoff: false });
         try {
           const events = await relay.query(
             [{ kinds: [30078], authors: [pubkey], limit: 5 }],

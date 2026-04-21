@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNostr } from '@nostrify/react'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getUserRelays, FALLBACK_RELAYS, createRelay } from '@/components/NostrProvider'
+import { getUserRelays, FALLBACK_RELAYS, createRelayFresh } from '@/components/NostrProvider'
 import { idbSetSync } from '@/lib/idb'
 import { STORAGE_KEYS } from '@/lib/storageKeys'
 import type { NostrEvent } from '@nostrify/nostrify'
@@ -58,7 +58,7 @@ export function usePinnedNotes() {
       // Query all write relays in parallel, collect all responses
       const results = await Promise.allSettled(
         writeRelays.map(async (relayUrl) => {
-          const relay = createRelay(normalizeRelay(relayUrl), { backoff: false })
+          const relay = createRelayFresh(normalizeRelay(relayUrl), { backoff: false })
           try {
             const events = await relay.query(
               [{ kinds: [10001], authors: [user.pubkey], limit: 1 }],
@@ -165,7 +165,7 @@ export function usePinnedNotes() {
         if (hinted.length > 0) {
           await Promise.allSettled(
             hinted.map(async id => {
-              const relay = createRelay(normalizeRelay(hints[id]), { backoff: false })
+              const relay = createRelayFresh(normalizeRelay(hints[id]), { backoff: false })
               try {
                 const evs = await relay.query([{ ids: [id] }], { signal: AbortSignal.timeout(5000) })
                 evs.forEach(ev => found.set(ev.id, ev))
@@ -190,7 +190,7 @@ export function usePinnedNotes() {
           const needIds = stillMissing.filter(id => !found.has(id))
           if (needIds.length === 0) break
           try {
-            const relay = createRelay(normalizeRelay(relayUrl), { backoff: false })
+            const relay = createRelayFresh(normalizeRelay(relayUrl), { backoff: false })
             try {
               const evs = await relay.query([{ ids: needIds }], { signal: AbortSignal.timeout(5000) })
               console.log(`[pinnedNotes] ${relayUrl} returned ${evs.length} events for ${needIds.length} missing ids`)
@@ -235,7 +235,7 @@ export function usePinnedNotes() {
     let published = 0
     await Promise.allSettled(
       relays.map(async (url) => {
-        const relay = createRelay(normalizeRelay(url), { backoff: false })
+        const relay = createRelayFresh(normalizeRelay(url), { backoff: false })
         try {
           await relay.event(event, { signal: AbortSignal.timeout(8000) })
           published++

@@ -224,6 +224,29 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
   return inner;
 }
 
+/**
+ * Create a fresh relay instance that is NOT stored in the shared cache.
+ * Use for one-shot queries where the relay will be closed immediately after use.
+ * Closing a cached relay poisons it for subsequent callers; this avoids that.
+ * Still rate-limited (same per-URL token bucket as cached relays).
+ */
+export function createRelayFresh(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
+  const inner = new NRelay1(url, opts);
+  const origQuery = inner.query.bind(inner);
+  const origEvent = inner.event.bind(inner);
+  inner.query = async (filters, qOpts) => {
+    await waitForRateLimit(url);
+    try { const r = await origQuery(filters, qOpts); recordRelaySuccess(url); return r; }
+    catch (e) { recordRelayFailure(url); throw e; }
+  };
+  inner.event = async (event, eOpts) => {
+    await waitForRateLimit(url);
+    try { await origEvent(event, eOpts); recordRelaySuccess(url); }
+    catch (e) { recordRelayFailure(url); throw e; }
+  };
+  return inner;
+}
+
 // ============================================================================
 // Pool factory
 // ============================================================================

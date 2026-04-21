@@ -175,6 +175,16 @@ export function createRelayDirect(url: string, opts?: ConstructorParameters<type
   return relay;
 }
 
+/**
+ * Create a fresh relay instance that is NOT stored in the shared cache.
+ * Use for one-shot queries where the relay will be closed immediately after use.
+ * Closing a cached relay poisons it for subsequent callers; this avoids that.
+ * Still rate-limited (same per-URL token bucket as cached relays).
+ */
+export function createRelayFresh(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
+  return new RateLimitedRelay(url, opts) as unknown as NRelay1;
+}
+
 /** Dummy relay returned when a URL is in backoff — fails fast without opening a WebSocket */
 class BlockedRelay implements NRelay {
   private url: string;

@@ -10,7 +10,8 @@ import './index.css';
 
 // When running inside Tauri, redirect console output to a log file so we can
 // diagnose production issues without a devtools window.
-if (isTauri) {
+if (isTauri && !('__tauriConsoleOverride' in window)) {
+  (window as unknown as Record<string, unknown>).__tauriConsoleOverride = true;
   clearTauriLog();
 
   const fmt = (args: unknown[]): string => {

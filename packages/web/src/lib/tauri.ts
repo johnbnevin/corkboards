@@ -5,8 +5,12 @@
  * All functions are no-ops when not running inside Tauri.
  */
 
-/** True when running inside the Tauri desktop app */
-export const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+/** True when running inside the Tauri desktop app.
+ * Checks both v1 (__TAURI__) and v2 (__TAURI_INTERNALS__) globals.
+ * withGlobalTauri:true in tauri.conf.json ensures __TAURI__ is set in v2 as well. */
+export const isTauri = typeof window !== 'undefined' && (
+  '__TAURI__' in window || '__TAURI_INTERNALS__' in window
+);
 
 /** Invoke a Tauri command. Returns null if not in Tauri. */
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {

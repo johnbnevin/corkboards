@@ -513,10 +513,12 @@ function createPool(): NPool {
         }
       }
 
-      const relayList = Array.from(routes.keys());
-      const tier = authors.length >= BULK_AUTHOR_THRESHOLD ? 'T1-bulk' : 'T2-targeted';
-      const filterDesc = filters.map(f => `kinds=${f.kinds?.join(',')} authors=${f.authors?.length ?? 0} ids=${f.ids?.length ?? 0}`).join(' | ');
-      debugLog(`reqRouter [${tier}] authors=${authors.length} → ${routes.size} relays: ${relayList.join(', ')} | filters: ${filterDesc}`);
+      if (DEBUG) {
+        const relayList = Array.from(routes.keys());
+        const tier = authors.length >= BULK_AUTHOR_THRESHOLD ? 'T1-bulk' : 'T2-targeted';
+        const filterDesc = filters.map(f => `kinds=${f.kinds?.join(',')} authors=${f.authors?.length ?? 0} ids=${f.ids?.length ?? 0}`).join(' | ');
+        debugLog(`reqRouter [${tier}] authors=${authors.length} → ${routes.size} relays: ${relayList.join(', ')} | filters: ${filterDesc}`);
+      }
       return routes;
     },
 
@@ -539,7 +541,7 @@ function createPool(): NPool {
         FALLBACK_RELAYS.forEach(relay => relaysToPublish.add(normalizeRelayUrl(relay)));
       }
 
-      debugLog(`eventRouter: kind=${event.kind} → ${relaysToPublish.size} relays: ${Array.from(relaysToPublish).join(', ')}`);
+      if (DEBUG) debugLog(`eventRouter: kind=${event.kind} → ${relaysToPublish.size} relays: ${Array.from(relaysToPublish).join(', ')}`);
       return Array.from(relaysToPublish);
     },
   });

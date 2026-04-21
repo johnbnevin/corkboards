@@ -8,6 +8,30 @@ import type { NostrEvent, NostrMetadata } from '@nostrify/nostrify';
 import { useNostr, FALLBACK_RELAYS } from '../lib/NostrProvider';
 import { getCachedProfile, cacheProfile } from '../lib/cacheStore';
 
+// Cap simultaneous profile network fetches to avoid overwhelming relays/device.
+const MAX_CONCURRENT_AUTHOR_FETCHES = 6;
+let _activeFetches = 0;
+const _fetchQueue: Array<() => void> = [];
+
+function withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
+  if (_activeFetches < MAX_CONCURRENT_AUTHOR_FETCHES) {
+    _activeFetches++;
+    return fn().finally(() => {
+      _activeFetches--;
+      _fetchQueue.shift()?.();
+    });
+  }
+  return new Promise<T>((resolve, reject) => {
+    _fetchQueue.push(() => {
+      _activeFetches++;
+      fn().then(resolve, reject).finally(() => {
+        _activeFetches--;
+        _fetchQueue.shift()?.();
+      });
+    });
+  });
+}
+
 interface AuthorResult {
   event?: NostrEvent;
   metadata?: NostrMetadata;
@@ -116,7 +140,7 @@ export function useAuthor(pubkey: string | undefined) {
         };
       }
 
-      return fetchAuthorFromNetwork(pubkey, signal, nostr as NostrPool);
+      return withConcurrencyLimit(() => fetchAuthorFromNetwork(pubkey, signal, nostr as NostrPool));
     },
     staleTime: STALE_TIME,
     gcTime: CACHE_MAX_AGE,

@@ -6,6 +6,32 @@ import { FALLBACK_RELAYS } from '@/components/NostrProvider';
 import { getBackupRelaysUsed } from '@/hooks/useNostrBackup';
 import { debugWarn } from '@/lib/debug';
 
+// Cap simultaneous profile network fetches to avoid opening too many WebSocket
+// connections at once (WebKit crashes above ~50 concurrent WS connections).
+// With up to 3 relays per profile query, 6 concurrent fetches = max 18 connections.
+const MAX_CONCURRENT_AUTHOR_FETCHES = 6;
+let _activeFetches = 0;
+const _fetchQueue: Array<() => void> = [];
+
+function withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
+  if (_activeFetches < MAX_CONCURRENT_AUTHOR_FETCHES) {
+    _activeFetches++;
+    return fn().finally(() => {
+      _activeFetches--;
+      _fetchQueue.shift()?.();
+    });
+  }
+  return new Promise<T>((resolve, reject) => {
+    _fetchQueue.push(() => {
+      _activeFetches++;
+      fn().then(resolve, reject).finally(() => {
+        _activeFetches--;
+        _fetchQueue.shift()?.();
+      });
+    });
+  });
+}
+
 interface NostrPool {
   query: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]>;
   relay: (url: string) => { query: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]> };
@@ -133,7 +159,7 @@ export function useAuthor(pubkey: string | undefined, enabled = true) {
         };
       }
 
-      return fetchAuthorFromNetwork(pubkey, signal, nostr as NostrPool);
+      return withConcurrencyLimit(() => fetchAuthorFromNetwork(pubkey, signal, nostr as NostrPool));
     },
     staleTime: STALE_TIME,
     gcTime: CACHE_MAX_AGE,

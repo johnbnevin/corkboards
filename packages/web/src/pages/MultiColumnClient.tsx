@@ -3132,7 +3132,7 @@ export function MultiColumnClient() {
   // This populates React Query cache so NoteCards render avatars instantly.
   const { prefetchFromNotes } = useBulkAuthors();
   const prefetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  
+
   useEffect(() => {
     // Debounce prefetch to avoid rapid-fire calls when notes change
     if (prefetchTimeoutRef.current) {
@@ -3148,13 +3148,28 @@ export function MultiColumnClient() {
         });
       }
     }, 50); // 50ms debounce — fire fast so profiles arrive before individual useAuthor calls
-    
+
     return () => {
       if (prefetchTimeoutRef.current) {
         clearTimeout(prefetchTimeoutRef.current);
       }
     };
   }, [deduplicatedNotes, feedLimit, prefetchFromNotes, canLoadNotes]);
+
+  // ── Background prefetch for All Follows notes ────────────────────────────────
+  // Eagerly populate the React Query author cache when follow notes first load,
+  // even while the user is on a different tab. This prevents 60+ simultaneous
+  // useAuthor network fetches (and potential WebKit crash) when they switch to
+  // the All Follows tab and all NoteCards render at once.
+  const allFollowsPrefetchKeyRef = useRef('');
+  useEffect(() => {
+    if (!canLoadNotes || !allFollowsNotes || allFollowsNotes.length === 0) return;
+    // Fingerprint on the first 30 note IDs to detect when the feed changes
+    const key = allFollowsNotes.slice(0, 30).map(n => n.id).join(',');
+    if (key === allFollowsPrefetchKeyRef.current) return;
+    allFollowsPrefetchKeyRef.current = key;
+    prefetchFromNotes(allFollowsNotes.slice(0, feedLimit)).catch(() => {});
+  }, [allFollowsNotes, feedLimit, prefetchFromNotes, canLoadNotes]);
 
   // ── Lazy engagement fetch: query reactions/reposts/zaps for visible notes ──
   // Fires once after feed loads, single batched query, respects rate limiting.

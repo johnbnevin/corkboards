@@ -242,11 +242,14 @@ export function useDiscover(follows: string[] | undefined, enabled: boolean = tr
       const finalNotes = Array.from(seenNotes.values())
       updateState(finalNotes, false)
 
-      // Update cache — store current state for fast reload
-      setState(prev => {
-        discoverCache.set(cacheKey, { ...prev, isLoading: false, lastUpdated: Date.now() })
-        return prev
-      })
+      // Only cache if we found results — don't cache empty state from relay timeouts
+      // or poisoned connections, which would block discovery for 5 minutes.
+      if (finalNotes.length > 0) {
+        setState(prev => {
+          discoverCache.set(cacheKey, { ...prev, isLoading: false, lastUpdated: Date.now() })
+          return prev
+        })
+      }
 
     } catch (err) {
       console.error('Discovery error:', err)

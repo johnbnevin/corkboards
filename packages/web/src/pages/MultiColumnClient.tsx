@@ -91,7 +91,7 @@ import { downloadSettingsBackup, shouldPromptBackupDownload, restoreFromBackupFi
 import { FEED_KINDS } from '@/lib/feedUtils';
 // NostrProvider relay utilities used by components but no longer needed in this file
 import { getCacheStatsForPubkeys, clearNotesCache } from '@/lib/notesCache';
-import { clearRelayCache } from '@/components/NostrProvider';
+import { clearRelayCache, getUserRelays } from '@/components/NostrProvider';
 import { clearMemCache as clearProfileMemCache, evictCachedProfile } from '@/lib/cacheStore';
 import { useFeedLimit } from '@/hooks/useFeedLimit';
 import { useFeedPagination } from '@/hooks/useFeedPagination';
@@ -1040,6 +1040,16 @@ export function MultiColumnClient() {
   // Nostr backup/restore
   const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, getCheckpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
 
+  // Startup diagnostic log — emits once per user session
+  useEffect(() => {
+    if (!user?.pubkey) {
+      debugLog(`[startup] No user — showing login screen`);
+      return;
+    }
+    const { read, write } = getUserRelays();
+    debugLog(`[startup] user=${user.pubkey.slice(0, 8)} readRelays=${read.length}(${read.join(',')}) writeRelays=${write.length}(${write.join(',')})`);
+  }, [user?.pubkey]);
+
   // Logout: visible step-by-step — autosave to :auto slot, wipe, reload
   const [logoutStep, setLogoutStep] = useState<string | null>(null);
   const [logoutLog, setLogoutLog] = useState<string[]>([]);
@@ -1896,12 +1906,17 @@ export function MultiColumnClient() {
         }
       ], { signal });
 
-      if (events.length === 0) return [];
+      if (events.length === 0) {
+        debugLog('[contacts] No kind-3 events returned — zero contacts or relay miss');
+        return [];
+      }
 
       // Kind 3 is replaceable — use the most recent event
       const contactEvent = events.sort((a, b) => b.created_at - a.created_at)[0];
       const contactTags = contactEvent.tags.filter(tag => tag[0] === 'p');
-      return contactTags.map(tag => tag[1]); // Extract pubkeys
+      const pubkeys = contactTags.map(tag => tag[1]);
+      debugLog(`[contacts] Loaded ${pubkeys.length} contacts from kind-3 (created_at=${contactEvent.created_at})`);
+      return pubkeys;
     },
     enabled: !!user?.pubkey && canLoadNotes,
     retry: 3,
@@ -2229,8 +2244,14 @@ export function MultiColumnClient() {
 
   // Derive all-follows notes from cache
   const allFollowsNotes = followNotesCache;
-  
+
   const isLoadingAllFollows = isLoadingFollowCache || isLoadingContacts;
+
+  // Log note/contact counts when feed data settles
+  useEffect(() => {
+    if (isLoadingAllFollows) return;
+    debugLog(`[feed] contacts=${contacts?.length ?? 0} followCache=${followNotesCache?.length ?? 0} pinnedIds=${pinnedIds.length} pinnedNotes=${pinnedNoteEvents?.length ?? 0} pinnedStatus=${pinnedNotesStatus}`);
+  }, [isLoadingAllFollows, contacts, followNotesCache, pinnedIds, pinnedNoteEvents, pinnedNotesStatus]);
   
   // Reset extra notes when user changes (extraUserNotes state is defined earlier in the file)
   useEffect(() => {

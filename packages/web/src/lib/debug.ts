@@ -1,5 +1,6 @@
-// Debug utility - only active in dev mode or when VITE_DEBUG=true
-const DEBUG = import.meta.env.DEV || import.meta.env.VITE_DEBUG === 'true';
+// Debug utility - active in dev mode, when VITE_DEBUG=true, or inside Tauri desktop app
+import { isTauri } from '@/lib/tauri';
+const DEBUG = import.meta.env.DEV || import.meta.env.VITE_DEBUG === 'true' || isTauri;
 
 export function debugLog(...args: unknown[]) {
   if (DEBUG) {

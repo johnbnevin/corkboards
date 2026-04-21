@@ -16,6 +16,42 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return tauriInvoke<T>(cmd, args);
 }
 
+// ─── File Logger ─────────────────────────────────────────────────────────────
+
+/** Queued log messages — flushed in a batch every 50ms to reduce IPC overhead */
+const _logQueue: string[] = [];
+let _logFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushLogQueue(): void {
+  const batch = _logQueue.splice(0);
+  if (batch.length === 0) return;
+  invoke('write_log', { message: batch.join('\n') }).catch(() => {});
+}
+
+/**
+ * Write a message to ~/.local/share/me.corkboards.desktop/debug.log.
+ * Batches writes every 50ms so console.log spam doesn't flood IPC.
+ * No-op when not running inside Tauri.
+ */
+export function tauriLog(message: string): void {
+  if (!isTauri) return;
+  _logQueue.push(message);
+  if (!_logFlushTimer) {
+    _logFlushTimer = setTimeout(() => {
+      _logFlushTimer = null;
+      flushLogQueue();
+    }, 50);
+  }
+}
+
+/**
+ * Clear the log file and write a fresh header.
+ * Called on app startup so each session starts clean.
+ */
+export async function clearTauriLog(): Promise<void> {
+  await invoke('clear_log');
+}
+
 // ─── OS Keychain ────────────────────────────────────────────────────────────
 
 /** Store a secret in the OS keychain. */

@@ -53,6 +53,7 @@ export function usePinnedNotes() {
 
       const userRelays = getUserRelays()
       const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
+      console.log(`[pinnedNotes] Step 1: querying ${writeRelays.length} write relays for kind 10001 — pubkey=${user.pubkey.slice(0, 8)} relays=${writeRelays.join(', ')}`)
 
       // Query all write relays in parallel, collect all responses
       const results = await Promise.allSettled(
@@ -63,12 +64,20 @@ export function usePinnedNotes() {
               [{ kinds: [10001], authors: [user.pubkey], limit: 1 }],
               { signal: AbortSignal.timeout(8000) }
             )
+            console.log(`[pinnedNotes] ${relayUrl} → ${events.length} kind-10001 events`)
             return events.filter(ev => ev.kind === 10001)
+          } catch (e) {
+            console.warn(`[pinnedNotes] ${relayUrl} failed:`, e)
+            throw e
           } finally {
             try { relay.close() } catch { /* */ }
           }
         })
       )
+
+      const fulfilled = results.filter(r => r.status === 'fulfilled').length
+      const rejected = results.filter(r => r.status === 'rejected').length
+      console.log(`[pinnedNotes] Step 1 done: ${fulfilled} relays OK, ${rejected} relays failed`)
 
       // Pick the newest kind 10001 event across all relays
       let best: NostrEvent | null = null
@@ -79,7 +88,10 @@ export function usePinnedNotes() {
         }
       }
 
-      if (!best) return { ids: [], status: 'no-list', relayHints: {} }
+      if (!best) {
+        console.log('[pinnedNotes] Step 1 result: no kind 10001 found on any relay')
+        return { ids: [], status: 'no-list', relayHints: {} }
+      }
 
       const eTags = best.tags.filter(t => t[0] === 'e' && t[1])
       const ids = eTags.map(t => t[1])
@@ -89,6 +101,7 @@ export function usePinnedNotes() {
         if (t[2]) relayHints[t[1]] = t[2]
       }
 
+      console.log(`[pinnedNotes] Step 1 result: ${ids.length} pinned IDs from event created_at=${best.created_at} hints=${Object.keys(relayHints).length}`)
       if (ids.length === 0) return { ids: [], status: 'none', relayHints: {} }
       return { ids, status: 'found', relayHints }
     },
@@ -101,6 +114,7 @@ export function usePinnedNotes() {
   // contaminated cache from persisting across reloads.
   useEffect(() => {
     if (!pinListResult) return
+    console.log(`[pinnedNotes] pinListResult: status=${pinListResult.status} ids=${pinListResult.ids.length}`)
     if (pinListResult.ids.length > 0) {
       console.log(`[pinnedNotes] Relay returned ${pinListResult.ids.length} pinned IDs`)
       persistPendingRef.current = true
@@ -124,6 +138,7 @@ export function usePinnedNotes() {
     queryFn: async () => {
       if (pinnedIds.length === 0) return []
 
+      console.log(`[pinnedNotes] Step 2: fetching ${pinnedIds.length} pinned note events — ids=${pinnedIds.map(id => id.slice(0, 8)).join(',')}`)
       const found = new Map<string, NostrEvent>()
 
       // Primary: NPool routes to outbox relays + fallbacks in parallel
@@ -133,7 +148,10 @@ export function usePinnedNotes() {
           { signal: AbortSignal.timeout(10000) }
         )
         events.forEach(ev => found.set(ev.id, ev))
-      } catch { /* pool failed — fall through to hint relays */ }
+        console.log(`[pinnedNotes] NPool returned ${events.length} events, ${pinnedIds.length - found.size} still missing`)
+      } catch (e) {
+        console.warn('[pinnedNotes] NPool query failed:', e)
+      }
 
       // Fallback 1: for notes still missing, try relay hints embedded in the pin list
       const missing = pinnedIds.filter(id => !found.has(id))
@@ -143,6 +161,7 @@ export function usePinnedNotes() {
         )
         const hints = cached?.relayHints ?? {}
         const hinted = missing.filter(id => hints[id])
+        console.log(`[pinnedNotes] Fallback 1 (relay hints): ${missing.length} missing, ${hinted.length} have hints`)
         if (hinted.length > 0) {
           await Promise.allSettled(
             hinted.map(async id => {
@@ -150,10 +169,13 @@ export function usePinnedNotes() {
               try {
                 const evs = await relay.query([{ ids: [id] }], { signal: AbortSignal.timeout(5000) })
                 evs.forEach(ev => found.set(ev.id, ev))
-              } catch { /* skip */ }
+              } catch (e) {
+                console.warn(`[pinnedNotes] Hint relay ${hints[id]} failed for ${id.slice(0, 8)}:`, e)
+              }
               finally { try { relay.close() } catch { /* */ } }
             })
           )
+          console.log(`[pinnedNotes] After hint relays: found=${found.size}/${pinnedIds.length}`)
         }
       }
 
@@ -163,6 +185,7 @@ export function usePinnedNotes() {
       if (stillMissing.length > 0) {
         const userRelays = getUserRelays()
         const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
+        console.log(`[pinnedNotes] Fallback 2 (write relays): ${stillMissing.length} still missing, trying ${writeRelays.length} write relays`)
         for (const relayUrl of writeRelays) {
           const needIds = stillMissing.filter(id => !found.has(id))
           if (needIds.length === 0) break
@@ -170,15 +193,20 @@ export function usePinnedNotes() {
             const relay = createRelay(normalizeRelay(relayUrl), { backoff: false })
             try {
               const evs = await relay.query([{ ids: needIds }], { signal: AbortSignal.timeout(5000) })
+              console.log(`[pinnedNotes] ${relayUrl} returned ${evs.length} events for ${needIds.length} missing ids`)
               evs.forEach(ev => found.set(ev.id, ev))
             } finally {
               try { relay.close() } catch { /* */ }
             }
-          } catch { /* try next */ }
+          } catch (e) {
+            console.warn(`[pinnedNotes] Write relay ${relayUrl} failed:`, e)
+          }
         }
       }
 
-      return pinnedIds.map(id => found.get(id)).filter((n): n is NostrEvent => !!n)
+      const final = pinnedIds.map(id => found.get(id)).filter((n): n is NostrEvent => !!n)
+      console.log(`[pinnedNotes] Step 2 done: ${final.length}/${pinnedIds.length} pinned notes resolved`)
+      return final
     },
     enabled: pinnedIds.length > 0,
     staleTime: 5 * 60 * 1000,
@@ -192,6 +220,10 @@ export function usePinnedNotes() {
   const publishPinList = useCallback(async (newIds: string[]) => {
     if (!user) return
 
+    const userRelays = getUserRelays()
+    const relays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
+    console.log(`[pinnedNotes] publishPinList: ${newIds.length} IDs → ${relays.length} write relays: ${relays.join(', ')}`)
+
     const tags = newIds.map(id => ['e', id])
     const event = await user.signer.signEvent({
       kind: 10001,
@@ -200,8 +232,6 @@ export function usePinnedNotes() {
       created_at: Math.floor(Date.now() / 1000),
     })
 
-    const userRelays = getUserRelays()
-    const relays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
     let published = 0
     await Promise.allSettled(
       relays.map(async (url) => {
@@ -209,6 +239,7 @@ export function usePinnedNotes() {
         try {
           await relay.event(event, { signal: AbortSignal.timeout(8000) })
           published++
+          console.log(`[pinnedNotes] ${url} accepted pin list`)
         } catch (err) {
           console.warn(`[pinnedNotes] ${url} rejected:`, err)
         } finally {

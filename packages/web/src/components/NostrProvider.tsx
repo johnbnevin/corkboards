@@ -4,6 +4,7 @@ import type { NRelay, NostrRelayEVENT, NostrRelayEOSE, NostrRelayCLOSED } from '
 import { NostrContext } from '@nostrify/react';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
+import { isTauri } from '@/lib/tauri';
 // Re-exported for backwards compatibility — canonical source is @/lib/relayConstants
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
@@ -16,8 +17,8 @@ interface NostrProviderProps {
 const RELAY_CACHE_KEY = 'corkboard:relay-cache';
 const APP_CONFIG_KEY = 'corkboard:app-config';
 
-// Debug flag - set to false in production
-const DEBUG = false;
+// Debug flag — always on in Tauri (logs go to file, not browser console)
+const DEBUG = import.meta.env.DEV || isTauri;
 
 // ============================================================================
 // Per-relay rate limiter — max 3 requests per second per relay URL.
@@ -296,7 +297,7 @@ function loadRelayCache(): void {
         }
       }
       relayCache = newCache;
-      debugLog('Loaded relay cache:', relayCache.size, 'entries');
+      debugLog(`loadRelayCache: ${relayCache.size} pubkeys cached`);
     }
   } catch {
     // Ignore storage errors
@@ -512,7 +513,10 @@ function createPool(): NPool {
         }
       }
 
-      debugLog('reqRouter:', routes.size, 'relays (authors:', authors.length, ')');
+      const relayList = Array.from(routes.keys());
+      const tier = authors.length >= BULK_AUTHOR_THRESHOLD ? 'T1-bulk' : 'T2-targeted';
+      const filterDesc = filters.map(f => `kinds=${f.kinds?.join(',')} authors=${f.authors?.length ?? 0} ids=${f.ids?.length ?? 0}`).join(' | ');
+      debugLog(`reqRouter [${tier}] authors=${authors.length} → ${routes.size} relays: ${relayList.join(', ')} | filters: ${filterDesc}`);
       return routes;
     },
 
@@ -535,7 +539,7 @@ function createPool(): NPool {
         FALLBACK_RELAYS.forEach(relay => relaysToPublish.add(normalizeRelayUrl(relay)));
       }
 
-      debugLog('eventRouter:', relaysToPublish.size, 'relays');
+      debugLog(`eventRouter: kind=${event.kind} → ${relaysToPublish.size} relays: ${Array.from(relaysToPublish).join(', ')}`);
       return Array.from(relaysToPublish);
     },
   });

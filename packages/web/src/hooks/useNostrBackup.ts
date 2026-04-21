@@ -1126,6 +1126,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         ? Math.max(...dedupedCheckpoints.map(cp => cp.timestamp))
         : 0;
       const localIsCurrentOrNewer = localLastBackupTs > 0 && localLastBackupTs >= newestRemoteTs;
+      log(`checkRemoteBackup: hasLocalData=${!!hasLocalData} localTs=${localLastBackupTs} newestRemoteTs=${newestRemoteTs} localIsCurrentOrNewer=${localIsCurrentOrNewer} force=${force} checkpoints=${dedupedCheckpoints.length}`);
       if ((hasLocalData && localIsCurrentOrNewer) && !force) {
         log('Local data is current — auto-dismissing');
         _checkedPubkey = user.pubkey;

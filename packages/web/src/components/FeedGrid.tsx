@@ -12,6 +12,7 @@ import { NoteCard } from '@/components/NoteCard';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
+import { isTauri } from '@/lib/tauri';
 
 /** Brief pointer-events lockout after notes rearrange to prevent misclicks from layout shift */
 const REARRANGE_LOCKOUT_MS = 700;
@@ -19,8 +20,8 @@ const REARRANGE_LOCKOUT_MS = 700;
 const INITIAL_RENDER_PER_COL = 8;
 /** How many notes per column to add when scrolling near the bottom */
 const RENDER_INCREMENT_PER_COL = 8;
-/** Hard cap on DOM notes per column — prevents unbounded memory growth on long sessions */
-const MAX_RENDER_PER_COL = 1000;
+/** Hard cap on DOM notes per column — WebKit (Tauri/Linux) is slower than Chrome so uses a lower cap */
+const MAX_RENDER_PER_COL = isTauri ? 150 : 1000;
 
 // ─── Discover loading experience ─────────────────────────────────────────────
 

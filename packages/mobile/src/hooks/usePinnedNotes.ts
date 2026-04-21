@@ -121,7 +121,7 @@ export function usePinnedNotes() {
         events.forEach((ev: NostrEvent) => found.set(ev.id, ev));
       } catch { /* pool failed — fall through to hint relays */ }
 
-      // Fallback: for notes still missing, try the relay hints embedded in the pin list
+      // Fallback 1: for notes still missing, try relay hints embedded in the pin list
       const missing = pinnedIds.filter(id => !found.has(id));
       if (missing.length > 0) {
         const cached = queryClient.getQueryData<{ relayHints: Record<string, string> }>(
@@ -140,6 +140,27 @@ export function usePinnedNotes() {
               finally { try { relay.close(); } catch { /* */ } }
             })
           );
+        }
+      }
+
+      // Fallback 2: still missing — query write relays directly (covers cold-cache sessions
+      // where the NPool hasn't routed to the right relays yet)
+      const stillMissing = pinnedIds.filter(id => !found.has(id));
+      if (stillMissing.length > 0) {
+        const userRelays = getUserRelays();
+        const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS;
+        for (const relayUrl of writeRelays) {
+          const needIds = stillMissing.filter(id => !found.has(id));
+          if (needIds.length === 0) break;
+          try {
+            const relay = createRelay(normalizeRelay(relayUrl), { backoff: false });
+            try {
+              const evs = await relay.query([{ ids: needIds }], { signal: AbortSignal.timeout(5000) });
+              evs.forEach((ev: NostrEvent) => found.set(ev.id, ev));
+            } finally {
+              try { relay.close(); } catch { /* */ }
+            }
+          } catch { /* try next */ }
         }
       }
 

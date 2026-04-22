@@ -116,8 +116,6 @@ function getStoredCheckpoints(): RemoteCheckpoint[] {
 
 function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
   // Dedup by d-tag only — addressable events replace each other, keep newest per tag.
-  // Stats-based dedup was removed: it silently discarded valid checkpoints that
-  // happened to share the same corkboard/dismissed counts.
   const byDTag = new Map<string, RemoteCheckpoint>();
   for (const cp of cps) {
     const key = cp.dTag || cp.eventId;
@@ -126,8 +124,12 @@ function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
       byDTag.set(key, cp);
     }
   }
-  const deduped = [...byDTag.values()].sort((a, b) => b.timestamp - a.timestamp);
-  mobileStorage.setSync(CHECKPOINTS_KEY, JSON.stringify(deduped));
+  const sorted = [...byDTag.values()].sort((a, b) => b.timestamp - a.timestamp);
+  // Keep max 3 total: always preserve named (user-created) checkpoints
+  const named = sorted.filter(c => c.name);
+  const unnamed = sorted.filter(c => !c.name);
+  const trimmed = [...named, ...unnamed.slice(0, Math.max(0, 3 - named.length))].sort((a, b) => b.timestamp - a.timestamp);
+  mobileStorage.setSync(CHECKPOINTS_KEY, JSON.stringify(trimmed));
 }
 
 // Keys checked for change detection — subset of BACKED_UP_KEYS that
@@ -570,9 +572,10 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       } else {
         cps.unshift(autoEntry);
       }
-      const manualCps = cps.filter(c => !c.dTag?.includes(':auto'));
-      const autoCps = cps.filter(c => c.dTag?.includes(':auto')).slice(0, 5);
-      const merged = [...manualCps, ...autoCps].sort((a, b) => b.timestamp - a.timestamp);
+      const allCps = cps.sort((a, b) => b.timestamp - a.timestamp);
+      const namedCps = allCps.filter(c => c.name);
+      const unnamedCps = allCps.filter(c => !c.name);
+      const merged = [...namedCps, ...unnamedCps.slice(0, Math.max(0, 3 - namedCps.length))].sort((a, b) => b.timestamp - a.timestamp);
       setStoredCheckpoints(merged);
       setCheckpoints(merged);
 
@@ -661,14 +664,29 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       } catch { /* ignore malformed */ }
     }
 
-    // setStoredCheckpoints handles d-tag + stats dedup automatically
-    setStoredCheckpoints(cps);
+    // Safety: merge with stored checkpoints; don't let a thin manifest wipe a richer stored one.
+    const stored = getStoredCheckpoints();
+    const newestStored = stored.length > 0 ? stored[0] : null;
+    const safeCps = cps.filter(cp => {
+      if (!newestStored?.stats || !cp.stats) return true;
+      const isThinnerThanStored =
+        (newestStored.stats.savedForLater - cp.stats.savedForLater > 10
+          || newestStored.stats.dismissed - cp.stats.dismissed > 50);
+      return !isThinnerThanStored;
+    });
+    // Merge: prefer fresh events over stored, preserve named checkpoints
+    const merged = new Map<string, RemoteCheckpoint>();
+    for (const cp of [...safeCps, ...stored]) {
+      const key = cp.dTag || cp.eventId;
+      if (!merged.has(key) || cp.timestamp > merged.get(key)!.timestamp) merged.set(key, cp);
+    }
+    setStoredCheckpoints([...merged.values()]);
     const deduped = getStoredCheckpoints();
     setCheckpoints(deduped);
 
     setStatus('found');
     setMessage(`Found ${deduped.length} backup${deduped.length === 1 ? '' : 's'}`);
-    log(`Found ${deduped.length} backups (${cps.length} raw → ${deduped.length} after dedup)`);
+    log(`Found ${deduped.length} backups (${cps.length} raw, ${safeCps.length} passed safety check)`);
   }, [pubkey, signer, log]);
 
   const restoreBackup = useCallback(async (checkpoint: RemoteCheckpoint) => {

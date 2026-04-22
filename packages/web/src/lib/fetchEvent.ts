@@ -11,6 +11,7 @@
 import type { NostrEvent, NRelay1 } from '@nostrify/nostrify'
 import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS, createRelayFresh } from '@/components/NostrProvider'
 import { isSecureRelay } from '@core/nostrUtils'
+import { isTauri, tauriRelayQuery } from '@/lib/tauri'
 
 // Cap concurrent outbox event fetches — each fetchEventWithOutbox may open several
 // fresh WebSocket connections (phase-1 hints + phase-2 author relays). Without a cap,
@@ -83,6 +84,14 @@ export async function queryRelay(
   filter: { ids?: string[]; kinds?: number[]; '#e'?: string[]; authors?: string[]; '#d'?: string[]; limit?: number },
   timeoutMs = 2500,
 ): Promise<NostrEvent[]> {
+  // In Tauri: use native Rust WebSocket to bypass WebKitGTK's WebSocket implementation.
+  // WebKitGTK crashes with too many concurrent WebSocket connections on Linux.
+  if (isTauri) {
+    const result = await tauriRelayQuery(relayUrl, filter as Record<string, unknown>, timeoutMs);
+    if (result && !result.error) return result.events as NostrEvent[];
+    return [];
+  }
+
   const events: NostrEvent[] = []
   let relay: NRelay1 | undefined
   let timeout: ReturnType<typeof setTimeout> | undefined

@@ -3,6 +3,7 @@ import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-quer
 import { useNostr } from '@/hooks/useNostr';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { fetchEventWithOutbox } from '@/lib/fetchEvent';
+import { isTauri } from '@/lib/tauri';
 
 // Shared cache for parent notes (persists across hook instances)
 const parentNoteCache = new Map<string, NostrEvent>();
@@ -136,14 +137,16 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
     },
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
-    enabled: uniqueIds.length > 0,
+    enabled: !isTauri && uniqueIds.length > 0,
     placeholderData: keepPreviousData,
     retry: 2,
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
 
   // Second pass: retry failed IDs individually with full outbox discovery
+  // Disabled in Tauri: WebKitGTK crashes with too many concurrent WebSocket connections.
   useEffect(() => {
+    if (isTauri) return;
     if (secondPassScheduled.current) return;
     if (!query.data) return;
 

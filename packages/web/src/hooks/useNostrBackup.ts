@@ -767,10 +767,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
           : c
         );
       }
-      // Keep only last 5 autosaves, preserve any manual checkpoints
-      const manualCps = updatedCps.filter(c => !c.dTag?.includes(':auto'));
-      const autoCps = updatedCps.filter(c => c.dTag?.includes(':auto')).slice(0, 5);
-      const merged = [...manualCps, ...autoCps].sort((a, b) => b.timestamp - a.timestamp);
+      // Keep max 3 total: always preserve named (user-created) checkpoints, fill rest with most recent
+      const updatedSorted = updatedCps.sort((a, b) => b.timestamp - a.timestamp);
+      const namedCpsAuto = updatedSorted.filter(c => c.name);
+      const unnamedCpsAuto = updatedSorted.filter(c => !c.name);
+      const merged = [...namedCpsAuto, ...unnamedCpsAuto.slice(0, Math.max(0, 3 - namedCpsAuto.length))].sort((a, b) => b.timestamp - a.timestamp);
       setStoredCheckpoints(merged);
       refreshCheckpointsRef.current();
 
@@ -1001,78 +1002,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // Store the raw manifest event for later use
       manifestEventRef.current = bestManifestEvent;
 
-      // Parse all v4 manifest events to rebuild the checkpoint list from relay data.
-      // This ensures checkpoints survive logout/login and appear on other devices.
       type ManifestData = { v?: number; chunks?: number; timestamp?: number; keys?: string[]; relays?: string[]; corkboardNames?: string[]; encryption?: string; wrappedKey?: string; signerMethod?: string; blossomUrl?: string; blossomHash?: string; deviceId?: string; stats?: { corkboards: number; savedForLater: number; dismissed: number } };
-
-      const discoveredCheckpoints: RemoteCheckpoint[] = [];
-      for (const ev of manifestEvents) {
-        let m: ManifestData | null = null;
-        try {
-          m = JSON.parse(ev.content);
-        } catch {
-          // Not plaintext — try NIP-44 decrypt (same as scanOlderStates)
-          try {
-            const json = await Promise.race([
-              user.signer.nip44!.decrypt(user.pubkey, ev.content),
-              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), 3000)),
-            ]);
-            m = JSON.parse(json);
-          } catch { /* decrypt failed or timed out — skip */ }
-        }
-        if (m && m.blossomUrl && m.wrappedKey && m.signerMethod) {
-          const dTag = ev.tags.find(t => t[0] === 'd')?.[1] || '';
-          discoveredCheckpoints.push({
-            eventId: ev.id,
-            dTag,
-            timestamp: m.timestamp || ev.created_at,
-            blossomUrl: m.blossomUrl,
-            ...(m.blossomHash ? { blossomHash: m.blossomHash } : {}),
-            wrappedKey: m.wrappedKey,
-            signerMethod: (m.signerMethod as 'nip44' | 'nip04'),
-            stats: m.stats,
-            corkboardNames: m.corkboardNames,
-          });
-        }
-      }
-
-      // Dedup by d-tag: keep only the newest event per d-tag (addressable events replace each other)
-      const byDTag = new Map<string, RemoteCheckpoint>();
-      for (const cp of discoveredCheckpoints) {
-        const key = cp.dTag || cp.eventId;
-        const existing = byDTag.get(key);
-        if (!existing || cp.timestamp > existing.timestamp) {
-          byDTag.set(key, cp);
-        }
-      }
-      const dedupedCheckpoints = [...byDTag.values()];
-
-      // Merge with locally stored checkpoints (preserve user-given names)
-      if (dedupedCheckpoints.length > 0) {
-        const existing = getStoredCheckpoints();
-        const nameMap = new Map(existing.filter(c => c.name).map(c => [c.eventId, c.name!]));
-        // Also check names by dTag for renamed autosaves that got a new eventId
-        for (const c of existing) { if (c.name && c.dTag) nameMap.set(c.dTag, c.name); }
-        // Deduplicate by eventId, prefer discovered (fresh from relay)
-        const merged = new Map<string, RemoteCheckpoint>();
-        for (const cp of dedupedCheckpoints) {
-          if (nameMap.has(cp.eventId)) cp.name = nameMap.get(cp.eventId);
-          else if (cp.dTag && nameMap.has(cp.dTag)) cp.name = nameMap.get(cp.dTag);
-          merged.set(cp.eventId, cp);
-        }
-        // Add any local-only checkpoints — but skip if a newer version with same dTag was discovered
-        const discoveredDTags = new Set(dedupedCheckpoints.map(c => c.dTag).filter(Boolean));
-        for (const cp of existing) {
-          if (!merged.has(cp.eventId) && !(cp.dTag && discoveredDTags.has(cp.dTag))) {
-            merged.set(cp.eventId, cp);
-          }
-        }
-        const sorted = [...merged.values()].sort((a, b) => b.timestamp - a.timestamp);
-        setStoredCheckpoints(sorted);
-        const deduped = getStoredCheckpoints();
-        setCheckpoints(deduped);
-        log(`Checkpoints: ${sorted.length} → ${deduped.length} after dedup (${discoveredCheckpoints.length} from relays, ${dedupedCheckpoints.length} unique d-tags, ${existing.length} local)`);
-      }
 
       // Parse the best (newest) manifest for the restore flow
       let manifest: ManifestData | null = null;
@@ -1098,6 +1028,46 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
           log(msg === 'decrypt_timeout'
             ? 'Old encrypted manifest — signer timed out. Make a fresh backup from desktop.'
             : `Decrypt failed: ${msg}`, 'warn');
+        }
+      }
+
+      // Update rolling checkpoint list (max 3) with the best manifest.
+      // Safety: reject if the new manifest is significantly thinner than our stored newest
+      // (e.g. a freshly-installed device autosaved with no data and became the newest event).
+      if (manifest && manifest.blossomUrl && manifest.wrappedKey && manifest.signerMethod) {
+        const newCp: RemoteCheckpoint = {
+          eventId: bestManifestEvent.id,
+          dTag: bestManifestEvent.tags.find(t => t[0] === 'd')?.[1] || '',
+          timestamp: manifest.timestamp || bestManifestEvent.created_at,
+          blossomUrl: manifest.blossomUrl,
+          ...(manifest.blossomHash ? { blossomHash: manifest.blossomHash } : {}),
+          wrappedKey: manifest.wrappedKey,
+          signerMethod: manifest.signerMethod as 'nip44' | 'nip04',
+          stats: manifest.stats,
+          corkboardNames: manifest.corkboardNames,
+        };
+        const stored = getStoredCheckpoints();
+        const newestStored = stored.length > 0 ? stored[0] : null;
+        const isThinnerThanStored = !!(newestStored?.stats && manifest.stats
+          && (newestStored.stats.savedForLater - manifest.stats.savedForLater > 10
+            || newestStored.stats.dismissed - manifest.stats.dismissed > 50));
+        if (isThinnerThanStored) {
+          log(`Manifest is thinner than stored checkpoint (saved:${manifest.stats?.savedForLater} vs stored:${newestStored?.stats?.savedForLater}) — skipping checkpoint update`, 'warn');
+        } else {
+          const nameMap = new Map(stored.filter(c => c.name).map(c => [c.eventId, c.name!]));
+          if (nameMap.has(newCp.eventId)) newCp.name = nameMap.get(newCp.eventId);
+          const dedupMap = new Map<string, RemoteCheckpoint>([[newCp.eventId, newCp]]);
+          for (const cp of stored) {
+            if (!dedupMap.has(cp.eventId)) dedupMap.set(cp.eventId, cp);
+          }
+          const allSorted = [...dedupMap.values()].sort((a, b) => b.timestamp - a.timestamp);
+          // Always preserve named (user-created) checkpoints; fill up to 3 with unnamed
+          const namedCps = allSorted.filter(c => c.name);
+          const unnamedCps = allSorted.filter(c => !c.name);
+          const trimmed = [...namedCps, ...unnamedCps.slice(0, Math.max(0, 3 - namedCps.length))].sort((a, b) => b.timestamp - a.timestamp);
+          setStoredCheckpoints(trimmed);
+          setCheckpoints(getStoredCheckpoints());
+          log(`Checkpoints: ${trimmed.length} in rolling history (${namedCps.length} named)`);
         }
       }
 
@@ -1141,11 +1111,9 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         (localDismissed && localDismissed !== '[]' && localDismissed !== 'null') ||
         (localCollapsed && localCollapsed !== '[]' && localCollapsed !== 'null');
       const localLastBackupTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
-      const newestRemoteTs = dedupedCheckpoints.length > 0
-        ? Math.max(...dedupedCheckpoints.map(cp => cp.timestamp))
-        : 0;
+      const newestRemoteTs = manifest?.timestamp || bestManifestEvent.created_at;
       const localIsCurrentOrNewer = localLastBackupTs > 0 && localLastBackupTs >= newestRemoteTs;
-      log(`checkRemoteBackup: hasLocalData=${!!hasLocalData} localTs=${localLastBackupTs} newestRemoteTs=${newestRemoteTs} localIsCurrentOrNewer=${localIsCurrentOrNewer} force=${force} checkpoints=${dedupedCheckpoints.length}`);
+      log(`checkRemoteBackup: hasLocalData=${!!hasLocalData} localTs=${localLastBackupTs} newestRemoteTs=${newestRemoteTs} localIsCurrentOrNewer=${localIsCurrentOrNewer} force=${force}`);
       if ((hasLocalData && localIsCurrentOrNewer) && !force) {
         log('Local data is current — auto-dismissing');
         _checkedPubkey = user.pubkey;

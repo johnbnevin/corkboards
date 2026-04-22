@@ -92,3 +92,32 @@ export async function keychainDelete(key: string): Promise<boolean> {
     return false;
   }
 }
+
+// ─── Native Relay Query ───────────────────────────────────────────────────────
+
+interface RelayQueryResult {
+  events: unknown[];
+  error?: string;
+}
+
+/**
+ * Query a relay via Rust tokio-tungstenite (bypasses WebKitGTK WebSocket).
+ * Returns null if not in Tauri or on error.
+ */
+export async function tauriRelayQuery(
+  url: string,
+  filter: Record<string, unknown>,
+  timeoutMs?: number,
+): Promise<RelayQueryResult | null> {
+  if (!isTauri) return null;
+  try {
+    return await invoke<RelayQueryResult>('relay_query', {
+      url,
+      filter,
+      timeout_ms: timeoutMs,
+    });
+  } catch (e) {
+    console.warn('[tauri] relay_query failed:', e);
+    return null;
+  }
+}

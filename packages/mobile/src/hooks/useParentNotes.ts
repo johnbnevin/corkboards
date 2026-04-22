@@ -12,6 +12,29 @@ import { fetchEventWithOutbox } from '../lib/fetchEvent';
 const parentNoteCache = new Map<string, NostrEvent>();
 const failedFirstPass = new Set<string>();
 
+const MAX_CONCURRENT_POOL_QUERIES = 6;
+let _activePoolQueries = 0;
+const _poolQueryQueue: Array<() => void> = [];
+
+function withPoolQueryLimit<T>(fn: () => Promise<T>): Promise<T> {
+  if (_activePoolQueries < MAX_CONCURRENT_POOL_QUERIES) {
+    _activePoolQueries++;
+    return fn().finally(() => {
+      _activePoolQueries--;
+      _poolQueryQueue.shift()?.();
+    });
+  }
+  return new Promise<T>((resolve, reject) => {
+    _poolQueryQueue.push(() => {
+      _activePoolQueries++;
+      fn().then(resolve, reject).finally(() => {
+        _activePoolQueries--;
+        _poolQueryQueue.shift()?.();
+      });
+    });
+  });
+}
+
 interface ParentRequest {
   eventId: string;
   hints?: string[];
@@ -66,10 +89,13 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
 
       if (uncachedIds.length > 0) {
         try {
-          const events = await nostr.query(
-            [{ ids: uncachedIds }],
-            { signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]) }
-          );
+          const events = await withPoolQueryLimit(() => {
+            if (signal.aborted) return Promise.resolve([] as NostrEvent[]);
+            return nostr.query(
+              [{ ids: uncachedIds }],
+              { signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]) }
+            );
+          });
           for (const event of events) {
             parentNoteCache.set(event.id, event);
           }

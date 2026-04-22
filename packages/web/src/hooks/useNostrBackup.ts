@@ -965,8 +965,10 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       }
 
       // Fetch recent backup manifests — one attempt, try ALL known relays.
+      // Use limit:50 so corkboards manifests aren't crowded out by other apps'
+      // kind:30078 events (NIP-78 is shared across all apps).
       const allEvents = await queryAll(
-        { kinds: [30078], authors: [pubkey], limit: 5 },
+        { kinds: [30078], authors: [pubkey], limit: 50 },
         'backup manifest events',
         undefined,
         true, // checkAll — query every relay in one pass
@@ -1606,11 +1608,17 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
       if (manifests.length > 0) {
         const discovered: RemoteCheckpoint[] = [];
-        for (const ev of manifests) {
+        // Process at most 20 most-recent manifests — bunker signers (NIP-46) incur
+        // a round-trip per decrypt, so iterating all 38+ would timeout in seconds.
+        const recent = [...manifests].sort((a, b) => b.created_at - a.created_at).slice(0, 20);
+        for (const ev of recent) {
           let m: Record<string, unknown> | null = null;
           try { m = JSON.parse(ev.content); } catch {
             try {
-              const json = await user.signer.nip44!.decrypt(user.pubkey, ev.content);
+              const json = await Promise.race([
+                user.signer.nip44!.decrypt(user.pubkey, ev.content),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), 3000)),
+              ]);
               m = JSON.parse(json);
             } catch { continue; }
           }

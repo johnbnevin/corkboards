@@ -599,15 +599,15 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
     log(`Checking ${relays.length} relays…`);
 
-    // Fetch recent backup manifests (limit 5 for fast login).
-    // User can manually check for older states from the backup UI.
+    // Fetch recent backup manifests (limit 50 to avoid other apps' kind:30078
+    // events crowding out corkboards manifests — NIP-78 is shared across all apps).
     for (let i = 0; i < relays.length; i += 3) {
       const batch = relays.slice(i, i + 3);
       await Promise.allSettled(batch.map(async url => {
         const relay = createRelayFresh(url, { backoff: false });
         try {
           const events = await relay.query(
-            [{ kinds: [30078], authors: [pubkey], limit: 5 }],
+            [{ kinds: [30078], authors: [pubkey], limit: 50 }],
             { signal: AbortSignal.timeout(5000) },
           );
           for (const ev of events) {
@@ -637,9 +637,12 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
       try { data = JSON.parse(ev.content); } catch {
         if (signer?.nip44) {
           try {
-            const json = await signer.nip44.decrypt(pubkey, ev.content);
+            const json = await Promise.race([
+              signer.nip44.decrypt(pubkey, ev.content),
+              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), 3000)),
+            ]);
             data = JSON.parse(json);
-          } catch { /* decrypt failed — skip */ }
+          } catch { /* decrypt failed or timed out — skip */ }
         }
       }
       try {

@@ -11,6 +11,47 @@ pub struct RelayQueryResult {
     pub error: Option<String>,
 }
 
+/// Query multiple relays in parallel, deduplicate results by event ID.
+/// All relay connections use tokio-tungstenite — no WebKitGTK WebSocket involved.
+/// Called by the JS TauriNostrProxy to replace NPool queries in Tauri.
+#[tauri::command]
+pub async fn pool_query(
+    urls: Vec<String>,
+    filter: Value,
+    timeout_ms: Option<u64>,
+) -> RelayQueryResult {
+    let ms = timeout_ms.unwrap_or(5000);
+    let dur = Duration::from_millis(ms);
+
+    let handles: Vec<_> = urls
+        .into_iter()
+        .map(|url| {
+            let f = filter.clone();
+            tokio::spawn(async move {
+                match tokio::time::timeout(dur, do_query(url, f)).await {
+                    Ok(r) => r.events,
+                    Err(_) => vec![],
+                }
+            })
+        })
+        .collect();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut events = Vec::new();
+    for handle in handles {
+        if let Ok(relay_events) = handle.await {
+            for ev in relay_events {
+                if let Some(id) = ev.get("id").and_then(|v| v.as_str()) {
+                    if seen.insert(id.to_string()) {
+                        events.push(ev);
+                    }
+                }
+            }
+        }
+    }
+    RelayQueryResult { events, error: None }
+}
+
 /// Query a single relay via native tokio-tungstenite WebSocket.
 /// Bypasses WebKitGTK's WebSocket implementation entirely — avoids the crash
 /// that occurs when too many concurrent WS connections saturate WebKitGTK on Linux.

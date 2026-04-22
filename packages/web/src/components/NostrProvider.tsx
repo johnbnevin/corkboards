@@ -4,7 +4,7 @@ import type { NRelay, NostrRelayEVENT, NostrRelayEOSE, NostrRelayCLOSED } from '
 import { NostrContext } from '@nostrify/react';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
-import { isTauri } from '@/lib/tauri';
+import { isTauri, tauriPoolQuery } from '@/lib/tauri';
 // Re-exported for backwards compatibility — canonical source is @/lib/relayConstants
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
@@ -560,6 +560,38 @@ function createPool(): NPool {
 // Initialize cache after IDB is ready (async — pool works with fallback relays until loaded)
 idbReady.then(() => loadRelayCache()).catch(() => {});
 
+// ── Tauri relay routing ───────────────────────────────────────────────────────
+// Replicates reqRouter's two-tier logic for use by the TauriNostrProxy below.
+// Uses the same relayCache, thresholds, and fallback lists as the NPool router.
+function getTauriRelaysForFilter(filter: Record<string, unknown>): string[] {
+  const authors = (filter.authors as string[] | undefined) ?? [];
+  const relaySet = new Set<string>();
+
+  if (authors.length >= BULK_AUTHOR_THRESHOLD) {
+    // T1-bulk: find most-used relays across sampled authors
+    const freq = new Map<string, number>();
+    for (const pk of authors.slice(0, 100)) {
+      for (const r of getRelayCache(pk).slice(0, 3)) {
+        if (isSecureRelay(r)) freq.set(r, (freq.get(r) ?? 0) + 1);
+      }
+    }
+    [...freq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .forEach(([r]) => relaySet.add(r));
+  } else if (authors.length > 0) {
+    // T2-targeted: each author's cached relays first
+    for (const pk of authors) {
+      getRelayCache(pk).slice(0, 3).filter(isSecureRelay).forEach(r => relaySet.add(r));
+    }
+  }
+
+  // Always include fallbacks and read-only relays (deduplicated via Set)
+  FALLBACK_RELAYS.forEach(r => relaySet.add(r));
+  READ_ONLY_RELAYS.forEach(r => relaySet.add(r));
+  return Array.from(relaySet).slice(0, 8);
+}
+
 const NostrProvider: React.FC<NostrProviderProps> = (props) => {
   const { children } = props;
 
@@ -620,7 +652,25 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
     };
   }, []);
 
-  const value = useMemo(() => ({ nostr: pool }), [pool]);
+  const value = useMemo(() => {
+    if (!isTauri) return { nostr: pool };
+    // In Tauri: intercept nostr.query() and route it through Rust pool_query.
+    // WebKitGTK never processes WebSocket frames — only IPC JSON arrives in JS.
+    // This removes the event-burst crash without any per-feature workarounds.
+    const tauriProxy = new Proxy(pool, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return async (filters: unknown[], _opts?: unknown) => {
+            const filter = (filters[0] ?? {}) as Record<string, unknown>;
+            const relays = getTauriRelaysForFilter(filter);
+            return tauriPoolQuery(relays, filter, 5000) as Promise<NostrEvent[]>;
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    return { nostr: tauriProxy as NPool };
+  }, [pool]);
 
   return (
     <NostrContext.Provider value={value}>

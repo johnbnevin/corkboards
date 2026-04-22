@@ -3,7 +3,6 @@ import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-quer
 import { useNostr } from '@/hooks/useNostr';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { fetchEventWithOutbox } from '@/lib/fetchEvent';
-import { isTauri } from '@/lib/tauri';
 
 // Shared cache for parent notes (persists across hook instances)
 const parentNoteCache = new Map<string, NostrEvent>();
@@ -11,9 +10,7 @@ const parentNoteCache = new Map<string, NostrEvent>();
 // Track IDs that failed first-pass fetch so we can retry them
 const failedFirstPass = new Set<string>();
 
-// Limit concurrent first-pass pool queries — each opens subscriptions on 3 relays,
-// so 60 note cards firing simultaneously would create 180 concurrent subscriptions
-// and saturate WebKitGTK's WebSocket message pump.
+// Limit concurrent first-pass pool queries to avoid opening too many relay connections at once.
 const MAX_CONCURRENT_POOL_QUERIES = 6;
 let _activePoolQueries = 0;
 const _poolQueryQueue: Array<() => void> = [];
@@ -137,16 +134,14 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
     },
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
-    enabled: !isTauri && uniqueIds.length > 0,
+    enabled: uniqueIds.length > 0,
     placeholderData: keepPreviousData,
     retry: 2,
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
 
   // Second pass: retry failed IDs individually with full outbox discovery
-  // Disabled in Tauri: WebKitGTK crashes with too many concurrent WebSocket connections.
   useEffect(() => {
-    if (isTauri) return;
     if (secondPassScheduled.current) return;
     if (!query.data) return;
 

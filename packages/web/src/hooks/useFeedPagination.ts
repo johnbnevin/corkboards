@@ -807,8 +807,8 @@ export function useFeedPagination({
 
         // ── Fetch from relay ─────────────────────────────────────────────
         debugLog(`[loadMoreByCount] query until: ${new Date(until * 1000).toISOString()}  limit: ${neededFromRelay}`);
-        
-        // Use simple timeout - reqRouter will handle relay routing (author outbox + user relays + fallbacks)
+
+        // reqRouter (or TauriNostrProxy in Tauri) handles relay routing
         const raw = await nostr.query([{
           kinds: [...FEED_KINDS],
           authors,

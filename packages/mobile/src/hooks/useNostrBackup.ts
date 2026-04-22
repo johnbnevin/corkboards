@@ -602,23 +602,21 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
 
     log(`Checking ${relays.length} relays…`);
 
-    // Fetch recent backup manifests (limit 50 to avoid other apps' kind:30078
-    // events crowding out corkboards manifests — NIP-78 is shared across all apps).
+    // Query the autosave slot directly by d-tag — kind:30078 is addressable, so every
+    // relay stores exactly 1 event per d-tag. No crowding from other NIP-78 apps.
     for (let i = 0; i < relays.length; i += 3) {
       const batch = relays.slice(i, i + 3);
       await Promise.allSettled(batch.map(async url => {
         const relay = createRelayFresh(url, { backoff: false });
         try {
           const events = await relay.query(
-            [{ kinds: [30078], authors: [pubkey], limit: 50 }],
+            [{ kinds: [30078], authors: [pubkey], '#d': [`${D_TAG_PREFIX}:auto`], limit: 1 }],
             { signal: AbortSignal.timeout(5000) },
           );
           for (const ev of events) {
-            const dTag = ev.tags.find(t => t[0] === 'd')?.[1];
-            if (!dTag || !(dTag === D_TAG_PREFIX || dTag.startsWith(D_TAG_PREFIX + ':'))) continue;
             if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
           }
-          log(`  ${url}: ${events.length} kind:30078, ${allEvents.length} backup manifests`);
+          log(`  ${url}: ${events.length} autosave manifest(s)`);
         } catch { /* timeout ok */ } finally {
           try { relay.close(); } catch { /* */ }
         }

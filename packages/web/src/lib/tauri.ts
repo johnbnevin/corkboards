@@ -101,6 +101,30 @@ interface RelayQueryResult {
 }
 
 /**
+ * Query multiple relays in parallel via Rust, returning deduplicated events.
+ * Used by the TauriNostrProxy in NostrProvider to replace all NPool.query() calls
+ * in Tauri — WebKitGTK never sees WebSocket frames, only the IPC result.
+ */
+export async function tauriPoolQuery(
+  urls: string[],
+  filter: Record<string, unknown>,
+  timeoutMs = 5000,
+): Promise<unknown[]> {
+  if (!isTauri || urls.length === 0) return [];
+  try {
+    const result = await invoke<RelayQueryResult>('pool_query', {
+      urls,
+      filter,
+      timeout_ms: timeoutMs,
+    });
+    return result?.events ?? [];
+  } catch (e) {
+    console.warn('[tauri] pool_query failed:', e);
+    return [];
+  }
+}
+
+/**
  * Query a relay via Rust tokio-tungstenite (bypasses WebKitGTK WebSocket).
  * Returns null if not in Tauri or on error.
  */

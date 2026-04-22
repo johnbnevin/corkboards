@@ -965,23 +965,18 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setMessage('Checking for backup...');
       }
 
-      // Fetch recent backup manifests — one attempt, try ALL known relays.
-      // Use limit:50 so corkboards manifests aren't crowded out by other apps'
-      // kind:30078 events (NIP-78 is shared across all apps).
+      // Query the autosave slot directly by d-tag — kind:30078 is addressable, so every
+      // relay stores exactly 1 event per d-tag. No crowding from other NIP-78 apps.
       const allEvents = await queryAll(
-        { kinds: [30078], authors: [pubkey], limit: 50 },
-        'backup manifest events',
+        { kinds: [30078], authors: [pubkey], '#d': [`${D_TAG_PREFIX}:auto`], limit: 1 },
+        'autosave manifest',
         undefined,
-        true, // checkAll — query every relay in one pass
-        20000,
-        8000
+        false, // stop on first result — any relay that has it is enough
+        10000,
+        5000
       );
-      // Filter for backup manifests (d-tag starts with the prefix)
-      const manifestEvents = allEvents.filter(ev => {
-        const dTag = ev.tags.find(t => t[0] === 'd')?.[1];
-        return dTag === D_TAG_PREFIX || dTag?.startsWith(D_TAG_PREFIX + ':');
-      });
-      log(`Total: ${manifestEvents.length} backup manifest events (from ${allEvents.length} kind:30078, limit 5)`);
+      const manifestEvents = allEvents; // relay already filtered by d-tag
+      log(`Total: ${manifestEvents.length} autosave manifest events`);
 
       if (manifestEvents.length === 0) {
         log(allEvents.length === 0 ? 'No events returned from relays' : 'No remote backup found');
@@ -1561,7 +1556,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     await idbReady;
     try {
       const events = await queryAll(
-        { kinds: [30078], authors: [user.pubkey], limit: 50 },
+        { kinds: [30078], authors: [user.pubkey], limit: 20 },
         'all backup manifests',
         undefined,
         true, // checkAll — query every relay

@@ -2,8 +2,13 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
+use tauri::ipc::Channel;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+/// How many events to bundle per Channel send.
+/// Each send is one postMessage call — keep it small to avoid WebKit buffer limits.
+const BATCH_SIZE: usize = 20;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RelayQueryResult {
@@ -11,50 +16,101 @@ pub struct RelayQueryResult {
     pub error: Option<String>,
 }
 
-/// Query multiple relays in parallel, deduplicate results by event ID.
-/// All relay connections use tokio-tungstenite — no WebKitGTK WebSocket involved.
-/// Called by the JS TauriNostrProxy to replace NPool queries in Tauri.
+/// Stream events from multiple relays to JS via a Tauri Channel.
+///
+/// Queries all relays concurrently via tokio-tungstenite (no WebKitGTK WebSocket).
+/// Events are deduplicated by ID and streamed back in batches of BATCH_SIZE so
+/// each postMessage call is small even when the IPC custom protocol has fallen back.
+///
+/// The JS side receives `{ events: [...], done: false }` batches and a final
+/// `{ events: [...], done: true }` when all relays have returned EOSE.
 #[tauri::command]
-pub async fn pool_query(
+pub async fn relay_subscribe(
     urls: Vec<String>,
     filter: Value,
     timeout_ms: Option<u64>,
-) -> RelayQueryResult {
+    on_event: Channel<Value>,
+) -> Result<(), String> {
     let ms = timeout_ms.unwrap_or(5000);
     let dur = Duration::from_millis(ms);
+    let limit = filter
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(u64::MAX) as usize;
 
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+
+    // Spawn one task per relay — all connect concurrently via Rust async
     let handles: Vec<_> = urls
         .into_iter()
         .map(|url| {
             let f = filter.clone();
+            let sender = tx.clone();
             tokio::spawn(async move {
                 match tokio::time::timeout(dur, do_query(url, f)).await {
-                    Ok(r) => r.events,
-                    Err(_) => vec![],
+                    Ok(result) => {
+                        for ev in result.events {
+                            if sender.send(ev).is_err() {
+                                break; // receiver closed
+                            }
+                        }
+                    }
+                    Err(_) => {} // timed out — channel sender dropped, that's fine
                 }
             })
         })
         .collect();
+    drop(tx); // channel closes when all spawned tasks drop their senders
 
+    // Collect, deduplicate, and stream to JS
     let mut seen = std::collections::HashSet::new();
-    let mut events = Vec::new();
-    for handle in handles {
-        if let Ok(relay_events) = handle.await {
-            for ev in relay_events {
-                if let Some(id) = ev.get("id").and_then(|v| v.as_str()) {
-                    if seen.insert(id.to_string()) {
-                        events.push(ev);
+    let mut batch: Vec<Value> = Vec::new();
+    let mut total = 0usize;
+
+    while let Some(event) = rx.recv().await {
+        if total >= limit {
+            continue; // drain but discard — relay sent more than requested
+        }
+        if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
+            if seen.insert(id.to_string()) {
+                total += 1;
+                batch.push(event);
+                if batch.len() >= BATCH_SIZE {
+                    if on_event
+                        .send(serde_json::json!({
+                            "events": std::mem::take(&mut batch),
+                            "done": false
+                        }))
+                        .is_err()
+                    {
+                        // JS closed the channel (AbortSignal or unmount) — drain and exit cleanly
+                        drop(rx);
+                        for h in handles {
+                            let _ = h.await;
+                        }
+                        return Ok(());
                     }
                 }
             }
         }
     }
-    RelayQueryResult { events, error: None }
+
+    // All relay tasks have finished
+    for h in handles {
+        let _ = h.await;
+    }
+
+    // Final batch + completion signal
+    let _ = on_event.send(serde_json::json!({
+        "events": batch,
+        "done": true
+    }));
+
+    Ok(())
 }
 
-/// Query a single relay via native tokio-tungstenite WebSocket.
-/// Bypasses WebKitGTK's WebSocket implementation entirely — avoids the crash
-/// that occurs when too many concurrent WS connections saturate WebKitGTK on Linux.
+/// Query a single relay via native tokio-tungstenite.
+/// Used by fetchEventWithOutbox for individual event lookups (small payloads, safe).
 #[tauri::command]
 pub async fn relay_query(
     url: String,
@@ -71,6 +127,7 @@ pub async fn relay_query(
     }
 }
 
+/// Open a WebSocket to one relay, send REQ, collect all events until EOSE/CLOSED.
 async fn do_query(url: String, filter: Value) -> RelayQueryResult {
     let (mut ws, _) = match connect_async(url.as_str()).await {
         Ok(pair) => pair,
@@ -82,10 +139,8 @@ async fn do_query(url: String, filter: Value) -> RelayQueryResult {
         }
     };
 
-    let sub_id = "corkboards-query";
-    let req = serde_json::json!(["REQ", sub_id, filter]);
-    let req_str = req.to_string();
-    if ws.send(Message::Text(req_str)).await.is_err() {
+    let req = serde_json::json!(["REQ", "q", filter]);
+    if ws.send(Message::Text(req.to_string())).await.is_err() {
         return RelayQueryResult {
             events: vec![],
             error: Some("send failed".to_string()),

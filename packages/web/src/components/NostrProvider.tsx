@@ -4,7 +4,7 @@ import type { NRelay, NostrRelayEVENT, NostrRelayEOSE, NostrRelayCLOSED } from '
 import { NostrContext } from '@nostrify/react';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
-import { isTauri, tauriPoolQuery } from '@/lib/tauri';
+import { isTauri, tauriQuery } from '@/lib/tauri';
 // Re-exported for backwards compatibility — canonical source is @/lib/relayConstants
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
@@ -663,7 +663,7 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
           return async (filters: unknown[], _opts?: unknown) => {
             const filter = (filters[0] ?? {}) as Record<string, unknown>;
             const relays = getTauriRelaysForFilter(filter);
-            return tauriPoolQuery(relays, filter, 5000) as Promise<NostrEvent[]>;
+            return tauriQuery(relays, filter, 5000) as Promise<NostrEvent[]>;
           };
         }
         return Reflect.get(target, prop, receiver);

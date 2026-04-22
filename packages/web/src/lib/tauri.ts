@@ -100,28 +100,57 @@ interface RelayQueryResult {
   error?: string;
 }
 
+interface RelayBatch {
+  events: unknown[];
+  done: boolean;
+}
+
 /**
- * Query multiple relays in parallel via Rust, returning deduplicated events.
- * Used by the TauriNostrProxy in NostrProvider to replace all NPool.query() calls
- * in Tauri — WebKitGTK never sees WebSocket frames, only the IPC result.
+ * Query multiple relays via Rust, streaming results back in small batches.
+ *
+ * Uses Tauri Channel<T> so each IPC call is at most BATCH_SIZE events (~8 KB).
+ * This avoids WebKit postMessage crashes that occur with large single-shot payloads.
+ * The Channel approach works even when the custom IPC protocol falls back to postMessage.
  */
-export async function tauriPoolQuery(
+export async function tauriQuery(
   urls: string[],
   filter: Record<string, unknown>,
   timeoutMs = 5000,
 ): Promise<unknown[]> {
   if (!isTauri || urls.length === 0) return [];
-  try {
-    const result = await invoke<RelayQueryResult>('pool_query', {
+
+  const { Channel, invoke: tauriInvoke } = await import('@tauri-apps/api/core');
+
+  const allEvents: unknown[] = [];
+  const seen = new Set<string>();
+
+  return new Promise<unknown[]>((resolve) => {
+    const channel = new Channel<RelayBatch>();
+
+    channel.onmessage = ({ events, done }) => {
+      for (const ev of events) {
+        const e = ev as { id?: string };
+        if (e.id && !seen.has(e.id)) {
+          seen.add(e.id);
+          allEvents.push(ev);
+        }
+      }
+      if (done) {
+        resolve(allEvents);
+      }
+    };
+
+    // timeout_ms → timeoutMs, on_event → onEvent (Tauri v2 camelCase command params)
+    tauriInvoke('relay_subscribe', {
       urls,
       filter,
-      timeout_ms: timeoutMs,
+      timeoutMs,
+      onEvent: channel,
+    }).catch((err) => {
+      console.warn('[tauri] relay_subscribe failed:', err);
+      resolve(allEvents); // return whatever arrived before the error
     });
-    return result?.events ?? [];
-  } catch (e) {
-    console.warn('[tauri] pool_query failed:', e);
-    return [];
-  }
+  });
 }
 
 /**

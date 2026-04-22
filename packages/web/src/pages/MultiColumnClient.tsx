@@ -8,6 +8,7 @@ import { useImageSizeLimitSetting, useAvatarSizeLimitSetting } from '@/hooks/use
 import { usePlatformStorage } from '@/hooks/usePlatformStorage';
 import { useToast } from '@/hooks/useToast';
 import { debugLog, debugWarn } from '@/lib/debug';
+import { isTauri } from '@/lib/tauri';
 
 import { usePinnedNotes } from '@/hooks/usePinnedNotes';
 import { useParentNotes } from '@/hooks/useParentNotes';
@@ -3195,7 +3196,10 @@ export function MultiColumnClient() {
       );
       return events;
     },
-    enabled: lazyEngagementNoteIds.length > 0,
+    // Disabled in Tauri: WebKitGTK 605.x crashes when 500+ engagement events flood
+    // the WebSocket message pump simultaneously. The NPool query returns up to 1500
+    // events (500 × 3 relays) which saturates the older WebKit JS engine.
+    enabled: !isTauri && lazyEngagementNoteIds.length > 0,
     staleTime: 5 * 60 * 1000, // 5 min — don't re-fetch constantly
     gcTime: 10 * 60 * 1000,
   });

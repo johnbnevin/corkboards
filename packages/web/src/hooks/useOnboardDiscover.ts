@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { type NostrEvent, NSchema as n } from '@nostrify/nostrify'
-import { createRelay } from '@/components/NostrProvider'
+import { createRelayFresh } from '@/components/NostrProvider'
 import { useQueryClient } from '@tanstack/react-query'
 import { cacheProfile } from '@/lib/cacheStore'
 import { nip19 } from 'nostr-tools'
 
-// Relays to round-robin through — one connection at a time
+// Relays to query in parallel for onboard discovery
 const RELAYS = ['wss://nos.lol', 'wss://relay.damus.io', 'wss://relay.ditto.pub']
 
 // Curators whose follows seed the onboard discovery feed
@@ -29,14 +29,14 @@ const CURATOR_PUBKEYS: string[] = CURATOR_NPUBS.map(npub => {
   } catch { return null }
 }).filter(Boolean) as string[]
 
-/** Query a single relay, return events. One connection, close immediately. */
-async function queryRelay(
+/** Query a single relay (fresh connection, closed immediately after). */
+async function queryRelayOnce(
   url: string,
   filter: { kinds: number[]; authors: string[]; limit: number },
-  timeoutMs = 4000,
+  timeoutMs = 5000,
 ): Promise<NostrEvent[]> {
   try {
-    const relay = createRelay(url, { backoff: false })
+    const relay = createRelayFresh(url, { backoff: false })
     const events = await relay.query([filter], { signal: AbortSignal.timeout(timeoutMs) })
     try { relay.close() } catch { /* */ }
     return events
@@ -53,7 +53,6 @@ export function useOnboardDiscover(userFollows: string[], enabled: boolean, user
   const userFollowsRef = useRef(userFollows)
   useEffect(() => { userFollowsRef.current = userFollows })
 
-  // Cache a profile event into React Query + persistent cache
   const cacheProfileEvent = useCallback((ev: NostrEvent) => {
     try {
       const metadata = n.json().pipe(n.metadata()).parse(ev.content)
@@ -81,97 +80,108 @@ export function useOnboardDiscover(userFollows: string[], enabled: boolean, user
 
     async function run() {
       try {
-        // Step 1: Fetch kind 3 (contact lists) for all curators from first relay
-        const curatorEvents = await queryRelay(RELAYS[0], {
-          kinds: [3], authors: CURATOR_PUBKEYS, limit: 50,
-        }, 6000)
+        // Step 1: Fetch curator contact lists from all 3 relays in parallel — take the union
+        const curatorListResults = await Promise.all(
+          RELAYS.map(url => queryRelayOnce(url, { kinds: [3], authors: CURATOR_PUBKEYS, limit: 50 }, 5000))
+        )
         if (signal.aborted) return
 
-        // Build per-curator follow lists
-        const userFollowSet = new Set(userFollowsRef.current)
-        const curatorFollows: string[][] = [] // one array of follows per curator
+        // Merge: keep newest event per curator pubkey across all relay results
         const latestPerCurator = new Map<string, NostrEvent>()
-        for (const ev of curatorEvents) {
-          const existing = latestPerCurator.get(ev.pubkey)
-          if (!existing || ev.created_at > existing.created_at) {
-            latestPerCurator.set(ev.pubkey, ev)
+        for (const events of curatorListResults) {
+          for (const ev of events) {
+            const existing = latestPerCurator.get(ev.pubkey)
+            if (!existing || ev.created_at > existing.created_at) {
+              latestPerCurator.set(ev.pubkey, ev)
+            }
           }
         }
-        for (const ev of latestPerCurator.values()) {
-          const follows = ev.tags
-            .filter(t => t[0] === 'p' && t[1] && !userFollowSet.has(t[1]))
-            .map(t => t[1])
-          if (follows.length > 0) curatorFollows.push(follows)
-        }
-        if (curatorFollows.length === 0 || signal.aborted) return
 
-        // Step 2: Round-robin — for each curator, pick 5 follows, ask one relay
-        // for 1 note each + their profiles. Append to feed as they arrive.
+        const userFollowSet = new Set(userFollowsRef.current)
+
+        // Collect all candidate follows: pubkeys from curators' follows, excluding already-followed
+        const candidateSet = new Set<string>()
+        for (const ev of latestPerCurator.values()) {
+          for (const tag of ev.tags) {
+            if (tag[0] === 'p' && tag[1] && !userFollowSet.has(tag[1])) {
+              candidateSet.add(tag[1])
+            }
+          }
+        }
+
+        const candidates = Array.from(candidateSet)
+        if (candidates.length === 0 || signal.aborted) return
+
+        // Step 2: Fetch notes + profiles for candidates in parallel batches of 30
+        // Each batch queries all 3 relays in parallel and takes the union.
+        const BATCH_SIZE = 30
+        const MAX_CANDIDATES = 150
+        const cappedCandidates = candidates.slice(0, MAX_CANDIDATES)
+
         const seenNoteIds = new Set<string>()
         const seenAuthors = new Set<string>()
-        let relayIdx = 0
+        const collected: NostrEvent[] = []
 
         const addNotes = (newNotes: NostrEvent[]) => {
           const accepted: NostrEvent[] = []
           for (const ev of newNotes) {
             if (seenNoteIds.has(ev.id)) continue
             if (seenAuthors.has(ev.pubkey)) continue
-            // Only root notes (no e-tags)
-            if (ev.tags.some(t => t[0] === 'e')) continue
+            if (ev.tags.some(t => t[0] === 'e')) continue // only root notes
             seenNoteIds.add(ev.id)
             seenAuthors.add(ev.pubkey)
             accepted.push(ev)
           }
           if (accepted.length > 0) {
-            setNotes(prev => [...prev, ...accepted])
+            collected.push(...accepted)
+            setNotes([...collected])
           }
-          return accepted
         }
 
-        // Track which follows we've already tried per curator
-        const curatorOffsets = new Array(curatorFollows.length).fill(0)
-        const PICKS_PER_ROUND = 5
-        const MAX_ROUNDS = 8 // up to 8 rounds × curators × 5 = lots of notes
-
-        for (let round = 0; round < MAX_ROUNDS; round++) {
-          if (signal.aborted) break
-          let anyProgress = false
-
-          for (let ci = 0; ci < curatorFollows.length; ci++) {
-            if (signal.aborted) break
-            const follows = curatorFollows[ci]
-            const offset = curatorOffsets[ci]
-            if (offset >= follows.length) continue // exhausted this curator
-
-            // Pick next 5 un-tried follows
-            const picks: string[] = []
-            let idx = offset
-            while (picks.length < PICKS_PER_ROUND && idx < follows.length) {
-              if (!seenAuthors.has(follows[idx])) picks.push(follows[idx])
-              idx++
-            }
-            curatorOffsets[ci] = idx
-            if (picks.length === 0) continue
-
-            const relayUrl = RELAYS[relayIdx % RELAYS.length]
-            relayIdx++
-            anyProgress = true
-
-            // Fetch 1 note per author + profiles in parallel from same relay
-            const [noteEvents, profileEvents] = await Promise.all([
-              queryRelay(relayUrl, { kinds: [1], authors: picks, limit: picks.length }),
-              queryRelay(relayUrl, { kinds: [0], authors: picks, limit: picks.length }),
+        // Process first batch immediately to show something fast
+        const firstBatch = cappedCandidates.slice(0, BATCH_SIZE)
+        const firstResults = await Promise.all(
+          RELAYS.map(url =>
+            Promise.all([
+              queryRelayOnce(url, { kinds: [1], authors: firstBatch, limit: firstBatch.length }),
+              queryRelayOnce(url, { kinds: [0], authors: firstBatch, limit: firstBatch.length }),
             ])
+          )
+        )
+        if (signal.aborted) return
 
-            // Cache profiles immediately
-            for (const ev of profileEvents) cacheProfileEvent(ev)
-
-            // Add notes (deduped, 1 per author)
-            addNotes(noteEvents)
-          }
-
-          if (!anyProgress) break // all curators exhausted
+        for (const [noteResults, profileResults] of firstResults) {
+          for (const ev of profileResults) cacheProfileEvent(ev)
+          addNotes(noteResults)
         }
+
+        if (signal.aborted) return
+
+        // Remaining batches in parallel
+        const remainingBatches: string[][] = []
+        for (let i = BATCH_SIZE; i < cappedCandidates.length; i += BATCH_SIZE) {
+          remainingBatches.push(cappedCandidates.slice(i, i + BATCH_SIZE))
+        }
+
+        await Promise.all(
+          remainingBatches.map(async batch => {
+            if (signal.aborted) return
+            const results = await Promise.all(
+              RELAYS.map(url =>
+                Promise.all([
+                  queryRelayOnce(url, { kinds: [1], authors: batch, limit: batch.length }),
+                  queryRelayOnce(url, { kinds: [0], authors: batch, limit: batch.length }),
+                ])
+              )
+            )
+            if (signal.aborted) return
+            for (const [noteResults, profileResults] of results) {
+              for (const ev of profileResults) cacheProfileEvent(ev)
+              addNotes(noteResults)
+            }
+          })
+        )
+
       } catch (err) {
         if (!signal.aborted) console.error('[onboard-discover]', err)
       } finally {

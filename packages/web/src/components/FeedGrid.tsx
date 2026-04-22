@@ -28,7 +28,6 @@ const DISCOVER_STEPS = [
   'Finding interesting notes for you…',
   'Finding notes your follows replied to or reposted…',
   'Discovering people outside your network…',
-  'Ranking by engagement from people you trust…',
   'Assembling your discover feed…',
 ];
 

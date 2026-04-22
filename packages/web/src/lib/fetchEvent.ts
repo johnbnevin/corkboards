@@ -9,8 +9,34 @@
  *   Phase 2: Discover author's NIP-65 relay list and query those relays
  */
 import type { NostrEvent, NRelay1 } from '@nostrify/nostrify'
-import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS, createRelay } from '@/components/NostrProvider'
+import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS, createRelayFresh } from '@/components/NostrProvider'
 import { isSecureRelay } from '@core/nostrUtils'
+
+// Cap concurrent outbox event fetches — each fetchEventWithOutbox may open several
+// fresh WebSocket connections (phase-1 hints + phase-2 author relays). Without a cap,
+// 33 missing parent notes firing simultaneously = 100+ concurrent connections → WebKit OOM.
+const MAX_CONCURRENT_OUTBOX_FETCHES = 4;
+let _activeOutboxFetches = 0;
+const _outboxFetchQueue: Array<() => void> = [];
+
+function withOutboxLimit<T>(fn: () => Promise<T>): Promise<T> {
+  if (_activeOutboxFetches < MAX_CONCURRENT_OUTBOX_FETCHES) {
+    _activeOutboxFetches++;
+    return fn().finally(() => {
+      _activeOutboxFetches--;
+      _outboxFetchQueue.shift()?.();
+    });
+  }
+  return new Promise<T>((resolve, reject) => {
+    _outboxFetchQueue.push(() => {
+      _activeOutboxFetches++;
+      fn().then(resolve, reject).finally(() => {
+        _activeOutboxFetches--;
+        _outboxFetchQueue.shift()?.();
+      });
+    });
+  });
+}
 
 // ── Session cache (shared with thread system) ─────────────────────────────
 const MAX_EVENT_CACHE = 750
@@ -62,7 +88,7 @@ export async function queryRelay(
   let timeout: ReturnType<typeof setTimeout> | undefined
 
   try {
-    relay = createRelay(relayUrl, { backoff: false })
+    relay = createRelayFresh(relayUrl, { backoff: false })
     timeout = setTimeout(() => relay!.close(), timeoutMs)
     for await (const msg of relay.req([filter])) {
       if (msg[0] === 'EVENT') events.push(msg[2] as NostrEvent)
@@ -113,7 +139,7 @@ type NostrLike = { query: (filters: unknown[], opts?: { signal?: AbortSignal }) 
  * Fetch a single event using outbox model routing.
  * Races NPool + relay hints + author relays + fallbacks.
  */
-export async function fetchEventWithOutbox(
+async function _fetchEventWithOutboxImpl(
   eventId: string,
   nostr: NostrLike,
   opts?: {
@@ -175,6 +201,14 @@ export async function fetchEventWithOutbox(
   }
 
   return null
+}
+
+export function fetchEventWithOutbox(
+  eventId: string,
+  nostr: NostrLike,
+  opts?: { onRelayTried?: (r: string) => void; hints?: string[]; authorPubkey?: string },
+): Promise<NostrEvent | null> {
+  return withOutboxLimit(() => _fetchEventWithOutboxImpl(eventId, nostr, opts));
 }
 
 /**

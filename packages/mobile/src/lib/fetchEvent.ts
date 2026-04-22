@@ -5,9 +5,32 @@
  * Uses mobile's NostrProvider relay cache instead of web IDB.
  */
 import type { NostrEvent, NRelay1 } from '@nostrify/nostrify';
-import { createRelay } from './NostrProvider';
+import { createRelayFresh } from './NostrProvider';
 import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS } from './NostrProvider';
 import { isSecureRelay } from '@core/nostrUtils';
+
+const MAX_CONCURRENT_OUTBOX_FETCHES = 4;
+let _activeOutboxFetches = 0;
+const _outboxFetchQueue: Array<() => void> = [];
+
+function withOutboxLimit<T>(fn: () => Promise<T>): Promise<T> {
+  if (_activeOutboxFetches < MAX_CONCURRENT_OUTBOX_FETCHES) {
+    _activeOutboxFetches++;
+    return fn().finally(() => {
+      _activeOutboxFetches--;
+      _outboxFetchQueue.shift()?.();
+    });
+  }
+  return new Promise<T>((resolve, reject) => {
+    _outboxFetchQueue.push(() => {
+      _activeOutboxFetches++;
+      fn().then(resolve, reject).finally(() => {
+        _activeOutboxFetches--;
+        _outboxFetchQueue.shift()?.();
+      });
+    });
+  });
+}
 
 // ── Session cache ─────────────────────────────────────────────────────────
 const MAX_EVENT_CACHE = 750;
@@ -59,7 +82,7 @@ export async function queryRelay(
   let timeout: ReturnType<typeof setTimeout> | undefined;
 
   try {
-    relay = createRelay(relayUrl, { backoff: false });
+    relay = createRelayFresh(relayUrl, { backoff: false });
     timeout = setTimeout(() => relay!.close(), timeoutMs);
     for await (const msg of relay.req([filter])) {
       if (msg[0] === 'EVENT') events.push(msg[2] as NostrEvent);
@@ -105,7 +128,7 @@ async function fetchAuthorRelays(pubkey: string): Promise<string[]> {
 
 type NostrLike = { query: (filters: unknown[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]> };
 
-export async function fetchEventWithOutbox(
+async function _fetchEventWithOutboxImpl(
   eventId: string,
   nostr: NostrLike,
   opts?: {
@@ -165,6 +188,14 @@ export async function fetchEventWithOutbox(
   }
 
   return null;
+}
+
+export function fetchEventWithOutbox(
+  eventId: string,
+  nostr: NostrLike,
+  opts?: { hints?: string[]; authorPubkey?: string },
+): Promise<NostrEvent | null> {
+  return withOutboxLimit(() => _fetchEventWithOutboxImpl(eventId, nostr, opts));
 }
 
 export async function fetchNaddrWithOutbox(

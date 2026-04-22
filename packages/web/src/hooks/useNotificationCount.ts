@@ -41,9 +41,12 @@ export function useNotificationCount() {
     }
   }, [user?.pubkey]);
 
+  // Round to 5-minute intervals when there's no saved timestamp — without rounding,
+  // Date.now() drifts by 1 every second and each re-render during backup restore
+  // produces a unique query key, firing 8+ duplicate network requests.
   const since = lastSeenAt > 0
     ? lastSeenAt
-    : Math.floor(Date.now() / 1000) - DEFAULT_LOOKBACK_SECS;
+    : Math.floor(Date.now() / 1000 / 300) * 300 - DEFAULT_LOOKBACK_SECS;
 
   const { data: newCount } = useQuery({
     queryKey: [QUERY_KEY_PREFIX, user?.pubkey, since],

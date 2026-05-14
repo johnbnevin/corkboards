@@ -106,11 +106,11 @@ interface RelayBatch {
 }
 
 /**
- * Query multiple relays via Rust, streaming results back in small batches.
+ * Query multiple relays via Rust, streaming results back via app.emit() batches.
  *
- * Uses Tauri Channel<T> so each IPC call is at most BATCH_SIZE events (~8 KB).
- * This avoids WebKit postMessage crashes that occur with large single-shot payloads.
- * The Channel approach works even when the custom IPC protocol falls back to postMessage.
+ * Uses app.emit() + listen() instead of Channel<T>. Channel<T> hangs silently when
+ * the Tauri IPC custom protocol falls back to postMessage (Tauri bug #9266) —
+ * app.emit() uses webkit_web_view_run_javascript directly and bypasses IPC entirely.
  */
 export async function tauriQuery(
   urls: string[],
@@ -119,15 +119,19 @@ export async function tauriQuery(
 ): Promise<unknown[]> {
   if (!isTauri || urls.length === 0) return [];
 
-  const { Channel, invoke: tauriInvoke } = await import('@tauri-apps/api/core');
+  const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
+  const { listen: tauriListen } = await import('@tauri-apps/api/event');
 
+  const subId = Math.random().toString(36).slice(2, 10);
   const allEvents: unknown[] = [];
   const seen = new Set<string>();
 
   return new Promise<unknown[]>((resolve) => {
-    const channel = new Channel<RelayBatch>();
+    let unlistenFn: (() => void) | null = null;
+    const cleanup = () => { unlistenFn?.(); };
 
-    channel.onmessage = ({ events, done }) => {
+    tauriListen<RelayBatch>(`relay-${subId}`, (event) => {
+      const { events, done } = event.payload;
       for (const ev of events) {
         const e = ev as { id?: string };
         if (e.id && !seen.has(e.id)) {
@@ -136,19 +140,24 @@ export async function tauriQuery(
         }
       }
       if (done) {
+        cleanup();
         resolve(allEvents);
       }
-    };
-
-    // timeout_ms → timeoutMs, on_event → onEvent (Tauri v2 camelCase command params)
-    tauriInvoke('relay_subscribe', {
-      urls,
-      filter,
-      timeoutMs,
-      onEvent: channel,
+    }).then((unlisten) => {
+      unlistenFn = unlisten;
+      tauriInvoke('relay_subscribe', {
+        subId,
+        urls,
+        filter,
+        timeoutMs,
+      }).catch((err) => {
+        console.warn('[tauri] relay_subscribe failed:', err);
+        cleanup();
+        resolve(allEvents);
+      });
     }).catch((err) => {
-      console.warn('[tauri] relay_subscribe failed:', err);
-      resolve(allEvents); // return whatever arrived before the error
+      console.warn('[tauri] listen failed:', err);
+      resolve(allEvents);
     });
   });
 }
@@ -167,7 +176,7 @@ export async function tauriRelayQuery(
     return await invoke<RelayQueryResult>('relay_query', {
       url,
       filter,
-      timeout_ms: timeoutMs,
+      timeoutMs,
     });
   } catch (e) {
     console.warn('[tauri] relay_query failed:', e);

@@ -33,7 +33,7 @@ import { clearCache as clearProfileCacheDb, clearMemCache as clearProfileMemCach
 import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
 import { clearNoteCardCache } from '@/components/NoteCard';
 import { handleLogoutStorageAsync } from '@/lib/storageKeys';
-import { isTauri, keychainStore, keychainDelete } from '@/lib/tauri';
+import { isTauri, keychainStore, keychainDelete, tauriLog } from '@/lib/tauri';
 import { NOSTRCONNECT_RELAYS, NSEC_APP_RELAY } from '@/lib/relayConstants';
 
 const BACKUP_CHECKED_KEY = 'corkboard:backup-checked';
@@ -90,43 +90,62 @@ export function useLoginActions() {
       params.append('name', 'corkboards.me');
 
       const uri = `nostrconnect://${clientPubkey}?${params.toString()}`;
+      tauriLog(`[nip46] nostrconnect URI generated, relays: ${connectRelays.join(', ')}`);
       onUri(uri);
 
-      // Open direct relay connections (not through NPool, which uses backoff:false)
+      // Inner abort controller — aborted as soon as we get a valid connect response,
+      // which cleanly closes all 3 relay subscriptions. Without this, abandoned
+      // for-await generators fill NRelay1's buffer and block the subsequent
+      // NConnectSigner.getPublicKey() response from being delivered.
+      const connectAbort = new AbortController();
+      signal.addEventListener('abort', () => connectAbort.abort());
+
+      // Open direct relay connections (not through NPool, backoff:false)
       const relays = connectRelays.map(url => createRelayDirect(url, { backoff: false, idleTimeout: false }));
       const subs = relays.map(relay =>
         relay.req(
           [{ kinds: [24133], '#p': [clientPubkey] }],
-          { signal },
+          { signal: connectAbort.signal },
         )
       );
+      tauriLog(`[nip46] subscriptions opened on ${connectRelays.length} relays, waiting for response...`);
 
       // Race all relays for the signer's connect response
       const result = await new Promise<{ bunkerPubkey: string; relayIndex: number }>((resolve, reject) => {
         let resolved = false;
-        signal.addEventListener('abort', () => { if (!resolved) reject(new Error('aborted')); });
+        connectAbort.signal.addEventListener('abort', () => { if (!resolved) reject(new Error('aborted')); });
 
         for (let ri = 0; ri < subs.length; ri++) {
           const sub = subs[ri];
+          const relayUrl = connectRelays[ri];
           (async () => {
             try {
               for await (const msg of sub) {
+                tauriLog(`[nip46] ${relayUrl}: msg[0]=${msg[0]}`);
                 if (resolved) return;
                 if (msg[0] === 'CLOSED') continue;
                 if (msg[0] === 'EVENT') {
                   const event = msg[2];
+                  tauriLog(`[nip46] EVENT kind=${event.kind} from ${event.pubkey.slice(0,8)}`);
                   try {
                     const decrypted = await clientSigner.nip44!.decrypt(event.pubkey, event.content);
                     const response = JSON.parse(decrypted);
+                    tauriLog(`[nip46] decrypted result=${response?.result?.slice?.(0,8)} expected=${secret.slice(0,8)}`);
                     if (typeof response === 'object' && response !== null && response.result === secret) {
                       resolved = true;
+                      connectAbort.abort(); // close all 3 subscriptions cleanly
                       resolve({ bunkerPubkey: event.pubkey, relayIndex: ri });
                       return;
                     }
-                  } catch { /* not our response */ }
+                  } catch (e) {
+                    tauriLog(`[nip46] decrypt error: ${e}`);
+                  }
                 }
               }
-            } catch { /* subscription closed or errored */ }
+              tauriLog(`[nip46] ${relayUrl}: subscription ended`);
+            } catch (e) {
+              tauriLog(`[nip46] ${relayUrl}: subscription error: ${e}`);
+            }
           })();
         }
       });

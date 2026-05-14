@@ -4018,6 +4018,22 @@ export function MultiColumnClient() {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
+                  <DropdownMenuItem
+                    disabled={backupStatus === 'saving' || backupStatus === 'encrypting'}
+                    onClick={async () => {
+                      try {
+                        await saveBackup();
+                        setBackupIndicator('saved');
+                        toast({ title: 'Saved', description: 'Backup saved to Blossom.' });
+                      } catch {
+                        toast({ title: 'Save failed', description: 'Could not save to Blossom.', variant: 'destructive' });
+                      }
+                    }}
+                    className="gap-2"
+                  >
+                    <CloudUpload className="h-4 w-4" />Save Now
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={() => {
                       if ((backupStatus as string) === 'checking' || (backupStatus as string) === 'restoring') return;
                       setShowBackupConfirm(true);

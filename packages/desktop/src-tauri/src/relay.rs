@@ -2,12 +2,12 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
-use tauri::ipc::Channel;
+use tauri::{AppHandle, Emitter};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-/// How many events to bundle per Channel send.
-/// Each send is one postMessage call — keep it small to avoid WebKit buffer limits.
+/// Events per emit call — each app.emit() uses webkit_web_view_run_javascript,
+/// so the payload per call stays small regardless of IPC protocol state.
 const BATCH_SIZE: usize = 20;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -16,20 +16,24 @@ pub struct RelayQueryResult {
     pub error: Option<String>,
 }
 
-/// Stream events from multiple relays to JS via a Tauri Channel.
+/// Stream events from multiple relays to JS via Tauri app events.
 ///
-/// Queries all relays concurrently via tokio-tungstenite (no WebKitGTK WebSocket).
-/// Events are deduplicated by ID and streamed back in batches of BATCH_SIZE so
-/// each postMessage call is small even when the IPC custom protocol has fallen back.
+/// Uses app.emit() rather than Channel<T> because Channel relies on the Tauri
+/// IPC fetch mechanism which silently hangs when the custom protocol falls back
+/// to postMessage on older WebKitGTK builds.
 ///
-/// The JS side receives `{ events: [...], done: false }` batches and a final
-/// `{ events: [...], done: true }` when all relays have returned EOSE.
+/// app.emit() calls webkit_web_view_run_javascript directly — a completely
+/// separate path that always works.  JS registers a listen() handler before
+/// calling this command, accumulates batches, and resolves when done=true.
+///
+/// AppHandle is injected by Tauri; sub_id/urls/filter/timeout_ms come from JS.
 #[tauri::command]
 pub async fn relay_subscribe(
+    app: AppHandle,
+    sub_id: String,
     urls: Vec<String>,
     filter: Value,
     timeout_ms: Option<u64>,
-    on_event: Channel<Value>,
 ) -> Result<(), String> {
     let ms = timeout_ms.unwrap_or(5000);
     let dur = Duration::from_millis(ms);
@@ -40,7 +44,7 @@ pub async fn relay_subscribe(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
 
-    // Spawn one task per relay — all connect concurrently via Rust async
+    // Spawn one task per relay — all connect and query concurrently
     let handles: Vec<_> = urls
         .into_iter()
         .map(|url| {
@@ -51,66 +55,56 @@ pub async fn relay_subscribe(
                     Ok(result) => {
                         for ev in result.events {
                             if sender.send(ev).is_err() {
-                                break; // receiver closed
+                                break; // receiver dropped
                             }
                         }
                     }
-                    Err(_) => {} // timed out — channel sender dropped, that's fine
+                    Err(_) => {} // timeout — sender dropped, channel eventually closes
                 }
             })
         })
         .collect();
-    drop(tx); // channel closes when all spawned tasks drop their senders
+    drop(tx); // channel closes when all spawned senders finish
 
-    // Collect, deduplicate, and stream to JS
+    // Deduplicate and stream to JS in small batches via app.emit()
+    let event_name = format!("relay-{}", sub_id);
     let mut seen = std::collections::HashSet::new();
     let mut batch: Vec<Value> = Vec::new();
     let mut total = 0usize;
 
     while let Some(event) = rx.recv().await {
         if total >= limit {
-            continue; // drain but discard — relay sent more than requested
+            continue; // drain but discard once limit reached
         }
         if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
             if seen.insert(id.to_string()) {
                 total += 1;
                 batch.push(event);
                 if batch.len() >= BATCH_SIZE {
-                    if on_event
-                        .send(serde_json::json!({
-                            "events": std::mem::take(&mut batch),
-                            "done": false
-                        }))
-                        .is_err()
-                    {
-                        // JS closed the channel (AbortSignal or unmount) — drain and exit cleanly
-                        drop(rx);
-                        for h in handles {
-                            let _ = h.await;
-                        }
-                        return Ok(());
-                    }
+                    let _ = app.emit(
+                        &event_name,
+                        serde_json::json!({ "events": std::mem::take(&mut batch), "done": false }),
+                    );
                 }
             }
         }
     }
 
-    // All relay tasks have finished
     for h in handles {
         let _ = h.await;
     }
 
     // Final batch + completion signal
-    let _ = on_event.send(serde_json::json!({
-        "events": batch,
-        "done": true
-    }));
+    let _ = app.emit(
+        &event_name,
+        serde_json::json!({ "events": batch, "done": true }),
+    );
 
     Ok(())
 }
 
-/// Query a single relay via native tokio-tungstenite.
-/// Used by fetchEventWithOutbox for individual event lookups (small payloads, safe).
+/// Query a single relay via native tokio-tungstenite (no WebKitGTK WebSocket).
+/// Used by fetchEventWithOutbox for individual event lookups — small payloads only.
 #[tauri::command]
 pub async fn relay_query(
     url: String,
@@ -127,7 +121,7 @@ pub async fn relay_query(
     }
 }
 
-/// Open a WebSocket to one relay, send REQ, collect all events until EOSE/CLOSED.
+/// Open one WebSocket, send REQ, collect all events until EOSE/CLOSED.
 async fn do_query(url: String, filter: Value) -> RelayQueryResult {
     let (mut ws, _) = match connect_async(url.as_str()).await {
         Ok(pair) => pair,

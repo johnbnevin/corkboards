@@ -19,8 +19,24 @@ import {
 import { Platform } from 'react-native';
 import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS } from '../hooks/useNostrBackup';
 import { mobileStorage } from '../storage/MmkvStorage';
+import { setImageProxyTemplate } from '@core/imageProxy';
 
 const PROXY_URL_KEY = '__proxy_url__';
+const IMAGE_PROXY_KEY = 'corkboard:image-proxy-template';
+
+function getImageProxy(): string {
+  return mobileStorage.getSync(IMAGE_PROXY_KEY) ?? '';
+}
+
+function saveImageProxy(template: string) {
+  const trimmed = template.trim();
+  if (trimmed.length === 0) {
+    mobileStorage.removeSync(IMAGE_PROXY_KEY);
+  } else {
+    mobileStorage.setSync(IMAGE_PROXY_KEY, trimmed);
+  }
+  setImageProxyTemplate(trimmed || null);
+}
 
 function getProxyUrl(): string {
   return mobileStorage.getSync(PROXY_URL_KEY) ?? '';
@@ -460,7 +476,21 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
 function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
   const [url, setUrl] = useState(getProxyUrl);
   const [saved, setSaved] = useState(getProxyUrl);
+  const [imgProxy, setImgProxy] = useState(getImageProxy);
+  const [savedImgProxy, setSavedImgProxy] = useState(getImageProxy);
   const isAndroid = Platform.OS === 'android';
+
+  const handleSaveImgProxy = () => {
+    const trimmed = imgProxy.trim();
+    if (trimmed && !trimmed.includes('{url}')) {
+      Alert.alert('Invalid template', 'Template must include {url} as the placeholder.');
+      return;
+    }
+    saveImageProxy(trimmed);
+    setImgProxy(trimmed);
+    setSavedImgProxy(trimmed);
+    Alert.alert(trimmed ? 'Image proxy enabled' : 'Image proxy cleared');
+  };
 
   const handleSave = () => {
     const trimmed = url.trim();
@@ -525,6 +555,32 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
         </View>
         {saved ? (
           <Text style={[styles.settingHint, { marginTop: 8, color: '#22c55e' }]}>Saved: {saved}</Text>
+        ) : null}
+      </View>
+
+      <View style={styles.separator} />
+
+      <View style={{ paddingHorizontal: 12 }}>
+        <Text style={styles.settingTitle}>Image Proxy URL template</Text>
+        <Text style={styles.settingHint}>
+          Route every avatar and inline image through an image-proxy so your IP and Referer aren&apos;t sent to each host. Use {'{url}'} as the placeholder.
+        </Text>
+        <View style={styles.addRow}>
+          <TextInput
+            style={styles.addInput}
+            placeholder="https://wsrv.nl/?url={url}"
+            placeholderTextColor="#666"
+            value={imgProxy}
+            onChangeText={setImgProxy}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity style={styles.addButton} onPress={handleSaveImgProxy} disabled={imgProxy === savedImgProxy}>
+            <Text style={styles.addButtonText}>{imgProxy.trim() ? 'Save' : 'Clear'}</Text>
+          </TouchableOpacity>
+        </View>
+        {savedImgProxy ? (
+          <Text style={[styles.settingHint, { marginTop: 8, color: '#22c55e' }]}>Active: {savedImgProxy}</Text>
         ) : null}
       </View>
     </ScrollView>

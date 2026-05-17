@@ -280,6 +280,7 @@ export function ProfileCard({
               <img
                 src={metadata.banner} alt=""
                 className={`absolute inset-0 w-full h-full ${bannerFitMode === 'crop' ? 'object-cover' : 'object-contain'}`}
+                referrerPolicy="no-referrer"
                 onLoad={(e) => {
                   const img = e.currentTarget;
                   if (img.naturalWidth > 0 && naturalBannerPct === 0)
@@ -291,6 +292,7 @@ export function ProfileCard({
             <div className="w-full">
               <img
                 src={metadata.banner} alt="" className="w-full h-auto"
+                referrerPolicy="no-referrer"
                 onLoad={(e) => {
                   const img = e.currentTarget;
                   if (img.naturalWidth > 0 && naturalBannerPct === 0)

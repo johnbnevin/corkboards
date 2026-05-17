@@ -36,6 +36,7 @@ import {
   getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS,
 } from '@/hooks/useNostrBackup';
 import { isTauri, tauriGetProxy, tauriSetProxy } from '@/lib/tauri';
+import { getImageProxyTemplate, saveImageProxyTemplate } from '@/lib/imageProxySettings';
 
 interface AdvancedSettingsProps {
   dismissedCount: number;
@@ -475,7 +476,21 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
   const [proxyUrl, setProxyUrl] = useState('');
   const [savedUrl, setSavedUrl] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [imgProxy, setImgProxy] = useState(getImageProxyTemplate);
+  const [savedImgProxy, setSavedImgProxy] = useState(getImageProxyTemplate);
   const desktop = isTauri;
+
+  const handleSaveImgProxy = () => {
+    const trimmed = imgProxy.trim();
+    if (trimmed && !trimmed.includes('{url}')) {
+      toast({ title: 'Template must include {url}', variant: 'destructive' });
+      return;
+    }
+    saveImageProxyTemplate(trimmed);
+    setImgProxy(trimmed);
+    setSavedImgProxy(trimmed);
+    toast({ title: trimmed ? 'Image proxy enabled' : 'Image proxy cleared' });
+  };
 
   useEffect(() => {
     if (!desktop) return;
@@ -560,6 +575,32 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
           </p>
         </div>
       )}
+
+      <Separator />
+
+      <div className="space-y-3">
+        <div>
+          <Label className="text-xs">Image Proxy URL template</Label>
+          <Input
+            placeholder="https://wsrv.nl/?url={url}"
+            value={imgProxy}
+            onChange={(e) => setImgProxy(e.target.value)}
+            className="h-8 text-xs font-mono mt-1"
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+          />
+          <p className="text-[10px] text-muted-foreground mt-1">
+            Route every avatar and inline image through an image-proxy so your IP and Referer aren't sent to each random host. Use <code>{'{url}'}</code> as the placeholder for the original URL. Blank by default.
+          </p>
+        </div>
+        <Button size="sm" onClick={handleSaveImgProxy} disabled={imgProxy === savedImgProxy}>
+          {imgProxy.trim() ? 'Save' : 'Disable image proxy'}
+        </Button>
+        {savedImgProxy && (
+          <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedImgProxy}</span></p>
+        )}
+      </div>
     </div>
   );
 }

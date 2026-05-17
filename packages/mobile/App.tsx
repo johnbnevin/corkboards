@@ -5,7 +5,8 @@ import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { prepareSecureStorage, mmkvInitError, mmkvIsEncrypted } from './src/storage/MmkvStorage';
+import { prepareSecureStorage, mmkvInitError, mmkvIsEncrypted, mobileStorage } from './src/storage/MmkvStorage';
+import { setImageProxyTemplate } from '@core/imageProxy';
 import { dmStoreReady } from './src/lib/dmMessageStore';
 import { NostrProvider, WelshmanRouterBridge } from './src/lib/NostrProvider';
 import { AuthProvider } from './src/lib/AuthContext';
@@ -50,6 +51,10 @@ export default function App() {
       } else if (!mmkvIsEncrypted) {
         setStorageWarning('Storage is running in unencrypted mode. Sensitive data (DMs, backup metadata) is not protected at rest.');
       }
+      // Activate the persisted image-proxy template (if any) before any
+      // image renders. Settings UI calls setImageProxyTemplate directly on
+      // save, so this only matters for cold launches.
+      setImageProxyTemplate(mobileStorage.getSync('corkboard:image-proxy-template'));
       setStorageReady(true);
     });
   }, []);

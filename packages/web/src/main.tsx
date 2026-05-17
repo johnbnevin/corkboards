@@ -5,8 +5,18 @@ import './lib/polyfills.ts';
 
 import { isTauri, tauriLog, clearTauriLog } from '@/lib/tauri';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { setImageProxyTemplate } from '@core/imageProxy';
+import { IMAGE_PROXY_TEMPLATE_KEY } from '@/lib/imageProxySettings';
 import App from './App.tsx';
 import './index.css';
+
+// Initialize the image-proxy template before any image renders so the very
+// first paint already routes through the user's chosen proxy (if set).
+try {
+  setImageProxyTemplate(localStorage.getItem(IMAGE_PROXY_TEMPLATE_KEY));
+} catch {
+  /* localStorage unavailable — proxy stays disabled */
+}
 
 // When running inside Tauri, redirect console output to a log file so we can
 // diagnose production issues without a devtools window.

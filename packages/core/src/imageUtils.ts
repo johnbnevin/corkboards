@@ -1,7 +1,14 @@
 /**
  * Image URL optimization utilities.
  * Adds size parameters to known image hosts for faster loading.
+ *
+ * After host-specific resizing, the URL is run through `applyImageProxy()`
+ * (see ./imageProxy.ts) — when the user has configured an image proxy,
+ * every avatar and inline image is rewritten to fetch via that proxy,
+ * hiding the user's IP from the original host.
  */
+
+import { applyImageProxy } from './imageProxy';
 
 const THUMBNAIL_SIZE = 64;
 const PREVIEW_SIZE = 400;
@@ -52,42 +59,44 @@ export function optimizeAvatarUrl(url: string | undefined): string | undefined {
   // Reject non-HTTPS avatar URLs and suspicious file extensions
   if (shouldRejectUrl(url, 'avatar')) return undefined;
 
+  let optimized = url;
   try {
     const u = new URL(url);
 
     for (const [host, optimizer] of Object.entries(KNOWN_THUMBNAIL_HOSTS)) {
       if (u.hostname.endsWith(host)) {
-        return optimizer(url, THUMBNAIL_SIZE);
+        optimized = optimizer(url, THUMBNAIL_SIZE);
+        break;
       }
     }
 
-    if (GOOGLE_FAVICON_HOSTS.includes(u.hostname) && u.pathname.includes('/favicons')) {
+    if (optimized === url && GOOGLE_FAVICON_HOSTS.includes(u.hostname) && u.pathname.includes('/favicons')) {
       u.searchParams.set('sz', String(THUMBNAIL_SIZE));
-      return u.toString();
+      optimized = u.toString();
     }
-
-    return url;
   } catch {
-    return url;
+    /* fall through to passthrough */
   }
+  return applyImageProxy(optimized);
 }
 
 export function optimizeMediaUrl(url: string, isPreview: boolean = false): string {
   const size = isPreview ? PREVIEW_SIZE : THUMBNAIL_SIZE;
-  
+
+  let optimized = url;
   try {
     const u = new URL(url);
-    
+
     for (const [host, optimizer] of Object.entries(KNOWN_THUMBNAIL_HOSTS)) {
       if (u.hostname.endsWith(host)) {
-        return optimizer(url, size);
+        optimized = optimizer(url, size);
+        break;
       }
     }
-    
-    return url;
   } catch {
-    return url;
+    /* fall through to passthrough */
   }
+  return applyImageProxy(optimized);
 }
 
 export function shouldRejectUrl(url: string, type: 'avatar' | 'media'): boolean {

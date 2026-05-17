@@ -72,6 +72,14 @@ export function hexToRawKey(hex: string): Uint8Array {
 /**
  * Encrypt a JSON payload for self-storage on Nostr.
  * Returns the encrypted content string and tags needed for the event.
+ *
+ * NIP-44 v2 only — we never request a version explicitly, but @nostrify
+ * signers (NSecSigner, NConnectSigner) negotiate v2 with no v1 downgrade
+ * path. NIP-04 is only used to *unwrap* legacy own-data sync events that
+ * were written before this codebase moved to NIP-44; new writes always go
+ * through `nip44.encrypt`. This applies to backup, custom-feed, and
+ * dismissed-notes sync only — DMs are pure NIP-17 after the kind-4 removal
+ * in cypherpunk Phase 1.
  */
 export async function encryptForSelf(
   plaintext: string,

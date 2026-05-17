@@ -17,6 +17,7 @@ import { clearRelayCache } from './NostrProvider';
 import { clearCollapsedNotesModuleState } from '../hooks/useCollapsedNotes';
 import { evictCachedProfile, clearProfileCache } from '../lib/cacheStore';
 import { mobileStorage } from '../storage/MmkvStorage';
+import { bumpSessionEpoch } from '../hooks/useSessionAbort';
 
 const KEYCHAIN_SERVICE_PREFIX = 'corkboards-nsec:';
 const KEYCHAIN_CLIENTNSEC_PREFIX = 'corkboards-clientnsec:';
@@ -137,8 +138,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     loading: true,
     accounts: [],
   });
+  // Keep a ref to the active pubkey so long-lived async callbacks (logout,
+  // backup-restore) see the latest value without re-binding closures.
+  // Updated in a useEffect (post-commit) instead of during render to satisfy
+  // the v7 refs rule and align with React 19 semantics.
   const pubkeyRef = useRef<string | null>(null);
-  pubkeyRef.current = state.pubkey;
+  useEffect(() => { pubkeyRef.current = state.pubkey; }, [state.pubkey]);
 
   // Restore session from keychain on mount
   useEffect(() => {
@@ -215,7 +220,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const oldPubkey = pubkeyRef.current;
-    if (oldPubkey && oldPubkey !== pubkey) switchActiveUser(oldPubkey, pubkey);
+    if (oldPubkey && oldPubkey !== pubkey) {
+      // Abort BEFORE any storage swap or state set, so in-flight queries
+      // for the old account can't write into the new account's UI.
+      bumpSessionEpoch();
+      switchActiveUser(oldPubkey, pubkey);
+    }
     setStoredActiveAccount(pubkey);
 
     setState({ pubkey, signer, loading: false, accounts });
@@ -241,7 +251,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const oldPubkey = pubkeyRef.current;
-    if (oldPubkey && oldPubkey !== userPubkey) switchActiveUser(oldPubkey, userPubkey);
+    if (oldPubkey && oldPubkey !== userPubkey) {
+      bumpSessionEpoch();
+      switchActiveUser(oldPubkey, userPubkey);
+    }
     setStoredActiveAccount(userPubkey);
 
     const decoded = nip19.decode(clientNsec);
@@ -266,6 +279,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const oldPubkey = pubkeyRef.current;
     if (oldPubkey && oldPubkey !== pubkey) {
+      // Abort first — otherwise stale subscriptions for oldPubkey may resolve
+      // after setState below and write into the new account's UI.
+      bumpSessionEpoch();
       switchActiveUser(oldPubkey, pubkey);
       clearRelayCache();
       clearCollapsedNotesModuleState();
@@ -277,6 +293,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const removeAccount = useCallback(async (pubkey: string) => {
+    // Removing the active account changes the in-flight session, so abort
+    // anything pending. Removing an inactive account is harmless but cheap
+    // to handle uniformly.
+    if (pubkeyRef.current === pubkey) bumpSessionEpoch();
     handleLogoutStorage(pubkey);
 
     const type = getAccountType(pubkey);
@@ -314,6 +334,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
+    bumpSessionEpoch();
     const accounts = getStoredAccounts();
     for (const pk of accounts) {
       handleLogoutStorage(pk);

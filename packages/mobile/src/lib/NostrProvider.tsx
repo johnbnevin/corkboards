@@ -12,6 +12,7 @@ import { mobileStorage } from '../storage/MmkvStorage';
 import { isSecureRelay } from '@core/nostrUtils';
 import { RELAY_CACHE_TTL_MS } from '@core/cacheConfig';
 import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
+import { getSessionSignal } from '../hooks/useSessionAbort';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS } from '@core/relayConstants';
 import { useAuth } from './AuthContext';
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS };
@@ -396,8 +397,38 @@ interface NostrContextValue {
 
 const NostrContext = createContext<NostrContextValue | null>(null);
 
+/**
+ * Wrap an NPool so every `query` call inherits the current session abort
+ * signal. Callers can still pass their own `signal` (typically a timeout);
+ * we compose both so EITHER the timeout OR the session bump aborts.
+ *
+ * Without this, in-flight queries for account A keep running after the user
+ * switches to account B and can write stale results into the new UI.
+ */
+function wrapPoolWithSessionAbort(pool: NPoolType): NPoolType {
+  const origQuery = pool.query.bind(pool);
+  const origReq = pool.req?.bind(pool);
+  pool.query = ((filters: NostrFilter[], opts?: { signal?: AbortSignal }) => {
+    const sessionSignal = getSessionSignal();
+    const composed = opts?.signal
+      ? AbortSignal.any([opts.signal, sessionSignal])
+      : sessionSignal;
+    return origQuery(filters, { ...opts, signal: composed });
+  }) as NPoolType['query'];
+  if (origReq) {
+    pool.req = ((filters: NostrFilter[], opts?: { signal?: AbortSignal }) => {
+      const sessionSignal = getSessionSignal();
+      const composed = opts?.signal
+        ? AbortSignal.any([opts.signal, sessionSignal])
+        : sessionSignal;
+      return origReq(filters, { ...opts, signal: composed });
+    }) as NPoolType['req'];
+  }
+  return pool;
+}
+
 export function NostrProvider({ children }: { children: React.ReactNode }) {
-  const [pool] = useState<NPoolType>(() => createPool());
+  const [pool] = useState<NPoolType>(() => wrapPoolWithSessionAbort(createPool()));
   const value = useMemo(() => ({ nostr: pool }), [pool]);
   return <NostrContext.Provider value={value}>{children}</NostrContext.Provider>;
 }

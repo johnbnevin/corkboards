@@ -21,9 +21,11 @@ import { bumpSessionEpoch } from '../hooks/useSessionAbort';
 
 const KEYCHAIN_SERVICE_PREFIX = 'corkboards-nsec:';
 const KEYCHAIN_CLIENTNSEC_PREFIX = 'corkboards-clientnsec:';
+/** Legacy plaintext account list — removed on first launch after the keychain-enumeration switch. */
 const ACCOUNTS_KEY = 'corkboard:accounts';
 const ACTIVE_ACCOUNT_KEY = 'corkboard:active-account';
 const MIGRATION_DONE_KEY = 'corkboard:keychain-migrated';
+const ENUM_MIGRATION_FLAG = '__accounts_migrated_to_encrypted__';
 
 function keychainService(pubkey: string) {
   return `${KEYCHAIN_SERVICE_PREFIX}${pubkey}`;
@@ -58,16 +60,36 @@ function removeBunkerData(pubkey: string) {
   mobileStorage.removeSync(`corkboard:account-type:${pubkey}`);
 }
 
-function getStoredAccounts(): string[] {
+/**
+ * Enumerate accounts from the OS keychain.
+ *
+ * Cypherpunk: the pubkey list is no longer persisted in MMKV. It's derived on
+ * demand from keychain entries whose service names use known prefixes. This
+ * means even with full filesystem access (no keychain), an attacker can't see
+ * which Nostr identities live on the device — they're locked behind the OS
+ * keychain's hardware-backed isolation.
+ *
+ * Both nsec accounts (`corkboards-nsec:{pk}`) and bunker accounts
+ * (`corkboards-clientnsec:{pk}`) are included. Returned list is deduplicated.
+ */
+async function getStoredAccounts(): Promise<string[]> {
   try {
-    const raw = mobileStorage.getSync(ACCOUNTS_KEY);
-    if (raw) return JSON.parse(raw) as string[];
-  } catch { /* ignore */ }
-  return [];
-}
-
-function setStoredAccounts(pubkeys: string[]) {
-  mobileStorage.setSync(ACCOUNTS_KEY, JSON.stringify(pubkeys));
+    const services = await Keychain.getAllGenericPasswordServices();
+    const pubkeys = new Set<string>();
+    for (const s of services) {
+      if (s.startsWith(KEYCHAIN_SERVICE_PREFIX)) {
+        const pk = s.slice(KEYCHAIN_SERVICE_PREFIX.length);
+        if (pk) pubkeys.add(pk);
+      } else if (s.startsWith(KEYCHAIN_CLIENTNSEC_PREFIX)) {
+        const pk = s.slice(KEYCHAIN_CLIENTNSEC_PREFIX.length);
+        if (pk) pubkeys.add(pk);
+      }
+    }
+    return [...pubkeys];
+  } catch (e) {
+    console.warn('[AuthContext] keychain enumeration failed:', e);
+    return [];
+  }
 }
 
 function getStoredActiveAccount(): string | null {
@@ -149,7 +171,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     (async () => {
       try {
-        const accounts = getStoredAccounts();
+        // One-time scrub of the legacy plaintext account-list MMKV key.
+        // The list is now derived from keychain enumeration; the MMKV copy is
+        // redundant and would needlessly expose the pubkey set if encryption
+        // were ever bypassed.
+        if (mobileStorage.getSync(ENUM_MIGRATION_FLAG) !== '1') {
+          mobileStorage.removeSync(ACCOUNTS_KEY);
+          mobileStorage.setSync(ENUM_MIGRATION_FLAG, '1');
+        }
+
+        let accounts = await getStoredAccounts();
         const activePubkey = getStoredActiveAccount();
 
         // Migrate from old single-account keychain if no accounts stored
@@ -164,7 +195,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 const pk = getPublicKey(decoded.data);
                 await Keychain.setGenericPassword('nsec', oldCreds.password, { service: keychainService(pk) });
                 await Keychain.resetGenericPassword({ service: 'corkboards-nsec' });
-                setStoredAccounts([pk]);
                 setStoredActiveAccount(pk);
                 setState({ pubkey: pk, signer: new NSecSigner(decoded.data), loading: false, accounts: [pk] });
                 return;
@@ -188,10 +218,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setStoredActiveAccount(targetPubkey);
           setState({ pubkey: targetPubkey, signer, loading: false, accounts });
         } else {
-          // Stale entry — remove it
-          const cleaned = accounts.filter(a => a !== targetPubkey);
-          setStoredAccounts(cleaned);
-          setState(prev => ({ ...prev, loading: false, accounts: cleaned }));
+          // Stale entry — drop the keychain residue and re-enumerate.
+          await Keychain.resetGenericPassword({ service: keychainService(targetPubkey) }).catch(() => {});
+          await Keychain.resetGenericPassword({ service: clientNsecService(targetPubkey) }).catch(() => {});
+          accounts = await getStoredAccounts();
+          setState(prev => ({ ...prev, loading: false, accounts }));
         }
       } catch (e) {
         if (e instanceof Error && !e.message.toLowerCase().includes('no entry') && !e.message.toLowerCase().includes('not found')) {
@@ -213,11 +244,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await Keychain.setGenericPassword('nsec', nsec, { service: keychainService(pubkey) });
     setAccountType(pubkey, 'nsec');
 
-    const accounts = getStoredAccounts();
-    if (!accounts.includes(pubkey)) {
-      accounts.push(pubkey);
-      setStoredAccounts(accounts);
-    }
+    // Enumerate *after* writing the keychain entry so the new account is
+    // included without us having to maintain a parallel list.
+    const accounts = await getStoredAccounts();
 
     const oldPubkey = pubkeyRef.current;
     if (oldPubkey && oldPubkey !== pubkey) {
@@ -244,11 +273,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setBunkerData(userPubkey, { bunkerPubkey, relays });
     setAccountType(userPubkey, 'bunker');
 
-    const accounts = getStoredAccounts();
-    if (!accounts.includes(userPubkey)) {
-      accounts.push(userPubkey);
-      setStoredAccounts(accounts);
-    }
+    const accounts = await getStoredAccounts();
 
     const oldPubkey = pubkeyRef.current;
     if (oldPubkey && oldPubkey !== userPubkey) {
@@ -271,7 +296,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const switchAccount = useCallback(async (pubkey: string) => {
-    const accounts = getStoredAccounts();
+    const accounts = await getStoredAccounts();
     if (!accounts.includes(pubkey)) throw new Error('Account not found');
 
     const signer = await buildSignerForAccount(pubkey);
@@ -310,8 +335,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearRelayCache();
     clearCollapsedNotesModuleState();
 
-    const accounts = getStoredAccounts().filter(a => a !== pubkey);
-    setStoredAccounts(accounts);
+    // Re-enumerate after the keychain deletion above; the removed pubkey is
+    // automatically excluded.
+    const accounts = await getStoredAccounts();
 
     if (pubkeyRef.current === pubkey) {
       if (accounts.length > 0) {
@@ -335,7 +361,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = useCallback(async () => {
     bumpSessionEpoch();
-    const accounts = getStoredAccounts();
+    const accounts = await getStoredAccounts();
     for (const pk of accounts) {
       handleLogoutStorage(pk);
       const type = getAccountType(pk);
@@ -346,7 +372,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await Keychain.resetGenericPassword({ service: keychainService(pk) }).catch(() => {});
       }
     }
-    setStoredAccounts([]);
     setStoredActiveAccount(null);
     clearRelayCache();
     clearCollapsedNotesModuleState();

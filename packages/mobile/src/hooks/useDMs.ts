@@ -1,8 +1,9 @@
 /**
- * DM hooks — NIP-04 (kind 4) and NIP-17 (kind 1059 gift-wrap) dual-protocol support.
+ * DM hooks — NIP-17 (kind 1059 gift-wrap) sealed-sender DMs.
  *
- * NIP-04: Legacy encrypted DMs. Widely supported.
- * NIP-17: Gift-wrapped sealed-sender DMs. More private (hides metadata).
+ * NIP-04 (kind 4) DM support was removed in v0.7. The cipher itself is still
+ * imported elsewhere for NIP-47 (NWC) and legacy own-data sync events, but
+ * direct messaging uses NIP-17 exclusively.
  *
  * Mirrors web's DMProvider architecture adapted as hooks.
  */
@@ -12,10 +13,9 @@ import { generateSecretKey } from 'nostr-tools';
 import { finalizeEvent } from 'nostr-tools/pure';
 import { encrypt as nip44Encrypt } from 'nostr-tools/nip44';
 import { getConversationKey } from 'nostr-tools/nip44';
-import { hexToBytes } from 'nostr-tools/utils';
 import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
-import { getConversationPartner, formatConversationTime } from '@core/dmUtils';
+import { formatConversationTime } from '@core/dmUtils';
 import { secureRandomInt } from '@core/cryptoUtils';
 
 export interface DecryptedMessage {
@@ -24,7 +24,7 @@ export interface DecryptedMessage {
   created_at: number;
   pubkey: string;        // real author
   isMine: boolean;
-  protocol: 'nip04' | 'nip17';
+  protocol: 'nip17';
 }
 
 export interface Conversation {
@@ -32,51 +32,6 @@ export interface Conversation {
   lastMessage: string;
   lastActivity: number;
   unreadHint: boolean;
-}
-
-// ============================================================================
-// NIP-04 — legacy encrypted DMs (kind 4)
-// ============================================================================
-
-export function useDMEvents() {
-  const { nostr } = useNostr();
-  const { pubkey } = useAuth();
-
-  return useQuery<NostrEvent[]>({
-    queryKey: ['dm-events', pubkey],
-    queryFn: async () => {
-      if (!pubkey) return [];
-
-      const [inbox, outbox] = await Promise.allSettled([
-        nostr.query(
-          [{ kinds: [4], '#p': [pubkey], limit: 200 }],
-          { signal: AbortSignal.timeout(10000) },
-        ),
-        nostr.query(
-          [{ kinds: [4], authors: [pubkey], limit: 200 }],
-          { signal: AbortSignal.timeout(10000) },
-        ),
-      ]);
-
-      const events: NostrEvent[] = [];
-      const seen = new Set<string>();
-
-      for (const result of [inbox, outbox]) {
-        if (result.status === 'fulfilled') {
-          for (const ev of result.value) {
-            if (!seen.has(ev.id)) {
-              seen.add(ev.id);
-              events.push(ev);
-            }
-          }
-        }
-      }
-
-      return events.sort((a, b) => a.created_at - b.created_at);
-    },
-    enabled: !!pubkey,
-    staleTime: 60_000,
-  });
 }
 
 // ============================================================================
@@ -127,8 +82,6 @@ async function unwrapGiftWrap(
     const isMine = senderPubkey === pubkey;
 
     // Resolve conversation partner from the rumor's p-tag (NIP-17 spec)
-    // For incoming messages: partner is the sender (seal.pubkey)
-    // For outgoing messages (sender copy): partner is the p-tag recipient
     let partnerPubkey: string;
     if (isMine) {
       const pTag = rumor.tags?.find(t => t[0] === 'p');
@@ -138,7 +91,7 @@ async function unwrapGiftWrap(
     }
 
     return {
-      id: rumor.id || giftWrap.id, // use rumor ID if available, fallback to wrap ID
+      id: rumor.id || giftWrap.id,
       content: rumor.content,
       created_at: rumor.created_at || giftWrap.created_at,
       pubkey: senderPubkey,
@@ -146,7 +99,7 @@ async function unwrapGiftWrap(
       protocol: 'nip17',
       partnerPubkey,
     };
-  } catch (err) {
+  } catch {
     if (__DEV__) console.warn('[useDMs] NIP-17 unwrap failed');
     return null;
   }
@@ -190,34 +143,16 @@ export function useNip17DMEvents() {
 }
 
 // ============================================================================
-// Conversations — merged NIP-04 + NIP-17
+// Conversations — NIP-17 only
 // ============================================================================
 
 export function useConversations(): { conversations: Conversation[]; isLoading: boolean } {
-  const { pubkey, signer } = useAuth();
-  const { data: nip04Events, isLoading: nip04Loading } = useDMEvents();
-  const { data: nip17Data, isLoading: nip17Loading } = useNip17DMEvents();
-
-  const isLoading = nip04Loading || nip17Loading;
+  const { pubkey, signer: _signer } = useAuth();
+  const { data: nip17Data, isLoading } = useNip17DMEvents();
 
   if (!pubkey) return { conversations: [], isLoading };
 
   const map = new Map<string, { lastActivity: number; lastMessage: string; unreadHint: boolean }>();
-
-  // NIP-04 events
-  for (const ev of nip04Events ?? []) {
-    const partner = getConversationPartner(ev, pubkey);
-    if (!partner) continue;
-
-    const existing = map.get(partner);
-    if (!existing || ev.created_at > existing.lastActivity) {
-      map.set(partner, {
-        lastActivity: ev.created_at,
-        lastMessage: formatConversationTime(ev.created_at),
-        unreadHint: ev.pubkey !== pubkey,
-      });
-    }
-  }
 
   // NIP-17 messages — partner is resolved from rumor p-tag by unwrapGiftWrap
   for (const msg of nip17Data?.messages ?? []) {
@@ -244,52 +179,19 @@ export function useConversations(): { conversations: Conversation[]; isLoading: 
 }
 
 // ============================================================================
-// Per-conversation messages — NIP-04
+// Per-conversation messages — NIP-17 only
 // ============================================================================
 
 export function useConversationMessages(partnerPubkey: string) {
   const { pubkey, signer } = useAuth();
-  const { data: allEvents } = useDMEvents();
   const { data: nip17Data } = useNip17DMEvents();
 
   return useQuery<DecryptedMessage[]>({
     queryKey: ['dm-messages', pubkey, partnerPubkey],
     queryFn: async () => {
-      if (!pubkey || !signer || !allEvents) return [];
+      if (!pubkey || !signer) return [];
 
       const messages: DecryptedMessage[] = [];
-
-      // NIP-04 messages
-      const partnerEvents = allEvents.filter(ev => {
-        const partner = getConversationPartner(ev, pubkey);
-        return partner === partnerPubkey;
-      });
-
-      for (const ev of partnerEvents) {
-        try {
-          if (!signer.nip04) continue; // signer doesn't support NIP-04
-          const otherPubkey = ev.pubkey === pubkey ? partnerPubkey : ev.pubkey;
-          const content = await withDecryptTimeout(signer.nip04.decrypt(otherPubkey, ev.content));
-          messages.push({
-            id: ev.id,
-            content,
-            created_at: ev.created_at,
-            pubkey: ev.pubkey,
-            isMine: ev.pubkey === pubkey,
-            protocol: 'nip04',
-          });
-        } catch (err) {
-          if (__DEV__) console.warn('[useDMs] NIP-04 decryption failed');
-          messages.push({
-            id: ev.id,
-            content: '[decryption failed]',
-            created_at: ev.created_at,
-            pubkey: ev.pubkey,
-            isMine: ev.pubkey === pubkey,
-            protocol: 'nip04',
-          });
-        }
-      }
 
       // NIP-17 messages from this partner
       for (const msg of nip17Data?.messages ?? []) {
@@ -308,13 +210,13 @@ export function useConversationMessages(partnerPubkey: string) {
 
       return deduped.sort((a, b) => a.created_at - b.created_at);
     },
-    enabled: !!pubkey && !!signer && !!allEvents && allEvents.length > 0,
+    enabled: !!pubkey && !!signer,
     staleTime: 30_000,
   });
 }
 
 // ============================================================================
-// Send DM — NIP-04 or NIP-17
+// Send DM — NIP-17 only
 // ============================================================================
 
 export function useSendDM() {
@@ -326,49 +228,27 @@ export function useSendDM() {
     mutationFn: async ({
       recipientPubkey,
       content,
-      protocol = 'nip17',
     }: {
       recipientPubkey: string;
       content: string;
-      /** Default: nip17. Falls back to nip04 if signer lacks nip44. */
-      protocol?: 'nip04' | 'nip17';
     }) => {
       if (!pubkey || !signer) throw new Error('Not logged in');
-
-      // Fall back to NIP-04 if NIP-44 not available
-      const useNip17 = protocol === 'nip17' && !!(signer as { nip44?: unknown }).nip44;
-
-      if (useNip17) {
-        return sendNip17(pubkey, signer as { nip44: { encrypt: (r: string, p: string) => Promise<string> }; signEvent: (t: unknown) => Promise<NostrEvent> }, recipientPubkey, content, nostr);
-      } else {
-        return sendNip04(pubkey, signer as { nip04: { encrypt: (r: string, p: string) => Promise<string> }; signEvent: (t: unknown) => Promise<NostrEvent> }, recipientPubkey, content, nostr);
+      if (!(signer as { nip44?: unknown }).nip44) {
+        throw new Error('Signer does not support NIP-44 encryption (required for NIP-17 DMs)');
       }
+      return sendNip17(
+        pubkey,
+        signer as { nip44: { encrypt: (r: string, p: string) => Promise<string> }; signEvent: (t: unknown) => Promise<NostrEvent> },
+        recipientPubkey,
+        content,
+        nostr,
+      );
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dm-events', pubkey] });
       queryClient.invalidateQueries({ queryKey: ['nip17-dm-events', pubkey] });
       queryClient.invalidateQueries({ queryKey: ['dm-messages'] });
     },
   });
-}
-
-async function sendNip04(
-  pubkey: string,
-  signer: { nip04: { encrypt(r: string, p: string): Promise<string> }; signEvent(t: unknown): Promise<NostrEvent> },
-  recipientPubkey: string,
-  content: string,
-  nostr: { event(e: NostrEvent): Promise<void> },
-): Promise<NostrEvent> {
-  const encrypted = await signer.nip04.encrypt(recipientPubkey, content);
-  const template = {
-    kind: 4,
-    content: encrypted,
-    tags: [['p', recipientPubkey]],
-    created_at: Math.floor(Date.now() / 1000),
-  };
-  const event = await signer.signEvent(template);
-  await nostr.event(event as NostrEvent);
-  return event as NostrEvent;
 }
 
 async function sendNip17(
@@ -443,7 +323,6 @@ async function sendNip17(
     nostr.event(senderGiftWrap as NostrEvent),
   ]);
 
-  // Log failures without leaking event content (only IDs)
   if (results[0].status === 'rejected') {
     if (__DEV__) console.warn('[useDMs] Recipient gift wrap publish failed:', (recipientGiftWrap as NostrEvent).id);
   }
@@ -451,7 +330,6 @@ async function sendNip17(
     if (__DEV__) console.warn('[useDMs] Sender gift wrap publish failed:', (senderGiftWrap as NostrEvent).id);
   }
 
-  // Throw only if BOTH failed (at least one succeeding is acceptable)
   if (results[0].status === 'rejected' && results[1].status === 'rejected') {
     throw new Error('Both gift wraps rejected by all relays');
   }

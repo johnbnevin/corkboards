@@ -1,23 +1,7 @@
 import type { NostrEvent } from '@nostrify/nostrify';
 
-/**
- * Validate that an event is a proper DM event
- */
-export function validateNip04DMEvent(event: NostrEvent): boolean {
-  // Must be kind 4 (NIP-04 DM)
-  if (event.kind !== 4) return false;
-
-  // Must have a 'p' tag with a valid pubkey value (64-char hex)
-  const recipientTag = event.tags?.find(t => t[0] === 'p');
-  if (!recipientTag) return false;
-  const recipientPubkey = recipientTag[1];
-  if (typeof recipientPubkey !== 'string' || !/^[0-9a-f]{64}$/.test(recipientPubkey)) return false;
-
-  // Must have content (even if encrypted)
-  if (!event.content) return false;
-
-  return true;
-}
+// validateNip04DMEvent removed in v0.7 — kind 4 (NIP-04) DMs are no longer
+// recognised. See dmConstants.ts for context.
 
 /**
  * Get the recipient pubkey from a DM event

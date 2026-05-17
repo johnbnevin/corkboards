@@ -2,27 +2,26 @@ import type { NostrEvent } from '@nostrify/nostrify';
 
 // ============================================================================
 // Message Protocol Types
+//
+// NIP-04 (kind 4) DM support was removed in v0.7. NIP-17 (sealed-sender,
+// kind 1059) is the only supported DM protocol — NIP-04 leaks recipient
+// pubkeys to relays and stored plaintext at rest.
+//
+// The NIP-04 encryption primitive (signer.nip04.encrypt/decrypt) is still
+// imported elsewhere in the codebase for two reasons:
+//   1. NIP-47 (Nostr Wallet Connect) mandates NIP-04 for wallet RPC.
+//   2. Own-data sync events (backup, dismissed, custom-feeds) may have
+//      been written with NIP-04 in older versions; readers fall back to
+//      it for legacy decryption.
+// Neither of those use kind 4 — they reuse only the cipher.
 // ============================================================================
 
 export const DM_PROTOCOL = {
-  NIP04: 'nip04',
   NIP17: 'nip17',
   UNKNOWN: 'unknown',
 } as const;
 
 export type DMProtocol = typeof DM_PROTOCOL[keyof typeof DM_PROTOCOL];
-
-// ============================================================================
-// Protocol Mode (for user selection)
-// ============================================================================
-
-export const DM_PROTOCOL_MODE = {
-  NIP04_ONLY: 'nip04_only',
-  NIP17_ONLY: 'nip17_only',
-  NIP04_OR_NIP17: 'nip04_or_nip17',
-} as const;
-
-export type DMProtocolMode = typeof DM_PROTOCOL_MODE[keyof typeof DM_PROTOCOL_MODE];
 
 // ============================================================================
 // Loading Phases
@@ -43,11 +42,6 @@ export type DMLoadingPhase = typeof DM_LOADING_PHASES[keyof typeof DM_LOADING_PH
 // ============================================================================
 
 export const DM_PROTOCOL_CONFIG = {
-  [DM_PROTOCOL.NIP04]: {
-    label: 'NIP-04',
-    description: 'Legacy DMs',
-    kind: 4,
-  },
   [DM_PROTOCOL.NIP17]: {
     label: 'NIP-17',
     description: 'Private DMs',
@@ -65,12 +59,12 @@ export const DM_PROTOCOL_CONFIG = {
 // ============================================================================
 
 /**
- * Get the message protocol from an event kind
+ * Get the message protocol from an event kind. Kind 4 (NIP-04 DMs) is
+ * intentionally treated as UNKNOWN — the app no longer recognises legacy
+ * DMs as a valid protocol.
  */
 export function getDMProtocol(event: NostrEvent): DMProtocol {
   switch (event.kind) {
-    case 4:
-      return DM_PROTOCOL.NIP04;
     case 1059:
       return DM_PROTOCOL.NIP17;
     default:
@@ -79,8 +73,8 @@ export function getDMProtocol(event: NostrEvent): DMProtocol {
 }
 
 /**
- * Check if a protocol is valid for sending messages
+ * Check if a protocol is valid for sending messages.
  */
 export function isValidDMSendProtocol(protocol: DMProtocol): boolean {
-  return protocol === DM_PROTOCOL.NIP04 || protocol === DM_PROTOCOL.NIP17;
+  return protocol === DM_PROTOCOL.NIP17;
 }

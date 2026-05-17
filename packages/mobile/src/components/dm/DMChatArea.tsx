@@ -93,20 +93,8 @@ function FileAttachment({ url }: { url: string }) {
   );
 }
 
-/** Protocol badge: key icon for NIP-04, shield icon for NIP-17 */
-function ProtocolBadge({ protocol, isMine }: { protocol: 'nip04' | 'nip17'; isMine: boolean }) {
-  if (protocol === 'nip04') {
-    return (
-      <View style={styles.protocolBadgeContainer}>
-        <Text style={[styles.protocolIcon, isMine && styles.protocolIconMine]}>
-          {'\u{1F511}'}
-        </Text>
-        <Text style={[styles.protocolLabel, isMine && styles.protocolLabelMine]}>
-          NIP-04
-        </Text>
-      </View>
-    );
-  }
+/** Protocol badge: shield icon for NIP-17 (only supported protocol). */
+function ProtocolBadge({ isMine }: { isMine: boolean }) {
   return (
     <View style={styles.protocolBadgeContainer}>
       <Text style={[styles.protocolIcon, isMine && styles.protocolIconMine]}>
@@ -121,7 +109,7 @@ function ProtocolBadge({ protocol, isMine }: { protocol: 'nip04' | 'nip17'; isMi
 
 function MessageBubble({ message }: { message: DecryptedMessage & { isSending?: boolean } }) {
   const isDecryptionFailure = message.content === '[decryption failed]';
-  const imageUrls = useMemo(() => extractImetaUrls(message), [message.content]);
+  const imageUrls = useMemo(() => extractImetaUrls(message), [message]);
   const textContent = useMemo(() => {
     // Strip image URLs from text so they aren't shown twice
     if (imageUrls.length === 0) return message.content;
@@ -156,10 +144,7 @@ function MessageBubble({ message }: { message: DecryptedMessage & { isSending?: 
         <Text style={[styles.bubbleTime, message.isMine && styles.bubbleTimeMine]}>
           {formatTimeAgo(message.created_at)}
         </Text>
-        <ProtocolBadge protocol={message.protocol} isMine={message.isMine} />
-        {message.protocol === 'nip04' && (
-          <Text style={styles.nip04Warning}>{'\u26A0'}</Text>
-        )}
+        <ProtocolBadge isMine={message.isMine} />
         {message.isSending && (
           <ActivityIndicator color={message.isMine ? '#666' : '#b3b3b3'} size={10} />
         )}
@@ -194,12 +179,15 @@ export function DMChatArea({ partnerPubkey, onBack }: DMChatAreaProps) {
 
   const hasMoreMessages = allMessages ? allMessages.length > displayCount : false;
 
-  // Scroll to bottom when messages load or new message arrives
+  // Scroll to bottom when messages load or a new message arrives.
+  // We only care about the length transition (new message count); reading
+  // `messages` for the array reference would re-fire on every cache write.
+  const messageCount = messages?.length ?? 0;
   useEffect(() => {
-    if (messages && messages.length > 0) {
+    if (messageCount > 0) {
       setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 100);
     }
-  }, [messages?.length]);
+  }, [messageCount]);
 
   const handleLoadEarlier = useCallback(() => {
     if (!hasMoreMessages || isLoadingMore) return;
@@ -384,7 +372,7 @@ const styles = StyleSheet.create({
   protocolIconMine: { opacity: 0.7 },
   protocolLabel: { fontSize: 9, color: '#555' },
   protocolLabelMine: { color: '#999' },
-  nip04Warning: { fontSize: 10, color: '#eab308' },
+  // nip04Warning style removed (NIP-04 DMs no longer supported)
   // Attachments
   attachmentContainer: {
     marginBottom: 6,

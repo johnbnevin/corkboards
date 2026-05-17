@@ -2,28 +2,30 @@
  * MMKV-backed DM message store for React Native.
  *
  * Sharded layout (per user):
- *   dm:idx:{userPubkey}              → JSON index { participants: {[pk]: {lastActivity, hasNIP04, hasNIP17}}, lastSync }
+ *   dm:idx:{userPubkey}              → JSON index { participants: {[pk]: {lastActivity, hasNIP17}}, lastSync }
  *   dm:msgs:{userPubkey}:{partnerPk} → JSON array of NostrEvents for that conversation
  *
  * Why sharded: a power user with thousands of DMs would otherwise rewrite a
  * multi-MB blob on every new message. With sharding, each new message only
  * rewrites that partner's shard (typically a few KB) plus a small index update.
  *
- * Backward compatibility:
- *   The legacy single-blob key `dm:messages:{userPubkey}` (one MessageStore
- *   JSON per user) is auto-migrated to the sharded layout on first read.
+ * Encryption: lives in the keychain-backed encrypted MMKV shard
+ * (`openEncryptedShard`), with a one-time migration off the legacy
+ * unencrypted shard.
+ *
+ * NIP-04 (kind 4) removal (v0.7): on first read after upgrade, all kind-4
+ * messages are purged from each `dm:msgs:*` shard, hasNIP04 flags are
+ * dropped from indices, and `lastSync.nip04` is cleared. The purge is
+ * idempotent and gated by `__nip04_purged__` written into the encrypted shard.
  */
 import { createMMKV, type MMKV } from 'react-native-mmkv';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { openEncryptedShard } from '../storage/MmkvStorage';
 
-// DM history contains decrypted plaintext for NIP-04 and NIP-44/17. It MUST
-// live in the encrypted shard (shared keychain-backed key) — never in a bare
-// MMKV instance. We use a temporary in-memory shim until the encrypted shard
-// is ready, then drain queued writes/reads through it.
 const DM_SHARD_ID = 'nostr-dm-store-encrypted';
 const LEGACY_DM_SHARD_ID = 'nostr-dm-store';
 const DM_MIGRATION_FLAG = '__dm_migrated_from_unencrypted__';
+const NIP04_PURGE_FLAG = '__nip04_purged__';
 
 const _memFallback = new Map<string, string>();
 let dmMmkv: MMKV = {
@@ -38,8 +40,6 @@ let _dmReady = false;
 export const dmStoreReady: Promise<void> = (async () => {
   try {
     const encrypted = await openEncryptedShard(DM_SHARD_ID);
-    // One-time migration: copy from the legacy unencrypted instance (which
-    // previously stored decrypted DMs in cleartext on disk).
     if (!encrypted.getString(DM_MIGRATION_FLAG)) {
       try {
         // Safe to open the legacy unencrypted instance here: this code path
@@ -54,7 +54,6 @@ export const dmStoreReady: Promise<void> = (async () => {
             const v = legacy.getString(k);
             if (v !== undefined) encrypted.set(k, v);
           }
-          // Wipe cleartext copies off disk.
           legacy.clearAll();
         }
         encrypted.set(DM_MIGRATION_FLAG, '1');
@@ -62,11 +61,14 @@ export const dmStoreReady: Promise<void> = (async () => {
         console.warn('[dmMessageStore] Legacy DM shard migration skipped:', e);
       }
     }
-    // Drain anything written before the shard opened.
     for (const [k, v] of _memFallback.entries()) encrypted.set(k, v);
     _memFallback.clear();
     dmMmkv = encrypted;
     _dmReady = true;
+
+    // One-time purge of kind-4 history. Runs after migration so legacy data
+    // is in the new shard before we scrub it. Gated by NIP04_PURGE_FLAG.
+    purgeLegacyNip04Once();
   } catch (e) {
     console.error('[dmMessageStore] Failed to open encrypted DM shard, staying in-memory:', e);
   }
@@ -76,33 +78,39 @@ export const dmStoreReady: Promise<void> = (async () => {
 export function isDmStoreReady(): boolean { return _dmReady; }
 
 // ============================================================================
-// Types (public API stays compatible with the previous version)
+// Types
 // ============================================================================
 
 export interface StoredParticipant {
   messages: NostrEvent[];
   lastActivity: number;
-  hasNIP04: boolean;
   hasNIP17: boolean;
 }
 
 export interface MessageStore {
   participants: Record<string, StoredParticipant>;
   lastSync: {
-    nip04: number | null;
     nip17: number | null;
   };
 }
 
 interface ParticipantMeta {
   lastActivity: number;
-  hasNIP04: boolean;
   hasNIP17: boolean;
 }
 
 interface IndexBlob {
   participants: Record<string, ParticipantMeta>;
-  lastSync: { nip04: number | null; nip17: number | null };
+  lastSync: { nip17: number | null };
+}
+
+/**
+ * Wider type for reading legacy data — older versions wrote hasNIP04 and
+ * lastSync.nip04 fields. We accept them on read and strip them on write.
+ */
+interface LegacyIndexBlob {
+  participants: Record<string, ParticipantMeta & { hasNIP04?: boolean }>;
+  lastSync: { nip17: number | null; nip04?: number | null };
 }
 
 // ============================================================================
@@ -121,14 +129,28 @@ function legacyKey(userPubkey: string): string { return `${LEGACY_PREFIX}${userP
 // Internal helpers (sharded reads/writes)
 // ============================================================================
 
-function readIndex(userPubkey: string): IndexBlob | undefined {
+function readIndexRaw(userPubkey: string): LegacyIndexBlob | undefined {
   const raw = dmMmkv.getString(indexKey(userPubkey));
   if (!raw) return undefined;
   try {
-    const parsed = JSON.parse(raw) as IndexBlob;
+    const parsed = JSON.parse(raw) as LegacyIndexBlob;
     if (!parsed || typeof parsed.participants !== 'object' || !parsed.lastSync) return undefined;
     return parsed;
   } catch { return undefined; }
+}
+
+function readIndex(userPubkey: string): IndexBlob | undefined {
+  const raw = readIndexRaw(userPubkey);
+  if (!raw) return undefined;
+  // Strip legacy nip04 fields on read so callers never see them.
+  const participants: Record<string, ParticipantMeta> = {};
+  for (const [pk, p] of Object.entries(raw.participants)) {
+    participants[pk] = { lastActivity: p.lastActivity, hasNIP17: !!p.hasNIP17 };
+  }
+  return {
+    participants,
+    lastSync: { nip17: raw.lastSync.nip17 ?? null },
+  };
 }
 
 function writeIndex(userPubkey: string, idx: IndexBlob): void {
@@ -150,21 +172,20 @@ function writePartnerMessages(userPubkey: string, partnerPubkey: string, msgs: N
 
 /** One-time migration from the legacy single-blob layout. */
 function migrateLegacyIfNeeded(userPubkey: string): void {
-  if (readIndex(userPubkey)) return; // already on new layout
+  if (readIndex(userPubkey)) return;
   const legacy = dmMmkv.getString(legacyKey(userPubkey));
   if (!legacy) return;
   try {
-    const old = JSON.parse(legacy) as MessageStore;
+    const old = JSON.parse(legacy) as { participants?: Record<string, { messages: NostrEvent[]; lastActivity: number; hasNIP17?: boolean }>; lastSync?: { nip17?: number | null } };
     if (!old || typeof old.participants !== 'object' || !old.lastSync) {
       dmMmkv.remove(legacyKey(userPubkey));
       return;
     }
-    const idx: IndexBlob = { participants: {}, lastSync: old.lastSync };
+    const idx: IndexBlob = { participants: {}, lastSync: { nip17: old.lastSync.nip17 ?? null } };
     for (const [pk, p] of Object.entries(old.participants)) {
       idx.participants[pk] = {
         lastActivity: p.lastActivity,
-        hasNIP04: p.hasNIP04,
-        hasNIP17: p.hasNIP17,
+        hasNIP17: !!p.hasNIP17,
       };
       writePartnerMessages(userPubkey, pk, p.messages);
     }
@@ -173,6 +194,56 @@ function migrateLegacyIfNeeded(userPubkey: string): void {
     console.log(`[dmMessageStore] Migrated ${Object.keys(old.participants).length} partners from legacy blob`);
   } catch (e) {
     console.warn('[dmMessageStore] Legacy migration failed (ignoring):', e);
+  }
+}
+
+/**
+ * Strip every kind-4 event from every user's shards and drop hasNIP04
+ * markers / lastSync.nip04 from each index. Runs at most once per install.
+ */
+function purgeLegacyNip04Once(): void {
+  try {
+    if (dmMmkv.getString(NIP04_PURGE_FLAG)) return;
+    const allKeys = dmMmkv.getAllKeys();
+
+    for (const key of allKeys) {
+      if (key.startsWith(INDEX_PREFIX)) {
+        const raw = dmMmkv.getString(key);
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw) as LegacyIndexBlob;
+          if (!parsed || typeof parsed.participants !== 'object' || !parsed.lastSync) continue;
+          const cleanedParticipants: Record<string, ParticipantMeta> = {};
+          for (const [pk, p] of Object.entries(parsed.participants)) {
+            cleanedParticipants[pk] = { lastActivity: p.lastActivity, hasNIP17: !!p.hasNIP17 };
+          }
+          const cleaned: IndexBlob = {
+            participants: cleanedParticipants,
+            lastSync: { nip17: parsed.lastSync.nip17 ?? null },
+          };
+          dmMmkv.set(key, JSON.stringify(cleaned));
+        } catch { /* skip */ }
+      } else if (key.startsWith(MSGS_PREFIX)) {
+        const raw = dmMmkv.getString(key);
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw) as NostrEvent[];
+          if (!Array.isArray(parsed)) continue;
+          const filtered = parsed.filter(m => m && m.kind !== 4);
+          if (filtered.length === 0) {
+            // All-kind-4 shard: remove entirely.
+            dmMmkv.remove(key);
+          } else if (filtered.length !== parsed.length) {
+            dmMmkv.set(key, JSON.stringify(filtered));
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    dmMmkv.set(NIP04_PURGE_FLAG, '1');
+    console.log('[dmMessageStore] NIP-04 history purged');
+  } catch (e) {
+    console.warn('[dmMessageStore] NIP-04 purge skipped (will retry next launch):', e);
   }
 }
 
@@ -193,7 +264,6 @@ export function writeMessagesToDB(
     for (const [pk, p] of Object.entries(messageStore.participants)) {
       idx.participants[pk] = {
         lastActivity: p.lastActivity,
-        hasNIP04: p.hasNIP04,
         hasNIP17: p.hasNIP17,
       };
       writePartnerMessages(userPubkey, pk, p.messages);
@@ -208,10 +278,6 @@ export function writeMessagesToDB(
 /**
  * Read the full message store for a user. Combines the index with each
  * partner's shard. Returns undefined when no data exists yet.
- *
- * Power users beware: this reassembles every conversation into a single
- * object. For most callers, prefer `getPartnerMessages` and the existing
- * `getLastSync`.
  */
 export function readMessagesFromDB(
   userPubkey: string,
@@ -225,7 +291,6 @@ export function readMessagesFromDB(
       store.participants[pk] = {
         messages: readPartnerMessages(userPubkey, pk),
         lastActivity: meta.lastActivity,
-        hasNIP04: meta.hasNIP04,
         hasNIP17: meta.hasNIP17,
       };
     }
@@ -277,24 +342,17 @@ export function clearAllMessages(): void {
 // Convenience helpers
 // ============================================================================
 
-/**
- * Get or create the index, initialising with empty defaults. Returns an
- * IndexBlob for cheap "who do I have conversations with" reads.
- */
 function getOrCreateIndex(userPubkey: string): IndexBlob {
   migrateLegacyIfNeeded(userPubkey);
   const existing = readIndex(userPubkey);
   if (existing) return existing;
-  const empty: IndexBlob = { participants: {}, lastSync: { nip04: null, nip17: null } };
+  const empty: IndexBlob = { participants: {}, lastSync: { nip17: null } };
   writeIndex(userPubkey, empty);
   return empty;
 }
 
-/**
- * Backwards-compatible helper. Now backed by per-partner shards.
- */
 export function getOrCreateStore(userPubkey: string): MessageStore {
-  return readMessagesFromDB(userPubkey) ?? { participants: {}, lastSync: { nip04: null, nip17: null } };
+  return readMessagesFromDB(userPubkey) ?? { participants: {}, lastSync: { nip17: null } };
 }
 
 /**
@@ -305,7 +363,6 @@ export function upsertMessages(
   userPubkey: string,
   partnerPubkey: string,
   newMessages: NostrEvent[],
-  protocol: 'nip04' | 'nip17',
 ): void {
   const idx = getOrCreateIndex(userPubkey);
   const existingMsgs = readPartnerMessages(userPubkey, partnerPubkey);
@@ -319,11 +376,8 @@ export function upsertMessages(
     }
   }
   if (!changed) {
-    // Even with no new messages, the protocol flag could have changed
     const meta = idx.participants[partnerPubkey];
-    if (meta && ((protocol === 'nip04' && meta.hasNIP04) || (protocol === 'nip17' && meta.hasNIP17))) {
-      return;
-    }
+    if (meta && meta.hasNIP17) return;
   }
   existingMsgs.sort((a, b) => a.created_at - b.created_at);
   writePartnerMessages(userPubkey, partnerPubkey, existingMsgs);
@@ -332,35 +386,26 @@ export function upsertMessages(
   const prevMeta = idx.participants[partnerPubkey];
   idx.participants[partnerPubkey] = {
     lastActivity: Math.max(prevMeta?.lastActivity ?? 0, latestTime),
-    hasNIP04: (prevMeta?.hasNIP04 ?? false) || protocol === 'nip04',
-    hasNIP17: (prevMeta?.hasNIP17 ?? false) || protocol === 'nip17',
+    hasNIP17: true,
   };
   writeIndex(userPubkey, idx);
 }
 
 /**
- * Update the last-sync timestamp for a protocol.
+ * Update the NIP-17 last-sync timestamp.
  */
-export function updateLastSync(
-  userPubkey: string,
-  protocol: 'nip04' | 'nip17',
-  timestamp: number,
-): void {
+export function updateLastSync(userPubkey: string, timestamp: number): void {
   const idx = getOrCreateIndex(userPubkey);
-  if (protocol === 'nip04') idx.lastSync.nip04 = timestamp;
-  else idx.lastSync.nip17 = timestamp;
+  idx.lastSync.nip17 = timestamp;
   writeIndex(userPubkey, idx);
 }
 
 /**
- * Get the last-sync timestamp for a protocol (or null if never synced).
+ * Get the NIP-17 last-sync timestamp (or null if never synced).
  */
-export function getLastSync(
-  userPubkey: string,
-  protocol: 'nip04' | 'nip17',
-): number | null {
+export function getLastSync(userPubkey: string): number | null {
   migrateLegacyIfNeeded(userPubkey);
   const idx = readIndex(userPubkey);
   if (!idx) return null;
-  return protocol === 'nip04' ? idx.lastSync.nip04 : idx.lastSync.nip17;
+  return idx.lastSync.nip17;
 }

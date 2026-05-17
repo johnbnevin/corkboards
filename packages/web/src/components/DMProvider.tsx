@@ -1,14 +1,9 @@
 /**
- * DMProvider — dual-protocol direct messaging provider.
+ * DMProvider — NIP-17 (sealed-sender) direct messaging provider.
  *
- * Supports both NIP-04 (legacy, kind 4) and NIP-17 (sealed-sender, kind
- * 1059/1060 gift-wrap) simultaneously. On mount it subscribes to both
- * protocols, decrypts incoming messages with the appropriate algorithm
- * (NIP-04 or NIP-44), and merges them into a single unified conversation list.
- *
- * The DM_PROTOCOL_MODE setting controls which protocol is used for *sending*
- * new messages. Received messages are always accepted from both protocols
- * regardless of the send setting.
+ * NIP-04 DMs (kind 4) were removed in v0.7. NIP-17 (sealed-sender, kind
+ * 1059/1060 gift-wrap) is the only supported DM protocol — it does not
+ * leak recipient pubkeys to relays and supports ephemeral sender keys.
  *
  * Performance: message state is written back to IDB with a 15-second debounce
  * to avoid excessive writes during active conversations.
@@ -20,23 +15,20 @@ import { useNostr } from '@nostrify/react';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
 import { useToast } from '@/hooks/useToast';
-import { validateNip04DMEvent } from '@/lib/dmUtils';
-import { DM_LOADING_PHASES, type DMLoadingPhase, DM_PROTOCOL_MODE, type DMProtocolMode } from '@/lib/dmConstants';
+import { DM_LOADING_PHASES, type DMLoadingPhase } from '@/lib/dmConstants';
 import { NSecSigner, type NostrEvent } from '@nostrify/nostrify';
 import { generateSecretKey } from 'nostr-tools';
 import { secureRandomInt } from '@core/cryptoUtils';
-import type { DMProtocol } from '@/lib/dmConstants';
-import { DM_PROTOCOL } from '@/lib/dmConstants';
-import { 
-  DMContext, 
-  DMContextType, 
+import {
+  DMContext,
+  DMContextType,
   FileAttachment,
   type MessagesState,
   type LastSyncData,
   type SubscriptionStatus,
   type ScanProgressState,
   type ConversationSummary,
-  type DecryptedMessage 
+  type DecryptedMessage,
 } from '@/contexts/DMContext';
 
 // ============================================================================
@@ -46,11 +38,6 @@ import {
 interface MessageProcessingResult {
   lastMessageTimestamp?: number;
   messageCount: number;
-}
-
-interface DecryptionResult {
-  decryptedContent: string;
-  error?: string;
 }
 
 /** Wrap a signer decrypt call with a hard timeout to prevent DM pane hangs. */
@@ -73,16 +60,14 @@ interface NIP17ProcessingResult {
 const DM_CONSTANTS = {
   DEBOUNCED_WRITE_DELAY: 15000,
   RECENT_MESSAGE_THRESHOLD: 5000,
-  SUBSCRIPTION_OVERLAP_SECONDS: 10, // Overlap for subscriptions to catch race conditions
+  SUBSCRIPTION_OVERLAP_SECONDS: 10,
   SCAN_TOTAL_LIMIT: 20000,
   SCAN_BATCH_SIZE: 1000,
-  NIP04_QUERY_TIMEOUT: 15000,
   NIP17_QUERY_TIMEOUT: 30000,
   ERROR_LOG_DEBOUNCE_DELAY: 2000,
 } as const;
 
 const SCAN_STATUS_MESSAGES = {
-  NIP04_STARTING: 'Starting NIP-4 scan...',
   NIP17_STARTING: 'Starting NIP-17 scan...',
 } as const;
 
@@ -106,7 +91,6 @@ const nip17ErrorLogger = createErrorLogger('NIP-17');
 
 export interface DMConfig {
   enabled?: boolean;
-  protocolMode?: DMProtocolMode;
 }
 
 interface DMProviderProps {
@@ -139,7 +123,6 @@ function createImetaTags(attachments: FileAttachment[] = []): string[][] {
     if (file.size) imetaTag.push(`size ${file.size}`);
     if (file.name) imetaTag.push(`alt ${file.name}`);
 
-    // Add hash tags from file.tags
     file.tags.forEach(tag => {
       if (tag[0] === 'x') imetaTag.push(`x ${tag[1]}`);
       if (tag[0] === 'ox') imetaTag.push(`ox ${tag[1]}`);
@@ -154,90 +137,38 @@ function createImetaTags(attachments: FileAttachment[] = []): string[][] {
 // ============================================================================
 
 export function DMProvider({ children, config }: DMProviderProps) {
-  const { enabled = false, protocolMode = DM_PROTOCOL_MODE.NIP17_ONLY } = config || {};
+  const { enabled = false } = config || {};
   const { user } = useCurrentUser();
   const { nostr } = useNostr();
   const { mutateAsync: createEvent } = useNostrPublish();
   const { toast } = useToast();
   const { config: appConfig } = useAppContext();
 
+  // Suppress unused-var lint while we keep the publish hook wired for future
+  // protocol-message types (e.g. NIP-17 read receipts). Safe to remove if not
+  // adopted.
+  void createEvent;
+
   const userPubkey = useMemo(() => user?.pubkey, [user?.pubkey]);
 
   // Track relay metadata to detect changes
   const previousRelayMetadata = useRef(appConfig.relayMetadata);
 
-  // Determine if NIP-17 is enabled based on protocol mode
-  const enableNIP17 = protocolMode !== DM_PROTOCOL_MODE.NIP04_ONLY;
-
   const [messages, setMessages] = useState<MessagesState>(new Map());
-  const [lastSync, setLastSync] = useState<LastSyncData>({
-    nip04: null,
-    nip17: null
-  });
+  const [lastSync, setLastSync] = useState<LastSyncData>({ nip17: null });
   const [isLoading, setIsLoading] = useState(false);
   const [loadingPhase, setDMLoadingPhase] = useState<DMLoadingPhase>(DM_LOADING_PHASES.IDLE);
-  const [subscriptions, setSubscriptions] = useState<SubscriptionStatus>({
-    isNIP04Connected: false,
-    isNIP17Connected: false
-  });
+  const [subscriptions, setSubscriptions] = useState<SubscriptionStatus>({ isNIP17Connected: false });
   const [hasInitialLoadCompleted, setHasInitialLoadCompleted] = useState(false);
   const [shouldSaveImmediately, setShouldSaveImmediately] = useState(false);
-  const [scanProgress, setScanProgress] = useState<ScanProgressState>({
-    nip04: null,
-    nip17: null
-  });
+  const [scanProgress, setScanProgress] = useState<ScanProgressState>({ nip17: null });
 
-  const nip04SubscriptionRef = useRef<{ close: () => void } | null>(null);
   const nip17SubscriptionRef = useRef<{ close: () => void } | null>(null);
   const debouncedWriteRef = useRef<NodeJS.Timeout | null>(null);
 
   // ============================================================================
   // Internal Message Sending Mutations
   // ============================================================================
-
-  // Send NIP-04 Message (internal)
-  const _sendNIP04Message = useMutation<NostrEvent, Error, {
-    recipientPubkey: string;
-    content: string;
-    attachments?: FileAttachment[];
-  }>({
-    mutationFn: async ({ recipientPubkey, content, attachments = [] }) => {
-      if (!user) {
-        throw new Error('User is not logged in');
-      }
-
-      if (!user.signer.nip04) {
-        throw new Error('NIP-04 encryption not available');
-      }
-
-      // Prepare content with file URLs
-      const messageContent = prepareMessageContent(content, attachments);
-
-      // Encrypt the content
-      const encryptedContent = await user.signer.nip04.encrypt(recipientPubkey, messageContent);
-
-      // Build tags with imeta tags for attachments
-      const tags: string[][] = [
-        ['p', recipientPubkey],
-        ...createImetaTags(attachments)
-      ];
-
-      // Create and publish the event
-      return await createEvent({
-        kind: 4,
-        content: encryptedContent,
-        tags,
-      });
-    },
-    onError: (error) => {
-      if (import.meta.env.DEV) console.error('[DM] Failed to send NIP-04 message:', error);
-      toast({
-        title: 'Failed to send message',
-        description: error.message,
-        variant: 'destructive',
-      });
-    },
-  });
 
   // Send NIP-17 Message (internal)
   const sendNIP17Message = useMutation<NostrEvent, Error, {
@@ -304,7 +235,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
       // Step 3: Create TWO Kind 1059 Gift Wrap events
       // Per NIP-17/NIP-59: Gift wraps MUST be signed with random, ephemeral keys
-      // to hide the sender's identity and provide - some - metadata privacy
+      // to hide the sender's identity and provide some metadata privacy.
 
       // Generate random secret keys for each gift wrap
       const recipientRandomKey = generateSecretKey();
@@ -314,23 +245,21 @@ export function DMProvider({ children, config }: DMProviderProps) {
       const recipientRandomSigner = new NSecSigner(recipientRandomKey);
       const senderRandomSigner = new NSecSigner(senderRandomKey);
 
-      // Encrypt the seals using the RANDOM signers (so recipient can decrypt with the random pubkey)
-      // The recipient will decrypt using the gift wrap's pubkey (the random ephemeral key)
+      // Encrypt the seals using the RANDOM signers
       const recipientGiftWrapContent = await recipientRandomSigner.nip44!.encrypt(recipientPubkey, JSON.stringify(recipientSeal));
       const senderGiftWrapContent = await senderRandomSigner.nip44!.encrypt(user.pubkey, JSON.stringify(senderSeal));
 
       // Sign both gift wraps with random keys and randomized timestamps
-      // Random keys hide the sender's identity; encryption to recipient allows decryption
       const [recipientGiftWrap, senderGiftWrap] = await Promise.all([
         recipientRandomSigner.signEvent({
           kind: 1059,
-          created_at: randomizeTimestamp(now),  // Randomized to hide real send time
+          created_at: randomizeTimestamp(now),
           tags: [['p', recipientPubkey]],
           content: recipientGiftWrapContent,
         }),
         senderRandomSigner.signEvent({
           kind: 1059,
-          created_at: randomizeTimestamp(now),  // Randomized to hide real send time
+          created_at: randomizeTimestamp(now),
           tags: [['p', user.pubkey]],
           content: senderGiftWrapContent,
         }),
@@ -343,12 +272,10 @@ export function DMProvider({ children, config }: DMProviderProps) {
           nostr.event(senderGiftWrap),
         ]);
 
-        // Check for failures and log detailed errors
         const recipientResult = results[0];
         const senderResult = results[1];
 
         if (recipientResult.status === 'rejected') {
-          // Log only the event ID (not content/tags) to avoid leaking encrypted payload metadata
           const error = recipientResult.reason;
           if (error && typeof error === 'object' && 'errors' in error) {
             if (import.meta.env.DEV) console.error('[DM] Failed to publish recipient gift wrap:', recipientGiftWrap.id, error.errors);
@@ -358,7 +285,6 @@ export function DMProvider({ children, config }: DMProviderProps) {
         }
 
         if (senderResult.status === 'rejected') {
-          // Log only the event ID (not content/tags) to avoid leaking encrypted payload metadata
           const error = senderResult.reason;
           if (error && typeof error === 'object' && 'errors' in error) {
             if (import.meta.env.DEV) console.error('[DM] Failed to publish sender gift wrap:', senderGiftWrap.id, error.errors);
@@ -392,67 +318,6 @@ export function DMProvider({ children, config }: DMProviderProps) {
   // Message Loading and Processing
   // ============================================================================
 
-  // Load past NIP-4 messages
-  const loadPastNIP04Messages = useCallback(async (sinceTimestamp?: number) => {
-    if (!user?.pubkey) return;
-
-    let allMessages: NostrEvent[] = [];
-    let processedMessages = 0;
-    let currentSince = sinceTimestamp || 0;
-
-
-    setScanProgress(prev => ({ ...prev, nip04: { current: 0, status: SCAN_STATUS_MESSAGES.NIP04_STARTING } }));
-
-    while (processedMessages < DM_CONSTANTS.SCAN_TOTAL_LIMIT) {
-      const batchLimit = Math.min(DM_CONSTANTS.SCAN_BATCH_SIZE, DM_CONSTANTS.SCAN_TOTAL_LIMIT - processedMessages);
-
-      const filters = [
-        { kinds: [4], '#p': [user.pubkey], limit: batchLimit, since: currentSince },
-        { kinds: [4], authors: [user.pubkey], limit: batchLimit, since: currentSince }
-      ];
-
-      try {
-        const batchDMs = await nostr.query(filters, { signal: AbortSignal.timeout(DM_CONSTANTS.NIP04_QUERY_TIMEOUT) });
-        const validBatchDMs = batchDMs.filter(validateNip04DMEvent);
-
-        if (validBatchDMs.length === 0) break;
-
-        allMessages = [...allMessages, ...validBatchDMs];
-        processedMessages += validBatchDMs.length;
-
-        setScanProgress(prev => ({
-          ...prev,
-          nip04: {
-            current: allMessages.length,
-            status: `Batch ${Math.floor(processedMessages / DM_CONSTANTS.SCAN_BATCH_SIZE) + 1} complete: ${validBatchDMs.length} messages`
-          }
-        }));
-
-        const toMe = validBatchDMs.filter(m => m.pubkey !== user.pubkey);
-        const fromMe = validBatchDMs.filter(m => m.pubkey === user.pubkey);
-        const oldestToMe = toMe.length > 0
-          ? toMe.reduce((min, m) => m.created_at < min ? m.created_at : min, toMe[0].created_at)
-          : Infinity;
-        const oldestFromMe = fromMe.length > 0
-          ? fromMe.reduce((min, m) => m.created_at < min ? m.created_at : min, fromMe[0].created_at)
-          : Infinity;
-
-        const oldestInBatch = Math.min(oldestToMe, oldestFromMe);
-        if (oldestInBatch !== Infinity) {
-          currentSince = oldestInBatch;
-        }
-
-        if (validBatchDMs.length < batchLimit * 2) break;
-      } catch (error) {
-        if (import.meta.env.DEV) console.error('[DM] NIP-4 Error in batch query:', error);
-        break;
-      }
-    }
-
-    setScanProgress(prev => ({ ...prev, nip04: null }));
-    return allMessages;
-  }, [user, nostr]);
-
   // Load past NIP-17 messages
   const loadPastNIP17Messages = useCallback(async (sinceTimestamp?: number) => {
     if (!user?.pubkey) return;
@@ -461,11 +326,8 @@ export function DMProvider({ children, config }: DMProviderProps) {
     let processedMessages = 0;
 
     // Adjust since timestamp to account for NIP-17 timestamp fuzzing (±2 days)
-    // We need to query from (lastSync - 2 days) to catch messages with randomized past timestamps
-    // This may fetch duplicates, but they're filtered by message ID in addMessageToState
     const TWO_DAYS_IN_SECONDS = 2 * 24 * 60 * 60;
     let currentSince = sinceTimestamp ? sinceTimestamp - TWO_DAYS_IN_SECONDS : 0;
-
 
     setScanProgress(prev => ({ ...prev, nip17: { current: 0, status: SCAN_STATUS_MESSAGES.NIP17_STARTING } }));
 
@@ -508,99 +370,36 @@ export function DMProvider({ children, config }: DMProviderProps) {
     return allNIP17Events;
   }, [user, nostr]);
 
-  // Query relays for messages
-  const queryRelaysForMessagesSince = useCallback(async (protocol: DMProtocol, sinceTimestamp?: number): Promise<MessageProcessingResult> => {
-    if (protocol === DM_PROTOCOL.NIP17 && !enableNIP17) {
-      return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
-    }
-
+  // Query relays for messages (NIP-17 only)
+  const queryRelaysForMessagesSince = useCallback(async (sinceTimestamp?: number): Promise<MessageProcessingResult> => {
     if (!userPubkey) {
       return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
     }
 
-    if (protocol === DM_PROTOCOL.NIP04) {
-      const messages = await loadPastNIP04Messages(sinceTimestamp);
+    const messages = await loadPastNIP17Messages(sinceTimestamp);
 
-      if (messages && messages.length > 0) {
-        const newState = new Map();
+    if (messages && messages.length > 0) {
+      const newState = new Map();
 
-        for (const message of messages) {
-          const isFromUser = message.pubkey === user?.pubkey;
-          const recipientPTag = message.tags?.find(([name]) => name === 'p')?.[1];
-          const otherPubkey = isFromUser ? recipientPTag : message.pubkey;
+      for (const giftWrap of messages) {
+        try {
+          const { processedMessage, conversationPartner, sealEvent } = await processNIP17GiftWrap(giftWrap);
 
-          if (!otherPubkey || otherPubkey === user?.pubkey) continue;
+          if (processedMessage.error) {
+            continue;
+          }
 
-          const { decryptedContent, error } = await decryptNIP04Message(message, otherPubkey);
-
-          const decryptedMessage: DecryptedMessage = {
-            ...message,
-            content: message.content,
-            decryptedContent: decryptedContent,
-            error: error,
+          const messageWithAnimation: DecryptedMessage = {
+            ...sealEvent,
+            created_at: processedMessage.created_at,
+            decryptedEvent: {
+              ...processedMessage,
+              content: processedMessage.decryptedContent,
+            } as NostrEvent,
+            decryptedContent: processedMessage.decryptedContent,
+            originalGiftWrapId: giftWrap.id,
           };
 
-          const messageAge = Date.now() - (message.created_at * 1000);
-          if (messageAge < 5000) {
-            decryptedMessage.clientFirstSeen = Date.now();
-          }
-
-          if (!newState.has(otherPubkey)) {
-            newState.set(otherPubkey, createEmptyParticipant());
-          }
-
-          const participant = newState.get(otherPubkey)!;
-          participant.messages.push(decryptedMessage);
-          participant.hasNIP04 = true;
-        }
-
-        newState.forEach(participant => {
-          sortAndUpdateParticipantState(participant);
-        });
-
-        mergeMessagesIntoState(newState);
-
-        const currentTime = Math.floor(Date.now() / 1000);
-        setLastSync(prev => ({ ...prev, nip04: currentTime }));
-
-        const newestMessage = messages.reduce((newest, msg) =>
-          msg.created_at > newest.created_at ? msg : newest
-        );
-        return { lastMessageTimestamp: newestMessage.created_at, messageCount: messages.length };
-      } else {
-        // No new messages, but we still successfully queried relays - update lastSync
-        const currentTime = Math.floor(Date.now() / 1000);
-        setLastSync(prev => ({ ...prev, nip04: currentTime }));
-        return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
-      }
-    } else if (protocol === DM_PROTOCOL.NIP17) {
-      const messages = await loadPastNIP17Messages(sinceTimestamp);
-
-      if (messages && messages.length > 0) {
-        const newState = new Map();
-
-        for (const giftWrap of messages) {
-          try {
-            const { processedMessage, conversationPartner, sealEvent } = await processNIP17GiftWrap(giftWrap);
-
-            // Skip messages with decryption errors
-            if (processedMessage.error) {
-              continue;
-            }
-
-            // Store the seal (kind 13) as-is + add decryptedEvent for inner message access
-            const messageWithAnimation: DecryptedMessage = {
-              ...sealEvent, // Seal fields (kind 13, seal pubkey, encrypted content, etc.)
-              created_at: processedMessage.created_at, // Use real timestamp from inner message
-              decryptedEvent: {
-                ...processedMessage,
-                content: processedMessage.decryptedContent,
-              } as NostrEvent,
-              decryptedContent: processedMessage.decryptedContent,
-              originalGiftWrapId: giftWrap.id, // Store gift wrap ID for deduplication
-            };
-
-          // Use real message timestamp for recency check
           const messageAge = Date.now() - (processedMessage.created_at * 1000);
           if (messageAge < 5000) {
             messageWithAnimation.clientFirstSeen = Date.now();
@@ -612,63 +411,37 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
           newState.get(conversationPartner)!.messages.push(messageWithAnimation);
           newState.get(conversationPartner)!.hasNIP17 = true;
-          } catch (error) {
-            if (import.meta.env.DEV) console.error('[DM] Error processing gift wrap from relay:', error);
-          }
+        } catch (error) {
+          if (import.meta.env.DEV) console.error('[DM] Error processing gift wrap from relay:', error);
         }
-
-        newState.forEach(participant => {
-          sortAndUpdateParticipantState(participant);
-        });
-
-        mergeMessagesIntoState(newState);
-
-        const currentTime = Math.floor(Date.now() / 1000);
-        setLastSync(prev => ({ ...prev, nip17: currentTime }));
-
-        const newestMessage = messages.reduce((newest, msg) =>
-          msg.created_at > newest.created_at ? msg : newest
-        );
-        return { lastMessageTimestamp: newestMessage.created_at, messageCount: messages.length };
-      } else {
-        // No new messages, but we still successfully queried relays - update lastSync
-        const currentTime = Math.floor(Date.now() / 1000);
-        setLastSync(prev => ({ ...prev, nip17: currentTime }));
-        return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
       }
-    }
 
-    return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
+      newState.forEach(participant => {
+        sortAndUpdateParticipantState(participant);
+      });
+
+      mergeMessagesIntoState(newState);
+
+      const currentTime = Math.floor(Date.now() / 1000);
+      setLastSync({ nip17: currentTime });
+
+      const newestMessage = messages.reduce((newest, msg) =>
+        msg.created_at > newest.created_at ? msg : newest
+      );
+      return { lastMessageTimestamp: newestMessage.created_at, messageCount: messages.length };
+    } else {
+      const currentTime = Math.floor(Date.now() / 1000);
+      setLastSync({ nip17: currentTime });
+      return { lastMessageTimestamp: sinceTimestamp, messageCount: 0 };
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enableNIP17, userPubkey, loadPastNIP04Messages, loadPastNIP17Messages, user]);
-
-  // Decrypt NIP-4 message
-  const decryptNIP04Message = useCallback(async (event: NostrEvent, otherPubkey: string): Promise<DecryptionResult> => {
-    try {
-      if (user?.signer?.nip04) {
-        const decryptedContent = await withDecryptTimeout(user.signer.nip04.decrypt(otherPubkey, event.content));
-        return { decryptedContent };
-      } else {
-        return {
-          decryptedContent: '',
-          error: 'No NIP-04 decryption available'
-        };
-      }
-    } catch (error) {
-      if (import.meta.env.DEV) console.error(`[DM] Failed to decrypt NIP-4 message ${event.id}:`, error);
-      return {
-        decryptedContent: '',
-        error: 'Decryption failed'
-      };
-    }
-  }, [user]);
+  }, [userPubkey, loadPastNIP17Messages, user]);
 
   // Create empty participant
   const createEmptyParticipant = useCallback(() => ({
     messages: [],
     lastActivity: 0,
     lastMessage: null,
-    hasNIP04: false,
     hasNIP17: false,
   }), []);
 
@@ -689,8 +462,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
       newState.forEach((value, key) => {
         const existing = finalMap.get(key);
         if (existing) {
-          // For NIP-17 messages with originalGiftWrapId, dedupe by gift wrap ID
-          // For NIP-04 and cached NIP-17 messages, dedupe by message ID
+          // Dedupe by gift wrap ID (NIP-17) or message ID (fallback)
           const existingMessageIds = new Set(
             existing.messages.map(msg => msg.originalGiftWrapId || msg.id)
           );
@@ -701,7 +473,6 @@ export function DMProvider({ children, config }: DMProviderProps) {
           const mergedMessages = [...existing.messages, ...newMessages];
           mergedMessages.sort((a, b) => a.created_at - b.created_at);
 
-          // Recalculate lastActivity and lastMessage after merging
           const lastMessage = mergedMessages.length > 0 ? mergedMessages[mergedMessages.length - 1] : null;
           const lastActivity = lastMessage ? lastMessage.created_at : existing.lastActivity;
 
@@ -710,7 +481,6 @@ export function DMProvider({ children, config }: DMProviderProps) {
             messages: mergedMessages,
             lastActivity,
             lastMessage,
-            hasNIP04: existing.hasNIP04 || value.hasNIP04,
             hasNIP17: existing.hasNIP17 || value.hasNIP17,
           });
         } else {
@@ -723,14 +493,12 @@ export function DMProvider({ children, config }: DMProviderProps) {
   }, []);
 
   // Add message to state
-  const addMessageToState = useCallback((message: DecryptedMessage, conversationPartner: string, protocol: DMProtocol) => {
+  const addMessageToState = useCallback((message: DecryptedMessage, conversationPartner: string) => {
     setMessages(prev => {
       const newMap = new Map(prev);
       const existing = newMap.get(conversationPartner);
 
       if (existing) {
-        // For NIP-17 messages with originalGiftWrapId, dedupe by gift wrap ID
-        // For NIP-04 and cached NIP-17 messages, dedupe by message ID
         const messageId = message.originalGiftWrapId || message.id;
         if (existing.messages.some(msg => (msg.originalGiftWrapId || msg.id) === messageId)) {
           return prev;
@@ -750,7 +518,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
           updatedMessages[optimisticIndex] = {
             ...message,
             created_at: existingMessage.created_at,
-            clientFirstSeen: existingMessage.clientFirstSeen
+            clientFirstSeen: existingMessage.clientFirstSeen,
           };
         } else {
           updatedMessages = [...existing.messages, message];
@@ -765,53 +533,20 @@ export function DMProvider({ children, config }: DMProviderProps) {
           messages: updatedMessages,
           lastActivity: actualLastMessage.created_at,
           lastMessage: actualLastMessage,
-          hasNIP04: protocol === DM_PROTOCOL.NIP04 ? true : existing.hasNIP04,
-          hasNIP17: protocol === DM_PROTOCOL.NIP17 ? true : existing.hasNIP17,
+          hasNIP17: true,
         });
       } else {
-        const newConversation = {
+        newMap.set(conversationPartner, {
           messages: [message],
           lastActivity: message.created_at,
           lastMessage: message,
-          hasNIP04: protocol === DM_PROTOCOL.NIP04,
-          hasNIP17: protocol === DM_PROTOCOL.NIP17,
-        };
-
-        newMap.set(conversationPartner, newConversation);
+          hasNIP17: true,
+        });
       }
 
       return newMap;
     });
   }, []);
-
-  // Process incoming NIP-4 message
-  const processIncomingNIP04Message = useCallback(async (event: NostrEvent) => {
-    if (!user?.pubkey) return;
-
-    if (!validateNip04DMEvent(event)) return;
-
-    const isFromUser = event.pubkey === user.pubkey;
-    const recipientPTag = event.tags?.find(([name]) => name === 'p')?.[1];
-    const otherPubkey = isFromUser ? recipientPTag : event.pubkey;
-
-    if (!otherPubkey || otherPubkey === user.pubkey) return;
-
-    const { decryptedContent, error } = await decryptNIP04Message(event, otherPubkey);
-
-    const decryptedMessage: DecryptedMessage = {
-      ...event,
-      content: event.content,
-      decryptedContent: decryptedContent,
-      error: error,
-    };
-
-    const messageAge = Date.now() - (event.created_at * 1000);
-    if (messageAge < 5000) {
-      decryptedMessage.clientFirstSeen = Date.now();
-    }
-
-    addMessageToState(decryptedMessage, otherPubkey, DM_PROTOCOL.NIP04);
-  }, [user, decryptNIP04Message, addMessageToState]);
 
   // Process NIP-17 Gift Wrap
   const processNIP17GiftWrap = useCallback(async (event: NostrEvent): Promise<NIP17ProcessingResult> => {
@@ -824,17 +559,15 @@ export function DMProvider({ children, config }: DMProviderProps) {
           error: 'No NIP-44 decryption available',
         },
         conversationPartner: event.pubkey,
-        sealEvent: event, // Return the event itself as fallback
+        sealEvent: event,
       };
     }
 
     try {
-      // Decrypt using the ephemeral sender's pubkey (event.pubkey)
       const sealContent = await withDecryptTimeout(user.signer.nip44.decrypt(event.pubkey, event.content));
       const sealEvent = JSON.parse(sealContent) as NostrEvent;
 
       if (sealEvent.kind !== 13) {
-        // Invalid protocol - silently ignore malformed messages
         return {
           processedMessage: {
             ...event,
@@ -843,16 +576,14 @@ export function DMProvider({ children, config }: DMProviderProps) {
             error: `Invalid Seal format - expected kind 13, got ${sealEvent.kind}`,
           },
           conversationPartner: event.pubkey,
-          sealEvent: event, // Return the gift wrap as fallback
+          sealEvent: event,
         };
       }
 
       const messageContent = await withDecryptTimeout(user.signer.nip44.decrypt(sealEvent.pubkey, sealEvent.content));
       const messageEvent = JSON.parse(messageContent) as NostrEvent;
 
-      // Accept both kind 14 (text) and kind 15 (files/attachments)
       if (messageEvent.kind !== 14 && messageEvent.kind !== 15) {
-        // Unsupported message kind - silently ignore
         return {
           processedMessage: {
             ...event,
@@ -861,7 +592,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
             error: `Invalid message format - expected kind 14 or 15, got ${messageEvent.kind}`,
           },
           conversationPartner: event.pubkey,
-          sealEvent, // Return the seal
+          sealEvent,
         };
       }
 
@@ -877,7 +608,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
               error: 'Invalid recipient - malformed p tag',
             },
             conversationPartner: event.pubkey,
-            sealEvent, // Return the seal
+            sealEvent,
           };
         } else {
           conversationPartner = recipient;
@@ -890,10 +621,10 @@ export function DMProvider({ children, config }: DMProviderProps) {
         processedMessage: {
           ...messageEvent,
           id: messageEvent.id || `missing-nip17-inner-${messageEvent.created_at}-${messageEvent.pubkey.substring(0, 8)}-${messageEvent.content.substring(0, 16)}`,
-          decryptedContent: messageEvent.content, // Plaintext from inner message
+          decryptedContent: messageEvent.content,
         },
         conversationPartner,
-        sealEvent, // Return the seal (kind 13) for storage
+        sealEvent,
       };
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Failed to process NIP-17 gift wrap:', {
@@ -909,7 +640,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
           error: error instanceof Error ? error.message : 'Failed to decrypt or parse NIP-17 message',
         },
         conversationPartner: event.pubkey,
-        sealEvent: event, // Return the gift wrap as fallback
+        sealEvent: event,
       };
     }
   }, [user]);
@@ -923,7 +654,6 @@ export function DMProvider({ children, config }: DMProviderProps) {
     try {
       const { processedMessage, conversationPartner, sealEvent } = await processNIP17GiftWrap(event);
 
-      // Check if decryption failed
       if (processedMessage.error) {
         if (import.meta.env.DEV) console.error('[DM] NIP-17 message decryption failed:', {
           giftWrapId: event.id,
@@ -933,25 +663,23 @@ export function DMProvider({ children, config }: DMProviderProps) {
         return;
       }
 
-      // Store the seal (kind 13) as-is + add decryptedEvent for inner message access
       const messageWithAnimation: DecryptedMessage = {
-        ...sealEvent, // Seal fields (kind 13, seal pubkey, encrypted content, etc.)
-        created_at: processedMessage.created_at, // Use real timestamp from inner message
+        ...sealEvent,
+        created_at: processedMessage.created_at,
         decryptedEvent: {
           ...processedMessage,
           content: processedMessage.decryptedContent,
         } as NostrEvent,
         decryptedContent: processedMessage.decryptedContent,
-        originalGiftWrapId: event.id, // Store gift wrap ID for deduplication
+        originalGiftWrapId: event.id,
       };
 
-      // Use real message timestamp for recency check
       const messageAge = Date.now() - (processedMessage.created_at * 1000);
       if (messageAge < 5000) {
         messageWithAnimation.clientFirstSeen = Date.now();
       }
 
-      addMessageToState(messageWithAnimation, conversationPartner, DM_PROTOCOL.NIP17);
+      addMessageToState(messageWithAnimation, conversationPartner);
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Exception in processIncomingNIP17Message:', {
         giftWrapId: event.id,
@@ -961,61 +689,9 @@ export function DMProvider({ children, config }: DMProviderProps) {
     }
   }, [user, processNIP17GiftWrap, addMessageToState]);
 
-  // Start NIP-4 subscription
-  const startNIP04Subscription = useCallback(async (sinceTimestamp?: number) => {
-    if (!user?.pubkey || !nostr) return;
-
-    if (nip04SubscriptionRef.current) {
-      nip04SubscriptionRef.current.close();
-    }
-
-    try {
-      let subscriptionSince = sinceTimestamp || Math.floor(Date.now() / 1000);
-      if (!sinceTimestamp && lastSync.nip04) {
-        subscriptionSince = lastSync.nip04 - DM_CONSTANTS.SUBSCRIPTION_OVERLAP_SECONDS;
-      }
-
-      const filters = [
-        { kinds: [4], '#p': [user.pubkey], since: subscriptionSince },
-        { kinds: [4], authors: [user.pubkey], since: subscriptionSince }
-      ];
-
-      const controller = new AbortController();
-      const subscription = nostr.req(filters, { signal: controller.signal });
-      let isActive = true;
-
-      (async () => {
-        try {
-          for await (const msg of subscription) {
-            if (!isActive) break;
-            if (msg[0] === 'EVENT') {
-              await processIncomingNIP04Message(msg[2]);
-            }
-          }
-        } catch (error) {
-          if (isActive) {
-            if (import.meta.env.DEV) console.error('[DM] NIP-4 subscription error:', error);
-          }
-        }
-      })();
-
-      nip04SubscriptionRef.current = {
-        close: () => {
-          isActive = false;
-          controller.abort();
-        }
-      };
-
-      setSubscriptions(prev => ({ ...prev, isNIP04Connected: true }));
-    } catch (error) {
-      if (import.meta.env.DEV) console.error('[DM] Failed to start NIP-4 subscription:', error);
-      setSubscriptions(prev => ({ ...prev, isNIP04Connected: false }));
-    }
-  }, [user, nostr, lastSync.nip04, processIncomingNIP04Message]);
-
   // Start NIP-17 subscription
   const startNIP17Subscription = useCallback(async (sinceTimestamp?: number) => {
-    if (!user?.pubkey || !nostr || !enableNIP17) return;
+    if (!user?.pubkey || !nostr) return;
 
     if (nip17SubscriptionRef.current) {
       nip17SubscriptionRef.current.close();
@@ -1028,7 +704,6 @@ export function DMProvider({ children, config }: DMProviderProps) {
       }
 
       // Adjust for NIP-17 timestamp fuzzing (±2 days)
-      // Subscribe from (lastSync - 2 days) to catch messages with randomized past timestamps
       const TWO_DAYS_IN_SECONDS = 2 * 24 * 60 * 60;
       subscriptionSince = subscriptionSince - TWO_DAYS_IN_SECONDS;
 
@@ -1064,15 +739,15 @@ export function DMProvider({ children, config }: DMProviderProps) {
         }
       };
 
-      setSubscriptions(prev => ({ ...prev, isNIP17Connected: true }));
+      setSubscriptions({ isNIP17Connected: true });
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Failed to start NIP-17 subscription:', error);
-      setSubscriptions(prev => ({ ...prev, isNIP17Connected: false }));
+      setSubscriptions({ isNIP17Connected: false });
     }
-  }, [user, nostr, lastSync.nip17, enableNIP17, processIncomingNIP17Message]);
+  }, [user, nostr, lastSync.nip17, processIncomingNIP17Message]);
 
-  // Load all cached messages at once (both protocols)
-  const loadAllCachedMessages = useCallback(async (): Promise<{ nip04Since?: number; nip17Since?: number }> => {
+  // Load all cached messages (NIP-17 seals stored in original encrypted form)
+  const loadAllCachedMessages = useCallback(async (): Promise<{ nip17Since?: number }> => {
     if (!userPubkey) return {};
 
     try {
@@ -1084,52 +759,34 @@ export function DMProvider({ children, config }: DMProviderProps) {
         return {};
       }
 
-      const filteredParticipants = enableNIP17
-        ? cachedStore.participants
-        : Object.fromEntries(
-          Object.entries(cachedStore.participants).filter(([_, participant]) => !participant.hasNIP17)
-        );
-
       const newState = new Map();
 
-      // Decrypt each message individually (they're stored in original encrypted form)
-      for (const [participantPubkey, participant] of Object.entries(filteredParticipants)) {
+      // Decrypt each NIP-17 seal individually
+      for (const [participantPubkey, participant] of Object.entries(cachedStore.participants)) {
         const processedMessages = await Promise.all(participant.messages.map(async (msg) => {
-          // Decrypt based on message kind
           let decryptedContent: string | undefined;
           let error: string | undefined;
 
-          if (msg.kind === 4) {
-            // NIP-04 message
-            const otherPubkey = msg.pubkey === user?.pubkey
-              ? msg.tags.find(([name]) => name === 'p')?.[1]
-              : msg.pubkey;
-
-            if (otherPubkey && user?.signer?.nip04) {
-              try {
-                decryptedContent = await withDecryptTimeout(user.signer.nip04.decrypt(otherPubkey, msg.content));
-              } catch {
-                error = 'Decryption failed';
-              }
-            }
-          } else if (msg.kind === 13) {
+          if (msg.kind === 13) {
             // NIP-17 seal - decrypt to get the inner kind 14/15 event
             if (user?.signer?.nip44) {
               try {
                 const sealContent = await withDecryptTimeout(user.signer.nip44.decrypt(msg.pubkey, msg.content));
                 const decryptedEvent = JSON.parse(sealContent) as NostrEvent;
 
-                // Keep seal structure but add decryptedEvent for access to inner fields
                 return {
                   ...msg,
-                  decryptedEvent,                         // Full inner event (kind 14/15)
-                  decryptedContent: decryptedEvent.content, // Plaintext message
+                  decryptedEvent,
+                  decryptedContent: decryptedEvent.content,
                 } as NostrEvent & { decryptedEvent?: NostrEvent; decryptedContent?: string; error?: string };
               } catch {
                 error = 'Decryption failed';
               }
             }
           }
+          // kind 4 (NIP-04) seals are no longer supported. They are wiped from
+          // disk by dmMessageStore's first-launch purge; anything that slips
+          // through here is rendered with an empty body and no error toast.
 
           return {
             ...msg,
@@ -1143,25 +800,23 @@ export function DMProvider({ children, config }: DMProviderProps) {
           messages: processedMessages,
           lastActivity: participant.lastActivity,
           lastMessage: processedMessages.length > 0 ? processedMessages[processedMessages.length - 1] : null,
-          hasNIP04: participant.hasNIP04,
           hasNIP17: participant.hasNIP17,
         });
       }
 
       setMessages(newState);
       if (cachedStore.lastSync) {
-        setLastSync(cachedStore.lastSync);
+        setLastSync({ nip17: cachedStore.lastSync.nip17 });
       }
 
       return {
-        nip04Since: cachedStore.lastSync?.nip04 || undefined,
         nip17Since: cachedStore.lastSync?.nip17 || undefined,
       };
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Error loading cached messages:', error);
       return {};
     }
-  }, [userPubkey, enableNIP17, user]);
+  }, [userPubkey, user]);
 
   // Start message loading
   const startMessageLoading = useCallback(async () => {
@@ -1171,37 +826,27 @@ export function DMProvider({ children, config }: DMProviderProps) {
     setDMLoadingPhase(DM_LOADING_PHASES.CACHE);
 
     try {
-      // ===== PHASE 1: Load cache and show immediately =====
-      const { nip04Since, nip17Since } = await loadAllCachedMessages();
+      // PHASE 1: Load cache and show immediately
+      const { nip17Since } = await loadAllCachedMessages();
 
-      // Mark as completed BEFORE releasing isLoading to prevent re-trigger
       setHasInitialLoadCompleted(true);
 
-      // Show cached messages immediately! Don't wait for relays
       setDMLoadingPhase(DM_LOADING_PHASES.READY);
       setIsLoading(false);
 
-      // ===== PHASE 2: Query relays in background (non-blocking, parallel) =====
+      // PHASE 2: Query relays in background (non-blocking)
       setDMLoadingPhase(DM_LOADING_PHASES.RELAYS);
 
-      // Run NIP-04 and NIP-17 queries IN PARALLEL
-      const [nip04Result, nip17Result] = await Promise.all([
-        queryRelaysForMessagesSince(DM_PROTOCOL.NIP04, nip04Since),
-        enableNIP17 ? queryRelaysForMessagesSince(DM_PROTOCOL.NIP17, nip17Since) : Promise.resolve({ lastMessageTimestamp: undefined, messageCount: 0 })
-      ]);
+      const nip17Result = await queryRelaysForMessagesSince(nip17Since);
 
-      const totalNewMessages = nip04Result.messageCount + (nip17Result?.messageCount || 0);
-      if (totalNewMessages > 0) {
+      if (nip17Result.messageCount > 0) {
         setShouldSaveImmediately(true);
       }
 
-      // ===== PHASE 3: Setup subscriptions =====
+      // PHASE 3: Setup subscription
       setDMLoadingPhase(DM_LOADING_PHASES.SUBSCRIPTIONS);
 
-      await Promise.all([
-        startNIP04Subscription(nip04Result.lastMessageTimestamp),
-        enableNIP17 ? startNIP17Subscription(nip17Result?.lastMessageTimestamp) : Promise.resolve()
-      ]);
+      await startNIP17Subscription(nip17Result?.lastMessageTimestamp);
 
       setDMLoadingPhase(DM_LOADING_PHASES.READY);
     } catch (error) {
@@ -1210,35 +855,27 @@ export function DMProvider({ children, config }: DMProviderProps) {
       setDMLoadingPhase(DM_LOADING_PHASES.READY);
       setIsLoading(false);
     }
-  }, [loadAllCachedMessages, queryRelaysForMessagesSince, startNIP04Subscription, startNIP17Subscription, enableNIP17, isLoading]);
+  }, [loadAllCachedMessages, queryRelaysForMessagesSince, startNIP17Subscription, isLoading]);
 
   // Clear cache and refetch from relays
   const clearCacheAndRefetch = useCallback(async () => {
     if (!enabled || !userPubkey) return;
 
     try {
-      // Close existing subscriptions
-      if (nip04SubscriptionRef.current) {
-        nip04SubscriptionRef.current.close();
-        nip04SubscriptionRef.current = null;
-      }
       if (nip17SubscriptionRef.current) {
         nip17SubscriptionRef.current.close();
         nip17SubscriptionRef.current = null;
       }
 
-      // Clear IndexedDB cache
       const { deleteMessagesFromDB } = await import('@/lib/dmMessageStore');
       await deleteMessagesFromDB(userPubkey);
 
-      // Reset all state
       setMessages(new Map());
-      setLastSync({ nip04: null, nip17: null });
-      setSubscriptions({ isNIP04Connected: false, isNIP17Connected: false });
-      setScanProgress({ nip04: null, nip17: null });
+      setLastSync({ nip17: null });
+      setSubscriptions({ isNIP17Connected: false });
+      setScanProgress({ nip17: null });
       setDMLoadingPhase(DM_LOADING_PHASES.IDLE);
 
-      // Trigger reload by setting hasInitialLoadCompleted to false
       setHasInitialLoadCompleted(false);
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Error clearing cache:', error);
@@ -1253,15 +890,10 @@ export function DMProvider({ children, config }: DMProviderProps) {
   }, [enabled, userPubkey, hasInitialLoadCompleted, isLoading, startMessageLoading]);
 
   // Cleanup subscriptions and debounced writes on unmount, disable, or user change.
-  // Also resets load state so the new user's messages are fetched fresh.
   useEffect(() => {
     if (!enabled) return;
 
     return () => {
-      if (nip04SubscriptionRef.current) {
-        nip04SubscriptionRef.current.close();
-        nip04SubscriptionRef.current = null;
-      }
       if (nip17SubscriptionRef.current) {
         nip17SubscriptionRef.current.close();
         nip17SubscriptionRef.current = null;
@@ -1269,11 +901,10 @@ export function DMProvider({ children, config }: DMProviderProps) {
       if (debouncedWriteRef.current) {
         clearTimeout(debouncedWriteRef.current);
       }
-      setSubscriptions({ isNIP04Connected: false, isNIP17Connected: false });
-      // Reset load state so new user (or re-login) starts fresh
+      setSubscriptions({ isNIP17Connected: false });
       setHasInitialLoadCompleted(false);
       setMessages(new Map());
-      setLastSync({ nip04: null, nip17: null });
+      setLastSync({ nip17: null });
       setDMLoadingPhase(DM_LOADING_PHASES.IDLE);
     };
   }, [enabled, userPubkey]);
@@ -1341,7 +972,6 @@ export function DMProvider({ children, config }: DMProviderProps) {
         pubkey: participantPubkey,
         lastMessage: participant.lastMessage,
         lastActivity: participant.lastActivity,
-        hasNIP04Messages: participant.hasNIP04,
         hasNIP17Messages: participant.hasNIP17,
         isKnown: isKnown,
         isRequest: isRequest,
@@ -1363,11 +993,9 @@ export function DMProvider({ children, config }: DMProviderProps) {
         participants: {} as Record<string, {
           messages: NostrEvent[];
           lastActivity: number;
-          hasNIP04: boolean;
           hasNIP17: boolean;
         }>,
         lastSync: {
-          nip04: lastSync.nip04,
           nip17: lastSync.nip17,
         }
       };
@@ -1375,20 +1003,18 @@ export function DMProvider({ children, config }: DMProviderProps) {
       messages.forEach((participant, participantPubkey) => {
         messageStore.participants[participantPubkey] = {
           messages: participant.messages.map(msg => ({
-            // Store messages in their ORIGINAL ENCRYPTED form
-            // Just strip the decrypted fields (decryptedContent, decryptedEvent)
-            // Keep originalGiftWrapId for NIP-17 deduplication on cache load
+            // Store messages in their ORIGINAL ENCRYPTED form.
+            // Keep originalGiftWrapId for NIP-17 deduplication on cache load.
             id: msg.id,
             pubkey: msg.pubkey,
-            content: msg.content, // Encrypted content (NIP-04 or seal)
+            content: msg.content,
             created_at: msg.created_at,
-            kind: msg.kind,       // 4 for NIP-04, 13 for NIP-17
+            kind: msg.kind,
             tags: msg.tags,
             sig: msg.sig,
             ...(msg.originalGiftWrapId && { originalGiftWrapId: msg.originalGiftWrapId }),
           } as NostrEvent)),
           lastActivity: participant.lastActivity,
-          hasNIP04: participant.hasNIP04,
           hasNIP17: participant.hasNIP17,
         };
       });
@@ -1397,8 +1023,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
       const currentTime = Math.floor(Date.now() / 1000);
       setLastSync(prev => ({
-        nip04: prev.nip04 || currentTime,
-        nip17: prev.nip17 || currentTime
+        nip17: prev.nip17 || currentTime,
       }));
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Error writing messages to IndexedDB:', error);
@@ -1428,17 +1053,13 @@ export function DMProvider({ children, config }: DMProviderProps) {
     }
   }, [enabled, messages, shouldSaveImmediately, writeAllMessagesToStore, triggerDebouncedWrite]);
 
-  // Send message
+  // Send message (always NIP-17)
   const sendMessage = useCallback(async (params: {
     recipientPubkey: string;
     content: string;
-    protocol?: DMProtocol;
     attachments?: FileAttachment[];
   }) => {
     if (!enabled) return;
-
-    // Always send via NIP-17 (kind 14/15 gift-wrapped). NIP-04 is deprecated and
-    // only kept for reading legacy messages. Ignore any protocol override.
     const { recipientPubkey, content, attachments } = params;
     if (!userPubkey) return;
 
@@ -1456,7 +1077,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
       clientFirstSeen: Date.now(),
     };
 
-    addMessageToState(optimisticMessage, recipientPubkey, DM_PROTOCOL.NIP17);
+    addMessageToState(optimisticMessage, recipientPubkey);
 
     try {
       await sendNIP17Message.mutateAsync({ recipientPubkey, content, attachments });
@@ -1475,7 +1096,6 @@ export function DMProvider({ children, config }: DMProviderProps) {
     lastSync,
     conversations,
     sendMessage,
-    protocolMode,
     scanProgress,
     subscriptions,
     clearCacheAndRefetch,
@@ -1487,4 +1107,3 @@ export function DMProvider({ children, config }: DMProviderProps) {
     </DMContext.Provider>
   );
 }
-

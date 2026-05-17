@@ -1,5 +1,5 @@
 import { useMemo, useState, memo } from 'react';
-import { AlertTriangle, Info, Loader2 } from 'lucide-react';
+import { Info, Loader2 } from 'lucide-react';
 import { useDMContext } from '@/hooks/useDMContext';
 import { useAuthor } from '@/hooks/useAuthor';
 import { genUserName } from '@/lib/genUserName';
@@ -26,16 +26,14 @@ interface ConversationItemProps {
   onClick: () => void;
   lastMessage: { decryptedContent?: string; error?: string } | null;
   lastActivity: number;
-  hasNIP04Messages: boolean;
 }
 
-const ConversationItemComponent = ({ 
-  pubkey, 
-  isSelected, 
+const ConversationItemComponent = ({
+  pubkey,
+  isSelected,
   onClick,
   lastMessage,
   lastActivity,
-  hasNIP04Messages
 }: ConversationItemProps) => {
   const author = useAuthor(pubkey);
   const metadata = author.data?.metadata;
@@ -76,18 +74,6 @@ const ConversationItemComponent = ({
                 <Skeleton className="h-[1.25rem] w-24" />
               ) : (
                 <span className="font-medium text-sm truncate">{displayName}</span>
-              )}
-              {hasNIP04Messages && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="flex-shrink-0">
-                      <AlertTriangle className="h-3.5 w-3.5 text-yellow-600 dark:text-yellow-500" />
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent side="left">
-                    <p className="text-xs max-w-[200px]">Some messages use outdated NIP-04 encryption</p>
-                  </TooltipContent>
-                </Tooltip>
               )}
             </div>
             <Tooltip>
@@ -248,7 +234,6 @@ export const DMConversationList = ({
                   onClick={() => onSelectConversation(conversation.pubkey)}
                   lastMessage={conversation.lastMessage}
                   lastActivity={conversation.lastActivity}
-                  hasNIP04Messages={conversation.hasNIP04Messages}
                 />
               ))}
             </div>

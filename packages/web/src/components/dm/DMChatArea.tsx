@@ -4,7 +4,7 @@ import { useDMContext } from '@/hooks/useDMContext';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useAuthor } from '@/hooks/useAuthor';
 import { genUserName } from '@/lib/genUserName';
-import { DM_PROTOCOL, type DMProtocol } from '@/lib/dmConstants';
+// DM_PROTOCOL / DMProtocol no longer needed: all sends are NIP-17.
 import { formatConversationTime, formatFullDateTime } from '@/lib/dmUtils';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -13,7 +13,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 // Select UI removed — NIP-17 is the only send protocol now
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { ArrowLeft, Send, Loader2, AlertTriangle, Key, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, Send, Loader2, ShieldCheck } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { NoteContent } from '@/components/NoteContent';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -41,9 +41,9 @@ const MessageBubble = memo(({
   };
   isFromCurrentUser: boolean;
 }) => {
-  // For NIP-17, use inner message kind (14/15); for NIP-04, use message kind (4)
+  // For NIP-17, use inner message kind (14/15). Legacy NIP-04 (kind 4) was
+  // removed in v0.7 and is purged from local cache on first launch.
   const actualKind = message.decryptedEvent?.kind || message.kind;
-  const isNIP04Message = message.kind === 4;
   const isFileAttachment = actualKind === 15; // Kind 15 = files/attachments
 
   // Create a NostrEvent object for NoteContent (only used for kind 15)
@@ -81,7 +81,7 @@ const MessageBubble = memo(({
             <NoteContent event={messageEvent} className="whitespace-pre-wrap break-words" />
           </div>
         ) : (
-          // Kind 4 (NIP-04) and Kind 14 (NIP-17 text): Display plain text
+          // Kind 14 (NIP-17 text): Display plain text
           <p className="text-sm whitespace-pre-wrap break-words">
             {message.decryptedContent}
           </p>
@@ -107,34 +107,17 @@ const MessageBubble = memo(({
                 "flex-shrink-0 opacity-50",
                 isFromCurrentUser ? "text-primary-foreground" : "text-muted-foreground"
               )}>
-                {message.kind === 4 ? (
-                  <Key className="h-3 w-3" />
-                ) : (
-                  <ShieldCheck className="h-3 w-3" />
-                )}
+                <ShieldCheck className="h-3 w-3" />
               </span>
             </TooltipTrigger>
             <TooltipContent>
               <p className="text-xs">
-                {message.kind === 4 && "NIP-04 Kind 4 (Legacy DM)"}
                 {message.kind === 14 && "NIP-17 Kind 14 (Private Message)"}
                 {message.kind === 15 && "NIP-17 Kind 15 (Media)"}
-                {message.kind !== 4 && message.kind !== 14 && message.kind !== 15 && `Kind ${message.kind}`}
+                {message.kind !== 14 && message.kind !== 15 && `Kind ${message.kind}`}
               </p>
             </TooltipContent>
           </Tooltip>
-          {isNIP04Message && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div className="flex-shrink-0">
-                  <AlertTriangle className="h-3 w-3 text-yellow-600 dark:text-yellow-500" />
-                </div>
-              </TooltipTrigger>
-              <TooltipContent>
-                <p className="text-xs">Uses outdated NIP-04 encryption</p>
-              </TooltipContent>
-            </Tooltip>
-          )}
           {message.isSending && (
             <Loader2 className="h-3 w-3 animate-spin opacity-70" />
           )}
@@ -209,15 +192,13 @@ const EmptyState = ({ isLoading }: { isLoading: boolean }) => {
 
 export const DMChatArea = ({ pubkey, onBack, className }: DMChatAreaProps) => {
   const { user } = useCurrentUser();
-  const { sendMessage, protocolMode: _protocolMode, isLoading } = useDMContext();
+  const { sendMessage, isLoading } = useDMContext();
   const { messages, hasMoreMessages, loadEarlierMessages } = useConversationMessages(pubkey || '');
   
   const [messageText, setMessageText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   
-  // Always use NIP-17 for sending. NIP-04 is deprecated (read-only for legacy messages).
-  const [selectedProtocol] = useState<DMProtocol>(DM_PROTOCOL.NIP17);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   const _allowSelection = false;
@@ -240,7 +221,6 @@ export const DMChatArea = ({ pubkey, onBack, className }: DMChatAreaProps) => {
       await sendMessage({
         recipientPubkey: pubkey,
         content: messageText.trim(),
-        protocol: selectedProtocol,
       });
       setMessageText('');
     } catch (error) {
@@ -248,7 +228,7 @@ export const DMChatArea = ({ pubkey, onBack, className }: DMChatAreaProps) => {
     } finally {
       setIsSending(false);
     }
-  }, [messageText, pubkey, user, sendMessage, selectedProtocol]);
+  }, [messageText, pubkey, user, sendMessage]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {

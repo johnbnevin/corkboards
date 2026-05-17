@@ -10,7 +10,11 @@ import { NSecSigner, NConnectSigner, NRelay1 } from '@nostrify/nostrify';
 import { useAuth } from '../lib/AuthContext';
 import { NSEC_APP_RELAY } from '@core/relayConstants';
 
-export function useSignerConnect(type: 'amber') {
+// `_type` is kept in the signature for API stability and to leave room for
+// future signer kinds (e.g. nsec.app). It is intentionally unused today;
+// underscore prefix marks it as such for linters. If a future kind is added,
+// restore the dep array entry and branch on it.
+export function useSignerConnect(_type: 'amber') {
   const { loginWithBunker } = useAuth();
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +100,7 @@ export function useSignerConnect(type: 'amber') {
     } finally {
       if (!controller.signal.aborted) setConnecting(false);
     }
-  }, [type, loginWithBunker]);
+  }, [loginWithBunker]);
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();

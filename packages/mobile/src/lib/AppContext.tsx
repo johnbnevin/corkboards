@@ -38,7 +38,10 @@ export const AppContext = createContext<AppContextType | undefined>(undefined);
 const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
   relayMetadata: { relays: [], updatedAt: 0 },
-  publishClientTag: true,
+  // Off by default — `client` tags are followable, which means a non-anon
+  // sender's pubkey gets correlated to "uses corkboards" by relay observers
+  // forever. Users can opt in via Advanced Settings. Matches the web default.
+  publishClientTag: false,
 };
 
 const STORAGE_KEY = 'corkboard:app-config';
@@ -71,12 +74,11 @@ function saveConfig(partial: Partial<AppConfig>) {
   mobileStorage.setSync(STORAGE_KEY, JSON.stringify(partial));
 }
 
-function resolveTheme(theme: Theme): 'dark' | 'light' {
-  if (theme === 'system') {
-    return Appearance.getColorScheme() === 'dark' ? 'dark' : 'light';
-  }
-  return theme;
-}
+// Theme resolution (system → dark/light) is currently handled inside the
+// React component tree rather than this helper. Kept commented for future
+// use rather than deleted because the import of `Appearance` is referenced
+// in other places this module re-exports.
+// function resolveTheme(theme: Theme): 'dark' | 'light' { ... }
 
 interface AppProviderProps {
   children: React.ReactNode;

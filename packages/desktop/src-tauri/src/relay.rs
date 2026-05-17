@@ -10,6 +10,11 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 /// so the payload per call stays small regardless of IPC protocol state.
 const BATCH_SIZE: usize = 20;
 
+/// Hard upper bound on per-query results when JS doesn't supply a `limit`.
+/// Without this, a missing limit defaults to u64::MAX, which would let a
+/// pathological relay flood memory before EOSE arrives.
+const DEFAULT_LIMIT_CAP: usize = 1000;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RelayQueryResult {
     pub events: Vec<Value>,
@@ -40,31 +45,46 @@ pub async fn relay_subscribe(
     let limit = filter
         .get("limit")
         .and_then(|v| v.as_u64())
-        .unwrap_or(u64::MAX) as usize;
+        .map(|v| v as usize)
+        .unwrap_or(DEFAULT_LIMIT_CAP)
+        .min(DEFAULT_LIMIT_CAP * 10); // hard ceiling even if JS asks for more
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    // Bounded channel — backpressure so a fast relay can't outrun the emit loop
+    // and balloon memory before JS drains the queue. Capacity scales with limit
+    // but stays modest to keep peak memory predictable.
+    let channel_capacity = limit.saturating_mul(2).clamp(64, 2048);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(channel_capacity);
 
     // Spawn one task per relay — all connect and query concurrently
+    let url_count = urls.len();
     let handles: Vec<_> = urls
         .into_iter()
         .map(|url| {
             let f = filter.clone();
             let sender = tx.clone();
+            let url_for_log = url.clone();
             tokio::spawn(async move {
                 match tokio::time::timeout(dur, do_query(url, f)).await {
                     Ok(result) => {
+                        if let Some(err) = result.error {
+                            eprintln!("[relay {url_for_log}] error: {err}");
+                        }
                         for ev in result.events {
-                            if sender.send(ev).is_err() {
+                            // send() awaits when the channel is full — applies backpressure
+                            if sender.send(ev).await.is_err() {
                                 break; // receiver dropped
                             }
                         }
                     }
-                    Err(_) => {} // timeout — sender dropped, channel eventually closes
+                    Err(_) => {
+                        eprintln!("[relay {url_for_log}] timeout after {ms}ms");
+                    }
                 }
             })
         })
         .collect();
     drop(tx); // channel closes when all spawned senders finish
+    let _ = url_count;
 
     // Deduplicate and stream to JS in small batches via app.emit()
     let event_name = format!("relay-{}", sub_id);
@@ -90,8 +110,17 @@ pub async fn relay_subscribe(
         }
     }
 
+    // Join all spawned tasks; surface panics so a buggy do_query path doesn't
+    // disappear silently. We continue draining other relays' results even if
+    // one task panicked.
     for h in handles {
-        let _ = h.await;
+        if let Err(e) = h.await {
+            if e.is_panic() {
+                eprintln!("[relay_subscribe] relay task panicked: {e}");
+            } else if e.is_cancelled() {
+                eprintln!("[relay_subscribe] relay task cancelled");
+            }
+        }
     }
 
     // Final batch + completion signal

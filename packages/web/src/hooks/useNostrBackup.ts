@@ -23,9 +23,10 @@ import type { NostrEvent, NPool } from '@nostrify/nostrify';
 import type { NUser } from '@nostrify/react/login';
 import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache, createRelayFresh } from '@/components/NostrProvider';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '@/lib/storageKeys';
+import { fnv1a32 } from '@core/hashCore';
 import { formatTimeAgo } from '@/lib/formatTimeAgo';
 import { debugLog, debugWarn } from '@/lib/debug';
-import { idbGetSync, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy } from '@/lib/idb';
+import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy } from '@/lib/idb';
 import {
   generateAesKey, importAesKey,
   aesEncrypt, aesDecrypt, rawKeyToHex, hexToRawKey,
@@ -295,6 +296,50 @@ function getPublishRelays(pubkey: string): { primary: string[]; fallback: string
 // Keys tracked for change detection (shared between save, auto-save, and restore)
 const SNAPSHOT_KEYS = ['nostr-custom-feeds','collapsed-notes','dismissed-notes','nostr-friends','nostr-browse-relays','nostr-rss-feeds','saved-minimized-notes','corkboard:tab-filters','corkboard:onboarding-skipped','corkboard:banner-height-pct','corkboard:banner-fit-mode'] as const;
 
+/**
+ * Counts of meaningful items at last-backup time — small enough to keep in
+ * memCache so the auto-save regression guard can read them synchronously.
+ * (The full LAST_BACKUP_DATA blob is excluded from memCache because it can
+ * grow to several MB; that exclusion made the legacy guard a no-op.)
+ */
+interface LastBackupCounts {
+  dismissed: number;
+  feeds: number;
+  collapsed: number;
+  bookmarks: number;
+}
+
+function countArrayJson(raw: string | undefined | null): number {
+  if (!raw) return 0;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch { return 0; }
+}
+
+function snapshotCounts(snapshot: Record<string, string>): LastBackupCounts {
+  return {
+    dismissed: countArrayJson(snapshot['dismissed-notes']),
+    feeds: countArrayJson(snapshot['nostr-custom-feeds']),
+    collapsed: countArrayJson(snapshot['collapsed-notes']),
+    bookmarks: countArrayJson(snapshot['nostr-bookmark-ids']),
+  };
+}
+
+/**
+ * Write the full snapshot blob (for restore/preflight) plus two small
+ * companion keys that DO fit in memCache:
+ *   - last-backup-hashes: per-key FNV-1a hashes for fast change detection
+ *   - last-backup-counts: item counts for the auto-save regression guard
+ */
+function persistSnapshotAndHashes(snapshot: Record<string, string>): void {
+  idbSetSync('corkboard:last-backup-data', JSON.stringify(snapshot));
+  const hashes: Record<string, string> = {};
+  for (const key of SNAPSHOT_KEYS) hashes[key] = fnv1a32(snapshot[key] || '');
+  idbSetSync('corkboard:last-backup-hashes', JSON.stringify(hashes));
+  idbSetSync('corkboard:last-backup-counts', JSON.stringify(snapshotCounts(snapshot)));
+}
+
 // Module-level guard: prevents double backup check across component remounts.
 // Keyed by pubkey so switching accounts still triggers a check.
 let _checkedPubkey: string | null = null;
@@ -346,11 +391,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   }, []);
 
   // Check if there are unsaved changes by comparing IDB with last backup snapshot.
-  // No React state dependencies — reads directly from IDB sync cache so the function
-  // identity is stable and doesn't reset the idle auto-save timer.
+  // Reads a per-key hash map (small, memCache-friendly) instead of the full snapshot
+  // blob — LAST_BACKUP_DATA is intentionally excluded from memCache because it can
+  // be hundreds of KB and would inflate every cold-start. The hash map fits in
+  // ~500 bytes so it's always sync-readable.
   const hasUnsavedChanges = useCallback(() => {
-    const saved = idbGetSync('corkboard:last-backup-data');
-    if (!saved) {
+    const savedHashes = idbGetSync('corkboard:last-backup-hashes');
+    if (!savedHashes) {
       // No snapshot means we haven't saved or restored yet this session.
       // Only consider it "unsaved" if there's actually meaningful data to save.
       const feeds = idbGetSync('nostr-custom-feeds');
@@ -362,11 +409,12 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     }
 
     try {
-      const lastData = JSON.parse(saved);
+      const lastHashes: Record<string, string> = JSON.parse(savedHashes);
       for (const key of SNAPSHOT_KEYS) {
         const current = idbGetSync(key) || '';
-        const lastSaved = lastData[key] || '';
-        if (current !== lastSaved) {
+        const currentHash = fnv1a32(current);
+        const lastHash = lastHashes[key] || fnv1a32('');
+        if (currentHash !== lastHash) {
           return true;
         }
       }
@@ -559,11 +607,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         idbRemoveSync('corkboard:preferred-checkpoint'); // new save is now the latest
         setLastBackupTs(now);
 
-        // Store snapshot of data for change detection
+        // Store snapshot of data + per-key hashes for change detection
         const snapshot: Record<string, string> = {};
         for (const key of SNAPSHOT_KEYS) snapshot[key] = idbGetSync(key) || '';
-        idbSetSync('corkboard:last-backup-data', JSON.stringify(snapshot));
-        
+        persistSnapshotAndHashes(snapshot);
+
         // Store checkpoint metadata locally for the Checkpoints dialog
         const cp: RemoteCheckpoint = {
           eventId: manifestEvent.id,
@@ -619,31 +667,30 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     }
 
     // Guard: don't save if key data regressed significantly vs last snapshot.
-    // Large sudden regressions suggest IDB was partially cleared, not intentional user action.
-    // Block save to protect the cloud backup.
-    const lastSnapshotRaw = idbGetSync('corkboard:last-backup-data');
-    if (lastSnapshotRaw) {
+    // Reads the small last-backup-counts companion key (which IS in memCache)
+    // instead of the LAST_BACKUP_DATA full blob (which isn't). Three real
+    // production data-loss incidents were caused by this guard being dead
+    // code; now it actually runs.
+    const lastCountsRaw = idbGetSync('corkboard:last-backup-counts');
+    if (lastCountsRaw) {
       try {
-        const prevSnap = JSON.parse(lastSnapshotRaw) as Record<string, string>;
+        const prev = JSON.parse(lastCountsRaw) as LastBackupCounts;
 
-        const prevDismissed = JSON.parse(prevSnap['dismissed-notes'] || '[]').length as number;
-        const currDismissed = JSON.parse(dismissed || '[]').length as number;
-        if (prevDismissed > 20 && currDismissed < prevDismissed * 0.5) {
-          debugWarn('[backup]', `Auto-save blocked: dismissed notes dropped from ${prevDismissed} to ${currDismissed} — IDB may be partially cleared`);
+        const currDismissed = countArrayJson(dismissed);
+        if (prev.dismissed > 20 && currDismissed < prev.dismissed * 0.5) {
+          debugWarn('[backup]', `Auto-save blocked: dismissed notes dropped from ${prev.dismissed} to ${currDismissed} — IDB may be partially cleared`);
           return false;
         }
 
-        const prevFeeds = JSON.parse(prevSnap['nostr-custom-feeds'] || '[]') as unknown[];
-        const currFeeds = JSON.parse(feeds || '[]') as unknown[];
-        if (prevFeeds.length > 0 && currFeeds.length === 0) {
+        const currFeeds = countArrayJson(feeds);
+        if (prev.feeds > 0 && currFeeds === 0) {
           debugWarn('[backup]', 'Auto-save blocked: custom feeds dropped to zero — IDB may be partially cleared');
           return false;
         }
 
-        const prevCollapsed = JSON.parse(prevSnap['collapsed-notes'] || '[]').length as number;
-        const currCollapsed = JSON.parse(collapsed || '[]').length as number;
-        if (prevCollapsed > 10 && currCollapsed < prevCollapsed * 0.5) {
-          debugWarn('[backup]', `Auto-save blocked: saved notes dropped from ${prevCollapsed} to ${currCollapsed} — IDB may be partially cleared`);
+        const currCollapsed = countArrayJson(collapsed);
+        if (prev.collapsed > 10 && currCollapsed < prev.collapsed * 0.5) {
+          debugWarn('[backup]', `Auto-save blocked: saved notes dropped from ${prev.collapsed} to ${currCollapsed} — IDB may be partially cleared`);
           return false;
         }
       } catch { /* ignore parse errors — don't block save on unexpected format */ }
@@ -736,7 +783,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // Snapshot for change detection
       const snapshot: Record<string, string> = {};
       for (const key of SNAPSHOT_KEYS) snapshot[key] = idbGetSync(key) || '';
-      idbSetSync('corkboard:last-backup-data', JSON.stringify(snapshot));
+      persistSnapshotAndHashes(snapshot);
 
       // Add autosave entry to local checkpoint list, keep last 5 autosaves
       const cps = getStoredCheckpoints();
@@ -1095,17 +1142,32 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         });
       }
 
-      // Auto-dismiss only if local data exists AND is already as current as the cloud.
-      // Using AND (not OR) so that stale local data (e.g. months-old desktop IDB that
-      // survived reinstall) still triggers a restore rather than being silently kept.
-      const localFeeds = idbGetSync('nostr-custom-feeds');
-      const localDismissed = idbGetSync('dismissed-notes');
-      const localCollapsed = idbGetSync('collapsed-notes');
+      // Auto-dismiss only when BOTH conditions hold: local has meaningful data AND the
+      // local timestamp is at-or-ahead of remote. Using AND (not OR) preserves the
+      // original safety property — if local is empty but stale, we must still allow the
+      // user to pull a newer remote checkpoint rather than silently locking them out.
+      //
+      // Read via async idbGet when sync returns null, in case memCache was evicted under
+      // pressure. Without this, a value that exists on disk would be invisible here.
+      const readKey = async (k: string) => idbGetSync(k) ?? (await idbGet(k));
+      const localFeeds = await readKey('nostr-custom-feeds');
+      const localDismissed = await readKey('dismissed-notes');
+      const localCollapsed = await readKey('collapsed-notes');
       const hasLocalData =
         (localFeeds && localFeeds !== '[]' && localFeeds !== 'null') ||
         (localDismissed && localDismissed !== '[]' && localDismissed !== 'null') ||
         (localCollapsed && localCollapsed !== '[]' && localCollapsed !== 'null');
-      const localLastBackupTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      let localLastBackupTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      // If we see real local data with no timestamp yet, stamp it now so subsequent
+      // checks can rely on timestamp comparisons. Independent of the dismiss decision.
+      if (hasLocalData && localLastBackupTs === 0) {
+        const stamp = Math.floor(Date.now() / 1000);
+        idbSetSync(LAST_BACKUP_TS_KEY, String(stamp));
+        idbSet(LAST_BACKUP_TS_KEY, String(stamp)).catch(() => {});
+        setLastBackupTs(stamp);
+        log(`Stamped LAST_BACKUP_TS=${stamp} to protect existing local data`);
+        localLastBackupTs = stamp;
+      }
       const newestRemoteTs = manifest?.timestamp || bestManifestEvent.created_at;
       const localIsCurrentOrNewer = localLastBackupTs > 0 && localLastBackupTs >= newestRemoteTs;
       log(`checkRemoteBackup: hasLocalData=${!!hasLocalData} localTs=${localLastBackupTs} newestRemoteTs=${newestRemoteTs} localIsCurrentOrNewer=${localIsCurrentOrNewer} force=${force}`);
@@ -1113,6 +1175,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         log('Local data is current — auto-dismissing');
         _checkedPubkey = user.pubkey;
         idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
+        idbSet(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true').catch(() => {});
         markBackupCheckedSync(user.pubkey);
         setStatus('idle');
         setCheckSettled(true);
@@ -1337,7 +1400,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // Store snapshot of restored data for change detection
       const snapshot: Record<string, string> = {};
       for (const key of SNAPSHOT_KEYS) snapshot[key] = idbGetSync(key) || '';
-      idbSetSync('corkboard:last-backup-data', JSON.stringify(snapshot));
+      persistSnapshotAndHashes(snapshot);
 
       // Mark as checked so future checks skip
       markBackupCheckedSync(user.pubkey);
@@ -1490,7 +1553,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // Store snapshot of restored data for change detection
       const cpSnapshot: Record<string, string> = {};
       for (const key of SNAPSHOT_KEYS) cpSnapshot[key] = idbGetSync(key) || '';
-      idbSetSync('corkboard:last-backup-data', JSON.stringify(cpSnapshot));
+      persistSnapshotAndHashes(cpSnapshot);
 
       // Move this checkpoint to the top so it becomes the "most recent" for auto-restore
       const cps = getStoredCheckpoints();

@@ -1,9 +1,13 @@
 import 'react-native-get-random-values'; // Must be first — polyfills crypto.getRandomValues
+import { useEffect, useState } from 'react';
+import { View, Text, ActivityIndicator } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { NostrProvider } from './src/lib/NostrProvider';
+import { prepareSecureStorage, mmkvInitError, mmkvIsEncrypted } from './src/storage/MmkvStorage';
+import { dmStoreReady } from './src/lib/dmMessageStore';
+import { NostrProvider, WelshmanRouterBridge } from './src/lib/NostrProvider';
 import { AuthProvider } from './src/lib/AuthContext';
 import { NwcProvider } from './src/hooks/useNwc';
 import { AppProvider } from './src/lib/AppContext';
@@ -30,6 +34,66 @@ const queryClient = new QueryClient({
 });
 
 export default function App() {
+  // Block render until encrypted MMKV is provisioned. The bootstrap also
+  // migrates any pre-existing unencrypted data on first run, so it must
+  // complete before anything reads or writes storage.
+  const [storageReady, setStorageReady] = useState(false);
+  // Surface init errors to the user rather than silently degrading. If keychain
+  // access failed and we're running unencrypted, the user should know so they
+  // can decide whether to continue.
+  const [storageWarning, setStorageWarning] = useState<string | null>(null);
+  const [warningAcked, setWarningAcked] = useState(false);
+  useEffect(() => {
+    Promise.all([prepareSecureStorage(), dmStoreReady]).finally(() => {
+      if (mmkvInitError) {
+        setStorageWarning(mmkvInitError);
+      } else if (!mmkvIsEncrypted) {
+        setStorageWarning('Storage is running in unencrypted mode. Sensitive data (DMs, backup metadata) is not protected at rest.');
+      }
+      setStorageReady(true);
+    });
+  }, []);
+
+  if (!storageReady) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#1f1f1f', alignItems: 'center', justifyContent: 'center' }}>
+        <Text style={{ fontSize: 40, marginBottom: 16 }}>📌</Text>
+        <ActivityIndicator color="#a855f7" />
+        <Text style={{ color: '#888', fontSize: 12, marginTop: 12 }}>Unlocking secure storage…</Text>
+      </View>
+    );
+  }
+
+  if (storageWarning && !warningAcked) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#1f1f1f', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+        <Text style={{ fontSize: 40, marginBottom: 16 }}>⚠️</Text>
+        <Text style={{ color: '#f97316', fontSize: 16, fontWeight: '600', marginBottom: 12, textAlign: 'center' }}>
+          Secure storage warning
+        </Text>
+        <Text style={{ color: '#d4d4d4', fontSize: 14, textAlign: 'center', lineHeight: 20, marginBottom: 24 }}>
+          {storageWarning}
+        </Text>
+        <Text
+          onPress={() => setWarningAcked(true)}
+          style={{
+            color: '#a855f7',
+            fontSize: 14,
+            fontWeight: '600',
+            paddingVertical: 12,
+            paddingHorizontal: 24,
+            borderWidth: 1,
+            borderColor: '#a855f7',
+            borderRadius: 8,
+            textAlign: 'center',
+          }}
+        >
+          Continue anyway
+        </Text>
+      </View>
+    );
+  }
+
   return (
     <ErrorBoundary>
     <AppProvider>
@@ -38,6 +102,7 @@ export default function App() {
       <NostrProvider>
       <AuthProvider>
       <NwcProvider>
+      <WelshmanRouterBridge />
       <NostrSync />
       <AutoSaveManager />
       <NavigationContainer>

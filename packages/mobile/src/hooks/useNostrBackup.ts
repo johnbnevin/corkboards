@@ -16,10 +16,14 @@
  */
 import { useState, useCallback, useRef } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
-import type { NSecSigner } from '@nostrify/nostrify';
+import type { NSecSigner, NConnectSigner } from '@nostrify/nostrify';
+
+// Backup operations only require signEvent + nip04/nip44 encrypt/decrypt,
+// which both NSecSigner and NConnectSigner provide.
+type BackupSigner = NSecSigner | NConnectSigner;
 import { mobileStorage, isStorageHealthy } from '../storage/MmkvStorage';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '../lib/storageKeys';
-import { FALLBACK_RELAYS, APP_CONFIG_KEY, getUserRelays, getRelayCache, createRelayFresh } from '../lib/NostrProvider';
+import { FALLBACK_RELAYS, getUserRelays, getRelayCache, createRelayFresh } from '../lib/NostrProvider';
 import {
   generateAesKey, importAesKey,
   aesEncrypt, aesDecrypt, rawKeyToHex, hexToRawKey,
@@ -141,6 +145,15 @@ const SNAPSHOT_KEYS = [
   'corkboard:banner-height-pct', 'corkboard:banner-fit-mode',
 ] as const;
 
+/**
+ * Detect whether any backed-up key has changed since the last snapshot.
+ *
+ * Divergence from web (intentional): web uses `fnv1a32` from `@core/hashCore`
+ * to compare hashes stored in a small companion key, because its full snapshot
+ * lives in an IDB key excluded from the in-memory cache (size-prohibitive).
+ * Mobile's MMKV is mmap-backed and synchronous, so reading the full snapshot
+ * blob is free — direct string equality is simpler and equally correct.
+ */
 function hasUnsavedChanges(): boolean {
   const saved = mobileStorage.getSync(STORAGE_KEYS.LAST_BACKUP_DATA);
   if (!saved) {
@@ -214,7 +227,7 @@ function getPublishRelays(pubkey: string): string[] {
 async function blossomUpload(
   server: string,
   content: string,
-  signer: NSecSigner,
+  signer: BackupSigner,
 ): Promise<{ url: string; hash?: string } | null> {
   try {
     // Compute SHA-256 of content for auth event
@@ -265,7 +278,7 @@ async function blossomUpload(
   }
 }
 
-export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null) {
+export function useNostrBackup(pubkey: string | null, signer: BackupSigner | null) {
   const [status, setStatus] = useState<BackupStatus>('idle');
   const [message, setMessage] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
@@ -419,7 +432,7 @@ export function useNostrBackup(pubkey: string | null, signer: NSecSigner | null)
     } finally {
       isSaving.current = false;
     }
-  }, [pubkey, signer, log]);
+  }, [pubkey, signer, log, deviceId]);
 
   // Silent auto-save — same logic as saveBackup but no status/message updates.
   // Returns true on success, false on failure. Used by auto-save orchestration.

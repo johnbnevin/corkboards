@@ -128,11 +128,18 @@ export async function idbGet(key: string): Promise<string | null> {
 }
 
 export async function idbSet(key: string, value: string): Promise<void> {
-  memCache.set(key, value);
-  if (!idbAvailable) return;
+  if (!idbAvailable) {
+    // In-memory-only mode: memCache *is* the store, so update it directly.
+    memCache.set(key, value);
+    return;
+  }
   try {
     const database = await getDb();
     await wrapRequest(tx(database, 'readwrite').put(value, key));
+    // Only mirror to memCache on confirmed disk success — prevents memCache
+    // from diverging from disk when writes fail. Readers fall through to
+    // idbGet (which reads disk) when a key isn't in memCache.
+    memCache.set(key, value);
     consecutiveWriteFailures = 0;
     broadcastChange({ type: 'set', key, value });
   } catch {
@@ -142,6 +149,7 @@ export async function idbSet(key: string, value: string): Promise<void> {
     try {
       const database = await getDb();
       await wrapRequest(tx(database, 'readwrite').put(value, key));
+      memCache.set(key, value);
       consecutiveWriteFailures = 0;
       broadcastChange({ type: 'set', key, value });
     } catch (retryErr) {
@@ -205,8 +213,11 @@ export function idbGetSync(key: string): string | null {
 
 /** Synchronous write – updates cache immediately and schedules IDB write. */
 export function idbSetSync(key: string, value: string): void {
-  // Skip caching large values to keep memCache bounded
-  if (value.length <= 512_000) {
+  // Only skip memCache for the same blacklist used at init. A size threshold
+  // here would create a sync/IDB read mismatch — idbGetSync would return null
+  // for a value that exists on disk, silently breaking every reader.
+  const skipCache = key.startsWith('custom-feed-cache:') || key === 'corkboard:last-backup-data';
+  if (!skipCache) {
     if (memCache.size >= MAX_MEM_CACHE && !memCache.has(key)) {
       // Evict oldest entry
       memCache.delete(memCache.keys().next().value!);
@@ -287,16 +298,17 @@ async function init(): Promise<void> {
 
     await migrateFromLocalStorage(database);
 
-    // Populate in-memory cache (skip large values that are only needed via async access)
+    // Populate in-memory cache. Only skip keys we *intentionally* never want
+    // accessed synchronously — never use a size threshold, since user data
+    // (e.g. nostr-custom-feeds) can legitimately grow past any cap and being
+    // invisible to idbGetSync silently breaks every reader.
     const all = await idbGetAll();
     const criticalKeys = ['nostr-custom-feeds', 'dismissed-notes', 'collapsed-notes', 'nostr-bookmark-ids'];
     for (const [k, v] of all) {
-      // Custom feed caches can be megabytes of JSON — leave them in IDB only
+      // Per-feed cached note bodies — fetched async only, can be megabytes each
       if (k.startsWith('custom-feed-cache:')) continue;
-      // Backup snapshots duplicate all user data — not needed synchronously
+      // Backup snapshot duplicates all user data — only read at backup-time via async API
       if (k === 'corkboard:last-backup-data') continue;
-      // Safety net: skip any single value over 500KB
-      if (v.length > 512_000) continue;
       memCache.set(k, v);
     }
     // Debug: log critical keys found in IDB at startup

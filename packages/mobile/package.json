@@ -1,6 +1,6 @@
 {
   "name": "@corkboards/mobile",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
@@ -14,10 +14,11 @@
     "@react-navigation/native": "^7.2.2",
     "@react-navigation/native-stack": "^7.14.10",
     "@tanstack/react-query": "^5.96.1",
+    "@welshman/router": "^0.8.15",
     "expo": "~54.0.33",
     "expo-clipboard": "^55.0.9",
-    "expo-image-picker": "^16.1.4",
     "expo-dev-client": "^55.0.19",
+    "expo-image-picker": "^16.1.4",
     "expo-status-bar": "~3.0.9",
     "getenv": "^2.0.0",
     "nostr-tools": "^2.23.3",
@@ -31,14 +32,20 @@
     "react-native-screens": "^4.24.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@testing-library/react-native": "^13.3.3",
     "@types/jest": "^30.0.0",
     "@types/react": "~19.1.0",
     "babel-plugin-module-resolver": "^5.0.3",
     "babel-preset-expo": "^55.0.13",
+    "eslint": "^10.4.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-unused-imports": "^4.4.1",
+    "globals": "^17.6.0",
     "jest": "^30.3.0",
     "jest-expo": "^55.0.11",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "typescript-eslint": "^8.59.3"
   },
   "private": true
 }

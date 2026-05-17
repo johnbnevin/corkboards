@@ -3,12 +3,17 @@
  * Adapted from the web version; uses MMKV instead of IDB,
  * no BroadcastChannel (single-process mobile environment).
  */
-import React, { createContext, useContext, useState, useMemo } from 'react';
+import React, { createContext, useContext, useState, useMemo, useEffect } from 'react';
 import { NPool, NRelay1 } from '@nostrify/nostrify';
 import type { NostrEvent, NostrFilter, NPool as NPoolType } from '@nostrify/nostrify';
+import { Router, getFilterSelections, addMinimalFallbacks } from '@welshman/router';
+import type { TrustedEvent, Filter } from '@welshman/util';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { isSecureRelay } from '@core/nostrUtils';
+import { RELAY_CACHE_TTL_MS } from '@core/cacheConfig';
+import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS } from '@core/relayConstants';
+import { useAuth } from './AuthContext';
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS };
 
 // ============================================================================
@@ -67,6 +72,12 @@ export function updateRelayCache(pubkey: string, relays: string[]): void {
   const secure = relays.filter(isSecureRelay);
   if (secure.length === 0) return;
 
+  // Eviction policy is "most-recently-written, drop oldest write" (MRW + FIFO
+  // on write). Each `updateRelayCache` deletes the existing entry then re-inserts
+  // so the rewritten entry moves to the end of the Map's insertion order; the
+  // loop below evicts from the front (oldest writes). Pure reads via
+  // getRelayCache() do NOT refresh — so this is not full LRU. That's intentional
+  // for relay routing: an entry's freshness matters more than its read frequency.
   relayCache.delete(pubkey);
   relayCache.set(pubkey, secure);
 
@@ -158,7 +169,6 @@ function waitForRateLimit(url: string): Promise<void> {
 // ── Connection cache + failure backoff ───────────────────────────────────
 
 const _relayCache = new Map<string, { relay: NRelay1; createdAt: number }>();
-const RELAY_CACHE_TTL_MS = 5 * 60 * 1000;
 const _relayBackoff = new Map<string, { failCount: number; blockedUntil: number }>();
 const BACKOFF_BASE_MS = 5_000;
 const BACKOFF_MAX_MS = 120_000;
@@ -166,14 +176,31 @@ const BACKOFF_MAX_MS = 120_000;
 function getBackoffMs(failCount: number): number {
   return Math.min(BACKOFF_BASE_MS * Math.pow(2, failCount - 1), BACKOFF_MAX_MS);
 }
+
+// Per-relay quality scoring (parity with web's router integration). Backoff is
+// a binary "blocked" gate; scoring is a continuous weight surfaced to Router so
+// a relay that's unblocked but still flaky gets deprioritised in selection.
+const _relayScores = new Map<string, RelayScore>();
+const SCORE_HALF_LIFE_MS = 60 * 60 * 1000;
+
+function getRelayWeight(url: string): number {
+  const raw = _relayScores.get(url);
+  if (!raw) return 0.5;
+  return scoreToWeight(decayScore(raw, SCORE_HALF_LIFE_MS));
+}
+
 function recordRelayFailure(url: string): void {
+  _relayScores.set(url, recordMiss(_relayScores.get(url)));
   const existing = _relayBackoff.get(url);
   if (existing && Date.now() < existing.blockedUntil) return;
   const failCount = (existing?.failCount ?? 0) + 1;
   _relayBackoff.set(url, { failCount, blockedUntil: Date.now() + getBackoffMs(failCount) });
   _relayCache.delete(url);
 }
-function recordRelaySuccess(url: string): void { _relayBackoff.delete(url); }
+function recordRelaySuccess(url: string): void {
+  _relayScores.set(url, recordHit(_relayScores.get(url)));
+  _relayBackoff.delete(url);
+}
 function isRelayBlocked(url: string): boolean {
   const entry = _relayBackoff.get(url);
   return !!entry && Date.now() < entry.blockedUntil;
@@ -248,10 +275,36 @@ export function createRelayFresh(url: string, opts?: ConstructorParameters<typeo
 }
 
 // ============================================================================
+// Welshman Router integration (parity with web NostrProvider)
+// ============================================================================
+
+let _currentUserPubkeyForRouter: string | undefined;
+export function _setRouterUserPubkey(pubkey: string | undefined): void {
+  _currentUserPubkeyForRouter = pubkey;
+}
+let _routerConfigured = false;
+function ensureRouterConfigured(): void {
+  if (_routerConfigured) return;
+  _routerConfigured = true;
+  Router.configure({
+    getUserPubkey: () => _currentUserPubkeyForRouter,
+    getPubkeyRelays: (pubkey: string) => {
+      const cached = getRelayCache(pubkey);
+      return cached.filter(isSecureRelay);
+    },
+    getDefaultRelays: () => [...FALLBACK_RELAYS, ...READ_ONLY_RELAYS],
+    getIndexerRelays: () => [...FALLBACK_RELAYS],
+    getRelayQuality: (url: string) => isRelayBlocked(url) ? 0 : getRelayWeight(url),
+    getLimit: () => MAX_TARGETED_RELAYS,
+  });
+}
+
+// ============================================================================
 // Pool factory
 // ============================================================================
 
 function createPool(): NPoolType {
+  ensureRouterConfigured();
   return new NPool({
     open(url: string) {
       return createRelay(url, { backoff: false });
@@ -296,37 +349,36 @@ function createPool(): NPoolType {
           }
         }
       } else {
-        // Tier 2 — Targeted query: full outbox model
-        for (const author of authors) {
-          const cached = getRelayCache(author);
-          if (cached.length > 0) cached.slice(0, 3).forEach(r => relaysToQuery.add(r));
+        // Tier 2 — Targeted query: delegate to welshman's getFilterSelections
+        // for proper outbox routing with fallback policy.
+        const selections = getFilterSelections(filters as unknown as Filter[]);
+        for (const sel of selections) {
+          const cappedRelays = sel.relays.slice(0, MAX_TARGETED_RELAYS);
+          for (const relay of cappedRelays) {
+            const existing = routes.get(relay) ?? [];
+            routes.set(relay, [...existing, ...(sel.filters as unknown as NostrFilter[])]);
+          }
         }
-        // Include the user's own read relays (matches web NostrProvider Tier 2 behaviour)
-        getUserRelays().read.forEach(r => relaysToQuery.add(r));
-        // Always include fallback + read-only relays — critical for #p queries (notifications)
-        // where the user has read relays but the event may live on a fallback relay.
-        FALLBACK_RELAYS.forEach(r => relaysToQuery.add(r));
-        READ_ONLY_RELAYS.forEach(r => relaysToQuery.add(r));
-
-        // Cap targeted queries to prevent WebSocket storms
-        const cappedTargeted = Array.from(relaysToQuery).slice(0, MAX_TARGETED_RELAYS);
-        for (const relay of cappedTargeted) {
-          routes.set(relay, filters);
+        // Welshman can return empty for non-author queries (#p tags); always
+        // include fallback + read-only for resilience.
+        if (routes.size === 0) {
+          [...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]
+            .slice(0, MAX_TARGETED_RELAYS)
+            .forEach(r => routes.set(r, filters));
         }
       }
       return routes;
     },
 
     eventRouter(event: NostrEvent) {
-      const relays = new Set<string>();
-      // 1. User's configured write relays (highest priority)
-      getUserRelays().write.forEach(r => relays.add(r));
-      // 2. Author's cached outbox relays (outbox model)
-      const authorRelays = getRelayCache(event.pubkey);
-      if (authorRelays.length > 0) authorRelays.slice(0, 3).forEach(r => relays.add(r));
-      // 3. Fallback only if nothing else available
-      if (relays.size === 0) FALLBACK_RELAYS.forEach(r => relays.add(r));
-      return Array.from(relays);
+      // Welshman picks user's write relays + author's outbox; add minimal
+      // fallback only when the user has nothing else configured.
+      const urls = Router.get()
+        .PublishEvent(event as unknown as TrustedEvent)
+        .policy(addMinimalFallbacks)
+        .limit(MAX_TARGETED_RELAYS)
+        .getUrls();
+      return urls.length > 0 ? urls : FALLBACK_RELAYS.slice(0, MAX_TARGETED_RELAYS);
     },
   });
 }
@@ -348,6 +400,20 @@ export function NostrProvider({ children }: { children: React.ReactNode }) {
   const [pool] = useState<NPoolType>(() => createPool());
   const value = useMemo(() => ({ nostr: pool }), [pool]);
   return <NostrContext.Provider value={value}>{children}</NostrContext.Provider>;
+}
+
+/**
+ * Headless bridge that keeps welshman's Router in sync with the active user.
+ * Mount inside AuthProvider so useAuth() is available; renders nothing.
+ * Web does this inside its NostrProvider via NostrLoginProvider — mobile uses
+ * AuthContext which is below NostrProvider in the tree, hence this bridge.
+ */
+export function WelshmanRouterBridge(): null {
+  const { pubkey } = useAuth();
+  useEffect(() => {
+    _setRouterUserPubkey(pubkey ?? undefined);
+  }, [pubkey]);
+  return null;
 }
 
 export function useNostr(): NostrContextValue {

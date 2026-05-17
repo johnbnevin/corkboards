@@ -1,9 +1,11 @@
 mod keychain;
 mod logger;
+mod proxy;
 mod relay;
 
 use keychain::{keychain_store, keychain_get, keychain_delete};
 use logger::{write_log, clear_log};
+use proxy::{get_proxy, set_proxy};
 use relay::{relay_query, relay_subscribe};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -17,6 +19,8 @@ pub fn run() {
             clear_log,
             relay_query,
             relay_subscribe,
+            get_proxy,
+            set_proxy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

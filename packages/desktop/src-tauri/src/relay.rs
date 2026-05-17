@@ -3,8 +3,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    client_async, connect_async,
+    tungstenite::{client::IntoClientRequest, Message},
+    WebSocketStream,
+};
+
+use crate::proxy;
 
 /// Events per emit call — each app.emit() uses webkit_web_view_run_javascript,
 /// so the payload per call stays small regardless of IPC protocol state.
@@ -151,17 +158,140 @@ pub async fn relay_query(
 }
 
 /// Open one WebSocket, send REQ, collect all events until EOSE/CLOSED.
+///
+/// Routes through SOCKS5 (`proxy::current_proxy()`) if configured; otherwise
+/// uses `tokio_tungstenite::connect_async` directly. The proxy check happens
+/// per query so toggling the setting takes effect on the next connection
+/// without an app restart.
 async fn do_query(url: String, filter: Value) -> RelayQueryResult {
-    let (mut ws, _) = match connect_async(url.as_str()).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            return RelayQueryResult {
+    match proxy::current_proxy() {
+        Some(proxy_url) => match connect_via_proxy(&url, &proxy_url).await {
+            Ok(ws) => run_query(ws, filter).await,
+            Err(e) => RelayQueryResult {
+                events: vec![],
+                error: Some(format!("proxy connect: {e}")),
+            },
+        },
+        None => match connect_async(url.as_str()).await {
+            Ok((ws, _)) => run_query(ws, filter).await,
+            Err(e) => RelayQueryResult {
                 events: vec![],
                 error: Some(format!("connect: {e}")),
-            };
-        }
+            },
+        },
+    }
+}
+
+/// SOCKS5-proxied WebSocket handshake. For `wss://`, wraps the SOCKS stream
+/// with native-tls; for `ws://`, uses the SOCKS stream directly.
+async fn connect_via_proxy(
+    target: &str,
+    proxy_url: &str,
+) -> Result<WebSocketStream<ProxiedStream>, String> {
+    let target_url = url::Url::parse(target).map_err(|e| format!("bad target: {e}"))?;
+    let host = target_url
+        .host_str()
+        .ok_or_else(|| "target missing host".to_string())?
+        .to_string();
+    let port = target_url
+        .port_or_known_default()
+        .ok_or_else(|| "target missing port".to_string())?;
+    let is_wss = target_url.scheme() == "wss";
+
+    let proxy_parsed = url::Url::parse(proxy_url).map_err(|e| format!("bad proxy: {e}"))?;
+    let proxy_addr = format!(
+        "{}:{}",
+        proxy_parsed.host_str().ok_or_else(|| "proxy missing host".to_string())?,
+        proxy_parsed.port().ok_or_else(|| "proxy missing port".to_string())?,
+    );
+
+    // SOCKS5 handshake. `socks5h://` semantics (remote DNS) are achieved by
+    // passing the hostname rather than a resolved IP — tokio-socks forwards
+    // the literal target string to the proxy.
+    let socks_stream = tokio_socks::tcp::Socks5Stream::connect(
+        proxy_addr.as_str(),
+        format!("{host}:{port}"),
+    )
+    .await
+    .map_err(|e| format!("socks5: {e}"))?;
+
+    let req = target
+        .into_client_request()
+        .map_err(|e| format!("request: {e}"))?;
+
+    let stream: ProxiedStream = if is_wss {
+        let native = native_tls::TlsConnector::new().map_err(|e| format!("tls init: {e}"))?;
+        let connector = tokio_native_tls::TlsConnector::from(native);
+        let tls = connector
+            .connect(&host, socks_stream)
+            .await
+            .map_err(|e| format!("tls handshake: {e}"))?;
+        ProxiedStream::Tls(Box::new(tls))
+    } else {
+        ProxiedStream::Plain(Box::new(socks_stream))
     };
 
+    let (ws, _) = client_async(req, stream)
+        .await
+        .map_err(|e| format!("ws handshake: {e}"))?;
+    Ok(ws)
+}
+
+/// Unified stream type so the same `run_query` body handles both proxied
+/// `wss://` (TLS over SOCKS) and proxied `ws://` (plain over SOCKS).
+enum ProxiedStream {
+    Tls(Box<tokio_native_tls::TlsStream<tokio_socks::tcp::Socks5Stream<tokio::net::TcpStream>>>),
+    Plain(Box<tokio_socks::tcp::Socks5Stream<tokio::net::TcpStream>>),
+}
+
+impl AsyncRead for ProxiedStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ProxiedStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_read(cx, buf),
+            ProxiedStream::Plain(s) => std::pin::Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ProxiedStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ProxiedStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_write(cx, buf),
+            ProxiedStream::Plain(s) => std::pin::Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ProxiedStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_flush(cx),
+            ProxiedStream::Plain(s) => std::pin::Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ProxiedStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_shutdown(cx),
+            ProxiedStream::Plain(s) => std::pin::Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+async fn run_query<S>(mut ws: WebSocketStream<S>, filter: Value) -> RelayQueryResult
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let req = serde_json::json!(["REQ", "q", filter]);
     if ws.send(Message::Text(req.to_string())).await.is_err() {
         return RelayQueryResult {

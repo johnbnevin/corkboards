@@ -16,7 +16,23 @@ import {
   ScrollView,
   Switch,
 } from 'react-native';
+import { Platform } from 'react-native';
 import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS } from '../hooks/useNostrBackup';
+import { mobileStorage } from '../storage/MmkvStorage';
+
+const PROXY_URL_KEY = '__proxy_url__';
+
+function getProxyUrl(): string {
+  return mobileStorage.getSync(PROXY_URL_KEY) ?? '';
+}
+
+function setProxyUrl(url: string) {
+  if (url.trim().length === 0) {
+    mobileStorage.removeSync(PROXY_URL_KEY);
+  } else {
+    mobileStorage.setSync(PROXY_URL_KEY, url.trim());
+  }
+}
 
 interface AdvancedSettingsProps {
   dismissedCount: number;
@@ -27,7 +43,7 @@ interface AdvancedSettingsProps {
   publicBookmarks: boolean;
   onTogglePublicBookmarks: () => void;
   onDeleteAccount: () => void;
-  initialSection?: 'main' | 'relays' | 'blossom';
+  initialSection?: 'main' | 'relays' | 'blossom' | 'network';
   isOnboarding: boolean;
   onResetOnboarding: () => void;
   // Relay management (optional — passed from SettingsScreen when available)
@@ -56,12 +72,13 @@ export function AdvancedSettings({
   onToggleRelayRead,
   onToggleRelayWrite,
 }: AdvancedSettingsProps) {
-  const [section, setSection] = useState<'main' | 'relays' | 'blossom'>(initialSection);
+  const [section, setSection] = useState<'main' | 'relays' | 'blossom' | 'network'>(initialSection);
 
-  // Sync with external section changes (e.g., opened from settings shortcut)
-  useEffect(() => {
-    setSection(initialSection);
-  }, [initialSection]);
+  // Sync with external section changes (e.g., opened from settings shortcut).
+  // The v7 set-state-in-effect warning is a known false positive for this
+  // "controlled prop → internal state" sync pattern — re-render is intentional.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { setSection(initialSection); }, [initialSection]);
 
   const handleClearDismissed = () => {
     if (dismissedCount === 0) {
@@ -143,6 +160,10 @@ export function AdvancedSettings({
     return <BlossomSection onBack={() => setSection('main')} />;
   }
 
+  if (section === 'network') {
+    return <NetworkPrivacySection onBack={() => setSection('main')} />;
+  }
+
   return (
     <View style={styles.container}>
       {/* Relay management */}
@@ -157,6 +178,12 @@ export function AdvancedSettings({
       <TouchableOpacity style={styles.settingRow} onPress={() => setSection('blossom')}>
         <Text style={styles.settingTitle}>Blossom Servers</Text>
         <Text style={styles.settingHint}>Configure backup storage servers</Text>
+      </TouchableOpacity>
+
+      {/* Network privacy (Tor / SOCKS5) */}
+      <TouchableOpacity style={styles.settingRow} onPress={() => setSection('network')}>
+        <Text style={styles.settingTitle}>Network Privacy</Text>
+        <Text style={styles.settingHint}>Route traffic through Tor / SOCKS5</Text>
       </TouchableOpacity>
 
       <View style={styles.separator} />
@@ -424,6 +451,82 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
       <TouchableOpacity style={[styles.settingRow, { marginTop: 12 }]} onPress={handleResetDefaults}>
         <Text style={styles.backText}>Reset to defaults</Text>
       </TouchableOpacity>
+    </ScrollView>
+  );
+}
+
+// ─── Network Privacy (Tor / SOCKS5) ───────────────────────────────────────
+
+function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
+  const [url, setUrl] = useState(getProxyUrl);
+  const [saved, setSaved] = useState(getProxyUrl);
+  const isAndroid = Platform.OS === 'android';
+
+  const handleSave = () => {
+    const trimmed = url.trim();
+    if (trimmed && !/^socks5h?:\/\/[^/]+:\d+/.test(trimmed)) {
+      Alert.alert('Invalid proxy URL', 'Use socks5://host:port or socks5h://host:port');
+      return;
+    }
+    setProxyUrl(trimmed);
+    setSaved(trimmed);
+    Alert.alert(
+      trimmed ? 'Proxy saved' : 'Proxy cleared',
+      trimmed
+        ? 'For Tor routing today, enable Orbot VPN mode. A future update will route relay sockets through this URL natively.'
+        : 'Direct relay connections restored.',
+    );
+  };
+
+  return (
+    <ScrollView style={styles.container}>
+      <TouchableOpacity style={styles.backButton} onPress={onBack}>
+        <Text style={styles.backText}>&larr; Back</Text>
+      </TouchableOpacity>
+      <Text style={styles.sectionTitle}>Network Privacy</Text>
+      <Text style={[styles.settingHint, { paddingHorizontal: 12, marginBottom: 12 }]}>
+        Routing relay queries through Tor hides your IP and prevents relays from correlating queries to a single user.
+      </Text>
+
+      {isAndroid ? (
+        <View style={{ paddingHorizontal: 12, marginBottom: 12 }}>
+          <Text style={styles.settingTitle}>Recommended: Orbot VPN mode</Text>
+          <Text style={styles.settingHint}>
+            Install Orbot from F-Droid or Play Store, enable VPN mode, and add Corkboards to the app list. All network traffic — relays, images, web links — will route through Tor at the OS level.
+          </Text>
+        </View>
+      ) : (
+        <View style={{ paddingHorizontal: 12, marginBottom: 12 }}>
+          <Text style={styles.settingTitle}>Not available on iOS</Text>
+          <Text style={styles.settingHint}>
+            iOS does not allow third-party Tor apps to provide system-wide routing. Use a Tor-routing network setup at the OS level, or run Corkboards on Android / desktop.
+          </Text>
+        </View>
+      )}
+
+      <View style={{ paddingHorizontal: 12 }}>
+        <Text style={styles.settingTitle}>SOCKS5 Proxy URL (advanced)</Text>
+        <Text style={styles.settingHint}>
+          Saved for future use by a native socket-routing module. Today this field is informational — Orbot VPN mode is the active path.
+        </Text>
+        <View style={styles.addRow}>
+          <TextInput
+            style={styles.addInput}
+            placeholder="socks5h://127.0.0.1:9050"
+            placeholderTextColor="#666"
+            value={url}
+            onChangeText={setUrl}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity style={styles.addButton} onPress={handleSave} disabled={url === saved}>
+            <Text style={styles.addButtonText}>{url ? 'Save' : 'Clear'}</Text>
+          </TouchableOpacity>
+        </View>
+        {saved ? (
+          <Text style={[styles.settingHint, { marginTop: 8, color: '#22c55e' }]}>Saved: {saved}</Text>
+        ) : null}
+      </View>
     </ScrollView>
   );
 }

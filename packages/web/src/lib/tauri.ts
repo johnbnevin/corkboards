@@ -162,6 +162,32 @@ export async function tauriQuery(
   });
 }
 
+// ─── SOCKS5 Proxy ────────────────────────────────────────────────────────────
+
+/**
+ * Read the currently configured SOCKS5 proxy URL.
+ * Returns null when not in Tauri or when no proxy is set.
+ */
+export async function tauriGetProxy(): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    return (await invoke<string | null>('get_proxy')) ?? null;
+  } catch (e) {
+    console.warn('[tauri] get_proxy failed:', e);
+    return null;
+  }
+}
+
+/**
+ * Set or clear the SOCKS5 proxy used by native relay queries.
+ * Pass `null`/empty to clear. URL must be `socks5://host:port` or `socks5h://host:port`.
+ * Throws on invalid format.
+ */
+export async function tauriSetProxy(url: string | null): Promise<void> {
+  if (!isTauri) return;
+  await invoke('set_proxy', { url: url && url.trim().length > 0 ? url.trim() : null });
+}
+
 /**
  * Query a relay via Rust tokio-tungstenite (bypasses WebKitGTK WebSocket).
  * Returns null if not in Tauri or on error.

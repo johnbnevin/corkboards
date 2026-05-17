@@ -24,7 +24,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import {
   Eye, Database, Settings, Bookmark, Trash2, Wifi, WifiOff, Compass,
-  Plus, X, CheckCircle, AlertTriangle, Server,
+  Plus, X, CheckCircle, AlertTriangle, Server, Shield,
 } from 'lucide-react';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
@@ -35,6 +35,7 @@ import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/components/NostrProvider';
 import {
   getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS,
 } from '@/hooks/useNostrBackup';
+import { isTauri, tauriGetProxy, tauriSetProxy } from '@/lib/tauri';
 
 interface AdvancedSettingsProps {
   dismissedCount: number;
@@ -45,7 +46,7 @@ interface AdvancedSettingsProps {
   publicBookmarks: boolean;
   onTogglePublicBookmarks: () => void;
   onDeleteAccount: () => void;
-  initialSection?: 'main' | 'relays' | 'blossom';
+  initialSection?: 'main' | 'relays' | 'blossom' | 'network';
   isOnboarding: boolean;
   onResetOnboarding: () => void;
   collapseReactions: boolean;
@@ -83,7 +84,7 @@ export function AdvancedSettings({
   onToggleCollapseReactions,
 }: AdvancedSettingsProps) {
   const [confirm, setConfirm] = useState<ConfirmAction>(null);
-  const [section, setSection] = useState<'main' | 'relays' | 'blossom'>(initialSection);
+  const [section, setSection] = useState<'main' | 'relays' | 'blossom' | 'network'>(initialSection);
 
   // Sync with external section changes (e.g., opened from backup dropdown)
   useEffect(() => {
@@ -138,6 +139,7 @@ export function AdvancedSettings({
 
   if (section === 'relays') return <RelaySection />;
   if (section === 'blossom') return <BlossomSection />;
+  if (section === 'network') return <NetworkPrivacySection onBack={() => setSection('main')} />;
 
   return (
     <>
@@ -194,6 +196,14 @@ export function AdvancedSettings({
             {collapseReactions ? '✓ ' : ''}Collapse Reactions
           </div>
           <p className="text-xs text-muted-foreground mt-0.5 pl-6">Group reactions, reposts, and zaps into badges on the original note</p>
+        </button>
+
+        <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setSection('network')}>
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Shield className="h-4 w-4 shrink-0" />
+            Network Privacy
+          </div>
+          <p className="text-xs text-muted-foreground mt-0.5 pl-6">Route relay traffic through Tor / SOCKS5</p>
         </button>
 
         <Separator className="my-2" />
@@ -453,6 +463,102 @@ function RelaySection() {
 
       {!user && (
         <p className="text-xs text-muted-foreground">Log in to sync your relay list with Nostr</p>
+      )}
+    </div>
+  );
+}
+
+// ─── Network Privacy (SOCKS5 / Tor) ───────────────────────────────────────
+
+function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
+  const { toast } = useToast();
+  const [proxyUrl, setProxyUrl] = useState('');
+  const [savedUrl, setSavedUrl] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const desktop = isTauri;
+
+  useEffect(() => {
+    if (!desktop) return;
+    tauriGetProxy().then((cur) => {
+      setSavedUrl(cur);
+      setProxyUrl(cur ?? '');
+    });
+  }, [desktop]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await tauriSetProxy(proxyUrl || null);
+      setSavedUrl(proxyUrl || null);
+      toast({ title: proxyUrl ? 'Proxy enabled' : 'Proxy cleared', description: proxyUrl ? 'New relay connections will route through SOCKS5.' : 'Direct relay connections restored.' });
+    } catch (e) {
+      toast({ title: 'Invalid proxy URL', description: String(e), variant: 'destructive' });
+    }
+    setSaving(false);
+  };
+
+  const handleClear = async () => {
+    setSaving(true);
+    try {
+      await tauriSetProxy(null);
+      setProxyUrl('');
+      setSavedUrl(null);
+      toast({ title: 'Proxy cleared' });
+    } catch (e) {
+      toast({ title: 'Failed to clear proxy', description: String(e), variant: 'destructive' });
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="space-y-4">
+      <button type="button" className="text-xs text-purple-500" onClick={onBack}>← Back</button>
+      <div>
+        <p className="text-sm font-medium flex items-center gap-2"><Shield className="h-4 w-4" /> Network Privacy</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          Route relay queries through a SOCKS5 proxy. With Tor, this hides your IP and prevents relays from correlating queries to a single user.
+        </p>
+      </div>
+
+      {desktop ? (
+        <div className="space-y-3">
+          <div>
+            <Label className="text-xs">SOCKS5 Proxy URL</Label>
+            <Input
+              placeholder="socks5h://127.0.0.1:9050"
+              value={proxyUrl}
+              onChange={(e) => setProxyUrl(e.target.value)}
+              className="h-8 text-xs font-mono mt-1"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+            />
+            <p className="text-[10px] text-muted-foreground mt-1">
+              Use <code>socks5h://</code> for remote DNS (Tor-style, recommended). Default Tor SOCKS port is 9050. Leave blank for direct connections.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" onClick={handleSave} disabled={saving || proxyUrl === (savedUrl ?? '')}>
+              {proxyUrl ? 'Save' : 'Disable proxy'}
+            </Button>
+            {savedUrl && (
+              <Button size="sm" variant="outline" onClick={handleClear} disabled={saving}>Clear</Button>
+            )}
+          </div>
+          {savedUrl && (
+            <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedUrl}</span></p>
+          )}
+          <p className="text-[10px] text-muted-foreground border-t pt-2">
+            Only native Rust relay queries are proxied. The WebView's own networking (image loading, link previews) is not — start your browser via Tor for full coverage or use the Tor Browser bundle.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-md border bg-muted/30 p-3">
+          <p className="text-xs">Browser-controlled networking — Corkboards cannot proxy traffic from a normal browser.</p>
+          <p className="text-xs text-muted-foreground mt-2">
+            Use <a className="underline" href="https://www.torproject.org/" target="_blank" rel="noreferrer">Tor Browser</a> for full-network privacy, or run Corkboards as a desktop app where SOCKS5 routing is supported.
+          </p>
+        </div>
       )}
     </div>
   );

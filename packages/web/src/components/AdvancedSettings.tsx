@@ -530,15 +530,18 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
       <button type="button" className="text-xs text-purple-500" onClick={onBack}>← Back</button>
       <div>
         <p className="text-sm font-medium flex items-center gap-2"><Shield className="h-4 w-4" /> Network Privacy</p>
-        <p className="text-xs text-muted-foreground mt-1">
-          Route relay queries through a SOCKS5 proxy. With Tor, this hides your IP and prevents relays from correlating queries to a single user.
-        </p>
+        <div className="mt-2 rounded-md border border-yellow-500/30 bg-yellow-500/5 p-2.5 text-[11px] leading-relaxed">
+          <p className="font-medium text-yellow-700 dark:text-yellow-400">Tor hides your IP. It does not hide your identity.</p>
+          <p className="text-muted-foreground mt-1">
+            Every event you publish is signed with your public key — relays still see your npub, your queries, and your follow graph. For real pseudonymity, use a fresh npub that was never linked to your real identity, and route the whole OS through Tor (Tails, Whonix, or a Tor-routing router).
+          </p>
+        </div>
       </div>
 
       {desktop ? (
         <div className="space-y-3">
           <div>
-            <Label className="text-xs">SOCKS5 Proxy URL</Label>
+            <Label className="text-xs">SOCKS5 Proxy URL <span className="text-muted-foreground font-normal">(expert)</span></Label>
             <Input
               placeholder="socks5h://127.0.0.1:9050"
               value={proxyUrl}
@@ -549,7 +552,7 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
               autoCorrect="off"
             />
             <p className="text-[10px] text-muted-foreground mt-1">
-              Use <code>socks5h://</code> for remote DNS (Tor-style, recommended). Default Tor SOCKS port is 9050. Leave blank for direct connections.
+              Use this only if you run a local Tor daemon (port 9050) and don&apos;t OS-torify everything. Use <code>socks5h://</code> so DNS goes through the proxy. Routes native relay sockets only — image loads, link previews, and any WebView traffic still go direct. For full coverage, OS-torify or use Tails / Whonix.
             </p>
           </div>
           <div className="flex gap-2">
@@ -561,17 +564,13 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
             )}
           </div>
           {savedUrl && (
-            <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedUrl}</span></p>
+            <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedUrl}</span> (native relay sockets only)</p>
           )}
-          <p className="text-[10px] text-muted-foreground border-t pt-2">
-            Only native Rust relay queries are proxied. The WebView's own networking (image loading, link previews) is not — start your browser via Tor for full coverage or use the Tor Browser bundle.
-          </p>
         </div>
       ) : (
-        <div className="rounded-md border bg-muted/30 p-3">
-          <p className="text-xs">Browser-controlled networking — Corkboards cannot proxy traffic from a normal browser.</p>
-          <p className="text-xs text-muted-foreground mt-2">
-            Use <a className="underline" href="https://www.torproject.org/" target="_blank" rel="noreferrer">Tor Browser</a> for full-network privacy, or run Corkboards as a desktop app where SOCKS5 routing is supported.
+        <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+          <p className="text-xs">
+            Browser networking can&apos;t be proxied from inside the page. To route everything, use <a className="underline" href="https://www.torproject.org/" target="_blank" rel="noreferrer">Tor Browser</a>.
           </p>
         </div>
       )}

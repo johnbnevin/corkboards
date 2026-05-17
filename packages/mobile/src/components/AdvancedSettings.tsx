@@ -21,7 +21,7 @@ import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS } from '.
 import { mobileStorage } from '../storage/MmkvStorage';
 import { setImageProxyTemplate } from '@core/imageProxy';
 
-const PROXY_URL_KEY = '__proxy_url__';
+const LEGACY_PROXY_URL_KEY = '__proxy_url__';
 const IMAGE_PROXY_KEY = 'corkboard:image-proxy-template';
 
 function getImageProxy(): string {
@@ -36,18 +36,6 @@ function saveImageProxy(template: string) {
     mobileStorage.setSync(IMAGE_PROXY_KEY, trimmed);
   }
   setImageProxyTemplate(trimmed || null);
-}
-
-function getProxyUrl(): string {
-  return mobileStorage.getSync(PROXY_URL_KEY) ?? '';
-}
-
-function setProxyUrl(url: string) {
-  if (url.trim().length === 0) {
-    mobileStorage.removeSync(PROXY_URL_KEY);
-  } else {
-    mobileStorage.setSync(PROXY_URL_KEY, url.trim());
-  }
 }
 
 interface AdvancedSettingsProps {
@@ -474,11 +462,14 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
 // ─── Network Privacy (Tor / SOCKS5) ───────────────────────────────────────
 
 function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
-  const [url, setUrl] = useState(getProxyUrl);
-  const [saved, setSaved] = useState(getProxyUrl);
   const [imgProxy, setImgProxy] = useState(getImageProxy);
   const [savedImgProxy, setSavedImgProxy] = useState(getImageProxy);
   const isAndroid = Platform.OS === 'android';
+
+  // Scrub the legacy '__proxy_url__' value: we no longer plan a per-app
+  // SOCKS5 module on mobile (an OS-level Tor setup is strictly better and
+  // an in-app toggle would falsely imply protection it can't deliver).
+  useEffect(() => { mobileStorage.removeSync(LEGACY_PROXY_URL_KEY); }, []);
 
   const handleSaveImgProxy = () => {
     const trimmed = imgProxy.trim();
@@ -492,71 +483,48 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     Alert.alert(trimmed ? 'Image proxy enabled' : 'Image proxy cleared');
   };
 
-  const handleSave = () => {
-    const trimmed = url.trim();
-    if (trimmed && !/^socks5h?:\/\/[^/]+:\d+/.test(trimmed)) {
-      Alert.alert('Invalid proxy URL', 'Use socks5://host:port or socks5h://host:port');
-      return;
-    }
-    setProxyUrl(trimmed);
-    setSaved(trimmed);
-    Alert.alert(
-      trimmed ? 'Proxy saved' : 'Proxy cleared',
-      trimmed
-        ? 'For Tor routing today, enable Orbot VPN mode. A future update will route relay sockets through this URL natively.'
-        : 'Direct relay connections restored.',
-    );
-  };
-
   return (
     <ScrollView style={styles.container}>
       <TouchableOpacity style={styles.backButton} onPress={onBack}>
         <Text style={styles.backText}>&larr; Back</Text>
       </TouchableOpacity>
       <Text style={styles.sectionTitle}>Network Privacy</Text>
-      <Text style={[styles.settingHint, { paddingHorizontal: 12, marginBottom: 12 }]}>
-        Routing relay queries through Tor hides your IP and prevents relays from correlating queries to a single user.
-      </Text>
+
+      <View style={{
+        marginHorizontal: 12,
+        marginBottom: 12,
+        padding: 10,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: 'rgba(234, 179, 8, 0.4)',
+        backgroundColor: 'rgba(234, 179, 8, 0.08)',
+      }}>
+        <Text style={{ color: '#fde047', fontSize: 12, fontWeight: '600' }}>
+          Tor hides your IP. It does not hide your identity.
+        </Text>
+        <Text style={[styles.settingHint, { marginTop: 4 }]}>
+          Every event you publish is signed with your public key — relays still see your npub, your queries, and your follow graph. For real pseudonymity, use a fresh npub that was never linked to your real identity.
+        </Text>
+      </View>
 
       {isAndroid ? (
         <View style={{ paddingHorizontal: 12, marginBottom: 12 }}>
-          <Text style={styles.settingTitle}>Recommended: Orbot VPN mode</Text>
+          <Text style={styles.settingTitle}>To route through Tor: use Orbot</Text>
           <Text style={styles.settingHint}>
-            Install Orbot from F-Droid or Play Store, enable VPN mode, and add Corkboards to the app list. All network traffic — relays, images, web links — will route through Tor at the OS level.
+            Install Orbot from F-Droid or Play Store, enable VPN mode, and add Corkboards to its app list. Everything — relays, images, link previews — will go through Tor at the OS level.
+          </Text>
+          <Text style={[styles.settingHint, { marginTop: 6 }]}>
+            We don&apos;t ship a per-app SOCKS5 toggle on mobile because anything we routed in-app would still leave other sockets (image fetches, WebView, system telemetry) leaking outside Tor. An OS-level setup is strictly safer.
           </Text>
         </View>
       ) : (
         <View style={{ paddingHorizontal: 12, marginBottom: 12 }}>
           <Text style={styles.settingTitle}>Not available on iOS</Text>
           <Text style={styles.settingHint}>
-            iOS does not allow third-party Tor apps to provide system-wide routing. Use a Tor-routing network setup at the OS level, or run Corkboards on Android / desktop.
+            Apple doesn&apos;t allow third-party apps to provide system-wide Tor routing. The only options are a Tor-routing home network (e.g. a flashed router) or running Corkboards on Android / desktop.
           </Text>
         </View>
       )}
-
-      <View style={{ paddingHorizontal: 12 }}>
-        <Text style={styles.settingTitle}>SOCKS5 Proxy URL (advanced)</Text>
-        <Text style={styles.settingHint}>
-          Saved for future use by a native socket-routing module. Today this field is informational — Orbot VPN mode is the active path.
-        </Text>
-        <View style={styles.addRow}>
-          <TextInput
-            style={styles.addInput}
-            placeholder="socks5h://127.0.0.1:9050"
-            placeholderTextColor="#666"
-            value={url}
-            onChangeText={setUrl}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <TouchableOpacity style={styles.addButton} onPress={handleSave} disabled={url === saved}>
-            <Text style={styles.addButtonText}>{url ? 'Save' : 'Clear'}</Text>
-          </TouchableOpacity>
-        </View>
-        {saved ? (
-          <Text style={[styles.settingHint, { marginTop: 8, color: '#22c55e' }]}>Saved: {saved}</Text>
-        ) : null}
-      </View>
 
       <View style={styles.separator} />
 

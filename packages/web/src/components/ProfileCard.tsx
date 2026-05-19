@@ -13,6 +13,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ClickableProfile } from '@/components/ProfileModal'
 import { genUserName } from '@/lib/genUserName'
+import { applyImageProxy } from '@core/imageProxy'
 import { optimizeAvatarUrl } from '@/lib/imageUtils'
 import { nip19 } from 'nostr-tools'
 import {
@@ -278,7 +279,7 @@ export function ProfileCard({
           effectiveBannerPct > 0 ? (
             <div className="w-full relative" style={{ paddingBottom: `${effectiveBannerPct}%` }}>
               <img
-                src={metadata.banner} alt=""
+                src={applyImageProxy(metadata.banner)} alt=""
                 className={`absolute inset-0 w-full h-full ${bannerFitMode === 'crop' ? 'object-cover' : 'object-contain'}`}
                 referrerPolicy="no-referrer"
                 onLoad={(e) => {
@@ -291,7 +292,7 @@ export function ProfileCard({
           ) : (
             <div className="w-full">
               <img
-                src={metadata.banner} alt="" className="w-full h-auto"
+                src={applyImageProxy(metadata.banner)} alt="" className="w-full h-auto"
                 referrerPolicy="no-referrer"
                 onLoad={(e) => {
                   const img = e.currentTarget;

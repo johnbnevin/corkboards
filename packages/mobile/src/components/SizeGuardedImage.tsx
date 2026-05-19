@@ -18,6 +18,7 @@ import {
 import { mobileStorage } from '../storage/MmkvStorage';
 import { STORAGE_KEYS } from '../lib/storageKeys';
 import { supportsCorsHead, learnCorsHost } from '../lib/mediaUtils';
+import { applyImageProxy } from '@core/imageProxy';
 
 type SizeLimitOption = 'small' | 'default' | 'large' | 'none';
 
@@ -122,7 +123,10 @@ interface SizeGuardedImageProps {
   resizeMode?: 'cover' | 'contain' | 'stretch' | 'center';
 }
 
-export function SizeGuardedImage({ uri, style, type = 'image', resizeMode = 'cover' }: SizeGuardedImageProps) {
+export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMode = 'cover' }: SizeGuardedImageProps) {
+  // Apply the user's image proxy here so HEAD probe + final render both hit
+  // the proxied URL. Non-http(s) URLs (data:, blob:) pass through unchanged.
+  const uri = applyImageProxy(rawUri);
   const limitBytes = getLimitBytes(type);
   const [status, setStatus] = useState<'checking' | 'allowed' | 'blocked' | 'unknown' | 'override'>('checking');
   const [fileSize, setFileSize] = useState<number | null>(null);

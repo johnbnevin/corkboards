@@ -27,6 +27,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { buildReplyTags } from '@core/noteClassifier';
+import { applyImageProxy } from '@core/imageProxy';
 import { useAuth } from '../lib/AuthContext';
 import { useNostrPublish } from '../hooks/useNostrPublish';
 import { useUploadFile } from '../hooks/useUploadFile';
@@ -318,7 +319,7 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
           <View style={styles.imageRow}>
             {images.map((url) => (
               <View key={url} style={styles.imageThumbWrapper}>
-                <Image source={{ uri: url }} style={styles.imageThumb} />
+                <Image source={{ uri: applyImageProxy(url) }} style={styles.imageThumb} />
                 <TouchableOpacity
                   style={styles.imageRemoveBtn}
                   onPress={() => removeImage(url)}

@@ -10,6 +10,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { useImageSizeLimit } from '@/hooks/useImageSizeLimit';
 import { supportsCorsHead, learnCorsHost } from '@/lib/mediaUtils';
+import { applyImageProxy } from '@core/imageProxy';
 import { ImageOff } from 'lucide-react';
 
 // ─── HEAD-based size cache ──────────────────────────────────────────────────
@@ -95,7 +96,10 @@ interface SizeGuardedImageProps extends React.ImgHTMLAttributes<HTMLImageElement
   compact?: boolean;
 }
 
-export function SizeGuardedImage({ src, compact = false, className, alt, ...imgProps }: SizeGuardedImageProps) {
+export function SizeGuardedImage({ src: rawSrc, compact = false, className, alt, ...imgProps }: SizeGuardedImageProps) {
+  // Apply the user's image proxy here so HEAD probe + final render both hit
+  // the proxied URL. Non-http(s) URLs (data:, blob:) pass through unchanged.
+  const src = applyImageProxy(rawSrc);
   const limitBytes = useImageSizeLimit();
   const [status, setStatus] = useState<'checking' | 'allowed' | 'blocked' | 'unknown' | 'override'>('checking');
   const [fileSize, setFileSize] = useState<number | null>(null);

@@ -14,6 +14,7 @@ import {
 import { useAuth } from '../../lib/AuthContext';
 import { useAuthor } from '../../hooks/useAuthor';
 import { genUserName } from '@core/genUserName';
+import { optimizeAvatarUrl } from '@core/imageUtils';
 import { LoginDialog } from './LoginDialog';
 
 interface LoginAreaProps {
@@ -23,7 +24,7 @@ interface LoginAreaProps {
 function LoggedInDisplay({ pubkey, style }: { pubkey: string; style?: object }) {
   const { data: author } = useAuthor(pubkey);
   const displayName = author?.metadata?.name ?? author?.metadata?.display_name ?? genUserName(pubkey);
-  const picture = author?.metadata?.picture;
+  const picture = optimizeAvatarUrl(author?.metadata?.picture);
 
   return (
     <View style={[styles.loggedInRow, style]}>

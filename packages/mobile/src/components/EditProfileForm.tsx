@@ -23,6 +23,7 @@ import { useAuthor } from '../hooks/useAuthor';
 import { useNostrPublish } from '../hooks/useNostrPublish';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { STORAGE_KEYS } from '@core/storageKeys';
+import { applyImageProxy } from '@core/imageProxy';
 
 interface ProfileFormData {
   display_name: string;
@@ -138,8 +139,8 @@ export function EditProfileForm({ onSaved }: EditProfileFormProps) {
     }
   };
 
-  const bannerUrl = form.banner.trim();
-  const pictureUrl = form.picture.trim();
+  const bannerUrl = applyImageProxy(form.banner.trim());
+  const pictureUrl = applyImageProxy(form.picture.trim());
 
   // Banner display settings (local, not published to Nostr)
   const [bannerHeightPct, setBannerHeightPct] = useLocalStorage<number>(STORAGE_KEYS.BANNER_HEIGHT_PCT, 0);

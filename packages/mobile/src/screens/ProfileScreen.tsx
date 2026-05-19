@@ -31,6 +31,7 @@ import { NoteActions } from '../components/NoteActions';
 import { ProfileAbout } from '../components/ProfileAbout';
 import { formatTimeAgo } from '@core/formatTimeAgo';
 import { SizeGuardedImage } from '../components/SizeGuardedImage';
+import { applyImageProxy } from '@core/imageProxy';
 
 interface ProfileScreenProps {
   pubkey: string;
@@ -222,7 +223,7 @@ export function ProfileScreen({ pubkey, onBack, onViewThread, onCreateCorkboard 
     <View>
       {/* Banner */}
       {meta?.banner && /^https?:\/\//.test(meta.banner) ? (
-        <Image source={{ uri: meta.banner }} style={styles.banner} />
+        <Image source={{ uri: applyImageProxy(meta.banner) }} style={styles.banner} />
       ) : (
         <View style={[styles.banner, styles.bannerPlaceholder]} />
       )}

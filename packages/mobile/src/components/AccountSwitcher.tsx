@@ -17,6 +17,7 @@ import { nip19 } from 'nostr-tools';
 import { useAuth } from '../lib/AuthContext';
 import { useAuthor } from '../hooks/useAuthor';
 import { genUserName } from '@core/genUserName';
+import { optimizeAvatarUrl } from '@core/imageUtils';
 
 interface AccountRowProps {
   pubkey: string;
@@ -28,7 +29,7 @@ interface AccountRowProps {
 function AccountRow({ pubkey, isActive, onPress, onRemove }: AccountRowProps) {
   const { data: author } = useAuthor(pubkey);
   const displayName = author?.metadata?.name ?? author?.metadata?.display_name ?? genUserName(pubkey);
-  const picture = author?.metadata?.picture;
+  const picture = optimizeAvatarUrl(author?.metadata?.picture);
   const npubShort = nip19.npubEncode(pubkey).slice(0, 16) + '...';
 
   return (
@@ -151,7 +152,7 @@ export function AccountSwitcher({ onAddAccount, onLogout }: AccountSwitcherProps
 function CurrentUserAvatar({ pubkey }: { pubkey: string }) {
   const { data: author } = useAuthor(pubkey);
   const displayName = author?.metadata?.name ?? author?.metadata?.display_name ?? genUserName(pubkey);
-  const picture = author?.metadata?.picture;
+  const picture = optimizeAvatarUrl(author?.metadata?.picture);
 
   return (
     <View style={styles.triggerInner}>

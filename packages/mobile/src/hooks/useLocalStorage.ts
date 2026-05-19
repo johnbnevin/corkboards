@@ -1,5 +1,17 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { DeviceEventEmitter } from 'react-native';
 import { mobileStorage } from '../storage/MmkvStorage';
+
+// Cross-component sync (parity with web's 'idb-storage-sync' CustomEvent).
+// When one component writes to a key, every other component subscribed to
+// the same key updates immediately — otherwise a global setter in the
+// profile modal would silently fail to refresh the home screen's list.
+//
+// Event payload is the key name only — never the value. This keeps each
+// invalidation a tiny bridge crossing; subscribers re-read from MMKV (which
+// is mmap-backed and effectively free) instead of serializing potentially
+// hundreds of KB across the JS bridge on every write.
+const SYNC_EVENT = 'mobile-storage-sync';
 
 export function useLocalStorage<T>(
   key: string,
@@ -24,6 +36,12 @@ export function useLocalStorage<T>(
   const stateRef = useRef<T>(state);
   useEffect(() => { stateRef.current = state; });
 
+  // Track our own emitter id so we can ignore echoes of our own writes.
+  // Compute once via useState's initializer (runs exactly once per mount),
+  // which the v7 purity rule accepts as a one-time-init pattern.
+  const [emitterId] = useState(() => Math.random().toString(36).slice(2));
+  const emitterIdRef = useRef(emitterId);
+
   const setValue = useCallback((value: T | ((prev: T) => T)) => {
     try {
       const next = value instanceof Function ? value(stateRef.current) : value;
@@ -35,10 +53,31 @@ export function useLocalStorage<T>(
       } else {
         mobileStorage.setSync(key, serialized);
       }
+      // Broadcast invalidation only — payload is a key + origin id. Subscribers
+      // re-read from MMKV (mmap, near-free). Sending the value across the bridge
+      // would scale poorly for hot keys like nostr-custom-feeds.
+      DeviceEventEmitter.emit(SYNC_EVENT, { key, originId: emitterIdRef.current });
     } catch (error) {
       console.warn(`[useLocalStorage] Failed to save ${key}:`, error);
     }
   }, [key, serialize]);
+
+  // Listen for cross-component writes to the same key — re-read from MMKV.
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(SYNC_EVENT, (e: { key: string; originId: string }) => {
+      if (e.key !== key) return;
+      if (e.originId === emitterIdRef.current) return; // ignore our own emit
+      try {
+        const raw = mobileStorage.getSync(key);
+        const next = raw ? deserialize(raw) : defaultValue;
+        stateRef.current = next;
+        setState(next);
+      } catch (error) {
+        console.warn(`[useLocalStorage] Failed to re-read ${key} on sync:`, error);
+      }
+    });
+    return () => sub.remove();
+  }, [key, defaultValue, deserialize]);
 
   return [state, setValue] as const;
 }

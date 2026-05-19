@@ -6,7 +6,7 @@
  */
 import { useCallback, useState } from 'react';
 import { useAuth } from '../lib/AuthContext';
-import type { NSecSigner } from '@nostrify/nostrify';
+import type { NSecSigner, NConnectSigner } from '@nostrify/nostrify';
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
@@ -69,7 +69,7 @@ async function createNIP98Token(
   method: string,
   url: string,
   body: unknown | undefined,
-  signer: NSecSigner,
+  signer: NSecSigner | NConnectSigner,
 ): Promise<string> {
   const tags: string[][] = [
     ['u', url],
@@ -190,7 +190,8 @@ export function useShakespeare() {
       }
 
       setError(errorMessage);
-      throw new Error(errorMessage);
+      // Preserve original cause for telemetry / nested error handling
+      throw new Error(errorMessage, { cause: err });
     } finally {
       setIsLoading(false);
     }
@@ -231,7 +232,8 @@ export function useShakespeare() {
       }
 
       setError(errorMessage);
-      throw new Error(errorMessage);
+      // Preserve original cause for telemetry / nested error handling
+      throw new Error(errorMessage, { cause: err });
     } finally {
       setIsLoading(false);
     }

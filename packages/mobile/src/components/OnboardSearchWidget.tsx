@@ -135,7 +135,7 @@ export function OnboardSearchWidget({
     }, 400);
   }, [tryDirectPubkey, onSelectProfile, clearSearch, isSearching]);
 
-  const progressWidth = `${Math.min(contactCount / followTarget * 100, 100)}%`;
+  const progressWidth: `${number}%` = `${Math.min(contactCount / followTarget * 100, 100)}%`;
 
   return (
     <View style={styles.container}>
@@ -146,7 +146,7 @@ export function OnboardSearchWidget({
       {/* Progress bar */}
       <View style={styles.progressRow}>
         <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: progressWidth as any }]} />
+          <View style={[styles.progressFill, { width: progressWidth }]} />
         </View>
         <Text style={styles.progressLabel}>{contactCount}/{followTarget}</Text>
       </View>

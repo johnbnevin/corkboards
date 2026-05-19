@@ -96,6 +96,8 @@ export const STORAGE_KEYS = {
   LAST_CHUNK_COUNT: 'corkboard:last-chunk-count',
   BACKUP_CHECKED: 'corkboard:backup-checked',
   LAST_BACKUP_DATA: 'corkboard:last-backup-data',
+  LAST_BACKUP_HASHES: 'corkboard:last-backup-hashes',
+  LAST_BACKUP_COUNTS: 'corkboard:last-backup-counts',
   RESTORE_HISTORY: 'corkboard:restore-history',
   // Persistent device identifier for cross-device sync (NOT backed up — stays local)
   DEVICE_ID: 'corkboard:device-id',
@@ -227,6 +229,8 @@ function getAllPerUserKeys(): string[] {
     STORAGE_KEYS.LAST_BACKUP_TS,
     STORAGE_KEYS.LAST_CHUNK_COUNT,
     STORAGE_KEYS.LAST_BACKUP_DATA,
+    STORAGE_KEYS.LAST_BACKUP_HASHES,
+    STORAGE_KEYS.LAST_BACKUP_COUNTS,
     STORAGE_KEYS.RESTORE_HISTORY,
   ];
   for (const baseKey of PLATFORM_SPECIFIC_KEYS) {

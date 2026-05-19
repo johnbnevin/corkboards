@@ -152,7 +152,7 @@ export async function clearCustomFeedCache(feedId: string): Promise<void> {
 
 export function getAllCustomFeedIds(): string[] {
   try {
-    const allKeys = mobileStorage.getSync ? getAllKeysSync() : [];
+    const allKeys = getAllKeysSync();
     return allKeys
       .filter(key => key.startsWith(CUSTOM_FEED_CACHE_PREFIX))
       .map(key => key.substring(CUSTOM_FEED_CACHE_PREFIX.length));
@@ -379,13 +379,11 @@ export function useCustomFeedNotesCache({
   // Track if there are more notes to load
   const [hasMore, setHasMore] = useState(true);
 
+  // Mirror query-result length to hasMore — classic controlled-prop sync.
   useEffect(() => {
     if (query.data) {
-      if (query.data.length < limit) {
-        setHasMore(false);
-      } else {
-        setHasMore(true);
-      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setHasMore(query.data.length >= limit);
     }
   }, [query.data, limit]);
 

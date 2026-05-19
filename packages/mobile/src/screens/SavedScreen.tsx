@@ -8,7 +8,7 @@
  * - NoteCard component for rendering
  * - Pin/unpin support
  */
-import { useCallback, useMemo, useState, useEffect } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -32,7 +32,8 @@ import { ZapDialog } from '../components/ZapDialog';
 export function SavedScreen() {
   const { pubkey } = useAuth();
   const { nostr } = useNostr();
-  const queryClient = useQueryClient();
+  // queryClient reserved for future invalidations from inline mutations
+  const _queryClient = useQueryClient();
   const { bookmarkIds, toggleBookmark, isBookmarked, isLoading: bookmarksLoading } = useBookmarks();
   const { pinnedIds, togglePin } = usePinnedNotes();
   const { collapsedIds, expand } = useCollapsedNotes();

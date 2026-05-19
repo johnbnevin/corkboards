@@ -59,9 +59,12 @@ export function EditProfileForm({ onSaved }: EditProfileFormProps) {
   const meta = authorData?.metadata;
   const [form, setForm] = useState<ProfileFormData>(EMPTY_FORM);
 
-  // Populate form when metadata loads
+  // Populate form when metadata loads. Hydrating internal state from an
+  // external source (network-fetched profile metadata) is the documented
+  // exception to the v7 set-state-in-effect rule.
   useEffect(() => {
     if (meta) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setForm({
         display_name: meta.display_name || '',
         name: meta.name || '',

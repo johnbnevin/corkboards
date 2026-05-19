@@ -7,6 +7,14 @@ import { Platform, ToastAndroid } from 'react-native';
 
 export type ToastType = 'default' | 'success' | 'error';
 
+/** Web-style object payload (title + optional description + variant). Accepted
+ *  by toast() for compatibility with web-ported callers. */
+export interface ToastInput {
+  title: string;
+  description?: string;
+  variant?: 'default' | 'destructive' | 'success' | 'error';
+}
+
 export interface ToastItem {
   id: string;
   message: string;
@@ -15,8 +23,21 @@ export interface ToastItem {
 
 interface ToastContextValue {
   toasts: ToastItem[];
-  toast: (message: string, type?: ToastType) => string;
+  toast: (input: string | ToastInput, type?: ToastType) => string;
   dismiss: (id?: string) => void;
+}
+
+/** Normalize either signature down to `{ message, type }`. */
+function normalizeToast(input: string | ToastInput, type?: ToastType): { message: string; type: ToastType } {
+  if (typeof input === 'string') {
+    return { message: input, type: type ?? 'default' };
+  }
+  const message = input.description ? `${input.title}: ${input.description}` : input.title;
+  const t: ToastType =
+    input.variant === 'destructive' || input.variant === 'error' ? 'error'
+    : input.variant === 'success' ? 'success'
+    : 'default';
+  return { message, type: t };
 }
 
 let idCounter = 0;
@@ -55,7 +76,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const toast = useCallback((message: string, type: ToastType = 'default'): string => {
+  const toast = useCallback((input: string | ToastInput, type?: ToastType): string => {
+    const { message, type: resolvedType } = normalizeToast(input, type);
+
     // On Android, use native toast for simple messages
     if (Platform.OS === 'android') {
       ToastAndroid.show(message, ToastAndroid.SHORT);
@@ -64,7 +87,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
     // On iOS, use context-based state
     const id = genId();
-    setToasts((prev) => [...prev, { id, message, type }]);
+    setToasts((prev) => [...prev, { id, message, type: resolvedType }]);
 
     // Auto-dismiss after timeout
     const timer = setTimeout(() => {

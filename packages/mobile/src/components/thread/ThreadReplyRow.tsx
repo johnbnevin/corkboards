@@ -10,8 +10,6 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import type { ThreadNode } from '@core/threadTree';
 import { useAuthor } from '../../hooks/useAuthor';
 import { useBookmarks } from '../../hooks/useBookmarks';
-import { NoteContent } from '../NoteContent';
-import { NoteActions } from '../NoteActions';
 import { SizeGuardedImage } from '../SizeGuardedImage';
 import { ThreadContent } from './ThreadContent';
 import { formatTimeAgo } from '@core/formatTimeAgo';

@@ -355,11 +355,15 @@ function ProfileModalDialog({ pubkey, isOpen, onClose }: ProfileModalDialogProps
                       {profileModalState.customFeeds.map(feed => (
                         <DropdownMenuItem
                           key={feed.id}
-                          onClick={() => {
+                          onSelect={() => {
                             window.dispatchEvent(new CustomEvent(PROFILE_ACTION_ADD_TO_CORKBOARD, {
                               detail: { pubkey, feedId: feed.id }
                             }))
-                            onClose()
+                            // Defer dialog close so the dropdown's own close
+                            // finishes first — otherwise Radix leaves the
+                            // pointer-events/focus-trap overlay on body and
+                            // the screen looks locked until reload.
+                            setTimeout(onClose, 0)
                           }}
                         >
                           {feed.title}

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { idbGetSync, idbSetSync, idbRemoveSync, idbReady } from '@/lib/idb';
+import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbReady } from '@/lib/idb';
 
 /**
  * Generic hook for managing persistent state backed by IndexedDB.
@@ -40,10 +40,17 @@ export function useLocalStorage<T>(
   // the hook mounts before the cache is warmed up, e.g. on very first load).
   useEffect(() => {
     let cancelled = false;
-    idbReady.then(() => {
+    idbReady.then(async () => {
       if (cancelled) return;
       try {
-        const item = idbGetSync(key);
+        let item = idbGetSync(key);
+        if (item === null) {
+          // Defense: memCache may be missing this key (e.g. evicted under
+          // MAX_MEM_CACHE pressure). Fall back to async IDB so we never
+          // mistake "not cached" for "not present" and clobber real data.
+          item = await idbGet(key);
+          if (cancelled) return;
+        }
         const value = item ? deserialize(item) : defaultValue;
         setState(value);
         stateRef.current = value;

@@ -60,7 +60,7 @@ export function CombinedEmojiPickerModal({
   onClose,
   onSelectEmoji,
   onSelectCustomEmoji,
-  onOpenSetBuilder,
+  onOpenSetBuilder: _onOpenSetBuilder,
 }: CombinedEmojiPickerModalProps) {
   const handleSelectEmoji = useCallback((emoji: string) => {
     onSelectEmoji(emoji);

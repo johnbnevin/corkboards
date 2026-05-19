@@ -7,7 +7,7 @@ import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { useImageSizeLimitSetting, useAvatarSizeLimitSetting } from '@/hooks/useImageSizeLimit';
 import { usePlatformStorage } from '@/hooks/usePlatformStorage';
 import { useToast } from '@/hooks/useToast';
-import { debugLog, debugWarn } from '@/lib/debug';
+import { debugLog } from '@/lib/debug';
 
 import { usePinnedNotes } from '@/hooks/usePinnedNotes';
 import { useParentNotes } from '@/hooks/useParentNotes';
@@ -17,7 +17,6 @@ import { useOnboardFollowActivity } from '@/hooks/useOnboardFollowActivity';
 import { OnboardSearchWidget } from '@/components/OnboardSearchWidget';
 import { useFollowNotesCache } from '@/hooks/useFollowNotesCache';
 import { useCustomFeedNotesCache } from '@/hooks/useCustomFeedNotesCache';
-import { useBulkAuthors } from '@/hooks/useBulkAuthors';
 import { useRelayFeed } from '@/hooks/useRelayFeed';
 import { useRssFeed } from '@/hooks/useRssFeed';
 import { ToastBar, useFeedToast } from '@/components/ToastBar';
@@ -69,7 +68,7 @@ import { useAppContext } from '@/hooks/useAppContext';
 import { useRelayHealth } from '@/hooks/useRelayHealth';
 import { useRetryFailedNotes } from '@/hooks/useRetryFailedNotes';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '@/components/ui/dropdown-menu';
-import { useCollapsedNotes, BOOKMARK_SYNC_EVENT, clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
+import { useCollapsedNotes, BOOKMARK_SYNC_EVENT } from '@/hooks/useCollapsedNotes';
 import { useNotificationCount } from '@/hooks/useNotificationCount';
 import { useBookmarks } from '@/hooks/useBookmarks';
 import { ZapDialog } from '@/components/ZapDialog';
@@ -80,8 +79,17 @@ import { ThroughputSettings } from '@/components/ThroughputSettings';
 import { AdvancedSettings } from '@/components/AdvancedSettings';
 import { EmojiSetEditor } from '@/components/EmojiSetEditor';
 import { useNostrBackup } from '@/hooks/useNostrBackup';
-import { getActiveUserPubkey, clearActiveUserData, switchActiveUser, STORAGE_KEYS } from '@/lib/storageKeys';
-import { idbGetSync, idbSetSync, idbSet } from '@/lib/idb';
+import { STORAGE_KEYS } from '@/lib/storageKeys';
+import { useAccountIsolation } from '@/hooks/useAccountIsolation';
+import { useAutoRestoreGuard } from '@/hooks/useAutoRestoreGuard';
+import { useScrollPersistence } from '@/hooks/useScrollPersistence';
+import { useIdleAutoRestoreCheck } from '@/hooks/useIdleAutoRestoreCheck';
+import { useAutoFetch } from '@/hooks/useAutoFetch';
+import { useAccountSwitchEffect } from '@/hooks/useAccountSwitchEffect';
+import { useBulkAuthorPrefetch } from '@/hooks/useBulkAuthorPrefetch';
+import { useAutoRestoreCountdown } from '@/hooks/useAutoRestoreCountdown';
+import { useAutoSaveTrigger } from '@/hooks/useAutoSaveTrigger';
+import { idbGetSync, idbSetSync } from '@/lib/idb';
 import { getCachedProfiles, setCachedProfiles, getProfilesNeedingRefresh, markProfileRefreshed } from '@/lib/profileCache';
 
 import { TIPS } from '@/lib/tips';
@@ -90,9 +98,8 @@ import { BackupDownloadPrompt } from '@/components/BackupDownloadPrompt';
 import { downloadSettingsBackup, shouldPromptBackupDownload, restoreFromBackupFile, preflightRestore, saveCheckpoint } from '@/lib/downloadBackup';
 import { FEED_KINDS } from '@/lib/feedUtils';
 // NostrProvider relay utilities used by components but no longer needed in this file
-import { getCacheStatsForPubkeys, clearNotesCache } from '@/lib/notesCache';
-import { clearRelayCache, getUserRelays } from '@/components/NostrProvider';
-import { clearMemCache as clearProfileMemCache, evictCachedProfile } from '@/lib/cacheStore';
+import { getCacheStatsForPubkeys } from '@/lib/notesCache';
+import { getUserRelays } from '@/components/NostrProvider';
 import { useFeedLimit } from '@/hooks/useFeedLimit';
 import { useFeedPagination } from '@/hooks/useFeedPagination';
 import { FeedGrid } from '@/components/FeedGrid';
@@ -404,7 +411,7 @@ export function MultiColumnClient() {
   useSeoMeta({
     title: 'corkboards.me',
     description: 'A private social feed reader and builder',
-    keywords: 'corkboard, social feed, feed reader, notecards, private, uncensorable, nostr',
+    // `keywords` was dropped from UseSeoMetaInput in @unhead/react v3 — set it via meta name="keywords" if needed
   });
 
   // Profile fetch is deferred — enabled after canLoadNotes is set (below)
@@ -435,43 +442,10 @@ export function MultiColumnClient() {
     }
   }, [user?.pubkey]);
 
-  // Per-user isolation: wipe any stale session data and mark the active user.
-  // This runs whenever the logged-in pubkey changes (including on first login).
-  //
-  // Safety: after a backup restore + reload, activePubkey === user.pubkey (restore
-  // doesn't clear the marker), so this block doesn't run and restored data is safe.
-  // After nuclear logout, IDB is empty, so clearActiveUserData() is a no-op.
-  // In all other cases (failed logout, race conditions) it wipes stale data.
-  useEffect(() => {
-    if (!user?.pubkey) return;
-    const activePubkey = getActiveUserPubkey();
-    if (activePubkey !== user.pubkey) {
-      // Wipe EVERYTHING from the previous user — IDB keys, notes cache, query cache,
-      // in-memory caches, session state, and relay routing data.
-      clearActiveUserData();
-      idbSetSync('corkboard:active-user-pubkey', user.pubkey);
-      idbSet('corkboard:active-user-pubkey', user.pubkey).catch(() => {});
-      clearNotesCache();
-      clearRelayCache();
-      clearProfileMemCache();
-      clearCollapsedNotesModuleState();
-      // Clear session-scoped state that isn't per-user keyed
-      try {
-        sessionStorage.removeItem('corkboard:scroll-positions');
-        sessionStorage.removeItem('corkboard:active-tab');
-        sessionStorage.removeItem('corkboard:new-user');
-        sessionStorage.removeItem('corkboard:soft-dismissed');
-        sessionStorage.removeItem('corkboard:session-collapsed');
-        sessionStorage.removeItem('corkboard:skip-backup-check');
-      } catch { /* sessionStorage may be unavailable */ }
-      // Nuke the ENTIRE TanStack Query cache — kills cached profiles, contact
-      // lists, notes, and everything else fetched from Nostr for the old user.
-      queryClient.clear();
-      // Evict the new user's own profile from IDB so it's always fetched fresh
-      // from relays (not served from a 48h cache with stale avatar/banner).
-      evictCachedProfile(user.pubkey).catch(() => {});
-    }
-  }, [user?.pubkey, queryClient]);
+  // Per-user isolation: extracted into a focused hook so the bug-prone
+  // account-switch flow can be tested independently and future fixes are
+  // less likely to regress. See useAccountIsolation.ts.
+  useAccountIsolation(user?.pubkey);
   const [activeTab, setActiveTabRaw] = useState(() => {
     const saved = sessionStorage.getItem('corkboard:active-tab');
     if (saved) return saved;
@@ -482,152 +456,42 @@ export function MultiColumnClient() {
   // Optimistic tab: updates instantly for visual feedback while content re-renders
   const [optimisticTab, setOptimisticTab] = useState(activeTab);
   const [isTabPending, startTabTransition] = useTransition();
-  // Preserve scroll position per tab so switching back restores reading position
-  const tabScrollPositions = useRef((() => {
-    try {
-      const saved = sessionStorage.getItem('corkboard:scroll-positions');
-      return saved ? new Map<string, number>(JSON.parse(saved)) : new Map<string, number>();
-    } catch { return new Map<string, number>(); }
-  })());
-  // Persist scroll positions to sessionStorage periodically
-  const persistScrollPositions = useRef<ReturnType<typeof setTimeout>>();
-  const scheduleScrollPersist = useCallback(() => {
-    if (persistScrollPositions.current) clearTimeout(persistScrollPositions.current);
-    persistScrollPositions.current = setTimeout(() => {
-      try {
-        sessionStorage.setItem('corkboard:scroll-positions',
-          JSON.stringify(Array.from(tabScrollPositions.current.entries())));
-      } catch { /* empty */ }
-    }, 1000);
-  }, []);
-  const activeTabRef2 = useRef(activeTab); // track previous tab for scroll save
+  // "Back to top" indicator — lifted up so useScrollPersistence can drive it.
+  const [scrolledFromTop, setScrolledFromTop] = useState(false);
+  // Scroll persistence: per-tab position saved to sessionStorage, restored on
+  // tab switch, page reload, and visibility-return. Extracted from inline
+  // effects so the retry/poll logic can be unit-tested independently.
+  const { onTabChange: onTabChangeScroll } =
+    useScrollPersistence({ activeTab, onScrolledFromTopChange: setScrolledFromTop });
   // Flag to suppress scroll-to-note after tab switch (so autofetch doesn't override)
   const suppressScrollTargetUntil = useRef(0);
   const setActiveTab = useCallback((tab: string) => {
-    // Save current scroll position for the tab we're leaving
-    tabScrollPositions.current.set(activeTabRef2.current, window.scrollY);
-    activeTabRef2.current = tab;
     // Suppress scroll targets for 2s after tab switch so autofetch doesn't override
     suppressScrollTargetUntil.current = Date.now() + 2000;
     sessionStorage.setItem('corkboard:active-tab', tab);
-    // Update optimistic tab instantly for visual feedback
     setOptimisticTab(tab);
     if (tab === 'notifications') markNotificationsSeen();
     // Wrap heavy state update in transition so content re-renders in background
     startTabTransition(() => {
       setActiveTabRaw(tab);
     });
-    // Restore scroll position after content renders — retry until DOM settles
-    const savedPos = tabScrollPositions.current.get(tab) ?? 0;
-    let attempts = 0;
-    const tryRestore = () => {
-      window.scrollTo(0, savedPos);
-      attempts++;
-      // Retry a few times as content may still be loading
-      if (attempts < 5) requestAnimationFrame(tryRestore);
-    };
-    requestAnimationFrame(tryRestore);
+    // Hand off save+restore of scroll positions to the dedicated hook.
+    onTabChangeScroll(tab);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- markNotificationsSeen declared after this hook (forward ref)
-  }, [startTabTransition]);
-  // Continuously save scroll position for current tab so it's always up-to-date
-  useEffect(() => {
-    let ticking = false;
-    const onScroll = () => {
-      if (!ticking) {
-        ticking = true;
-        requestAnimationFrame(() => {
-          tabScrollPositions.current.set(activeTab, window.scrollY);
-          scheduleScrollPersist();
-          setScrolledFromTop(window.scrollY > 0);
-          ticking = false;
-        });
-      }
-    };
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => window.removeEventListener('scroll', onScroll);
-  }, [activeTab, scheduleScrollPersist]);
-
-  // On initial mount, restore scroll position from sessionStorage after content renders.
-  // Mobile browsers may evict the page when backgrounded — when it reloads, content
-  // takes time to arrive from relays. We retry with escalating delays (up to 5s total)
-  // so the scroll restore succeeds once the document is tall enough.
-  useEffect(() => {
-    const savedPos = tabScrollPositions.current.get(activeTab) ?? 0;
-    if (savedPos <= 0) return;
-    let cancelled = false;
-    // Phase 1: quick rAF burst for fast restores
-    let rAFCount = 0;
-    const tryRAF = () => {
-      if (cancelled) return;
-      window.scrollTo(0, savedPos);
-      rAFCount++;
-      if (Math.abs(window.scrollY - savedPos) < 20) return;
-      if (rAFCount < 8) requestAnimationFrame(tryRAF);
-    };
-    requestAnimationFrame(tryRAF);
-    // Phase 2: slower polling for content-dependent restores (mobile bg return)
-    const pollTimer = setInterval(() => {
-      if (cancelled) return;
-      if (document.body.scrollHeight >= savedPos + window.innerHeight * 0.5) {
-        window.scrollTo(0, savedPos);
-        clearInterval(pollTimer);
-      }
-    }, 200);
-    // Give up after 5s
-    const giveUpTimer = setTimeout(() => { clearInterval(pollTimer); }, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(pollTimer);
-      clearTimeout(giveUpTimer);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Only on mount
-
-  // Also restore scroll position when returning from background (visibilitychange)
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'visible') return;
-      const savedPos = tabScrollPositions.current.get(activeTabRef2.current) ?? 0;
-      if (savedPos > 0 && Math.abs(window.scrollY - savedPos) > 50) {
-        // Content may have been re-rendered; nudge scroll back
-        requestAnimationFrame(() => window.scrollTo(0, savedPos));
-      }
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, []);
+  }, [startTabTransition, onTabChangeScroll]);
 
   const [defaultColumnCount, _setDefaultColumnCount] = usePlatformStorage<number>(STORAGE_KEYS.DEFAULT_COLUMN_COUNT, 3);
   const [featuresModalOpen, setFeaturesModalOpen] = useState(false);
   const [addAccountDialogOpen, setAddAccountDialogOpen] = useState(false);
-  // Track login count so we detect when a new account is added.
-  // When a second account is added, force a reload to trigger backup restore
-  // and land on the 'me' tab for the new account.
-  const prevLoginCountRef = useRef(allLogins.length);
-  const prevUserPubkeyRef = useRef(user?.pubkey);
-  useEffect(() => {
-    const prevCount = prevLoginCountRef.current;
-    const prevPubkey = prevUserPubkeyRef.current;
-    prevLoginCountRef.current = allLogins.length;
-    prevUserPubkeyRef.current = user?.pubkey;
-    // Detect new login added (count increased) with multiple accounts
-    if (allLogins.length > prevCount && allLogins.length > 1) {
-      setAddAccountDialogOpen(false);
-      // @nostrify/react auto-activates the new login, so user?.pubkey may
-      // already be the new account. If so, we need to do the storage swap
-      // and reload manually since switchToAccount guards against same-pubkey.
-      if (user?.pubkey && user.pubkey !== prevPubkey && prevPubkey) {
-        // New account is already active in @nostrify — just do the storage swap + reload
-        switchActiveUser(prevPubkey, user.pubkey);
-        window.location.reload();
-      } else {
-        // Fallback: explicitly switch to the newest login
-        const newestLogin = allLogins[allLogins.length - 1];
-        if (newestLogin) switchToAccount(newestLogin.id);
-      }
-    }
-  }, [allLogins, user?.pubkey, switchToAccount]);
-  const [scrolledFromTop, setScrolledFromTop] = useState(false);
+  // Detect newly-added accounts and ensure user.pubkey moves so useAccountIsolation
+  // can do the storage swap + reload. Extracted into useAccountSwitchEffect.
+  useAccountSwitchEffect({
+    allLogins,
+    pubkey: user?.pubkey,
+    switchToAccount,
+    onAccountAdded: () => setAddAccountDialogOpen(false),
+  });
+  // scrolledFromTop declared above (lifted up for useScrollPersistence callback)
   // Mobile account menu auto-close after 4s
   const [mobileAccountOpen, setMobileAccountOpen] = useState(false);
   const mobileAccountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1166,29 +1030,16 @@ export function MultiColumnClient() {
   useEffect(() => { if (canLoadNotes) setProfileFetchEnabled(true); }, [canLoadNotes]);
 
 
-  // Auto-restore best checkpoint when login check finds backups.
-  // Picks by: most saved notes > most dismissed > newest timestamp. Fires once.
-  const loginRestoreDone = useRef(false);
-  useEffect(() => {
-    if (loginRestoreDone.current) return;
-    if (!backupCheckSettled || backupStatus !== 'found') return;
-    if (!checkpoints.length) return;
-    loginRestoreDone.current = true;
-
-    // Prefer checkpoints that have at least some data; fall back to all if none have stats.
-    const withData = checkpoints.filter(cp =>
-      (cp.stats?.corkboards ?? 0) > 0 ||
-      (cp.stats?.savedForLater ?? 0) > 0 ||
-      (cp.stats?.dismissed ?? 0) > 0
-    );
-    // Always pick the newest — it's the user's most recent state.
-    const best = (withData.length > 0 ? withData : checkpoints)
-      .reduce((a, b) => b.timestamp > a.timestamp ? b : a);
-    // Skip restore if local backup is already at or ahead of this checkpoint.
-    if (lastBackupTs && lastBackupTs >= best.timestamp) return;
-    loadCheckpointFn(best);
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- lastBackupTs changes after loadCheckpointFn runs; including it would re-trigger the restore
-  }, [backupCheckSettled, backupStatus, checkpoints, loadCheckpointFn]);
+  // Auto-restore best checkpoint when login check finds backups — extracted
+  // into a focused hook so the safety logic (never clobber live local data)
+  // can't be accidentally bypassed by future refactors.
+  useAutoRestoreGuard({
+    backupCheckSettled,
+    backupStatus,
+    checkpoints,
+    lastBackupTs,
+    loadCheckpoint: loadCheckpointFn,
+  });
 
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
   const [showBackupConfirm, setShowBackupConfirm] = useState(false);
@@ -1227,155 +1078,44 @@ export function MultiColumnClient() {
     }
   }, [user]);
 
-  // Auto-save: triggers 30s after the last data change.
-  // Polls every 30s to check if unsaved changes exist and enough time has passed.
-  // Also triggers immediately on visibilitychange to 'hidden' (tab switch, mobile bg).
-  // SAFETY: auto-save is blocked for 2 minutes after page load to prevent overwriting
-  // a good cloud backup with empty/stale state after an unexpected page refresh.
-  const pageLoadTime = useRef(Date.now());
+  // Track whether the first login splash has resolved. Used below to decide
+  // whether to remount the splash on subsequent backupStatus transitions.
   const initialLoginDoneRef = useRef(false);
-  useEffect(() => {
-    if (!user || !backupCheckSettled) return;
 
-    const MIN_BLOSSOM_INTERVAL_MS = 30 * 1000;
-    let changeDetectedAt: number | null = null;
+  // Auto-save orchestration — extracted into useAutoSaveTrigger so the
+  // three safety gates (page-load cooldown, inter-save min, change-detection
+  // debounce) are co-located and unit-testable. See the hook for details.
+  useAutoSaveTrigger({
+    enabled: !!user && backupCheckSettled,
+    backupStatus,
+    lastBackupTs: lastBackupTs ?? 0,
+    hasUnsavedChanges,
+    autoSaveBackup,
+    setBackupIndicator,
+    toast,
+    cooldownMs: AUTO_SAVE_COOLDOWN_MS,
+  });
 
-    const triggerBlossomIfReady = (source: string) => {
-      // Never auto-save while a restore is in progress or just found.
-      if (backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored') {
-        debugLog(`[AutoSave] skip (${source}): backup ${backupStatus}, waiting for restore to complete`);
-        return;
-      }
-      // Block auto-save shortly after page load — prevents overwriting good state
-      // when the page refreshes and loads with empty/default IDB before restore completes.
-      const msSinceLoad = Date.now() - pageLoadTime.current;
-      if (msSinceLoad < AUTO_SAVE_COOLDOWN_MS) {
-        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceLoad / 1000)}s since page load, need ${AUTO_SAVE_COOLDOWN_MS / 1000}s cooldown`);
-        return;
-      }
-      const lastUploadMs = (lastBackupTs ?? 0) * 1000;
-      const msSinceLast = Date.now() - lastUploadMs;
-      if (msSinceLast < MIN_BLOSSOM_INTERVAL_MS) {
-        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceLast / 1000)}s since last upload, need ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
-        return;
-      }
-      if (!hasUnsavedChanges()) {
-        changeDetectedAt = null;
-        return;
-      }
-      // First time we see unsaved changes — record the timestamp
-      if (changeDetectedAt === null) {
-        changeDetectedAt = Date.now();
-        setBackupIndicator('unsaved');
-        debugLog(`[AutoSave] changes detected (${source}), will save in ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
-        return;
-      }
-      // Wait 2 minutes from when changes were first detected
-      const msSinceChange = Date.now() - changeDetectedAt;
-      if (msSinceChange < MIN_BLOSSOM_INTERVAL_MS) {
-        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceChange / 1000)}s since change, need ${MIN_BLOSSOM_INTERVAL_MS / 1000}s`);
-        return;
-      }
-      debugLog(`[AutoSave] triggering (${source})`);
-      changeDetectedAt = null;
-      autoSaveBackup().then((saved) => {
-        if (saved) {
-          setBackupIndicator('saved');
-        } else {
-          debugWarn('[AutoSave] Blossom upload failed');
-          toast({
-            title: 'Auto-save failed',
-            description: 'Could not save to Blossom. Use the backup menu to retry or download a local copy.',
-            variant: 'destructive',
-          });
-        }
-      }).catch((e) => debugWarn('[AutoSave] Unexpected error during Blossom auto-save:', e));
-    };
-
-    // Force-save on app background/close — but only after the cooldown period.
-    const onVisibilityHidden = () => {
-      if (document.visibilityState === 'hidden' && hasUnsavedChanges() && Date.now() - pageLoadTime.current >= AUTO_SAVE_COOLDOWN_MS) {
-        debugLog('[AutoSave] forcing save on background (cross-device sync)');
-        autoSaveBackup().catch(e => debugWarn('[AutoSave] bg save failed:', e));
-      }
-    };
-    const onBeforeUnload = () => {
-      if (hasUnsavedChanges() && Date.now() - pageLoadTime.current >= AUTO_SAVE_COOLDOWN_MS) {
-        autoSaveBackup().catch(e => debugWarn('[AutoSave] close save failed:', e));
-      }
-    };
-
-    // Poll every 30s to detect changes and trigger save after 30s
-    const pollInterval = setInterval(() => triggerBlossomIfReady('poll-30s'), 30_000);
-
-    document.addEventListener('visibilitychange', onVisibilityHidden);
-    window.addEventListener('beforeunload', onBeforeUnload);
-    // Initial check
-    triggerBlossomIfReady('mount');
-    return () => {
-      clearInterval(pollInterval);
-      document.removeEventListener('visibilitychange', onVisibilityHidden);
-      window.removeEventListener('beforeunload', onBeforeUnload);
-    };
-  }, [user, backupCheckSettled, backupStatus, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast]);
-
-  // Auto-restore after returning from 5+ min of TRUE idle (tab hidden, not just
-  // scrolling or watching a video). Fires once per return — not repeatedly.
+  // Idle-return cloud-backup check — extracted into useIdleAutoRestoreCheck.
+  // Suggests (never silently applies) a restore when returning from 5+ min idle
+  // and the cloud has substantially more progress than local.
   const [autoRestoreTarget, setAutoRestoreTarget] = useState<{ checkpoint: typeof checkpoints[0]; reason: string } | null>(null);
-  const [autoRestoreCountdown, setAutoRestoreCountdown] = useState<number | null>(null);
-  const idleCheckDoneRef = useRef(false);
+  useIdleAutoRestoreCheck({
+    enabled: !!user,
+    checkRemoteBackup,
+    getCheckpoints,
+    dismissedCount,
+    onSuggestRestore: setAutoRestoreTarget,
+  });
 
-  useEffect(() => {
-    if (!user) return;
-    let lastHidden = 0;
-    const onVisChange = () => {
-      if (document.visibilityState === 'hidden') {
-        lastHidden = Date.now();
-        idleCheckDoneRef.current = false; // reset so next return can check
-      } else if (document.visibilityState === 'visible' && lastHidden > 0 && !idleCheckDoneRef.current) {
-        const awayMs = Date.now() - lastHidden;
-        if (awayMs >= 5 * 60 * 1000) {
-          idleCheckDoneRef.current = true; // only once per return
-          // Silent background check — find newest checkpoint and auto-restore if ahead
-          checkRemoteBackup(true).then(() => {
-            const cps = getCheckpoints();
-            if (!cps.length) return;
-            let best: typeof cps[0] | null = null;
-            let bestDismissed = dismissedCount;
-            for (const cp of cps) {
-              const d = cp.stats?.dismissed ?? 0;
-              if (d > bestDismissed) { best = cp; bestDismissed = d; }
-            }
-            if (best && (bestDismissed - dismissedCount) > 5) {
-              setAutoRestoreTarget({ checkpoint: best, reason: `Newer backup found (${bestDismissed - dismissedCount} more dismissed)` });
-            }
-          });
-        }
-      }
-    };
-    document.addEventListener('visibilitychange', onVisChange);
-    return () => document.removeEventListener('visibilitychange', onVisChange);
-  }, [user, checkRemoteBackup, getCheckpoints, dismissedCount]);
-
-  // Countdown timer for auto-restore
-  useEffect(() => {
-    if (!autoRestoreTarget) { setAutoRestoreCountdown(null); return; }
-    setAutoRestoreCountdown(5);
-    const timer = setInterval(() => {
-      setAutoRestoreCountdown(prev => {
-        if (prev === null || prev <= 1) { clearInterval(timer); return 0; }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [autoRestoreTarget]);
-
-  // Auto-load when countdown hits 0
-  useEffect(() => {
-    if (autoRestoreCountdown !== 0 || !autoRestoreTarget) return;
-    loadCheckpointFn(autoRestoreTarget.checkpoint);
-    setAutoRestoreTarget(null);
-  }, [autoRestoreCountdown, autoRestoreTarget, loadCheckpointFn]);
+  // Visible 5-second countdown then auto-fire the restore — extracted hook
+  // owns both the countdown state and the elapsed-callback to keep the auto-
+  // restore safety logic colocated.
+  const { countdown: autoRestoreCountdown } = useAutoRestoreCountdown({
+    target: autoRestoreTarget,
+    onElapsed: (t) => loadCheckpointFn(t.checkpoint),
+    clearTarget: () => setAutoRestoreTarget(null),
+  });
 
   // Theme management
   const { theme, setTheme } = useTheme();
@@ -2629,6 +2369,7 @@ export function MultiColumnClient() {
     friendNotes,
     onMeTabNotesLoaded: handleMeTabNotesLoaded,
     showOwnNotes,
+    isDismissed,
   });
 
   // Wire the pagination setBatchProgress to the stable ref so feed hooks can call it
@@ -2636,51 +2377,16 @@ export function MultiColumnClient() {
     batchProgressCallbackRef.current = _paginationSetBatchProgressInternal;
   }, [_paginationSetBatchProgressInternal]);
 
-  // Autofetch interval: uses stored interval (default 120s)
-  const loadNewerRef = useRef(loadNewerNotes);
-  loadNewerRef.current = loadNewerNotes;
-  const isLoadingRef = useRef(false);
-  isLoadingRef.current = isLoadingMore || isLoadingNewer;
-  const autofetchTickRef = useRef(0);
-  const [lastAutofetchTime, setLastAutofetchTime] = useState<number>(0);
-  useEffect(() => {
-    if (!autofetch) return;
-    autofetchTickRef.current = 0;
-    // Fetch immediately when autofetch is turned on
-    if (!isLoadingRef.current) {
-      loadNewerRef.current();
-    }
-    setLastAutofetchTime(Date.now());
-    const intervalMs = autofetchIntervalSecs * 1000;
-    const timer = setInterval(() => {
-      // Don't fetch when tab is hidden — no point loading notes nobody sees,
-      // and it hammers relays that may be down (231 failures overnight from this).
-      if (document.visibilityState === 'hidden') return;
-      if (autofetchRef.current && !isLoadingRef.current) {
-        loadNewerRef.current();
-        setLastAutofetchTime(Date.now());
-        // Refresh notification count every other auto-fetch tick
-        if (++autofetchTickRef.current % 2 === 0) {
-          queryClient.invalidateQueries({ queryKey: ['notification-count'] });
-        }
-      }
-    }, intervalMs);
-    return () => clearInterval(timer);
-  }, [autofetch, autofetchIntervalSecs, queryClient]);
-
-  // Autofetch on tab/corkboard switch
-  const prevTabRef = useRef(activeTab);
-  useEffect(() => {
-    if (autofetchRef.current && activeTab !== prevTabRef.current) {
-      prevTabRef.current = activeTab;
-      // Small delay to let the tab settle before fetching
-      const t = setTimeout(() => {
-        if (autofetchRef.current) loadNewerNotes();
-      }, 500);
-      return () => clearTimeout(t);
-    }
-    prevTabRef.current = activeTab;
-  }, [activeTab, loadNewerNotes]);
+  // Autofetch extracted into useAutoFetch — interval, visibility gating,
+  // and tab-switch re-trigger all live there. Three relay-storm bugs traced
+  // to inline autofetch; centralizing makes regressions less likely.
+  const { lastAutofetchTime } = useAutoFetch({
+    enabled: !!autofetch,
+    intervalSecs: autofetchIntervalSecs,
+    activeTab,
+    isLoadingAny: isLoadingMore || isLoadingNewer,
+    loadNewer: loadNewerNotes,
+  });
 
   // Track when RSS should be refetched (for load more functionality)
   const [rssRefetchTrigger, setRssRefetchTrigger] = useState(0);
@@ -3128,48 +2834,15 @@ export function MultiColumnClient() {
   }, [activeTab, userNotes, friendNotes, relayNotes, customFeedNotes, stableDiscoverNotes, allFollowsNotes, rssNotes, isRelayTab, isCustomFeedTab, isLoadingCustomFeedNotes, isDiscoverTab, isAllFollowsTab, isRssTab, pinnedNoteEvents, showOwnNotes, newerNotes, mutedPubkeys, followNotesCache, pinnedIdSet, user?.pubkey, collapseReactions, isFriendTab, activeCustomFeed?.pubkeys?.length]);
 
   // ── Bulk Author Prefetch ─────────────────────────────────────────────────────
-  // Prefetch author profiles for notes being displayed (up to feedLimit).
-  // This populates React Query cache so NoteCards render avatars instantly.
-  const { prefetchFromNotes } = useBulkAuthors();
-  const prefetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    // Debounce prefetch to avoid rapid-fire calls when notes change
-    if (prefetchTimeoutRef.current) {
-      clearTimeout(prefetchTimeoutRef.current);
-    }
-    if (!canLoadNotes) return; // Don't prefetch during splash
-
-    prefetchTimeoutRef.current = setTimeout(() => {
-      const notesToPrefetch = deduplicatedNotes.slice(0, feedLimit);
-      if (notesToPrefetch.length > 0) {
-        prefetchFromNotes(notesToPrefetch).catch(err => {
-          debugWarn('[MultiColumnClient] Bulk author prefetch failed:', err);
-        });
-      }
-    }, 50); // 50ms debounce — fire fast so profiles arrive before individual useAuthor calls
-
-    return () => {
-      if (prefetchTimeoutRef.current) {
-        clearTimeout(prefetchTimeoutRef.current);
-      }
-    };
-  }, [deduplicatedNotes, feedLimit, prefetchFromNotes, canLoadNotes]);
-
-  // ── Background prefetch for All Follows notes ────────────────────────────────
-  // Eagerly populate the React Query author cache when follow notes first load,
-  // even while the user is on a different tab. This prevents 60+ simultaneous
-  // useAuthor network fetches (and potential WebKit crash) when they switch to
-  // the All Follows tab and all NoteCards render at once.
-  const allFollowsPrefetchKeyRef = useRef('');
-  useEffect(() => {
-    if (!canLoadNotes || !allFollowsNotes || allFollowsNotes.length === 0) return;
-    // Fingerprint on the first 30 note IDs to detect when the feed changes
-    const key = allFollowsNotes.slice(0, 30).map(n => n.id).join(',');
-    if (key === allFollowsPrefetchKeyRef.current) return;
-    allFollowsPrefetchKeyRef.current = key;
-    prefetchFromNotes(allFollowsNotes.slice(0, feedLimit)).catch(() => {});
-  }, [allFollowsNotes, feedLimit, prefetchFromNotes, canLoadNotes]);
+  // Extracted into useBulkAuthorPrefetch — handles both the debounced "visible
+  // notes" prefetch and the eager all-follows background prefetch with the
+  // fingerprint guard against redundant fires.
+  useBulkAuthorPrefetch({
+    displayedNotes: deduplicatedNotes,
+    allFollowsNotes,
+    feedLimit,
+    enabled: canLoadNotes,
+  });
 
   // ── Lazy engagement fetch: query reactions/reposts/zaps for visible notes ──
   // Fires once after feed loads, single batched query, respects rate limiting.
@@ -4717,7 +4390,7 @@ export function MultiColumnClient() {
             <span>{autoRestoreTarget.reason} — loading in {autoRestoreCountdown}s</span>
             <button
               className="text-white/80 hover:text-white font-medium underline"
-              onClick={() => { setAutoRestoreTarget(null); setAutoRestoreCountdown(null); }}
+              onClick={() => setAutoRestoreTarget(null)}
             >Cancel</button>
           </div>
         )}
@@ -4880,8 +4553,8 @@ export function MultiColumnClient() {
               dismissedCount={dismissedCount}
               onClearDismissed={() => { clearDismissed(); setAdvancedSettingsOpen(false); }}
               onOpenProfileCache={() => { setAdvancedSettingsOpen(false); setProfileCacheSettingsOpen(true); }}
-              publishClientTag={appConfig.publishClientTag !== false}
-              onToggleClientTag={() => updateConfig(c => ({ ...c, publishClientTag: !(c.publishClientTag !== false) }))}
+              publishClientTag={appConfig.publishClientTag === true}
+              onToggleClientTag={() => updateConfig(c => ({ ...c, publishClientTag: !(c.publishClientTag === true) }))}
               publicBookmarks={publicBookmarks}
               onTogglePublicBookmarks={() => { if (publicBookmarks) { setPublicBookmarks(false); setTimeout(republishBookmarks, 500); } else { setPublicBookmarks(true); setTimeout(republishBookmarks, 500); } }}
               onDeleteAccount={() => { setAdvancedSettingsOpen(false); setShowVanishConfirm(true); }}

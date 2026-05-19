@@ -4,7 +4,7 @@
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { NSchema as n } from '@nostrify/nostrify';
-import type { NostrEvent, NostrMetadata } from '@nostrify/nostrify';
+import type { NostrEvent, NostrFilter, NostrMetadata } from '@nostrify/nostrify';
 import { useNostr, FALLBACK_RELAYS } from '../lib/NostrProvider';
 import { getCachedProfile, cacheProfile } from '../lib/cacheStore';
 
@@ -38,8 +38,8 @@ interface AuthorResult {
 }
 
 interface NostrPool {
-  query: (filters: unknown[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]>;
-  relay: (url: string) => { query: (filters: unknown[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]> };
+  query: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]>;
+  relay: (url: string) => { query: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]> };
 }
 
 const CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24h — keep in sync with web

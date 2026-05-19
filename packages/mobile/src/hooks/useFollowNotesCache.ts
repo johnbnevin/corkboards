@@ -7,7 +7,7 @@
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '../lib/NostrProvider';
-import { batchFetchByAuthors, deduplicateAndSort } from '../lib/feedUtils';
+import { batchFetchByAuthors } from '../lib/feedUtils';
 import { mobileStorage } from '../storage/MmkvStorage';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useMemo, useCallback, useEffect, useRef } from 'react';

@@ -11,7 +11,6 @@ import {
   View,
   Text,
   TouchableOpacity,
-  ActivityIndicator,
   StyleSheet,
 } from 'react-native';
 import { nip19 } from 'nostr-tools';

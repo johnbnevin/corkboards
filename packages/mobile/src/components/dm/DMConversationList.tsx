@@ -136,7 +136,7 @@ interface DMConversationListProps {
 export function DMConversationList({ onSelectConversation, onStatusPress }: DMConversationListProps) {
   const { pubkey } = useAuth();
   const { conversations, isLoading } = useConversations();
-  const { data: contacts } = useContacts(pubkey);
+  const { data: contacts } = useContacts(pubkey ?? undefined);
   const [activeTab, setActiveTab] = useState<TabId>('active');
 
   // Enrich conversations with isKnown/isRequest based on whether the user

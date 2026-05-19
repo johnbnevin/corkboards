@@ -206,15 +206,19 @@ export const FeedGrid = React.memo(function FeedGrid({
   const maxColLength = Math.max(...columns.map(c => c.length), 0);
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_PER_COL);
 
-  // Reset render limit when the underlying data changes (tab switch, new data)
-  const columnsFingerprint = columns.map(col => col[0]?.id ?? '').join(',');
-  const prevColumnsFingerprint = useRef(columnsFingerprint);
+  // Reset render limit when the underlying data changes (tab switch, new data).
+  // We compare the first id of each column individually instead of joining into
+  // a string — string-join allocated O(n) per render on a hot path.
+  const prevFirstColumnIds = useRef<readonly (string | undefined)[]>([]);
   useEffect(() => {
-    if (columnsFingerprint !== prevColumnsFingerprint.current) {
-      prevColumnsFingerprint.current = columnsFingerprint;
+    const cur = columns.map(col => col[0]?.id);
+    const prev = prevFirstColumnIds.current;
+    const changed = cur.length !== prev.length || cur.some((id, i) => id !== prev[i]);
+    if (changed) {
+      prevFirstColumnIds.current = cur;
       setRenderLimit(INITIAL_RENDER_PER_COL);
     }
-  }, [columnsFingerprint]);
+  }, [columns]);
 
   // Expand render window when user scrolls near the bottom
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -240,21 +244,22 @@ export const FeedGrid = React.memo(function FeedGrid({
 
   // Detect when notes rearrange (new notes prepended / order changes) and briefly
   // suppress pointer events so the user doesn't misclick during layout shift.
+  // Compare per-column first-ids without joining into a fingerprint string.
   const gridRef = useRef<HTMLDivElement>(null);
-  const prevFirstIds = useRef<string>('');
+  const prevVisibleFirstIds = useRef<readonly (string | undefined)[]>([]);
   const lockoutTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  // Build a fingerprint from the first note ID in each column
-  const firstIdsFingerprint = visibleColumns.map(col => col[0]?.id ?? '').join(',');
-
   useEffect(() => {
-    // Skip the initial render and empty states
-    if (!firstIdsFingerprint || !prevFirstIds.current) {
-      prevFirstIds.current = firstIdsFingerprint;
+    const cur = visibleColumns.map(col => col[0]?.id);
+    const prev = prevVisibleFirstIds.current;
+    // Skip initial render and empty states
+    if (prev.length === 0 || cur.every(id => id === undefined)) {
+      prevVisibleFirstIds.current = cur;
       return;
     }
-    if (firstIdsFingerprint !== prevFirstIds.current) {
-      prevFirstIds.current = firstIdsFingerprint;
+    const changed = cur.length !== prev.length || cur.some((id, i) => id !== prev[i]);
+    if (changed) {
+      prevVisibleFirstIds.current = cur;
       if (gridRef.current) {
         gridRef.current.style.pointerEvents = 'none';
         clearTimeout(lockoutTimer.current);
@@ -263,7 +268,7 @@ export const FeedGrid = React.memo(function FeedGrid({
         }, REARRANGE_LOCKOUT_MS);
       }
     }
-  }, [firstIdsFingerprint]);
+  }, [visibleColumns]);
 
   // Cleanup on unmount
   useEffect(() => () => clearTimeout(lockoutTimer.current), []);

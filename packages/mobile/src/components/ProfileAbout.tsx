@@ -4,10 +4,15 @@
  * Mirrors web's ProfileAbout.tsx.
  */
 import { useMemo } from 'react';
-import { Text, StyleSheet, Linking, TouchableOpacity } from 'react-native';
+import { Text, StyleSheet } from 'react-native';
 import { nip19 } from 'nostr-tools';
 import { hasHtmlContent } from '@core/sanitizeUtils';
 import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr';
+
+/** Lightweight nip-19 validity check — keeps JSX construction out of try/catch. */
+function isValidNip19(id: string): boolean {
+  try { nip19.decode(id); return true; } catch { return false; }
+}
 
 interface ProfileAboutProps {
   about?: string;
@@ -49,39 +54,21 @@ export function ProfileAbout({ about, style }: ProfileAboutProps) {
       }
 
       if (nostrPrefix1 && nostrData1) {
-        // nostr: prefixed identifier
-        try {
-          const nostrId = `${nostrPrefix1}${nostrData1}`;
-          nip19.decode(nostrId);
-          parts.push(
-            <Text key={`n-${keyCounter++}`} style={styles.nostrLink}>
-              {fullMatch}
-            </Text>,
-          );
-        } catch {
-          parts.push(
-            <Text key={`n-${keyCounter++}`} style={styles.text}>
-              {fullMatch}
-            </Text>,
-          );
-        }
+        // nostr: prefixed identifier — validity-check outside JSX construction
+        // so the eslint react-hooks/error-boundaries rule doesn't flag this.
+        const valid = isValidNip19(`${nostrPrefix1}${nostrData1}`);
+        parts.push(
+          <Text key={`n-${keyCounter++}`} style={valid ? styles.nostrLink : styles.text}>
+            {fullMatch}
+          </Text>,
+        );
       } else if (nostrPrefix2 && nostrData2) {
-        // Non-prefixed identifier
-        try {
-          const nostrId = `${nostrPrefix2}${nostrData2}`;
-          nip19.decode(nostrId);
-          parts.push(
-            <Text key={`n-${keyCounter++}`} style={styles.nostrLink}>
-              {fullMatch}
-            </Text>,
-          );
-        } catch {
-          parts.push(
-            <Text key={`n-${keyCounter++}`} style={styles.text}>
-              {fullMatch}
-            </Text>,
-          );
-        }
+        const valid = isValidNip19(`${nostrPrefix2}${nostrData2}`);
+        parts.push(
+          <Text key={`n-${keyCounter++}`} style={valid ? styles.nostrLink : styles.text}>
+            {fullMatch}
+          </Text>,
+        );
       } else if (hashtagName) {
         parts.push(
           <Text key={`h-${keyCounter++}`} style={styles.hashtag}>
@@ -93,10 +80,10 @@ export function ProfileAbout({ about, style }: ProfileAboutProps) {
       lastIndex = index + fullMatch.length;
     }
 
-    // Remaining text
+    // Remaining text — final segment, post-increment of keyCounter would be a no-op
     if (lastIndex < text.length) {
       parts.push(
-        <Text key={`t-${keyCounter++}`} style={styles.text}>
+        <Text key={`t-${keyCounter}`} style={styles.text}>
           {text.substring(lastIndex)}
         </Text>,
       );

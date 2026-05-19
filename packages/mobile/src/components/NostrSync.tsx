@@ -5,7 +5,7 @@
  * Port of packages/web/src/components/NostrSync.tsx for React Native.
  * Also integrates custom feeds sync and dismissed notes sync.
  */
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
@@ -26,12 +26,16 @@ export function NostrSync({ showStatus = false }: NostrSyncProps) {
   const { config, updateConfig } = useAppContext();
   const lastQueriedUpdatedAt = useRef<number>(-1);
 
-  const { save: saveFeedsSync, load: loadFeedsSync } = useNostrCustomFeedsSync();
-  const { save: saveDismissedSync, load: loadDismissedSync } = useNostrDismissedSync();
+  // Sync hooks are intentionally called for their side effects (kind:30078
+  // subscriptions) even though save/load aren't invoked from this component.
+  const { save: _saveFeedsSync, load: _loadFeedsSync } = useNostrCustomFeedsSync();
+  const { save: _saveDismissedSync, load: _loadDismissedSync } = useNostrDismissedSync();
 
   const [relaySyncState, setRelaySyncState] = useState<SyncState>('idle');
-  const [feedsSyncState, setFeedsSyncState] = useState<SyncState>('idle');
-  const [dismissedSyncState, setDismissedSyncState] = useState<SyncState>('idle');
+  // feeds/dismissed state setters reserved for future wiring (the hooks above
+  // already drive the actual sync work).
+  const [feedsSyncState, _setFeedsSyncState] = useState<SyncState>('idle');
+  const [dismissedSyncState, _setDismissedSyncState] = useState<SyncState>('idle');
 
   // Sync NIP-65 relay list
   useEffect(() => {

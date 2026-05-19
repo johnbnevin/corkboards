@@ -94,11 +94,13 @@ export function useCollapsedNotes() {
   const dismissedSet = useMemo(() => new Set(dismissedIds), [dismissedIds]);
   const softDismissedSet = useMemo(() => new Set(softDismissedIds), [softDismissedIds]);
 
-  // Auto-cleanup on mount
+  // Auto-cleanup on mount — one-shot via hasCleanedUp.current, so the v7
+  // set-state-in-effect warning here is a false positive (no cascade possible).
   useEffect(() => {
     if (!hasCleanedUp.current) {
       hasCleanedUp.current = true;
       if (collapsedIds.length > MAX_COLLAPSED_NOTES) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setCollapsedIds(collapsedIds.slice(-MAX_COLLAPSED_NOTES));
       }
       if (dismissedIds.length > MAX_DISMISSED_NOTES) {

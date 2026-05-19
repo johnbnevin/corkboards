@@ -18,7 +18,7 @@ import {
   Platform,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { nip19, getPublicKey, generateSecretKey } from 'nostr-tools';
+import { nip19 } from 'nostr-tools';
 import { privateKeyFromSeedWords, validateWords, generateSeedWords } from 'nostr-tools/nip06';
 import { useAuth } from '../lib/AuthContext';
 import { useNostr } from '../lib/NostrProvider';
@@ -479,9 +479,6 @@ const styles = StyleSheet.create({
     alignItems: 'center', marginBottom: 8,
   },
   optionText: { color: '#f97316', fontSize: 14, fontWeight: '500' },
-
-  cancelBtn: { padding: 14, alignItems: 'center', marginTop: 8 },
-  cancelText: { color: '#b3b3b3', fontSize: 15 },
 
   backBtn: { marginBottom: 16 },
   backText: { color: '#b3b3b3', fontSize: 14 },

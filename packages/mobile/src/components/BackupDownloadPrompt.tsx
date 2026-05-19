@@ -30,8 +30,11 @@ export function BackupDownloadPrompt({ visible, onClose }: BackupDownloadPromptP
       const { json, filename } = await createBackup();
       // Attempt native sharing -- fallback to an alert with instructions
       try {
-        const Sharing = require('expo-sharing');
-        const FileSystem = require('expo-file-system');
+        // Optional native modules — wrapped to fall back gracefully when not present.
+        // @ts-expect-error optional dependency without bundled types
+        const Sharing = await import('expo-sharing');
+        // @ts-expect-error optional dependency without bundled types
+        const FileSystem = await import('expo-file-system');
         const path = `${FileSystem.cacheDirectory}${filename}`;
         await FileSystem.writeAsStringAsync(path, json);
         await Sharing.shareAsync(path, { mimeType: 'application/json' });

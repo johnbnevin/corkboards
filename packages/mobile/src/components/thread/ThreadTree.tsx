@@ -128,16 +128,21 @@ export function ThreadTree({
   const { isBookmarked, toggleBookmark } = useBookmarks();
   const flatListRef = useRef<FlatList<FlatThreadRow>>(null);
 
-  // Scroll to target event on mount
+  // Scroll to target event on first load (rows became non-empty). We only
+  // care about the empty→non-empty transition, not subsequent row mutations,
+  // so we use a boolean derived ahead of the dep array.
+  const hasRows = rows.length > 0;
   useEffect(() => {
-    if (!targetId || rows.length === 0) return;
+    if (!targetId || !hasRows) return;
     const idx = rows.findIndex((r) => r.node.event.id === targetId);
     if (idx >= 0) {
       setTimeout(() => {
         flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.3 });
       }, 300);
     }
-  }, [rows.length > 0, targetId]); // only on first load
+  // rows intentionally excluded — only fires on first-load transition
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasRows, targetId]);
 
   // Auto-scroll to a just-posted reply so the user sees it immediately
   const lastScrolledReply = useRef<string | null>(null);

@@ -86,6 +86,8 @@ export function usePinnedNotes() {
     staleTime: 5 * 60 * 1000,
   });
 
+  // Sync local pinned-ids state when relay data arrives — hydration pattern.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!pinListResult) return;
     if (pinListResult.ids.length > 0) {
@@ -99,6 +101,7 @@ export function usePinnedNotes() {
       });
     }
   }, [pinListResult]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const pinnedNotesStatus: 'loading' | 'found' | 'none' | 'no-list' = isLoadingPinList ? 'loading' : (pinListResult?.status ?? 'no-list');
 

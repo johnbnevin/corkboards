@@ -32,6 +32,7 @@ export function ReactorAvatar({ pubkey }: { pubkey: string }) {
 
 // ── Resolve reaction emoji ────────────────────────────────────────────────
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function resolveReactionEmoji(r: NostrEvent): { key: string; render: React.ReactNode } | null {
   const content = r.content || '+'
   if (content === '+') return { key: '❤️', render: <span className="text-sm leading-none">❤️</span> }

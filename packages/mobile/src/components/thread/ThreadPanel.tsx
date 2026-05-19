@@ -25,7 +25,7 @@ interface ThreadPanelProps {
   onNavigateThread?: (eventId: string) => void;
 }
 
-export function ThreadPanel({ eventId, onClose, onNavigateThread }: ThreadPanelProps) {
+export function ThreadPanel({ eventId, onClose, onNavigateThread: _onNavigateThread }: ThreadPanelProps) {
   const {
     rows,
     isLoading,

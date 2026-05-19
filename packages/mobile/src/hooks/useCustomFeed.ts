@@ -12,7 +12,7 @@ import { useNostr } from '../lib/NostrProvider';
 import { FEED_KINDS } from '@core/feedConstants';
 import { baseTimeWindow } from '@core/rss';
 import { fetchRssFeed, rssItemsToEvents, rssItemId } from '../lib/feedUtils';
-import type { NostrEvent } from '@nostrify/nostrify';
+import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
 
 export interface CustomFeedDef {
   id: string;
@@ -39,7 +39,7 @@ const MAX_AUTHORS_PER_QUERY = 500;
  * (no separate feedUtils on mobile yet).
  */
 async function batchFetchByAuthors(opts: {
-  nostr: { query: (filters: unknown[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]> };
+  nostr: { query: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]> };
   authors: string[];
   limit: number;
   since?: number;
@@ -155,10 +155,14 @@ export function useCustomFeed({
                 ? { kinds, authors: feed.pubkeys, limit }
                 : { kinds, limit };
 
-            // Query each custom relay individually
+            // Query each custom relay individually. NPool's relay() method
+            // exists at runtime but its types may not surface here depending
+            // on the version — narrow the call to the structural minimum.
+            type RelayProvider = { relay?: (url: string) => { query?: (filters: unknown[], opts: { signal: AbortSignal }) => Promise<unknown[]> } };
+            const relayProvider = nostr as unknown as RelayProvider;
             const relayResults = await Promise.allSettled(
               feed.relays.map(url =>
-                (nostr as any).relay?.(url)?.query?.([relayFilter], {
+                relayProvider.relay?.(url)?.query?.([relayFilter], {
                   signal: AbortSignal.timeout(8000),
                 }) ?? Promise.resolve([])
               )

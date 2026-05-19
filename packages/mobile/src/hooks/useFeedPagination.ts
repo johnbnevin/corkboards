@@ -19,6 +19,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import { useNostr } from '../lib/NostrProvider';
 import { useQueryClient } from '@tanstack/react-query';
 import { batchFetchByAuthors, FEED_KINDS } from '../lib/feedUtils';
+import { dedupBatch, initialUntilCursor, PAGINATION_MAX_ITERATIONS } from '@core/paginationCore';
 
 export interface CustomFeedDef {
   id: string;
@@ -49,6 +50,10 @@ export interface UseFeedPaginationOptions {
   onMeTabNotesLoaded?: (notes: NostrEvent[]) => void;
   /** Whether "include my notes" is enabled for the current tab */
   showOwnNotes?: boolean;
+  /** Lookup for dismissed note IDs — loadMoreByCount iterates until it has
+   *  fetched `count` *undismissed* notes (so the visible feed actually grows
+   *  by `count`, even when a batch is dominated by previously-dismissed notes). */
+  isDismissed?: (noteId: string) => boolean;
 }
 
 export interface UseFeedPaginationResult {
@@ -83,6 +88,7 @@ export function useFeedPagination({
   addCustomFeedNotes,
   onMeTabNotesLoaded,
   showOwnNotes,
+  isDismissed,
 }: UseFeedPaginationOptions): UseFeedPaginationResult {
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
@@ -102,11 +108,16 @@ export function useFeedPagination({
   const lastFetchTimeMap = useRef(new Map<string, number>());
   const hoursLoadedMap = useRef(new Map<string, number>());
 
-  // Derive current tab's values from maps
+  // Derive current tab's values from per-tab maps. Reading refs during render
+  // is deliberate here — see the long comment block above for why useState
+  // doesn't fit. The v7 react-hooks/refs rule flags this pattern; the
+  // suppressions below acknowledge the intentional design.
+  /* eslint-disable react-hooks/refs */
   const newerNotes = newerNotesMap.current.get(activeTab) || [];
   const newestTimestamp = newestTimestampMap.current.get(activeTab) ?? null;
   const lastFetchTime = lastFetchTimeMap.current.get(activeTab) ?? null;
   const hoursLoadedRef = useRef(hoursLoadedMap.current.get(activeTab) || 0);
+  /* eslint-enable react-hooks/refs */
 
   // Helpers to update per-tab state
   const [, forceUpdate] = useState(0);
@@ -138,9 +149,16 @@ export function useFeedPagination({
     hoursLoadedRef.current = hoursLoadedMap.current.get(activeTab) || 0;
   }, [activeTab]);
 
-  // Track active tab so async operations can bail if user switched tabs
+  // Track active tab so async operations can bail if user switched tabs.
+  // Ref mutation moved into useEffect to satisfy the v7 refs rule and
+  // align with React 19's stricter render purity.
   const activeTabRef = useRef(activeTab);
-  activeTabRef.current = activeTab;
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
+  // Always read the latest isDismissed via a ref so loadMoreByCount's
+  // useCallback dep list stays stable.
+  const isDismissedRef = useRef(isDismissed);
+  useEffect(() => { isDismissedRef.current = isDismissed; }, [isDismissed]);
 
   // Derived tab-type flags
   const isCustomFeedTab = activeTab.startsWith('feed:');
@@ -629,37 +647,44 @@ export function useFeedPagination({
       // Check cache first
       const existing = (queryClient.getQueryData(cacheKey) as NostrEvent[] | undefined) ?? [];
       const existingIds = new Set(existing.map(e => e.id));
-      const authorSet = new Set(authors);
-      const cachedEvents = existing.filter(e => authorSet.has(e.pubkey));
 
-      // Always fetch `count` notes from relay
-      const neededFromRelay = count;
-      let fetchedEvents: NostrEvent[] = [];
+      // Iterative fetch until `count` undismissed notes accumulated.
+      // A single fetch of `count` notes can return mostly-dismissed batches,
+      // leaving the visible feed unchanged. Keep paginating older until we
+      // have `count` undismissed notes (or hit MAX_ITERATIONS, or the relay
+      // stops returning new events).
+      const isDismissedFn = isDismissedRef.current;
+      const allTrulyNew: NostrEvent[] = [];
+      let undismissedAdded = 0;
+      let untilCursor: number = initialUntilCursor(existing);
 
-      if (neededFromRelay > 0) {
-        let until: number;
-        if (existing.length === 0) {
-          until = Math.floor(Date.now() / 1000);
-        } else {
-          const oldestInCache = existing[existing.length - 1].created_at;
-          until = oldestInCache - 1;
-        }
-
+      for (let iter = 0; iter < PAGINATION_MAX_ITERATIONS && undismissedAdded < count; iter++) {
         const raw = await nostr.query([{
           kinds: [...FEED_KINDS],
           authors,
-          until,
-          limit: neededFromRelay,
+          until: untilCursor,
+          limit: count,
         }], { signal: AbortSignal.timeout(5000) });
 
-        // Dedup
-        const seen = new Set<string>();
-        fetchedEvents = raw
-          .filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; })
-          .sort((a, b) => b.created_at - a.created_at);
+        if (activeTabRef.current !== requestTab) {
+          if (__DEV__) console.log('[loadMoreByCount] tab changed, discarding results');
+          return;
+        }
 
-        if (fetchedEvents.length > neededFromRelay) {
-          fetchedEvents = fetchedEvents.slice(0, neededFromRelay);
+        if (raw.length === 0) break;
+
+        const { trulyNew: trulyNewThisBatch, oldestReturned } = dedupBatch(raw, existingIds);
+
+        if (oldestReturned >= untilCursor) break;
+        untilCursor = oldestReturned - 1;
+
+        if (trulyNewThisBatch.length === 0) continue;
+
+        for (const n of trulyNewThisBatch) {
+          existingIds.add(n.id);
+          allTrulyNew.push(n);
+          if (!isDismissedFn || !isDismissedFn(n.id)) undismissedAdded++;
+          if (undismissedAdded >= count) break;
         }
       }
 
@@ -673,20 +698,17 @@ export function useFeedPagination({
         return;
       }
 
-      // Combine: cached + newly fetched
-      const allNewEvents = [...cachedEvents, ...fetchedEvents];
-      const trulyNew = allNewEvents.filter(n => !existingIds.has(n.id));
-
-      if (trulyNew.length > 0) {
-        const merged = [...existing, ...trulyNew].sort((a, b) => b.created_at - a.created_at);
+      if (allTrulyNew.length > 0) {
+        const merged = [...existing, ...allTrulyNew].sort((a, b) => b.created_at - a.created_at);
         queryClient.setQueryData(cacheKey, merged);
         if (activeTab === 'me' && onMeTabNotesLoaded) {
           onMeTabNotesLoaded(merged);
         }
-      }
-
-      if (trulyNew.length > 0) {
-        showBriefMessage(`${trulyNew.length} more notes loaded`);
+        if (isDismissedFn && undismissedAdded !== allTrulyNew.length) {
+          showBriefMessage(`${undismissedAdded} new notes loaded (${allTrulyNew.length - undismissedAdded} skipped dismissed)`);
+        } else {
+          showBriefMessage(`${allTrulyNew.length} more notes loaded`);
+        }
       } else {
         showBriefMessage('No older notes found');
       }
@@ -719,6 +741,9 @@ export function useFeedPagination({
     loadMoreByCount,
     loadNewerNotes,
     setBatchProgress,
+    // Reading the ref's current value at return time is intentional — see
+    // the per-tab Map design comment above. The v7 refs rule flags this.
+    // eslint-disable-next-line react-hooks/refs
     hoursLoaded: hoursLoadedRef.current,
   };
 }

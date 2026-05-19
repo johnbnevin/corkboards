@@ -97,7 +97,8 @@ const filterStyles = StyleSheet.create({
 
 export function NotificationsScreen() {
   const { pubkey } = useAuth();
-  const { notifications: rawNotifications, isLoading, refetch, loadMore, loadNewer, hasMore } = useNotifications();
+  // loadNewer reserved for pull-to-refresh-from-top behavior not wired yet
+  const { notifications: rawNotifications, isLoading, refetch, loadMore, loadNewer: _loadNewer, hasMore } = useNotifications();
   const { mutedPubkeys } = useMuteList();
   const { isDismissed } = useCollapsedNotes();
   const [hiddenTypes, setHiddenTypes] = useState<Set<NotifFilter>>(new Set());

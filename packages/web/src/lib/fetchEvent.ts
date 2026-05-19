@@ -11,6 +11,7 @@
 import type { NostrEvent, NRelay1 } from '@nostrify/nostrify'
 import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS, createRelayFresh } from '@/components/NostrProvider'
 import { isSecureRelay } from '@core/nostrUtils'
+import { FETCH_EVENT_CACHE_TTL_MS as CACHE_TTL_MS } from '@core/cacheConfig'
 import { isTauri, tauriRelayQuery } from '@/lib/tauri'
 
 // Cap concurrent outbox event fetches — each fetchEventWithOutbox may open several
@@ -41,7 +42,7 @@ function withOutboxLimit<T>(fn: () => Promise<T>): Promise<T> {
 
 // ── Session cache (shared with thread system) ─────────────────────────────
 const MAX_EVENT_CACHE = 750
-const CACHE_TTL_MS = 10 * 60 * 1000
+// CACHE_TTL_MS imported above from @core/cacheConfig
 
 const eventCache = new Map<string, NostrEvent>()
 const eventCacheTimestamps = new Map<string, number>()

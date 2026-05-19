@@ -3,7 +3,7 @@
  *
  * Port of packages/web/src/components/comments/CommentsSection.tsx for React Native.
  */
-import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useComments } from '../../hooks/useComments';
 import { CommentForm } from './CommentForm';

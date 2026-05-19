@@ -104,9 +104,8 @@ export const NotificationCard = React.memo(function NotificationCard({
     return content;
   }, [type, event.content]);
 
-  // Zap amount
+  // Zap amount — formatted directly into `label` below
   const zapSats = useMemo(() => getZapAmountSats(event), [event]);
-  const zapLabel = zapSats ? ` ${zapSats.toLocaleString()} sats` : '';
 
   const label = type === 'zap' && zapSats
     ? `zapped ${zapSats.toLocaleString()} sats`

@@ -16,7 +16,7 @@ export function useMuteList(fetchEnabled = true) {
   const { pubkey, signer } = useAuth();
   const queryClient = useQueryClient();
 
-  const queryKey = ['mute-list', pubkey];
+  const queryKey = useMemo(() => ['mute-list', pubkey] as const, [pubkey]);
 
   const { data: muteEvent } = useQuery({
     queryKey,

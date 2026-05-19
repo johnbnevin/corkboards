@@ -32,7 +32,8 @@ export function CommentForm({
   compact = false,
 }: CommentFormProps) {
   const [content, setContent] = useState('');
-  const { user } = useCurrentUser();
+  const { pubkey } = useCurrentUser();
+  const user = pubkey ? { pubkey } : null;
   const { mutate: postComment, isPending } = usePostComment();
 
   const handleSubmit = () => {

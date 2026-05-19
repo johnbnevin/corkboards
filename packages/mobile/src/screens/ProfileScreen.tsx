@@ -13,7 +13,6 @@ import {
   TouchableOpacity,
   Linking,
   Alert,
-  Modal,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { nip19 } from 'nostr-tools';
@@ -102,7 +101,8 @@ export function ProfileScreen({ pubkey, onBack, onViewThread, onCreateCorkboard 
   const { data: contacts } = useContacts(myPubkey ?? undefined);
   const { isMuted, mute, unmute } = useMuteList();
   const { isBookmarked, toggleBookmark } = useBookmarks();
-  const { mutateAsync: publish } = useNostrPublish();
+  // publish reserved for inline edit-profile flow not wired in this screen yet
+  const { mutateAsync: _publish } = useNostrPublish();
   const { fetchRelaysForPubkey } = useNip65Relays();
 
   const [followLoading, setFollowLoading] = useState(false);
@@ -112,13 +112,15 @@ export function ProfileScreen({ pubkey, onBack, onViewThread, onCreateCorkboard 
   const [relaysLoading, setRelaysLoading] = useState(false);
   const relaysFetchedRef = useRef(false);
 
-  // Reset relay state when pubkey changes
+  // Reset relay-fetch state when switching to a different profile.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     setRelays([]);
     setRelaysOpen(false);
     setRelaysLoading(false);
     relaysFetchedRef.current = false;
   }, [pubkey]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const isMe = myPubkey === pubkey;
   const isFollowing = contacts?.includes(pubkey) ?? false;

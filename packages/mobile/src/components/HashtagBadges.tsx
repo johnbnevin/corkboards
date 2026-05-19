@@ -7,7 +7,6 @@
  */
 import { memo } from 'react';
 import {
-  View,
   Text,
   TouchableOpacity,
   ScrollView,

@@ -26,9 +26,12 @@ export function useNostrPublish(): UseMutationResult<NostrEvent> {
 
       const tags = t.tags ?? [];
 
-      // Add the client tag unless explicitly disabled (default: on).
-      // Skip for kind 0 (profile metadata) — some relays reject extra tags on metadata events.
-      if (config.publishClientTag !== false && t.kind !== 0 && !tags.some(([name]) => name === "client")) {
+      // Client tag is OFF by default — attaching it to every event creates
+      // fingerprintable metadata that survives in the public relay record
+      // forever. Users can opt in via settings.publishClientTag.
+      // Skip for kind 0 (profile metadata) regardless — some relays reject
+      // extra tags on metadata events.
+      if (config.publishClientTag === true && t.kind !== 0 && !tags.some(([name]) => name === "client")) {
         tags.push(["client", "corkboards.me"]);
       }
 

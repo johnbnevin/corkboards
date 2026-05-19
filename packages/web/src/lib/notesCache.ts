@@ -7,13 +7,14 @@
  * - Sync access via in-memory cache after init
  */
 import { idbReady } from './idb';
+import { NOTES_CACHE_TTL_MS as CACHE_TTL_MS } from '@core/cacheConfig';
 
 const NOTES_DB_NAME = 'corkboard-notes';
 const NOTES_STORE_NAME = 'events';
 const METADATA_STORE_NAME = 'metadata';
 const NOTES_DB_VERSION = 1;
 const MAX_CACHED_NOTES = 5000;
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour — evict notes not accessed within this window
+// CACHE_TTL_MS imported above from @core/cacheConfig
 
 let notesDb: IDBDatabase | null = null;
 

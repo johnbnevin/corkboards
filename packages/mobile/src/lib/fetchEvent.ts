@@ -4,10 +4,11 @@
  * Port of packages/web/src/lib/fetchEvent.ts for mobile.
  * Uses mobile's NostrProvider relay cache instead of web IDB.
  */
-import type { NostrEvent, NRelay1 } from '@nostrify/nostrify';
+import type { NostrEvent, NostrFilter, NRelay1 } from '@nostrify/nostrify';
 import { createRelayFresh } from './NostrProvider';
 import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS } from './NostrProvider';
 import { isSecureRelay } from '@core/nostrUtils';
+import { FETCH_EVENT_CACHE_TTL_MS as CACHE_TTL_MS } from '@core/cacheConfig';
 
 const MAX_CONCURRENT_OUTBOX_FETCHES = 4;
 let _activeOutboxFetches = 0;
@@ -34,7 +35,7 @@ function withOutboxLimit<T>(fn: () => Promise<T>): Promise<T> {
 
 // ── Session cache ─────────────────────────────────────────────────────────
 const MAX_EVENT_CACHE = 750;
-const CACHE_TTL_MS = 10 * 60 * 1000;
+// CACHE_TTL_MS imported above from @core/cacheConfig
 
 const eventCache = new Map<string, NostrEvent>();
 const eventCacheTimestamps = new Map<string, number>();
@@ -126,7 +127,7 @@ async function fetchAuthorRelays(pubkey: string): Promise<string[]> {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
-type NostrLike = { query: (filters: unknown[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]> };
+type NostrLike = { query: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]> };
 
 async function _fetchEventWithOutboxImpl(
   eventId: string,

@@ -3,7 +3,7 @@
  * Mobile port of web's SignerRecommendations component.
  * Single source of truth for signer recommendations on mobile.
  */
-import { Platform, View, Text, StyleSheet, Linking, TouchableOpacity } from 'react-native';
+import { Platform, View, Text, StyleSheet, Linking } from 'react-native';
 
 interface SignerRec {
   name: string;

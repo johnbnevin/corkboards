@@ -45,9 +45,11 @@ export function useNotificationCount() {
     return () => clearTimeout(id);
   }, [pubkey]);
 
-  const since = lastSeenAt > 0
-    ? lastSeenAt
-    : Math.floor(Date.now() / 1000) - DEFAULT_LOOKBACK_SECS;
+  // `since` for the notification query. When the user has never seen this list
+  // we use a 24h-back lookback computed once at mount. Computing in useState's
+  // initializer keeps it pure-by-the-rule's-definition.
+  const [mountTime] = useState(() => Math.floor(Date.now() / 1000));
+  const since = lastSeenAt > 0 ? lastSeenAt : mountTime - DEFAULT_LOOKBACK_SECS;
 
   const { data: newCount } = useQuery({
     queryKey: [QUERY_KEY_PREFIX, pubkey, since],

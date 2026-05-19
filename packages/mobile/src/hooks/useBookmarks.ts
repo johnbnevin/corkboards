@@ -23,8 +23,14 @@ export function useBookmarks(fetchEnabled = true) {
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
   const publishingRef = useRef(false);
+  // Keep the latest pubkey/signer in a ref so long-lived async callbacks don't
+  // capture stale values. Updating in a useEffect (post-commit) instead of
+  // during render avoids the react-hooks/refs lint and the
+  // "ref-mutation-during-render" warning React 19 will start emitting.
   const userRef = useRef({ pubkey, signer });
-  userRef.current = { pubkey, signer };
+  useEffect(() => {
+    userRef.current = { pubkey, signer };
+  }, [pubkey, signer]);
 
   // Local bookmark IDs for instant UI (synced from relay + MMKV cache)
   const [bookmarkIds, setBookmarkIds] = useState<string[]>(() => {
@@ -65,7 +71,7 @@ export function useBookmarks(fetchEnabled = true) {
       const userRelays = getUserRelays();
       const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS;
 
-      let bookmarkEvent: NostrEvent | null = null;
+      let bookmarkEvent: NostrEvent;
       try {
         bookmarkEvent = await Promise.any(
           writeRelays.map(async (relayUrl) => {
@@ -82,7 +88,7 @@ export function useBookmarks(fetchEnabled = true) {
         return { ids: [], found: false };
       }
 
-      if (!bookmarkEvent) return { ids: [], found: false };
+      // bookmarkEvent is guaranteed assigned at this point (Promise.any catch returns early)
 
       // Public tags
       const publicIds = bookmarkEvent.tags
@@ -134,10 +140,13 @@ export function useBookmarks(fetchEnabled = true) {
     }
   }, [nostr, queryClient]);
 
-  // Sync local state when relay data arrives
+  // Sync local state when relay data arrives. Functional updater + identity
+  // check below ensures the cascade the v7 set-state-in-effect rule fears
+  // can't actually happen (only fires when content differs).
   useEffect(() => {
     if (!relayResult || !pubkey) return;
     if (relayResult.found && relayResult.ids.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setBookmarkIds(prev => {
         const merged = [...new Set([...relayResult.ids, ...prev])];
         if (merged.length === prev.length && merged.every(id => prev.includes(id))) return prev;

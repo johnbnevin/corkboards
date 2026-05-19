@@ -24,7 +24,7 @@ interface WebLinkProps {
 }
 
 export function WebLink({ url }: WebLinkProps) {
-  let hostname = '';
+  let hostname: string;
   try {
     hostname = new URL(url).hostname;
   } catch {

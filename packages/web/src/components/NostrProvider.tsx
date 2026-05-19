@@ -1,7 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { RELAY_CACHE_TTL_MS } from '@core/cacheConfig';
 import { NostrEvent, NostrFilter, NPool, NRelay1 } from '@nostrify/nostrify';
 import type { NRelay, NostrRelayEVENT, NostrRelayEOSE, NostrRelayCLOSED } from '@nostrify/nostrify';
 import { NostrContext } from '@nostrify/react';
+import { useNostrLogin } from '@nostrify/react/login';
+import { Router, getFilterSelections, addMinimalFallbacks } from '@welshman/router';
+import type { TrustedEvent, Filter } from '@welshman/util';
+import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
 import { isTauri, tauriQuery } from '@/lib/tauri';
@@ -72,8 +77,6 @@ function waitForRateLimit(url: string): Promise<void> {
 
 /** Cached relay instances by URL — reused across all createRelay() calls */
 const _relayCache = new Map<string, { relay: NRelay1; createdAt: number }>();
-/** Max age before a cached relay is evicted (connections go stale) */
-const RELAY_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 /** Failure backoff: URL → { failCount, blockedUntil } */
 const _relayBackoff = new Map<string, { failCount: number; blockedUntil: number }>();
@@ -85,11 +88,28 @@ function getBackoffMs(failCount: number): number {
   return Math.min(BACKOFF_BASE_MS * Math.pow(2, failCount - 1), BACKOFF_MAX_MS);
 }
 
+// ─── Per-relay quality scoring (welshman router input) ─────────────────────
+// hit/miss counters with time-decay, surfaced to welshman's Router via
+// getRelayQuality(). Decoupled from the binary "blocked" backoff: a relay
+// can be unblocked but still low-quality, in which case selection still
+// deprioritizes it.
+const _relayScores = new Map<string, RelayScore>();
+const SCORE_HALF_LIFE_MS = 60 * 60 * 1000; // 1h
+
+function getRelayWeight(url: string): number {
+  const key = url.replace(/\/+$/, '');
+  const raw = _relayScores.get(key);
+  if (!raw) return 0.5; // unknown → neutral
+  const decayed = decayScore(raw, SCORE_HALF_LIFE_MS);
+  return scoreToWeight(decayed);
+}
+
 /** Record a connection failure for a relay URL.
  *  Only increments once per backoff window — multiple queries failing on the
  *  same broken cached connection don't escalate the backoff. */
 function recordRelayFailure(url: string): void {
   const key = url.replace(/\/+$/, '');
+  _relayScores.set(key, recordMiss(_relayScores.get(key)));
   const existing = _relayBackoff.get(key);
   // If already in an active backoff window, don't increment — this is just
   // another query failing on the same broken connection.
@@ -105,9 +125,11 @@ function recordRelayFailure(url: string): void {
   }
 }
 
-/** Record a successful operation — clears the backoff */
+/** Record a successful operation — clears the backoff and increments score */
 function recordRelaySuccess(url: string): void {
-  _relayBackoff.delete(url.replace(/\/+$/, ''));
+  const key = url.replace(/\/+$/, '');
+  _relayScores.set(key, recordHit(_relayScores.get(key)));
+  _relayBackoff.delete(key);
 }
 
 /** Check if a relay is currently in backoff (should not be contacted) */
@@ -129,6 +151,7 @@ function isRelayBlocked(url: string): boolean {
  * Use `createRelayDirect()` for critical bootstrap paths (login, backup discovery)
  * that must bypass the failure backoff.
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function createRelay(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
   // Normalize URL for cache/backoff lookups (trailing slash differences)
   const key = url.replace(/\/+$/, '');
@@ -166,6 +189,7 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
  * try relays even if they failed recently — the user can't proceed without them.
  * Still rate-limited and cached.
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function createRelayDirect(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
   const key = url.replace(/\/+$/, '');
   const cached = _relayCache.get(key);
@@ -181,6 +205,7 @@ export function createRelayDirect(url: string, opts?: ConstructorParameters<type
  * Closing a cached relay poisons it for subsequent callers; this avoids that.
  * Still rate-limited (same per-URL token bucket as cached relays).
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function createRelayFresh(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
   return new RateLimitedRelay(url, opts) as unknown as NRelay1;
 }
@@ -289,6 +314,36 @@ function debugLog(...args: unknown[]) {
   if (DEBUG) {
     console.log('[NostrProvider]', ...args);
   }
+}
+
+// ─── Welshman Router integration ────────────────────────────────────────────
+// `@welshman/router` owns the *selection* logic now — given a pubkey, mode,
+// and a quality/limit hint, it picks the right relays. We keep our own
+// per-author relayCache, our own backoff/blocklist, and our own 500-author
+// batching wrapper around it because those are app-specific concerns
+// welshman doesn't (and shouldn't) own.
+let _currentUserPubkeyForRouter: string | undefined;
+// eslint-disable-next-line react-refresh/only-export-components
+export function _setRouterUserPubkey(pubkey: string | undefined): void {
+  _currentUserPubkeyForRouter = pubkey;
+}
+let _routerConfigured = false;
+function ensureRouterConfigured(): void {
+  if (_routerConfigured) return;
+  _routerConfigured = true;
+  Router.configure({
+    getUserPubkey: () => _currentUserPubkeyForRouter,
+    getPubkeyRelays: (pubkey: string, _mode) => {
+      // We don't distinguish read/write/messaging per pubkey at the cache layer
+      // — outbox NIP-65 lists are the union.
+      const cached = relayCache.get(pubkey);
+      return (cached ?? []).map(normalizeRelayUrl).filter(u => !isRelayBlocked(u));
+    },
+    getDefaultRelays: () => [...FALLBACK_RELAYS, ...READ_ONLY_RELAYS].map(normalizeRelayUrl),
+    getIndexerRelays: () => FALLBACK_RELAYS.map(normalizeRelayUrl),
+    getRelayQuality: (url: string) => isRelayBlocked(url) ? 0 : getRelayWeight(url),
+    getLimit: () => MAX_TARGETED_RELAYS,
+  });
 }
 
 // Load relay cache from IDB sync cache on init
@@ -451,6 +506,7 @@ function extractAuthorsFromFilters(filters: NostrFilter[]): string[] {
 // cheap to open and the pool may route to hundreds of different relays.
 // ─────────────────────────────────────────────────────────────────────────────
 function createPool(): NPool {
+  ensureRouterConfigured();
   return new NPool({
     open(url: string) {
       // Rate-limited relay wrapper — max 3 req/sec per relay URL.
@@ -458,27 +514,33 @@ function createPool(): NPool {
       return new RateLimitedRelay(url, { backoff: false });
     },
 
-    // Tiered routing for reading (see comment block above)
+    // Tiered routing for reading.
+    //   - Bulk (≥ BULK_AUTHOR_THRESHOLD authors): minimize WS fan-out;
+    //     send the whole batch to MAX_BULK_RELAYS picked from user-read + fallbacks.
+    //     We also batch 500 authors per filter to avoid relay-side truncation.
+    //   - Targeted (< BULK_AUTHOR_THRESHOLD authors, or non-author queries):
+    //     hand off to welshman's getFilterSelections so the outbox model is
+    //     applied per-pubkey with proper scoring + fallback policy.
     reqRouter(filters: NostrFilter[]) {
       const routes = new Map<string, NostrFilter[]>();
-      const relaysToQuery = new Set<string>();
-
       const authors = extractAuthorsFromFilters(filters);
-      const userRelays = getUserRelays();
 
       if (authors.length >= BULK_AUTHOR_THRESHOLD) {
-        // Tier 1 — Bulk feed query: skip per-author expansion, use a small fixed set
-        userRelays.read.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
-        FALLBACK_RELAYS.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
-        READ_ONLY_RELAYS.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
-
-        // Prefer relays not in backoff; pick 2 healthy ones first
+        // Tier 1 — Bulk feed query: skip welshman's per-author expansion to
+        // keep WS connection count low; instead query a small set of high-fan-out
+        // relays. Welshman's per-pubkey routing on 1000+ contacts would open
+        // a connection per follow.
+        const userRelays = getUserRelays();
+        const relaysToQuery = new Set<string>();
+        userRelays.read.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
+        FALLBACK_RELAYS.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
+        READ_ONLY_RELAYS.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
         const all = Array.from(relaysToQuery);
         const healthy = all.filter(r => !isRelayBlocked(r));
         const blocked = all.filter(r => isRelayBlocked(r));
         const capped = [...healthy, ...blocked].slice(0, MAX_BULK_RELAYS);
 
-        // Batch author lists at 500 per filter to avoid silent relay truncation
+        // Batch authors at 500 per filter to avoid silent relay truncation.
         const MAX_AUTHORS_PER_FILTER = 500;
         for (const relay of capped) {
           if (authors.length <= MAX_AUTHORS_PER_FILTER) {
@@ -488,71 +550,67 @@ function createPool(): NPool {
             for (let i = 0; i < authors.length; i += MAX_AUTHORS_PER_FILTER) {
               const batch = authors.slice(i, i + MAX_AUTHORS_PER_FILTER);
               for (const filter of filters) {
-                if (filter.authors) {
-                  batchedFilters.push({ ...filter, authors: batch });
-                } else {
-                  // Non-author filters (e.g. #p) don't need batching
-                  if (i === 0) batchedFilters.push(filter);
-                }
+                if (filter.authors) batchedFilters.push({ ...filter, authors: batch });
+                else if (i === 0) batchedFilters.push(filter);
               }
             }
             routes.set(relay, batchedFilters);
           }
         }
       } else {
-        // Tier 2 — Targeted query: full outbox model
-        authors.forEach(author => {
-          const authorRelays = getRelayCache(author);
-          if (authorRelays.length > 0) {
-            authorRelays.slice(0, 3).forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
+        // Tier 2 — Targeted query: delegate to welshman's getFilterSelections.
+        // It applies the outbox model per-pubkey using the relayCache we expose
+        // via Router.configure({ getPubkeyRelays }), then layers in fallbacks
+        // according to addMinimalFallbacks (at most 1 default relay when count
+        // is low). The result is an array of {relays, filters} selections.
+        const selections = getFilterSelections(filters as unknown as Filter[]);
+        for (const sel of selections) {
+          const cappedRelays = sel.relays.slice(0, MAX_TARGETED_RELAYS).map(normalizeRelayUrl);
+          for (const relay of cappedRelays) {
+            const existing = routes.get(relay) ?? [];
+            // Merge filter lists when welshman points multiple selections at the same relay
+            routes.set(relay, [...existing, ...(sel.filters as unknown as NostrFilter[])]);
           }
-        });
-        userRelays.read.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
-        // Always include fallback + read-only relays — critical for #p queries (notifications)
-        // where the user has read relays but the event may live on a fallback relay.
-        FALLBACK_RELAYS.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
-        READ_ONLY_RELAYS.forEach(relay => relaysToQuery.add(normalizeRelayUrl(relay)));
-
-        // Prefer healthy relays, cap to MAX_TARGETED_RELAYS
-        const allTargeted = Array.from(relaysToQuery);
-        const healthyTargeted = allTargeted.filter(r => !isRelayBlocked(r));
-        const blockedTargeted = allTargeted.filter(r => isRelayBlocked(r));
-        const cappedTargeted = [...healthyTargeted, ...blockedTargeted].slice(0, MAX_TARGETED_RELAYS);
-        for (const relay of cappedTargeted) {
-          routes.set(relay, filters);
+        }
+        // Welshman handles fallbacks via the policy, but for non-author
+        // queries (e.g. #p tag for notifications) it can return empty —
+        // always include fallback + read-only for resilience.
+        if (routes.size === 0) {
+          [...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]
+            .map(normalizeRelayUrl)
+            .slice(0, MAX_TARGETED_RELAYS)
+            .forEach(r => routes.set(r, filters));
         }
       }
 
       if (DEBUG) {
         const relayList = Array.from(routes.keys());
-        const tier = authors.length >= BULK_AUTHOR_THRESHOLD ? 'T1-bulk' : 'T2-targeted';
+        const tier = authors.length >= BULK_AUTHOR_THRESHOLD ? 'T1-bulk' : 'T2-welshman';
         const filterDesc = filters.map(f => `kinds=${f.kinds?.join(',')} authors=${f.authors?.length ?? 0} ids=${f.ids?.length ?? 0}`).join(' | ');
         debugLog(`reqRouter [${tier}] authors=${authors.length} → ${routes.size} relays: ${relayList.join(', ')} | filters: ${filterDesc}`);
       }
       return routes;
     },
 
-    // Smart publishing: user's write relays + author's relays + minimal fallback
+    // Publishing: delegate to welshman's PublishEvent scenario.
+    // It returns the union of user's write relays + author's outbox.
     eventRouter(event: NostrEvent) {
-      const relaysToPublish = new Set<string>();
+      const scenario = Router.get()
+        .PublishEvent(event as unknown as TrustedEvent)
+        .policy(addMinimalFallbacks)
+        .limit(MAX_TARGETED_RELAYS);
+      const urls = scenario.getUrls().map(normalizeRelayUrl);
 
-      // 1. User's configured write relays (primary - user sovereignty)
-      const userRelays = getUserRelays();
-      userRelays.write.forEach(relay => relaysToPublish.add(normalizeRelayUrl(relay)));
-
-      // 2. Author's own relays from cache (outbox model)
-      const authorRelays = getRelayCache(event.pubkey);
-      if (authorRelays.length > 0) {
-        authorRelays.slice(0, 3).forEach(relay => relaysToPublish.add(normalizeRelayUrl(relay)));
+      // Author's own cached outbox relays — welshman includes them already,
+      // but guarantee at least 1 fallback if everything else is empty.
+      if (urls.length === 0) {
+        const fb = FALLBACK_RELAYS.map(normalizeRelayUrl);
+        if (DEBUG) debugLog(`eventRouter: no relays from welshman, using fallbacks → ${fb.length}`);
+        return fb.slice(0, MAX_TARGETED_RELAYS);
       }
 
-      // 3. Minimal fallback only if user has no relays configured
-      if (relaysToPublish.size === 0) {
-        FALLBACK_RELAYS.forEach(relay => relaysToPublish.add(normalizeRelayUrl(relay)));
-      }
-
-      if (DEBUG) debugLog(`eventRouter: kind=${event.kind} → ${relaysToPublish.size} relays: ${Array.from(relaysToPublish).join(', ')}`);
-      return Array.from(relaysToPublish);
+      if (DEBUG) debugLog(`eventRouter: kind=${event.kind} → ${urls.length} relays: ${urls.join(', ')}`);
+      return urls;
     },
   });
 }
@@ -561,14 +619,17 @@ function createPool(): NPool {
 idbReady.then(() => loadRelayCache()).catch(() => {});
 
 // ── Tauri relay routing ───────────────────────────────────────────────────────
-// Replicates reqRouter's two-tier logic for use by the TauriNostrProxy below.
-// Uses the same relayCache, thresholds, and fallback lists as the NPool router.
+// In Tauri, queries go through the Rust pool_query bridge — but they still need
+// a relay list. We delegate to welshman's getFilterSelections for the targeted
+// tier (so it benefits from per-relay scoring and outbox routing), and keep the
+// manual bulk path for high-author queries to cap WS fan-out on desktop.
 function getTauriRelaysForFilter(filter: Record<string, unknown>): string[] {
+  ensureRouterConfigured();
   const authors = (filter.authors as string[] | undefined) ?? [];
   const relaySet = new Set<string>();
 
   if (authors.length >= BULK_AUTHOR_THRESHOLD) {
-    // T1-bulk: find most-used relays across sampled authors
+    // T1-bulk: find most-used relays across sampled authors (same as before).
     const freq = new Map<string, number>();
     for (const pk of authors.slice(0, 100)) {
       for (const r of getRelayCache(pk).slice(0, 3)) {
@@ -580,15 +641,24 @@ function getTauriRelaysForFilter(filter: Record<string, unknown>): string[] {
       .slice(0, 4)
       .forEach(([r]) => relaySet.add(r));
   } else if (authors.length > 0) {
-    // T2-targeted: each author's cached relays first
-    for (const pk of authors) {
-      getRelayCache(pk).slice(0, 3).filter(isSecureRelay).forEach(r => relaySet.add(r));
+    // T2-targeted: delegate to welshman so the relay selection benefits from
+    // per-pubkey outbox + per-relay scoring instead of just-cached-relays.
+    try {
+      const selections = getFilterSelections([filter as unknown as Filter]);
+      for (const sel of selections) {
+        for (const r of sel.relays) {
+          if (isSecureRelay(r)) relaySet.add(normalizeRelayUrl(r));
+        }
+      }
+    } catch {
+      // Welshman can throw if its singleton hasn't been configured; fall through
+      // to fallbacks below.
     }
   }
 
   // Always include fallbacks and read-only relays (deduplicated via Set)
-  FALLBACK_RELAYS.forEach(r => relaySet.add(r));
-  READ_ONLY_RELAYS.forEach(r => relaySet.add(r));
+  FALLBACK_RELAYS.forEach(r => relaySet.add(normalizeRelayUrl(r)));
+  READ_ONLY_RELAYS.forEach(r => relaySet.add(normalizeRelayUrl(r)));
   return Array.from(relaySet).slice(0, 8);
 }
 
@@ -600,6 +670,15 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
     debugLog('Initializing NPool');
     return createPool();
   });
+
+  // Keep welshman's Router in sync with the active login so its outbox
+  // scenarios know who "the user" is. NostrLoginProvider wraps NostrProvider,
+  // so this hook is always available here.
+  const { logins } = useNostrLogin();
+  useEffect(() => {
+    const activeLogin = logins[0];
+    _setRouterUserPubkey(activeLogin?.pubkey);
+  }, [logins]);
 
   // Listen for BroadcastChannel messages from other tabs
   useEffect(() => {

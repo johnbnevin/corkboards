@@ -85,9 +85,10 @@ export function ProfileCacheSettings() {
     }
   }, []);
 
-  useEffect(() => {
-    loadStats();
-  }, [loadStats]);
+  // loadStats internally calls setState — that's the design: load on mount,
+  // refresh after manual clears. v7 set-state-in-effect false positive.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { loadStats(); }, [loadStats]);
 
   const handleClearCache = useCallback(() => {
     Alert.alert(

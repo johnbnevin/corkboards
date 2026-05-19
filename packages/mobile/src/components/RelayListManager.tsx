@@ -81,10 +81,10 @@ export function RelayListManager() {
   const [newRelayUrl, setNewRelayUrl] = useState('');
   const [expandedRelay, setExpandedRelay] = useState<string | null>(null);
 
-  // Sync from storage on mount
-  useEffect(() => {
-    setRelays(getRelayList());
-  }, []);
+  // Hydrate from MMKV on mount — one-shot, no cascade. v7 set-state-in-effect
+  // false positive (the rule can't tell this is a hydration vs a reactive loop).
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { setRelays(getRelayList()); }, []);
 
   const publishNIP65 = async (relayList: RelayEntry[]) => {
     if (!signer) return;
@@ -103,6 +103,9 @@ export function RelayListManager() {
         kind: 10002,
         content: '',
         tags,
+        // publishNIP65 is invoked from a button press, not during render — the
+        // v7 purity rule can't tell. Date.now() here is fine.
+        // eslint-disable-next-line react-hooks/purity
         created_at: Math.floor(Date.now() / 1000),
       });
     } catch (err) {

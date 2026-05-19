@@ -295,37 +295,40 @@ interface NoteContentProps {
   numberOfLines?: number;
 }
 
-export function NoteContent({ event, numberOfLines }: NoteContentProps) {
-  // ---- Long-form content (kind 30023) — render title badge + truncated content ----
-  if (event.kind === 30023) {
-    const title = event.tags.find(t => t[0] === 'title')?.[1];
-    const dTag = event.tags.find(t => t[0] === 'd')?.[1];
-    let readMoreUrl: string | null = null;
-    if (dTag && event.pubkey) {
-      try {
-        readMoreUrl = 'https://njump.me/' + nip19.naddrEncode({
-          kind: 30023,
-          pubkey: event.pubkey,
-          identifier: dTag,
-        });
-      } catch { /* ignore */ }
-    }
-    const preview = event.content.replace(/<[^>]*>/g, '').replace(/#+\s/g, '').trim().slice(0, 300);
-    return (
-      <View>
-        <View style={styles.longFormBadge}>
-          <Text style={styles.longFormBadgeText}>Long-form</Text>
-          {title ? <Text style={styles.longFormTitle} numberOfLines={2}>{title}</Text> : null}
-        </View>
-        {preview ? <Text style={styles.content} numberOfLines={numberOfLines ?? 5}>{preview}</Text> : null}
-        {readMoreUrl ? (
-          <TouchableOpacity onPress={() => Linking.openURL(readMoreUrl!)}>
-            <Text style={styles.readMore}>Read more →</Text>
-          </TouchableOpacity>
-        ) : null}
-      </View>
-    );
+/** Pure long-form sub-component — keeps the parent's hook order stable. */
+function LongFormPreview({ event, numberOfLines }: NoteContentProps) {
+  const title = event.tags.find(t => t[0] === 'title')?.[1];
+  const dTag = event.tags.find(t => t[0] === 'd')?.[1];
+  let readMoreUrl: string | null = null;
+  if (dTag && event.pubkey) {
+    try {
+      readMoreUrl = 'https://njump.me/' + nip19.naddrEncode({
+        kind: 30023,
+        pubkey: event.pubkey,
+        identifier: dTag,
+      });
+    } catch { /* ignore */ }
   }
+  const preview = event.content.replace(/<[^>]*>/g, '').replace(/#+\s/g, '').trim().slice(0, 300);
+  return (
+    <View>
+      <View style={styles.longFormBadge}>
+        <Text style={styles.longFormBadgeText}>Long-form</Text>
+        {title ? <Text style={styles.longFormTitle} numberOfLines={2}>{title}</Text> : null}
+      </View>
+      {preview ? <Text style={styles.content} numberOfLines={numberOfLines ?? 5}>{preview}</Text> : null}
+      {readMoreUrl ? (
+        <TouchableOpacity onPress={() => Linking.openURL(readMoreUrl!)}>
+          <Text style={styles.readMore}>Read more →</Text>
+        </TouchableOpacity>
+      ) : null}
+    </View>
+  );
+}
+
+export function NoteContent({ event, numberOfLines }: NoteContentProps) {
+  // Hooks must run unconditionally on every render (rules-of-hooks). The
+  // kind === 30023 branch is taken AFTER all hooks have been called.
 
   // NIP-30 custom emoji map: shortcode → image URL
   const emojiMap = useMemo(() => {
@@ -372,6 +375,11 @@ export function NoteContent({ event, numberOfLines }: NoteContentProps) {
     if (event.kind !== 34235) return [];
     return getImetaVideoUrls(event);
   }, [event]);
+
+  // Long-form (kind 30023) — branch AFTER all hooks have been called.
+  if (event.kind === 30023) {
+    return <LongFormPreview event={event} numberOfLines={numberOfLines} />;
+  }
 
   // Separate inline parts from block-level media
   const inlineParts: ContentPart[] = [];

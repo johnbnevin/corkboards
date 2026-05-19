@@ -3,7 +3,7 @@
  * For use inside note content when mentioning users.
  * Mirrors web's ProfileLink.tsx.
  */
-import { Text, View, StyleSheet, ActivityIndicator } from 'react-native';
+import { Text, View, StyleSheet } from 'react-native';
 import { nip19 } from 'nostr-tools';
 import { useAuthor } from '../hooks/useAuthor';
 import { genUserName } from '@core/genUserName';

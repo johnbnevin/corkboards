@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Eye, EyeOff, Copy, Check, ChevronLeft, Link2, ShieldCheck, KeyRound, QrCode, BookKey, Smartphone } from 'lucide-react';
+import { Eye, EyeOff, Copy, Check, ChevronLeft, Link2, ShieldCheck, KeyRound, QrCode, BookKey, Smartphone, ExternalLink } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -642,6 +642,17 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
             <h1 className="text-3xl font-bold text-purple-600 dark:text-purple-400">corkboards.me</h1>
           </div>
           <p className="text-muted-foreground">No email needed. Just pick a name and you're in.</p>
+          {loginView === 'main' && (
+            <a
+              href="https://get.corkboards.me"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-purple-600 dark:text-purple-400 hover:underline"
+            >
+              Learn more or try it before signing up
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
         </div>
 
         {loginView === 'main' && nameScreen}

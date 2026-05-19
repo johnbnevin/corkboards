@@ -12,12 +12,15 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 
-export function useNostrPublish(): UseMutationResult<NostrEvent, Error, Omit<NostrEvent, 'id' | 'pubkey' | 'sig'>> {
+// created_at is auto-filled by the hook when omitted, so callers don't need to provide it.
+type PublishInput = Omit<NostrEvent, 'id' | 'pubkey' | 'sig' | 'created_at'> & { created_at?: number };
+
+export function useNostrPublish(): UseMutationResult<NostrEvent, Error, PublishInput> {
   const { nostr } = useNostr();
   const { signer } = useAuth();
 
   return useMutation({
-    mutationFn: async (t: Omit<NostrEvent, 'id' | 'pubkey' | 'sig'>) => {
+    mutationFn: async (t: PublishInput) => {
       if (!signer) {
         throw new Error('Not logged in');
       }

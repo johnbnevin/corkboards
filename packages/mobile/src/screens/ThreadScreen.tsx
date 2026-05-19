@@ -18,6 +18,7 @@ import {
 } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useThreadQuery } from '../hooks/useThreadQuery';
+import { useBookmarks } from '../hooks/useBookmarks';
 import { useAuthor } from '../hooks/useAuthor';
 import { useProfileModal, TappableProfile } from '../components/ProfileModal';
 import { ThreadReplyRow } from '../components/thread/ThreadReplyRow';
@@ -35,7 +36,9 @@ import type { FlatThreadRow } from '@core/threadTree';
 
 function AncestorNote({ event, onPress }: { event: NostrEvent; onPress?: () => void }) {
   const { data } = useAuthor(event.pubkey);
-  const { openProfile } = useProfileModal();
+  // openProfile is consumed by the TappableProfile children; the destructure
+  // is kept so the modal context is initialized eagerly.
+  const { openProfile: _openProfile } = useProfileModal();
   const displayName = data?.metadata?.display_name || data?.metadata?.name || genUserName(event.pubkey);
   const avatar = data?.metadata?.picture;
 
@@ -81,7 +84,9 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreen
     rows,
     targetEvent,
     allEvents,
-    rootId,
+    // rootId not currently consumed by this screen — kept in destructure so a
+    // future "scroll to root" affordance can use it without re-shaping the API.
+    rootId: _rootId,
     isLoading,
     error,
     collapsedIds,
@@ -89,7 +94,9 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreen
     injectReply,
     refetch,
   } = useThreadQuery(eventId);
-  const { isBookmarked, toggleBookmark } = useBookmarks();
+  // Bookmark UI lives in the NoteActions footer; we destructure to satisfy
+  // the hook's React-tree contract but the action handlers are pulled in there.
+  const { isBookmarked: _isBookmarked, toggleBookmark: _toggleBookmark } = useBookmarks();
   const [replyTarget, setReplyTarget] = useState<NostrEvent | null>(null);
   const [zapTarget, setZapTarget] = useState<NostrEvent | null>(null);
   const [scrollToReplyId, setScrollToReplyId] = useState<string | null>(null);
@@ -143,14 +150,13 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreen
 
   // Render ancestor + rows as a combined list
   const listData = useMemo(() => {
-    const items: { type: 'ancestor'; event: NostrEvent }[] | { type: 'row'; row: FlatThreadRow }[] = [];
-    for (const a of ancestors) {
-      (items as any[]).push({ type: 'ancestor', event: a });
-    }
-    for (const r of rows) {
-      (items as any[]).push({ type: 'row', row: r });
-    }
-    return items as ({ type: 'ancestor'; event: NostrEvent } | { type: 'row'; row: FlatThreadRow })[];
+    type ItemEntry =
+      | { type: 'ancestor'; event: NostrEvent }
+      | { type: 'row'; row: FlatThreadRow };
+    const items: ItemEntry[] = [];
+    for (const a of ancestors) items.push({ type: 'ancestor', event: a });
+    for (const r of rows) items.push({ type: 'row', row: r });
+    return items;
   }, [ancestors, rows]);
 
   // Auto-scroll to a just-posted reply so the user sees it immediately

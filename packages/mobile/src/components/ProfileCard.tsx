@@ -3,7 +3,7 @@
  * NIP-05, website, lightning address, relay list, and follow/mute actions.
  * For use in lists and modals. Mirrors web's ProfileCard.tsx.
  */
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,7 +11,6 @@ import {
   StyleSheet,
   ActivityIndicator,
   Clipboard,
-  Alert,
 } from 'react-native';
 import { nip19 } from 'nostr-tools';
 import { useAuthor } from '../hooks/useAuthor';
@@ -41,7 +40,8 @@ export function ProfileCard({ pubkey, compact = false, onPress, stats }: Profile
   const [relaysLoading, setRelaysLoading] = useState(false);
   const [bannerHeightPct] = useLocalStorage<number>(STORAGE_KEYS.BANNER_HEIGHT_PCT, 0);
   const [bannerFitMode] = useLocalStorage<string>(STORAGE_KEYS.BANNER_FIT_MODE, 'crop');
-  const [naturalBannerPct, setNaturalBannerPct] = useState(0);
+  // setter reserved for the image-loaded callback that's not wired yet
+  const [naturalBannerPct, _setNaturalBannerPct] = useState(0);
   const effectiveBannerPct = bannerHeightPct === 0 ? naturalBannerPct : bannerHeightPct;
   const bannerWidth = Dimensions.get('window').width - 24; // container padding
 

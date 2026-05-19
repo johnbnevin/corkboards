@@ -225,8 +225,9 @@ export function SettingsScreen() {
   const [relayList, setRelayList] = useState<RelayEntry[]>(() => getRelayList());
   const [newRelay, setNewRelay] = useState('');
 
-  // NWC
-  const { nwcUri, setNwcUri, isConnected: nwcConnected, walletRelay, disconnect: nwcDisconnect } = useNwc();
+  // NWC — nwcUri is read elsewhere via useNwc; the destructure here is just
+  // for the setter/connect helpers used in the form below.
+  const { nwcUri: _nwcUri, setNwcUri, isConnected: nwcConnected, walletRelay, disconnect: nwcDisconnect } = useNwc();
   const [nwcInput, setNwcInput] = useState('');
 
   // Backup

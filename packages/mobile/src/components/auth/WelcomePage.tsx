@@ -3,7 +3,7 @@
  * Mobile port of web's WelcomePage component.
  * Login hierarchy: nsec.app (primary) → Amber → nsec → mnemonic
  */
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -14,15 +14,16 @@ import {
   Alert,
   ActivityIndicator,
   Platform,
+  Linking,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
+import { nip19 } from 'nostr-tools';
 import { privateKeyFromSeedWords, validateWords, generateSeedWords } from 'nostr-tools/nip06';
 import { useAuth } from '../../lib/AuthContext';
 import { useNostr } from '../../lib/NostrProvider';
 import { useSignerConnect } from '../../hooks/useSignerConnect';
 import { SecurityInfoDialog } from './SecurityInfoDialog';
-import { SignerRecommendations, getTopSignerForPlatform } from './SignerRecommendations';
+import { getTopSignerForPlatform } from './SignerRecommendations';
 
 type Step = 'welcome' | 'key-backup';
 type LoginView = 'main' | 'nsec' | 'mnemonic' | 'amber';
@@ -243,6 +244,11 @@ export function WelcomePage({ onComplete }: WelcomePageProps) {
         <Text style={styles.brandEmoji}>📌</Text>
         <Text style={styles.brandName}>corkboards</Text>
         <Text style={styles.brandTagline}>No email needed. Just pick a name and you're in.</Text>
+        {loginView === 'main' && (
+          <TouchableOpacity onPress={() => Linking.openURL('https://get.corkboards.me')}>
+            <Text style={styles.learnMoreLink}>Learn more or try it before signing up →</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* ---- Main view ---- */}
@@ -411,6 +417,7 @@ const styles = StyleSheet.create({
   brandEmoji: { fontSize: 40, marginBottom: 4 },
   brandName: { fontSize: 28, fontWeight: '700', color: '#a855f7' },
   brandTagline: { color: '#b3b3b3', fontSize: 14, textAlign: 'center', marginTop: 4 },
+  learnMoreLink: { color: '#a855f7', fontSize: 12, textAlign: 'center', marginTop: 8, textDecorationLine: 'underline' },
 
   label: { color: '#999', fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
   fieldLabel: { color: '#999', fontSize: 12, marginBottom: 6, marginTop: 12 },

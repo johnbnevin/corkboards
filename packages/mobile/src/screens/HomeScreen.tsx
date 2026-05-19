@@ -12,7 +12,8 @@ import {
 } from 'react-native';
 import type { FlatList as FlatListType } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { useFeed, useContacts } from '../hooks/useFeed';
+import { useFeed, useContacts, useFeedLoadMore } from '../hooks/useFeed';
+import { FEED_PAGE_SIZE_MOBILE } from '@core/feedConstants';
 import { useBulkAuthors } from '../hooks/useAuthor';
 import { useNip65Relays } from '../hooks/useNip65Relays';
 import { useMuteList } from '../hooks/useMuteList';
@@ -150,6 +151,14 @@ interface CustomFeed {
 
 type FeedTab = 'following' | 'global' | `feed:${string}`;
 
+// Map note-category names → KindFilter slugs. Module-scope so the useMemo dep
+// array can stay stable across renders.
+const CATEGORY_TO_FILTER: Readonly<Record<string, KindFilter>> = {
+  shortNotes: 'posts', replies: 'replies', longForm: 'articles',
+  videos: 'videos', images: 'images', reposts: 'reposts', reactions: 'reactions',
+  highlights: 'highlights', recipes: 'recipes', other: 'posts',
+};
+
 // ============================================================================
 // HomeScreen
 // ============================================================================
@@ -187,8 +196,16 @@ export function HomeScreen() {
   const authors = pubkey && contacts && contacts.length > 0 ? contacts : [];
   const isFollowingTab = activeTab === 'following';
   const isGlobalTab = activeTab === 'global';
+  const feedAuthors = isFollowingTab || isGlobalTab ? authors : [];
   const { data: rawFollowEvents, isLoading: followLoading, isError: followError, refetch: followRefetch, isFetching: followFetching } =
-    useFeed(isFollowingTab || isGlobalTab ? authors : []);
+    useFeed(feedAuthors);
+  // Pagination — fetches older notes when the list nears its end. The iteration
+  // checks isDismissed so the visible list actually grows by `count` even when
+  // a batch is dominated by previously-dismissed notes.
+  const { loadMoreByCount, isLoading: isLoadingMore } = useFeedLoadMore({
+    authors: feedAuthors,
+    isDismissed,
+  });
 
   // ── Custom feed ─────────────────────────────────────────────────────────────
   const activeFeedId = activeTab.startsWith('feed:') ? activeTab.slice(5) : null;
@@ -270,11 +287,9 @@ export function HomeScreen() {
   }, [events]);
 
   // ── Kind filtering ──────────────────────────────────────────────────────────
-  const categoryToFilter: Record<string, KindFilter> = {
-    shortNotes: 'posts', replies: 'replies', longForm: 'articles',
-    videos: 'videos', images: 'images', reposts: 'reposts', reactions: 'reactions',
-    highlights: 'highlights', recipes: 'recipes', other: 'posts',
-  };
+  // Hoisted out of the component so the useMemo dep array stays stable.
+  // (Was previously recreated on every render, which is why the exhaustive-deps
+  // rule flagged it.)
 
   const filteredEvents = useMemo(() => {
     if (!events) return events;
@@ -286,13 +301,13 @@ export function HomeScreen() {
         const cats = getNoteCategories(note, eventLookup);
         if (filterMode === 'strict') {
           for (const cat of cats) {
-            const f = categoryToFilter[cat];
+            const f = CATEGORY_TO_FILTER[cat];
             if (f && kindFilters.has(f)) return false;
           }
           return true;
         } else {
           for (const cat of cats) {
-            const f = categoryToFilter[cat];
+            const f = CATEGORY_TO_FILTER[cat];
             if (!f || !kindFilters.has(f)) return true;
           }
           return false;
@@ -543,6 +558,19 @@ export function HomeScreen() {
             />
           }
           ListEmptyComponent={<Text style={styles.emptyText}>No notes found</Text>}
+          onEndReached={() => {
+            // Only paginate the standard following/global feed — custom feeds
+            // use their own pagination path inside useCustomFeedNotes.
+            if ((isFollowingTab || isGlobalTab) && !isLoadingMore) {
+              loadMoreByCount(FEED_PAGE_SIZE_MOBILE);
+            }
+          }}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={isLoadingMore ? (
+            <View style={{ paddingVertical: 16, alignItems: 'center' }}>
+              <Text style={{ color: '#888', fontSize: 12 }}>Loading more…</Text>
+            </View>
+          ) : null}
         />
 
         {/* ── Scroll to top ──────────────────────────────────────────── */}

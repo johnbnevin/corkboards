@@ -24,6 +24,7 @@ import {
   FEED_KINDS,
 } from '@/lib/feedUtils';
 import { debugLog, debugWarn, debugError } from '@/lib/debug';
+import { dedupBatch, initialUntilCursor, PAGINATION_MAX_ITERATIONS } from '@core/paginationCore';
 
 export interface CustomFeedDef {
   id: string;
@@ -54,6 +55,10 @@ export interface UseFeedPaginationOptions {
   onMeTabNotesLoaded?: (notes: NostrEvent[]) => void;
   /** Whether "include my notes" is enabled for the current tab */
   showOwnNotes?: boolean;
+  /** Lookup for dismissed note IDs — loadMoreByCount iterates until it has
+   *  fetched `count` *undismissed* notes (so the visible feed actually grows
+   *  by `count`, even when a batch is dominated by previously-dismissed notes). */
+  isDismissed?: (noteId: string) => boolean;
 }
 
 export interface UseFeedPaginationResult {
@@ -90,6 +95,7 @@ export function useFeedPagination({
   addCustomFeedNotes,
   onMeTabNotesLoaded,
   showOwnNotes,
+  isDismissed,
 }: UseFeedPaginationOptions): UseFeedPaginationResult {
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
@@ -175,6 +181,12 @@ export function useFeedPagination({
   // Track active tab so async operations can bail if user switched tabs
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
+
+  // Always read the latest isDismissed via a ref so loadMoreByCount's
+  // useCallback dep list stays stable — otherwise every dismissal would
+  // recreate the callback and invalidate any caller that depends on its identity.
+  const isDismissedRef = useRef(isDismissed);
+  isDismissedRef.current = isDismissed;
 
   // Derived tab-type flags (same logic as in MultiColumnClient)
   const isRelayTab = activeTab.startsWith('wss://') || activeTab.startsWith('ws://');
@@ -776,58 +788,54 @@ export function useFeedPagination({
       // ── Check cache first ──────────────────────────────────────────────
       const existing = (queryClient.getQueryData(cacheKey) as NostrEvent[] | undefined) ?? [];
       const existingIds = new Set(existing.map(e => e.id));
-      const authorSet = new Set(authors);
 
-      // Get cached events from these authors (all of them, not just older than visible)
-      const cachedEvents = existing.filter(e => authorSet.has(e.pubkey));
+      // ── Iterative fetch until `count` undismissed notes accumulated ────
+      // A single fetch of `count` notes can return mostly-dismissed batches,
+      // leaving the visible feed unchanged. Keep paginating older with the
+      // cursor moving back to the oldest fetched timestamp, until we have
+      // `count` undismissed new notes (or hit MAX_ITERATIONS, or a relay
+      // returns nothing further).
+      const isDismissedFn = isDismissedRef.current;
+      const allTrulyNew: NostrEvent[] = [];
+      let undismissedAdded = 0;
+      let untilCursor: number = initialUntilCursor(existing);
 
-      const cachedCount = cachedEvents.length;
-      debugLog('[loadMoreByCount] cached events from authors:', cachedCount);
+      for (let iter = 0; iter < PAGINATION_MAX_ITERATIONS && undismissedAdded < count; iter++) {
+        debugLog(`[loadMoreByCount] iter ${iter} until:${new Date(untilCursor * 1000).toISOString()} have ${undismissedAdded}/${count} undismissed`);
 
-      // Always fetch `count` notes from relay (using oldest cached note as anchor for pagination)
-      // Cache is only used for deduplication, not to limit the fetch count
-      const neededFromRelay = count;
-
-      let fetchedEvents: NostrEvent[] = [];
-
-      if (neededFromRelay > 0) {
-        // ── Determine `until` (upper bound) ────────────────────────────────
-        // Use the OLDEST note from the full cache, not just visible notes
-        // This ensures we get notes older than what we've already fetched
-        let until: number;
-        if (existing.length === 0) {
-          until = Math.floor(Date.now() / 1000);
-          debugLog('[loadMoreByCount] No cached notes, fetching most recent');
-        } else {
-        // Get the oldest note from the cache (cache is sorted newest-first, so take last)
-        const oldestInCache = existing[existing.length - 1].created_at;
-        until = oldestInCache - 1;
-        debugLog('[loadMoreByCount] oldest in cache:', new Date(oldestInCache * 1000).toISOString(), 'until:', new Date(until * 1000).toISOString());
-        }
-
-        // ── Fetch from relay ─────────────────────────────────────────────
-        debugLog(`[loadMoreByCount] query until: ${new Date(until * 1000).toISOString()}  limit: ${neededFromRelay}`);
-
-        // reqRouter (or TauriNostrProxy in Tauri) handles relay routing
         const raw = await nostr.query([{
           kinds: [...FEED_KINDS],
           authors,
-          until,
-          limit: neededFromRelay,
+          until: untilCursor,
+          limit: count,
         }], { signal: AbortSignal.timeout(5000) });
 
-        // Dedup (pool may return duplicates from multiple relays)
-        const seen = new Set<string>();
-        fetchedEvents = raw
-          .filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; })
-          .sort((a, b) => b.created_at - a.created_at);
+        // Bail if user switched tabs while we were fetching
+        if (activeTabRef.current !== requestTab) {
+          debugLog('[loadMoreByCount] tab changed, discarding results');
+          return;
+        }
 
-        debugLog('[loadMoreByCount] fetched from relay:', fetchedEvents.length, 'notes');
+        if (raw.length === 0) {
+          debugLog('[loadMoreByCount] relay returned empty — stopping iteration');
+          break;
+        }
 
-        // Slice to exactly what was requested if relay returned more
-        if (fetchedEvents.length > neededFromRelay) {
-          fetchedEvents = fetchedEvents.slice(0, neededFromRelay);
-          debugLog('[loadMoreByCount] sliced to:', fetchedEvents.length, 'notes');
+        const { trulyNew: trulyNewThisBatch, oldestReturned } = dedupBatch(raw, existingIds);
+
+        if (oldestReturned >= untilCursor) {
+          debugLog('[loadMoreByCount] no cursor progress — stopping');
+          break;
+        }
+        untilCursor = oldestReturned - 1;
+
+        if (trulyNewThisBatch.length === 0) continue;
+
+        for (const n of trulyNewThisBatch) {
+          existingIds.add(n.id);
+          allTrulyNew.push(n);
+          if (!isDismissedFn || !isDismissedFn(n.id)) undismissedAdded++;
+          if (undismissedAdded >= count) break;
         }
       }
 
@@ -841,29 +849,26 @@ export function useFeedPagination({
         return;
       }
 
-      // Combine: cached + newly fetched, up to count total
-      const allNewEvents = [...cachedEvents, ...fetchedEvents];
-      const trulyNew = allNewEvents.filter(n => !existingIds.has(n.id));
-
-      if (trulyNew.length > 0) {
-        const merged = [...existing, ...trulyNew].sort((a, b) => b.created_at - a.created_at);
+      if (allTrulyNew.length > 0) {
+        const merged = [...existing, ...allTrulyNew].sort((a, b) => b.created_at - a.created_at);
         queryClient.setQueryData(cacheKey, merged);
         // Also persist to IndexedDB memCache so getFilteredByPubkeys picks them up
         // and they survive page refresh
         import('@/lib/notesCache').then(({ mergeNotesToCache }) => {
-          mergeNotesToCache(trulyNew);
+          mergeNotesToCache(allTrulyNew);
         });
         // For 'me' tab: notify parent so userNotes state re-renders immediately
         if (activeTab === 'me' && onMeTabNotesLoaded) {
           onMeTabNotesLoaded(merged);
         }
-      }
-
-      if (trulyNew.length > 0) {
         // Scroll target = newest of the newly loaded batch
-        const newest = trulyNew.reduce((max, n) => n.created_at > max.created_at ? n : max, trulyNew[0]);
+        const newest = allTrulyNew.reduce((max, n) => n.created_at > max.created_at ? n : max, allTrulyNew[0]);
         setScrollTargetNoteId(newest.id);
-        showBriefMessage(`${trulyNew.length} more notes loaded`);
+        if (isDismissedFn && undismissedAdded !== allTrulyNew.length) {
+          showBriefMessage(`${undismissedAdded} new notes loaded (${allTrulyNew.length - undismissedAdded} skipped dismissed)`);
+        } else {
+          showBriefMessage(`${allTrulyNew.length} more notes loaded`);
+        }
       } else {
         showBriefMessage('No older notes found');
       }

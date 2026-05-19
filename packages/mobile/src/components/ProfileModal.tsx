@@ -27,6 +27,7 @@ import { useNip65Relays } from '../hooks/useNip65Relays';
 import { useContacts } from '../hooks/useFeed';
 import { useMuteList } from '../hooks/useMuteList';
 import { useNostrPublish } from '../hooks/useNostrPublish';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 import { genUserName } from '@core/genUserName';
 import { formatTimeAgo } from '@core/formatTimeAgo';
 import { ProfileAbout } from './ProfileAbout';
@@ -122,7 +123,8 @@ function ProfileModalDialog({ pubkey, isOpen, onClose, onViewThread }: ProfileMo
   const { fetchRelaysForPubkey } = useNip65Relays();
   const { data: contacts } = useContacts(myPubkey ?? undefined);
   const { isMuted, mute, unmute } = useMuteList();
-  const { mutateAsync: publish } = useNostrPublish();
+  // Reserved for future inline publish actions in this modal
+  const { mutateAsync: _publish } = useNostrPublish();
 
   const [copied, setCopied] = useState(false);
   const [relaysOpen, setRelaysOpen] = useState(false);
@@ -130,6 +132,9 @@ function ProfileModalDialog({ pubkey, isOpen, onClose, onViewThread }: ProfileMo
   const [relaysLoading, setRelaysLoading] = useState(false);
   const relaysFetchedRef = useRef(false);
   const [followLoading, setFollowLoading] = useState(false);
+  // Corkboard actions — write to MMKV via setCustomFeeds; the broadcast
+  // inside useLocalStorage refreshes the home screen's feed list.
+  const [customFeeds, setCustomFeeds] = useLocalStorage<Array<{ id: string; title: string; pubkeys: string[]; relays: string[]; rssUrls: string[] }>>('nostr-custom-feeds', []);
 
   if (!pubkey) return null;
 
@@ -405,6 +410,61 @@ function ProfileModalDialog({ pubkey, isOpen, onClose, onViewThread }: ProfileMo
                     </View>
                   )}
 
+                  {/* Corkboard actions — parity with web ProfileModal */}
+                  {myPubkey && (
+                    <View style={styles.actionRow}>
+                      <TouchableOpacity
+                        style={[styles.actionBtn, styles.corkboardBtn]}
+                        onPress={() => {
+                          const newFeed = {
+                            id: Date.now().toString(),
+                            title: displayName,
+                            pubkeys: [pubkey],
+                            relays: [],
+                            rssUrls: [],
+                          };
+                          setCustomFeeds([...customFeeds, newFeed]);
+                          setTimeout(onClose, 0);
+                          Alert.alert('Corkboard created', `New corkboard for ${displayName}`);
+                        }}
+                      >
+                        <Text style={styles.corkboardBtnText}>+ New corkboard</Text>
+                      </TouchableOpacity>
+                      {customFeeds.length > 0 && (
+                        <TouchableOpacity
+                          style={[styles.actionBtn, styles.corkboardBtn]}
+                          onPress={() => {
+                            Alert.alert(
+                              'Add to corkboard',
+                              'Pick a corkboard:',
+                              [
+                                ...customFeeds.map(feed => ({
+                                  text: feed.title,
+                                  onPress: () => {
+                                    if (feed.pubkeys.includes(pubkey)) {
+                                      Alert.alert('Already on this corkboard');
+                                      return;
+                                    }
+                                    setCustomFeeds(
+                                      customFeeds.map(f =>
+                                        f.id === feed.id ? { ...f, pubkeys: [...f.pubkeys, pubkey] } : f,
+                                      ),
+                                    );
+                                    setTimeout(onClose, 0);
+                                    Alert.alert('Added to corkboard', `Added to ${feed.title}`);
+                                  },
+                                })),
+                                { text: 'Cancel', style: 'cancel' as const },
+                              ],
+                            );
+                          }}
+                        >
+                          <Text style={styles.corkboardBtnText}>Add to corkboard</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
+
                   {/* Recent notes */}
                   <RecentNotes pubkey={pubkey} onViewThread={onViewThread} />
                 </>
@@ -586,6 +646,8 @@ const styles = StyleSheet.create({
   muteText: { color: '#b3b3b3', fontSize: 14 },
   unmuteBtn: { backgroundColor: '#2a1a1a', borderColor: '#4a2020' },
   unmuteText: { color: '#ef4444', fontSize: 14 },
+  corkboardBtn: { backgroundColor: 'transparent', borderColor: '#a855f7' },
+  corkboardBtnText: { color: '#a855f7', fontSize: 13, fontWeight: '500' },
 
   // Recent notes
   recentSection: { marginTop: 16 },

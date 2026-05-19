@@ -139,6 +139,11 @@ export function SizeGuardedImage({ uri, style, type = 'image', resizeMode = 'cov
     return 'allowed' as const;
   };
 
+  // Hydrate fileSize/status from cache or async HEAD probe. Both branches
+  // intentionally set state — this is the documented async-hydration pattern,
+  // not a reactive cascade. resolveStatus is a pure helper closed over current
+  // props; including it would force a useCallback for no benefit.
+  /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   useEffect(() => {
     if (limitBytes === 0) { setStatus('allowed'); return; }
     if (sizeCache.has(uri)) {
@@ -154,6 +159,7 @@ export function SizeGuardedImage({ uri, style, type = 'image', resizeMode = 'cov
       setStatus(resolveStatus(result));
     });
   }, [uri, limitBytes]);
+  /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
   if (status === 'checking') {
     // Show placeholder while HEAD request checks size — don't render <Image>

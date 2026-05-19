@@ -61,7 +61,15 @@ export function SmartNoteContent({
   const [expanded, setExpanded] = useState(false);
 
   const text = event.content;
+  // All hooks must run unconditionally; we early-return for the embedded-event
+  // case AFTER calling them.
   const visLen = useMemo(() => visibleLength(text), [text]);
+  const safeEvent = useMemo(() => {
+    if (hasHtmlContent(text)) {
+      return { ...event, content: text.replace(/<[^>]*>/g, '') };
+    }
+    return event;
+  }, [event, text]);
   const isLong = visLen > SPOILER_THRESHOLD * 1.5;
 
   // Check for JSON-embedded Nostr event
@@ -97,14 +105,6 @@ export function SmartNoteContent({
       </View>
     );
   }
-
-  // Strip HTML if present
-  const safeEvent = useMemo(() => {
-    if (hasHtmlContent(text)) {
-      return { ...event, content: text.replace(/<[^>]*>/g, '') };
-    }
-    return event;
-  }, [event, text]);
 
   const content = (
     <NoteContent event={safeEvent} numberOfLines={numberOfLines} />

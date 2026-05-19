@@ -14,6 +14,7 @@
  */
 import type { NostrEvent } from '@nostrify/nostrify';
 import { mobileStorage } from '../storage/MmkvStorage';
+import { NOTES_CACHE_TTL_MS as CACHE_TTL_MS } from '@core/cacheConfig';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -22,7 +23,7 @@ import { mobileStorage } from '../storage/MmkvStorage';
 const NOTES_PREFIX = 'notes-cache:';
 const META_PREFIX = 'notes-meta:';
 const MAX_CACHED_NOTES = 3000;
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+// CACHE_TTL_MS imported above from @core/cacheConfig
 
 // ---------------------------------------------------------------------------
 // L1 — in-memory hot cache
@@ -53,15 +54,9 @@ function mmkvDeleteNote(id: string): void {
   }
 }
 
-function mmkvGetAllNoteKeys(): string[] {
-  // getAllKeys is sync on MMKV but KVStorage exposes it async; use the sync
-  // path from the underlying MMKV instance via getSync trick — we iterate
-  // all keys via the async wrapper but since MMKV is sync it resolves inline.
-  // For the init path we use the async keys() API.
-  const keys: string[] = [];
-  // We'll collect them via the async API called from loadNotesFromStorage()
-  return keys;
-}
+// Note keys are collected via the async `mobileStorage.keys()` API in
+// `loadNotesFromStorage` below. A sync-iteration helper was previously
+// declared here but never used; removed to keep the API surface tight.
 
 // ---------------------------------------------------------------------------
 // Initialisation — load L2 into L1

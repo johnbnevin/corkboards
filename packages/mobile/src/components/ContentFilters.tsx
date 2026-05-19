@@ -10,7 +10,6 @@ import {
   Text,
   TouchableOpacity,
   TextInput,
-  Switch,
   StyleSheet,
 } from 'react-native';
 

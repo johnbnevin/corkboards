@@ -12,6 +12,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 import { useAuth } from '../lib/AuthContext';
 import { useNostrBackup } from '../hooks/useNostrBackup';
+import { mobileStorage } from '../storage/MmkvStorage';
 
 const MIN_SAVE_INTERVAL_MS = 30_000;
 
@@ -94,14 +95,30 @@ export function AutoSaveManager() {
     };
   }, [pubkey, signer, triggerIfReady, autoSaveBackup, hasUnsavedChanges, checkForBackup]);
 
-  // Auto-restore best checkpoint when checkForBackup finds newer ones after idle return
+  // Auto-restore best checkpoint when checkForBackup finds newer ones after idle return.
+  // Critical guard: never silently restore over existing local data. lastBackupTs starts
+  // at 0 until the first successful save/restore, so naively comparing "newest > 0" would
+  // wipe a power-user with real local data who has never explicitly clicked Save Now.
   const idleRestoreDone = useRef(false);
   useEffect(() => {
     if (idleRestoreDone.current || !idleCheckDoneRef.current) return;
     if (!checkpoints.length) return;
-    // Only auto-restore if the newest checkpoint is newer than our last save
     const newest = checkpoints[0];
-    if (newest && newest.timestamp > (lastBackupTs ?? 0)) {
+    if (!newest) return;
+    // If local already has meaningful data, never silently clobber it.
+    const feeds = mobileStorage.getSync('nostr-custom-feeds');
+    const filters = mobileStorage.getSync('corkboard:tab-filters');
+    const hasMeaningfulLocal =
+      (feeds && feeds !== '[]' && feeds !== 'null') ||
+      (filters && filters !== '{}' && filters !== 'null');
+    if (hasMeaningfulLocal && (lastBackupTs ?? 0) === 0) {
+      // User has data but never stamped LAST_BACKUP_TS. Skip silent restore;
+      // user can open Backup & Restore manually if they want to pull from cloud.
+      idleRestoreDone.current = true;
+      if (__DEV__) console.log('[AutoSave] skipping silent restore — local data present without timestamp');
+      return;
+    }
+    if (newest.timestamp > (lastBackupTs ?? 0)) {
       idleRestoreDone.current = true;
       if (__DEV__) console.log('[AutoSave] auto-restoring newer checkpoint from idle return');
       restoreBackup(newest).catch(e => {

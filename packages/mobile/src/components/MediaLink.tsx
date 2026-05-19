@@ -6,7 +6,7 @@
  *
  * Mobile equivalent of packages/web/src/components/MediaLink.tsx.
  */
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -131,7 +131,7 @@ interface MediaLinkProps {
   isVideo?: boolean;
 }
 
-export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo }: MediaLinkProps) {
+export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: forceVideo }: MediaLinkProps) {
   const [revealed, setRevealed] = useState(false);
 
   const embed = useMemo(() => getEmbedInfo(url, forceVideo), [url, forceVideo]);

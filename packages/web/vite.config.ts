@@ -34,38 +34,17 @@ export default defineConfig({
         entryFileNames: `assets/[name].js`,
         chunkFileNames: `assets/[name].js`,
         assetFileNames: `assets/[name].[ext]`,
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          'vendor-radix': [
-            '@radix-ui/react-dialog',
-            '@radix-ui/react-dropdown-menu',
-            '@radix-ui/react-popover',
-            '@radix-ui/react-tooltip',
-            '@radix-ui/react-select',
-            '@radix-ui/react-accordion',
-            '@radix-ui/react-alert-dialog',
-            '@radix-ui/react-avatar',
-            '@radix-ui/react-checkbox',
-            '@radix-ui/react-collapsible',
-            '@radix-ui/react-context-menu',
-            '@radix-ui/react-hover-card',
-            '@radix-ui/react-label',
-            '@radix-ui/react-menubar',
-            '@radix-ui/react-navigation-menu',
-            '@radix-ui/react-progress',
-            '@radix-ui/react-radio-group',
-            '@radix-ui/react-scroll-area',
-            '@radix-ui/react-separator',
-            '@radix-ui/react-slider',
-            '@radix-ui/react-switch',
-            '@radix-ui/react-tabs',
-            '@radix-ui/react-toast',
-            '@radix-ui/react-toggle',
-            '@radix-ui/react-toggle-group',
-          ],
-          'vendor-nostr': ['@nostrify/nostrify', '@nostrify/react', 'nostr-tools'],
-          'vendor-markdown': ['react-markdown', 'remark-gfm', 'remark-breaks'],
-        }
+        // Rolldown (Vite 8 default) requires the function form — the object
+        // form was dropped. Each branch matches the package's node_modules
+        // path so transitive deps don't get pulled into a vendor chunk.
+        manualChunks(id: string) {
+          if (!id.includes('/node_modules/')) return undefined;
+          if (/\/node_modules\/(react|react-dom|react-router-dom)\//.test(id)) return 'vendor-react';
+          if (id.includes('/node_modules/@radix-ui/')) return 'vendor-radix';
+          if (id.includes('/node_modules/@nostrify/') || id.includes('/node_modules/nostr-tools/')) return 'vendor-nostr';
+          if (/\/node_modules\/(react-markdown|remark-gfm|remark-breaks)\//.test(id)) return 'vendor-markdown';
+          return undefined;
+        },
       }
     }
   }

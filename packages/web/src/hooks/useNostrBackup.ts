@@ -954,15 +954,26 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        } catch { /* localStorage unavailable */ }
      }
 
+     // Register the in-flight promise NOW — before any awaits — so concurrent
+     // callers (effect re-fires, multi-mount of useNostrBackup) all short-
+     // circuit at the guard above instead of slipping through and racing to
+     // log "Waiting for IDB to be ready...", "Checking for remote backup...",
+     // etc. into the splash log. This pairs with v0.7.6's later registration
+     // (kept as a defence-in-depth no-op) and supersedes it as the primary
+     // dedupe point.
+     let _resolveInFlight: () => void = () => {};
+     _checkInFlight = {
+       pubkey: user.pubkey,
+       promise: new Promise<void>((resolve) => { _resolveInFlight = resolve; }),
+     };
+     const _clearInFlight = () => {
+       _resolveInFlight();
+       if (_checkInFlight && _checkInFlight.pubkey === user.pubkey) _checkInFlight = null;
+     };
+
      // CRITICAL: Wait for IDB memCache to be populated before reading the checked flag.
      // On page reload, memCache is empty until idbReady resolves, so idbGetSync() would
      // return null even if the flag was persisted — causing a double backup check.
-     //
-     // Flip the ref BEFORE the await so concurrent callers (the per-user gate
-     // in the effect is the primary defense, but this stays correct even if a
-     // future caller fires the function twice in quick succession) skip the
-     // log line and the wait instead of all logging it before the first await
-     // resolves.
      if (!idbReadyChecked.current) {
        idbReadyChecked.current = true;
        log('Waiting for IDB to be ready...');
@@ -975,6 +986,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
      if (!force && idbGetSync(checkedKey)) {
        log('Check skipped: backup already checked for this user (flag found after IDB ready)');
        _checkedPubkey = user.pubkey;
+       _clearInFlight();
        const stored = getStoredCheckpoints();
        if (stored.length > 0) setCheckpoints(stored);
        setStatus('idle');
@@ -990,21 +1002,9 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     setStatus('checking');
     setMessage('Checking for backup...');
 
-    // Prevent concurrent calls
+    // Prevent concurrent calls (post-await; the in-flight Promise above
+    // catches anyone who entered while we were awaiting IDB).
     _checkedPubkey = user.pubkey;
-    // Publish an in-flight promise so re-entrant callers (e.g. an effect
-    // re-fire driven by user-object identity churn during a slow bunker
-    // signer round-trip) join this run instead of starting parallel relay
-    // queries and re-logging "Checking for remote backup..." into the splash.
-    let _resolveInFlight: () => void = () => {};
-    _checkInFlight = {
-      pubkey: user.pubkey,
-      promise: new Promise<void>((resolve) => { _resolveInFlight = resolve; }),
-    };
-    const _clearInFlight = () => {
-      _resolveInFlight();
-      if (_checkInFlight && _checkInFlight.pubkey === user.pubkey) _checkInFlight = null;
-    };
 
     try {
       const pubkey = user.pubkey;

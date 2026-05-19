@@ -943,10 +943,16 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
      // CRITICAL: Wait for IDB memCache to be populated before reading the checked flag.
      // On page reload, memCache is empty until idbReady resolves, so idbGetSync() would
      // return null even if the flag was persisted — causing a double backup check.
+     //
+     // Flip the ref BEFORE the await so concurrent callers (the per-user gate
+     // in the effect is the primary defense, but this stays correct even if a
+     // future caller fires the function twice in quick succession) skip the
+     // log line and the wait instead of all logging it before the first await
+     // resolves.
      if (!idbReadyChecked.current) {
+       idbReadyChecked.current = true;
        log('Waiting for IDB to be ready...');
        await idbReady;
-       idbReadyChecked.current = true;
        log('IDB ready, memCache populated');
      }
 
@@ -1589,8 +1595,19 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   // Single check on login — one attempt, all relays, no retries.
   // Shows splash with tips while checking. If a checkpoint is found,
   // MultiColumnClient auto-restores the best one.
+  //
+  // Gate on user.pubkey (not the user object identity) and on a ref tracking
+  // the last pubkey we checked. Without these guards we re-fire every time
+  // useCurrentUser produces a fresh NUser instance (NUser.fromNsecLogin
+  // creates a new object per memo recomputation), which made checkRemoteBackup
+  // fan out into a storm of "Waiting for IDB to be ready..." log lines while
+  // the splash was visible. The user shouldn't see this as anything other
+  // than a single check.
+  const lastCheckPubkeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!user) return;
+    if (lastCheckPubkeyRef.current === user.pubkey) return;
+    lastCheckPubkeyRef.current = user.pubkey;
     checkRemoteBackup();
   }, [user, checkRemoteBackup]);
 

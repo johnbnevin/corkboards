@@ -344,6 +344,13 @@ function persistSnapshotAndHashes(snapshot: Record<string, string>): void {
 // Keyed by pubkey so switching accounts still triggers a check.
 let _checkedPubkey: string | null = null;
 
+// Module-level in-flight dedupe: if a check is already running for a pubkey,
+// concurrent callers share that promise instead of starting a parallel run.
+// Defends against effect-deps changes during the (potentially slow, with
+// bunker signers) network phase — every extra concurrent call would
+// otherwise open a fresh set of relay sockets and flood the splash log.
+let _checkInFlight: { pubkey: string; promise: Promise<void> } | null = null;
+
 // Track which relays were used during backup check/restore so other fetches
 // can prefer different relays and avoid rate-limiting the same ones.
 const _backupRelaysUsed = new Set<string>();
@@ -901,6 +908,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        return;
      }
 
+     // Concurrent-call dedupe: if a check is already running for this pubkey,
+     // join its promise instead of starting a parallel run. Effective even if
+     // a future change re-introduces effect re-firing.
+     if (!force && _checkInFlight && _checkInFlight.pubkey === user.pubkey) {
+       return _checkInFlight.promise;
+     }
+
      // Skip if already checked this session (module-level guard persists across remounts) — unless forced
      if (!force && _checkedPubkey === user.pubkey) {
        log('Check skipped: already checked this session');
@@ -978,6 +992,19 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
     // Prevent concurrent calls
     _checkedPubkey = user.pubkey;
+    // Publish an in-flight promise so re-entrant callers (e.g. an effect
+    // re-fire driven by user-object identity churn during a slow bunker
+    // signer round-trip) join this run instead of starting parallel relay
+    // queries and re-logging "Checking for remote backup..." into the splash.
+    let _resolveInFlight: () => void = () => {};
+    _checkInFlight = {
+      pubkey: user.pubkey,
+      promise: new Promise<void>((resolve) => { _resolveInFlight = resolve; }),
+    };
+    const _clearInFlight = () => {
+      _resolveInFlight();
+      if (_checkInFlight && _checkInFlight.pubkey === user.pubkey) _checkInFlight = null;
+    };
 
     try {
       const pubkey = user.pubkey;
@@ -1197,6 +1224,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       log('Check failed: ' + errMsg, 'error');
       setStatus('idle');
       setCheckSettled(true);
+    } finally {
+      _clearInFlight();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- checkpoints declared after this hook (forward ref); deviceId is stable useState
   }, [user, queryAll, log, deviceId]);

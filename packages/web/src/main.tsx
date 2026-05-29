@@ -78,4 +78,15 @@ createRoot(document.getElementById("root")!).render(
 // Register service worker for offline app shell caching (prevents reload on mobile background return)
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
+  // When a new SW takes control (e.g. after a deploy bumped CACHE_NAME), reload
+  // ONCE so the fresh app shell — including the up-to-date CSP in index.html —
+  // is served instead of the stale cached one. sessionStorage-guarded so this
+  // can never become a reload loop.
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    try {
+      if (sessionStorage.getItem('corkboard:sw-reloaded')) return;
+      sessionStorage.setItem('corkboard:sw-reloaded', '1');
+    } catch { /* sessionStorage unavailable — fall through to a single reload */ }
+    window.location.reload();
+  });
 }

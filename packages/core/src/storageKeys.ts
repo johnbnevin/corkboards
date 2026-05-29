@@ -245,7 +245,7 @@ function getAllPerUserKeys(): string[] {
 export const PER_USER_KEYS = getAllPerUserKeys();
 
 // Track which pubkey currently owns the active (global) keys
-const ACTIVE_USER_KEY = 'corkboard:active-user-pubkey';
+export const ACTIVE_USER_KEY = 'corkboard:active-user-pubkey';
 
 const PUBKEY_RE = /^[0-9a-f]{64}$/;
 

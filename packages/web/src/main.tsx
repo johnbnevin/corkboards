@@ -10,6 +10,37 @@ import { IMAGE_PROXY_TEMPLATE_KEY } from '@/lib/imageProxySettings';
 import App from './App.tsx';
 import './index.css';
 
+// ── DOM-mutation guard ────────────────────────────────────────────────────────
+// React cannot recover from "Failed to execute 'removeChild'/'insertBefore' on
+// 'Node'" — when a DOM node is mutated out from under it (browser translation
+// extensions, signer-extension injection, or a portal teardown race), the throw
+// propagates to the top-level ErrorBoundary and unmounts the entire app, leaving
+// the UI frozen. This guard makes those operations no-op safely when the node
+// isn't actually a child, instead of throwing. Normal removals/insertions are
+// unaffected. (Well-known React workaround; see facebook/react#11538.)
+function installDomMutationGuard(): void {
+  if (typeof Node !== 'function' || !Node.prototype) return;
+
+  const originalRemoveChild = Node.prototype.removeChild;
+  Node.prototype.removeChild = function <T extends Node>(this: Node, child: T): T {
+    if (child.parentNode !== this) {
+      if (import.meta.env.DEV) console.warn('[dom-guard] removeChild: node is not a child of this node — ignoring');
+      return child;
+    }
+    return originalRemoveChild.call(this, child) as T;
+  };
+
+  const originalInsertBefore = Node.prototype.insertBefore;
+  Node.prototype.insertBefore = function <T extends Node>(this: Node, node: T, ref: Node | null): T {
+    if (ref && ref.parentNode !== this) {
+      if (import.meta.env.DEV) console.warn('[dom-guard] insertBefore: reference is not a child of this node — appending');
+      return originalInsertBefore.call(this, node, null) as T;
+    }
+    return originalInsertBefore.call(this, node, ref) as T;
+  };
+}
+installDomMutationGuard();
+
 // Initialize the image-proxy template before any image renders so the very
 // first paint already routes through the user's chosen proxy (if set).
 try {

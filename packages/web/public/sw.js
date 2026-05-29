@@ -5,7 +5,7 @@
 // A changed CACHE_NAME also changes this file's bytes, which is what makes the
 // browser detect and install the new service worker (and purge the old cache,
 // including a stale index.html with an outdated CSP, in the activate handler).
-const CACHE_NAME = 'corkboards-v3';
+const CACHE_NAME = 'corkboards-v4';
 
 // On install, immediately activate (don't wait for existing tabs to close)
 self.addEventListener('install', () => self.skipWaiting());

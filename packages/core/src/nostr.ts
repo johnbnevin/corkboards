@@ -39,10 +39,15 @@ export function createNip19IdentifierRegex(): RegExp {
  */
 export function isValidNip19Identifier(str: string): boolean {
   const withoutPrefix = str.replace(/^nostr:/, '');
-  return NIP19_PREFIXES.some(prefix =>
-    withoutPrefix.startsWith(prefix) &&
-    withoutPrefix.slice(prefix.length).split('').every(c => BECH32_CHARSET.includes(c))
-  );
+  return NIP19_PREFIXES.some(prefix => {
+    if (!withoutPrefix.startsWith(prefix)) return false;
+    const data = withoutPrefix.slice(prefix.length);
+    // Reject empty / implausibly short data (an `npub1` with no payload is not
+    // a real identifier). The shortest valid bech32 payload here (npub/note)
+    // is ~52 chars; require a conservative minimum to avoid false positives.
+    if (data.length < 10) return false;
+    return data.split('').every(c => BECH32_CHARSET.includes(c));
+  });
 }
 
 /**

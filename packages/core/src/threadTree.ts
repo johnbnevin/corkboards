@@ -4,15 +4,8 @@
  * Shared between web and mobile. No DOM, React, or relay dependencies.
  */
 
-interface NostrEvent {
-  id: string
-  kind: number
-  pubkey: string
-  created_at: number
-  content: string
-  tags: string[][]
-  sig: string
-}
+import { type NostrEvent } from '@nostrify/nostrify'
+import { isValidEventId } from './noteClassifier'
 
 /** A node in the thread tree */
 export interface ThreadNode {
@@ -36,12 +29,16 @@ export function parseThreadTags(event: NostrEvent): {
     if (t[2] && t[2].startsWith('wss://')) hints.push(t[2])
   }
 
+  // Only surface well-formed 64-hex IDs (parity with classifyNote), so a
+  // malformed e-tag value can't poison the tree with a bogus root/parent.
+  const clean = (id: string | undefined) => (isValidEventId(id) ? id : undefined)
+
   if (rootTag || replyTag) {
-    return { root: rootTag?.[1], reply: replyTag?.[1] || rootTag?.[1], hints }
+    return { root: clean(rootTag?.[1]), reply: clean(replyTag?.[1] || rootTag?.[1]), hints }
   }
   // Positional fallback (NIP-10)
-  if (eTags.length === 1) return { root: eTags[0]?.[1], reply: eTags[0]?.[1], hints }
-  if (eTags.length > 1) return { root: eTags[0]?.[1], reply: eTags[eTags.length - 1]?.[1], hints }
+  if (eTags.length === 1) return { root: clean(eTags[0]?.[1]), reply: clean(eTags[0]?.[1]), hints }
+  if (eTags.length > 1) return { root: clean(eTags[0]?.[1]), reply: clean(eTags[eTags.length - 1]?.[1]), hints }
   return { hints }
 }
 
@@ -50,8 +47,9 @@ export function getParentId(event: NostrEvent): string | null {
   const eTags = event.tags.filter(t => t[0] === 'e')
   if (eTags.length === 0) return null
   const replyTag = eTags.find(t => t[3] === 'reply')
-  if (replyTag?.[1]) return replyTag[1]
-  return eTags[eTags.length - 1]?.[1] ?? null
+  if (isValidEventId(replyTag?.[1])) return replyTag![1]
+  const last = eTags[eTags.length - 1]?.[1]
+  return isValidEventId(last) ? last : null
 }
 
 /** Check if event is a direct reply to the given eventId */

@@ -17,14 +17,14 @@ export function formatTimeAgo(timestamp: number): string {
     const hours = Math.floor(diff / 3600);
     const mins = Math.floor((diff % 3600) / 60);
     if (mins > 0) return `${hours}h ${mins}m ago`;
-    return `${hours} hours ago`;
+    return `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
   }
   const days = Math.floor(diff / 86400);
   const hours = Math.floor((diff % 86400) / 3600);
   const mins = Math.floor((diff % 3600) / 60);
   if (hours > 0 && mins > 0) return `${days}d ${hours}h ${mins}m ago`;
   if (hours > 0) return `${days}d ${hours}h ago`;
-  return `${days} days ago`;
+  return `${days} ${days === 1 ? 'day' : 'days'} ago`;
 }
 
 /**

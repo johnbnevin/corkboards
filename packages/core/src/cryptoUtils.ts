@@ -18,9 +18,12 @@ export function secureRandomInt(max: number): number {
   const arr = new Uint32Array(1);
   // Rejection threshold: largest multiple of max that fits in 2^32
   const limit = Math.floor(0x100000000 / max) * max;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  // Rejection probability per iteration is < max/2^32, so exhausting this cap
+  // is astronomically unlikely with a real CSPRNG — it only guards against a
+  // broken/stubbed getRandomValues hanging the thread forever.
+  for (let i = 0; i < 1024; i++) {
     crypto.getRandomValues(arr);
     if (arr[0] < limit) return arr[0] % max;
   }
+  throw new Error('secureRandomInt: CSPRNG rejection sampling failed to converge');
 }

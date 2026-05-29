@@ -311,12 +311,15 @@ async function init(): Promise<void> {
       if (k === 'corkboard:last-backup-data') continue;
       memCache.set(k, v);
     }
-    // Debug: log critical keys found in IDB at startup
-    for (const k of criticalKeys) {
-      const v = memCache.get(k);
-      console.log(`[idb init] ${k}: ${v ? v.length + ' chars' : 'NOT FOUND'}`);
+    // Debug: log critical keys found in IDB at startup (dev only — these key
+    // names + sizes are user metadata and shouldn't ship to the prod console).
+    if (import.meta.env.DEV) {
+      for (const k of criticalKeys) {
+        const v = memCache.get(k);
+        console.log(`[idb init] ${k}: ${v ? v.length + ' chars' : 'NOT FOUND'}`);
+      }
+      console.log(`[idb init] Total: ${all.size} keys in IDB, ${memCache.size} in memCache`);
     }
-    console.log(`[idb init] Total: ${all.size} keys in IDB, ${memCache.size} in memCache`);
 
     // Listen for cross-tab changes
     const channel = getBroadcastChannel();

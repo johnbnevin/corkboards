@@ -403,8 +403,18 @@ export const FeedGrid = React.memo(function FeedGrid({
                       ? parentNotes?.[classification.parentEventId]
                       : null;
                     return (
-                      <NoteCard
+                      // content-visibility lets the browser skip rendering/layout/
+                      // paint for off-screen notes, so a long feed stays light no
+                      // matter how many notes are mounted. `contain-intrinsic-size:
+                      // auto <estimate>` gives a placeholder height up front and then
+                      // remembers each note's real size after it's first rendered,
+                      // keeping the scrollbar stable. Wrapping (vs. styling NoteCard's
+                      // root) keeps NoteCard's own height measurement unaffected.
+                      <div
                         key={note.id}
+                        style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 400px' } as React.CSSProperties}
+                      >
+                      <NoteCard
                         note={note}
                         isPinned={pinnedNoteIds.includes(note.id)}
                         showPinButton={activeTab === 'me'}
@@ -428,6 +438,7 @@ export const FeedGrid = React.memo(function FeedGrid({
                         isEngagementStub={stubNoteIds?.has(note.id)}
                         onDismissThread={onDismissThread && activeTab !== 'me' && !(userPubkey && note.pubkey === userPubkey) ? () => onDismissThread(note.id) : undefined}
                       />
+                      </div>
                     );
                   })}
                 </div>

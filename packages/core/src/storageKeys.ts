@@ -301,7 +301,15 @@ export function restoreUserData(storage: KVStorage, pubkey: string): void {
  * Pre-loads the new user's data before any destructive changes so the
  * clear-and-restore is safe even if storage reads fail mid-swap.
  */
-export function switchActiveUser(storage: KVStorage, oldPubkey: string | null, newPubkey: string): void {
+export function switchActiveUser(
+  storage: KVStorage,
+  oldPubkey: string | null,
+  newPubkey: string,
+  // Platform-supplied hook fired after a successful swap (e.g. web records an
+  // ephemeral "account-switch" flag in sessionStorage). Kept out of core so
+  // this module stays DOM-free and the hook can't silently no-op on mobile.
+  onSwitch?: () => void,
+): void {
   assertValidPubkey(newPubkey);
   if (oldPubkey) assertValidPubkey(oldPubkey);
   if (oldPubkey === newPubkey) return;
@@ -328,9 +336,8 @@ export function switchActiveUser(storage: KVStorage, oldPubkey: string | null, n
 
   storage.setSync(ACTIVE_USER_KEY, newPubkey);
 
-  // Signal to backup system that this is an account switch, not a new session.
-  // sessionStorage survives page reload but not new tabs/windows.
-  try { sessionStorage.setItem('corkboard:account-switch', '1'); } catch { /* SSR / restricted */ }
+  // Signal to the platform that this was an account switch, not a new session.
+  onSwitch?.();
 }
 
 /**
@@ -370,7 +377,13 @@ export async function handleLogoutStorageAsync(storage: KVStorage, pubkey: strin
   });
   await Promise.all(stashOps);
 
-  // Clear all active per-user keys and the active-user marker
-  const clearOps = [...PER_USER_KEYS.map(key => storage.remove(key)), storage.remove(ACTIVE_USER_KEY)];
+  // Clear all active per-user keys and the active-user marker, and rotate the
+  // device ID (parity with the sync handleLogoutStorage) to prevent
+  // cross-session tracking after the post-logout reload.
+  const clearOps = [
+    ...PER_USER_KEYS.map(key => storage.remove(key)),
+    storage.remove(ACTIVE_USER_KEY),
+    storage.remove(STORAGE_KEYS.DEVICE_ID),
+  ];
   await Promise.all(clearOps);
 }

@@ -191,7 +191,7 @@ function migrateLegacyIfNeeded(userPubkey: string): void {
     }
     writeIndex(userPubkey, idx);
     dmMmkv.remove(legacyKey(userPubkey));
-    console.log(`[dmMessageStore] Migrated ${Object.keys(old.participants).length} partners from legacy blob`);
+    if (__DEV__) console.log(`[dmMessageStore] Migrated ${Object.keys(old.participants).length} partners from legacy blob`);
   } catch (e) {
     console.warn('[dmMessageStore] Legacy migration failed (ignoring):', e);
   }
@@ -241,7 +241,7 @@ function purgeLegacyNip04Once(): void {
     }
 
     dmMmkv.set(NIP04_PURGE_FLAG, '1');
-    console.log('[dmMessageStore] NIP-04 history purged');
+    if (__DEV__) console.log('[dmMessageStore] NIP-04 history purged');
   } catch (e) {
     console.warn('[dmMessageStore] NIP-04 purge skipped (will retry next launch):', e);
   }

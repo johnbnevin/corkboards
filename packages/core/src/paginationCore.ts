@@ -34,7 +34,10 @@ export function dedupBatch(raw: NostrEvent[], existingIds: ReadonlySet<string>):
   if (raw.length === 0) {
     return { trulyNew: [], oldestReturned: 0 };
   }
-  // Dedup within the batch (pool can return duplicates from multiple relays)
+  // Dedup within the batch (pool can return duplicates from multiple relays).
+  // Keeping the first-seen copy is correct here: a Nostr event `id` is the
+  // SHA-256 of its serialized content, so any two events sharing an id are
+  // byte-identical (unlike thread dedup, which prefers richer tag copies).
   const seen = new Set<string>();
   const deduped: NostrEvent[] = [];
   let oldest = raw[0].created_at;

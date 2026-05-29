@@ -10,6 +10,7 @@ import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } fro
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
 import { isTauri, tauriQuery } from '@/lib/tauri';
+import { getOrCreateUser } from '@/hooks/useCurrentUser';
 // Re-exported for backwards compatibility — canonical source is @/lib/relayConstants
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
@@ -226,13 +227,44 @@ class BlockedRelay implements NRelay {
   async [Symbol.asyncDispose](): Promise<void> {}
 }
 
+// ─── NIP-42 relay AUTH ──────────────────────────────────────────────────────
+// Some relays (paid/private, and the inbox relays NIP-17 DMs increasingly live
+// on) gate reads/writes behind an AUTH challenge. Without responding, such a
+// relay silently returns nothing. We register the active account's signer here
+// and answer challenges with a signed kind-22242 event (NIP-42). The signer is
+// set by NostrProvider on login/account-switch; before login it's null and
+// challenges simply go unanswered (nothing to authenticate as yet).
+
+interface AuthSigner { signEvent(t: { kind: number; created_at: number; tags: string[][]; content: string }): Promise<NostrEvent>; }
+let _authSigner: AuthSigner | null = null;
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function setRelayAuthSigner(signer: AuthSigner | null): void {
+  _authSigner = signer;
+}
+
+async function handleRelayAuthChallenge(relayUrl: string, challenge: string): Promise<NostrEvent> {
+  const signer = _authSigner;
+  if (!signer) throw new Error('No active signer for NIP-42 relay AUTH');
+  return signer.signEvent({
+    kind: 22242,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [['relay', relayUrl], ['challenge', challenge]],
+    content: '',
+  }) as Promise<NostrEvent>;
+}
+
 class RateLimitedRelay implements NRelay {
   private inner: NRelay1;
   private url: string;
 
   constructor(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]) {
     this.url = url;
-    this.inner = new NRelay1(url, opts);
+    // Inject the default NIP-42 AUTH handler unless the caller supplied one.
+    const merged = (opts && opts.auth)
+      ? opts
+      : { ...opts, auth: (challenge: string) => handleRelayAuthChallenge(url, challenge) };
+    this.inner = new NRelay1(url, merged);
   }
 
   async *req(
@@ -678,7 +710,18 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
   useEffect(() => {
     const activeLogin = logins[0];
     _setRouterUserPubkey(activeLogin?.pubkey);
-  }, [logins]);
+    // Register the active account's signer for NIP-42 relay AUTH challenges
+    // (reuses the cached NUser so bunker logins don't spawn a second signer).
+    if (activeLogin) {
+      try {
+        setRelayAuthSigner(getOrCreateUser(activeLogin, pool).signer as AuthSigner);
+      } catch {
+        setRelayAuthSigner(null);
+      }
+    } else {
+      setRelayAuthSigner(null);
+    }
+  }, [logins, pool]);
 
   // Listen for BroadcastChannel messages from other tabs
   useEffect(() => {

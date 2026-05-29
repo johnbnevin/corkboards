@@ -31,6 +31,10 @@ export function findVisibleCutoff(content: string, targetChars: number): number 
   if (targetChars <= 0) return 0
   let visible = 0
   let i = 0
+  // Mirror visibleLength's whitespace model: runs of whitespace collapse to a
+  // single counted char and leading whitespace doesn't count. Start as if
+  // preceded by space so a leading run is skipped (matches the .trim()).
+  let prevWasSpace = true
   const nvRegex = nonVisibleRegex()
   let match = nvRegex.exec(content)
 
@@ -38,10 +42,18 @@ export function findVisibleCutoff(content: string, targetChars: number): number 
     if (match && i === match.index) {
       i += match[0].length
       match = nvRegex.exec(content)
+      prevWasSpace = false // a non-visible span ends any whitespace run
       continue
     }
-    visible++
-    i++
+    const isSpace = /\s/.test(content[i])
+    if (isSpace && prevWasSpace) {
+      // collapsed whitespace — consume position without counting it
+      i++
+    } else {
+      visible++
+      i++
+      prevWasSpace = isSpace
+    }
     while (match && match.index < i) {
       match = nvRegex.exec(content)
     }

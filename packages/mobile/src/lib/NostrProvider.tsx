@@ -211,6 +211,35 @@ function isRelayBlocked(url: string): boolean {
 const blockedQuery = async () => [] as NostrEvent[];
 const blockedEvent = async () => { /* noop */ };
 
+// ─── NIP-42 relay AUTH ──────────────────────────────────────────────────────
+// Parity with web's NostrProvider: answer relay AUTH challenges with a signed
+// kind-22242 event so paid/private relays (and the inbox relays NIP-17 DMs live
+// on) don't silently return nothing. Signer is registered by WelshmanRouterBridge
+// on login/account-switch; null before login.
+interface AuthSigner { signEvent(t: { kind: number; created_at: number; tags: string[][]; content: string }): Promise<NostrEvent>; }
+let _authSigner: AuthSigner | null = null;
+
+export function setRelayAuthSigner(signer: AuthSigner | null): void {
+  _authSigner = signer;
+}
+
+async function handleRelayAuthChallenge(relayUrl: string, challenge: string): Promise<NostrEvent> {
+  const signer = _authSigner;
+  if (!signer) throw new Error('No active signer for NIP-42 relay AUTH');
+  return signer.signEvent({
+    kind: 22242,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [['relay', relayUrl], ['challenge', challenge]],
+    content: '',
+  }) as Promise<NostrEvent>;
+}
+
+/** Merge the default NIP-42 AUTH handler into relay opts unless one is supplied. */
+function withAuth(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): ConstructorParameters<typeof NRelay1>[1] {
+  if (opts && opts.auth) return opts;
+  return { ...opts, auth: (challenge: string) => handleRelayAuthChallenge(url, challenge) };
+}
+
 /**
  * Create a rate-limited, cached relay with failure backoff.
  */
@@ -235,7 +264,7 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
     }
   }
 
-  const inner = new NRelay1(url, opts);
+  const inner = new NRelay1(url, withAuth(url, opts));
   const origQuery = inner.query.bind(inner);
   const origEvent = inner.event.bind(inner);
   inner.query = async (filters, qOpts) => {
@@ -259,7 +288,7 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
  * Still rate-limited (same per-URL token bucket as cached relays).
  */
 export function createRelayFresh(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
-  const inner = new NRelay1(url, opts);
+  const inner = new NRelay1(url, withAuth(url, opts));
   const origQuery = inner.query.bind(inner);
   const origEvent = inner.event.bind(inner);
   inner.query = async (filters, qOpts) => {
@@ -440,10 +469,12 @@ export function NostrProvider({ children }: { children: React.ReactNode }) {
  * AuthContext which is below NostrProvider in the tree, hence this bridge.
  */
 export function WelshmanRouterBridge(): null {
-  const { pubkey } = useAuth();
+  const { pubkey, signer } = useAuth();
   useEffect(() => {
     _setRouterUserPubkey(pubkey ?? undefined);
-  }, [pubkey]);
+    // Register the active signer for NIP-42 relay AUTH challenges (parity with web).
+    setRelayAuthSigner((signer as AuthSigner | null) ?? null);
+  }, [pubkey, signer]);
   return null;
 }
 

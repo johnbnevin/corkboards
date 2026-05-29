@@ -628,7 +628,7 @@ export function SettingsScreen() {
           <TouchableOpacity
             style={styles.clientTagRow}
             onPress={() => {
-              const current = config.publishClientTag !== false;
+              const current = config.publishClientTag === true;
               Alert.alert(
                 current ? 'Disable client tag?' : 'Enable client tag?',
                 current
@@ -646,7 +646,7 @@ export function SettingsScreen() {
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.clientTagTitle}>
-                {config.publishClientTag !== false ? '\u2713 ' : ''}Client Tag
+                {config.publishClientTag === true ? '\u2713 ' : ''}Client Tag
               </Text>
               <Text style={styles.clientTagHint}>
                 Tag your posts as "sent from Corkboards"
@@ -654,7 +654,7 @@ export function SettingsScreen() {
             </View>
             <View style={[
               styles.toggleDot,
-              config.publishClientTag !== false ? styles.toggleDotOn : styles.toggleDotOff,
+              config.publishClientTag === true ? styles.toggleDotOn : styles.toggleDotOff,
             ]} />
           </TouchableOpacity>
         </View>

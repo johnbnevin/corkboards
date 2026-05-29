@@ -85,7 +85,7 @@ export function ProfileCacheSettings() {
   const handleGetProfilesNeedingRefresh = async () => {
     try {
       const pubkeys = await getAllCachedProfilePubkeys();
-      console.log('Profiles needing refresh check:', pubkeys.length, 'total profiles');
+      if (import.meta.env.DEV) console.log('Profiles needing refresh check:', pubkeys.length, 'total profiles');
       // Note: Profile refresh happens automatically when profiles are accessed
       // This dialog is for informational purposes only
       setShowRefreshDialog(false);

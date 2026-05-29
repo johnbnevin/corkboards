@@ -17,8 +17,14 @@
  *   cookies, IndexedDB, Tauri keychain entries. Intended for "sign out and erase".
  *
  * ## Security notes
- * - nsec is never stored in localStorage. On Tauri it goes to the OS keychain;
- *   on web it stays in @nostrify/react's in-memory login state only.
+ * - The user's nsec is never stored in localStorage. On Tauri it goes to the OS
+ *   keychain; on web it stays in @nostrify/react's in-memory login state only.
+ * - NIP-46 bunker logins DO persist an *ephemeral client* nsec (`clientNsec`) via
+ *   @nostrify/react's login store so the bunker session can reconnect after a
+ *   reload. This key only authorizes the NIP-46 channel (revocable at the
+ *   bunker); it is NOT the user's identity key. It is therefore lower-value but,
+ *   like anything in localStorage, XSS-exfiltratable — which the strict CSP
+ *   (index.html) is the primary defense against.
  * - nostrconnect and amberConnect generate a fresh ephemeral key pair per session.
  * - The nostrconnect relays are `NOSTRCONNECT_RELAYS` from @/lib/relayConstants.
  */
@@ -27,7 +33,7 @@ import { NLogin, useNostrLogin } from '@nostrify/react/login';
 import { NConnectSigner, NSecSigner } from '@nostrify/nostrify';
 import { createRelayDirect } from '@/components/NostrProvider';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
-import { idbSetSync, idbClear } from '@/lib/idb';
+import { idbSetSync, idbClear, idbKeys } from '@/lib/idb';
 import { clearNotesCache } from '@/lib/notesCache';
 import { clearCache as clearProfileCacheDb, clearMemCache as clearProfileMemCache } from '@/lib/cacheStore';
 import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
@@ -45,7 +51,6 @@ export function useLoginActions() {
   return {
     async nsec(nsec: string, opts?: { isNewUser?: boolean }): Promise<void> {
       const login = NLogin.fromNsec(nsec);
-      addLogin(login);
       const decoded = nip19.decode(nsec);
       if (decoded.type === 'nsec') {
         const pubkey = getPublicKey(decoded.data);
@@ -53,14 +58,22 @@ export function useLoginActions() {
         if (opts?.isNewUser) {
           idbSetSync(`${BACKUP_CHECKED_KEY}:${pubkey}`, 'true');
         }
-        // On Tauri desktop, store nsec in OS keychain for secure persistence
+        // On Tauri desktop, store nsec in OS keychain for secure persistence, and
+        // keep it OUT of the JS-persisted login (localStorage) entirely — the
+        // Rust signer (createTauriNsecSigner) reads it from the keychain by
+        // pubkey, so the nsec never lives in JS memory or localStorage. Only
+        // blank it once the keychain write succeeds, so a keychain failure
+        // doesn't lock the user out (fall back to the in-login key).
         if (isTauri) {
           const stored = await keychainStore(`nsec:${pubkey}`, nsec);
           if (!stored) {
             console.error('[login] Failed to store nsec in OS keychain — key may not persist across restarts');
+          } else if (login.data && typeof login.data === 'object') {
+            (login.data as { nsec?: string }).nsec = '';
           }
         }
       }
+      addLogin(login);
     },
 
     async bunker(uri: string): Promise<void> {
@@ -130,8 +143,12 @@ export function useLoginActions() {
                   try {
                     const decrypted = await clientSigner.nip44!.decrypt(event.pubkey, event.content);
                     const response = JSON.parse(decrypted);
-                    tauriLog(`[nip46] decrypted result=${response?.result?.slice?.(0,8)} expected=${secret.slice(0,8)}`);
-                    if (typeof response === 'object' && response !== null && response.result === secret) {
+                    // Never log the connect secret or the decrypted RPC payload —
+                    // tauriLog persists to a plaintext file on desktop. Log only
+                    // the match outcome.
+                    const matched = typeof response === 'object' && response !== null && response.result === secret;
+                    tauriLog(`[nip46] response received, secret matched=${matched}`);
+                    if (matched) {
                       resolved = true;
                       connectAbort.abort(); // close all 3 subscriptions cleanly
                       resolve({ bunkerPubkey: event.pubkey, relayIndex: ri });
@@ -296,8 +313,23 @@ export function useLoginActions() {
       const log = onProgress || (() => {});
 
       log('Removing login credentials...');
+      // Collect every pubkey we can find — not just currently-loaded logins, but
+      // also any orphaned per-user namespaced keys (`user:<pubkey>:…`) left by a
+      // prior partial logout. Otherwise a stale `nsec:<pubkey>` keychain entry
+      // could survive a "wipe everything".
+      const pubkeysToWipe = new Set<string>(logins.map(l => l.pubkey));
+      if (isTauri) {
+        try {
+          for (const k of await idbKeys()) {
+            const m = /^user:([0-9a-f]{64}):/.exec(k);
+            if (m) pubkeysToWipe.add(m[1]);
+          }
+        } catch { /* enumeration best-effort */ }
+        for (const pk of pubkeysToWipe) {
+          await keychainDelete(`nsec:${pk}`);
+        }
+      }
       for (const l of [...logins]) {
-        if (isTauri) await keychainDelete(`nsec:${l.pubkey}`);
         removeLogin(l.id);
       }
 

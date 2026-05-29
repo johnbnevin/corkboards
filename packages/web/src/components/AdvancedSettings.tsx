@@ -35,7 +35,7 @@ import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/components/NostrProvider';
 import {
   getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS,
 } from '@/hooks/useNostrBackup';
-import { isTauri, tauriGetProxy, tauriSetProxy } from '@/lib/tauri';
+import { isTauri, tauriGetProxy, tauriSetProxy, tauriGetProxyRequired, tauriSetProxyRequired, tauriProxyLoadFailed } from '@/lib/tauri';
 import { getImageProxyTemplate, saveImageProxyTemplate } from '@/lib/imageProxySettings';
 
 interface AdvancedSettingsProps {
@@ -476,6 +476,8 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
   const [proxyUrl, setProxyUrl] = useState('');
   const [savedUrl, setSavedUrl] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [proxyRequired, setProxyRequired] = useState(false);
+  const [proxyLoadFailed, setProxyLoadFailed] = useState(false);
   const [imgProxy, setImgProxy] = useState(getImageProxyTemplate);
   const [savedImgProxy, setSavedImgProxy] = useState(getImageProxyTemplate);
   const desktop = isTauri;
@@ -498,14 +500,36 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
       setSavedUrl(cur);
       setProxyUrl(cur ?? '');
     });
+    tauriGetProxyRequired().then(setProxyRequired);
+    tauriProxyLoadFailed().then(setProxyLoadFailed);
   }, [desktop]);
+
+  const handleToggleRequired = async (next: boolean) => {
+    try {
+      await tauriSetProxyRequired(next);
+      setProxyRequired(next);
+      toast({
+        title: next ? 'Proxy now required' : 'Proxy requirement off',
+        description: next
+          ? 'Native relay queries will FAIL rather than connect directly if the proxy is unset or unreachable.'
+          : 'Native relay queries may fall back to a direct connection.',
+      });
+    } catch (e) {
+      toast({ title: 'Failed to update setting', description: String(e), variant: 'destructive' });
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
     try {
       await tauriSetProxy(proxyUrl || null);
       setSavedUrl(proxyUrl || null);
-      toast({ title: proxyUrl ? 'Proxy enabled' : 'Proxy cleared', description: proxyUrl ? 'New relay connections will route through SOCKS5.' : 'Direct relay connections restored.' });
+      toast({
+        title: proxyUrl ? 'Proxy enabled' : 'Proxy cleared',
+        description: proxyUrl
+          ? 'Native relay connections route through SOCKS5 immediately. Restart the app to also route in-app WebView traffic (images, embeds).'
+          : 'Direct relay connections restored. Restart the app to stop routing WebView traffic through the proxy.',
+      });
     } catch (e) {
       toast({ title: 'Invalid proxy URL', description: String(e), variant: 'destructive' });
     }
@@ -552,7 +576,10 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
               autoCorrect="off"
             />
             <p className="text-[10px] text-muted-foreground mt-1">
-              Use this only if you run a local Tor daemon (port 9050) and don&apos;t OS-torify everything. Use <code>socks5h://</code> so DNS goes through the proxy. Routes native relay sockets only — image loads, link previews, and any WebView traffic still go direct. For full coverage, OS-torify or use Tails / Whonix.
+              Use this only if you run a local Tor daemon (port 9050) and don&apos;t OS-torify everything. Use <code>socks5h://</code> so DNS goes through the proxy. Routes native relay sockets live, plus all WebView traffic (images, embeds, in-app relay sockets) after an app restart — Linux/Windows reliable, macOS best-effort. For guaranteed full coverage, OS-torify or use Tails / Whonix.
+            </p>
+            <p className="text-[10px] text-muted-foreground mt-1">
+              Note: relay TLS is validated against your system trust store (no certificate pinning — relay certs rotate too often to pin). A hostile CA could still MITM relay metadata; for that threat, use a Tor <code>.onion</code> relay where the address itself authenticates the endpoint.
             </p>
           </div>
           <div className="flex gap-2">
@@ -564,8 +591,24 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
             )}
           </div>
           {savedUrl && (
-            <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedUrl}</span> (native relay sockets only)</p>
+            <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedUrl}</span> (native relay sockets live; WebView traffic after restart)</p>
           )}
+          {proxyLoadFailed && (
+            <p className="text-[10px] text-red-500">⚠ The saved proxy config failed to load — your proxy setting may not be active. Re-save it above.</p>
+          )}
+          <button
+            type="button"
+            className="flex items-center gap-2 text-left"
+            onClick={() => handleToggleRequired(!proxyRequired)}
+          >
+            <span className={`inline-block h-4 w-7 rounded-full transition-colors ${proxyRequired ? 'bg-green-600' : 'bg-muted-foreground/40'}`}>
+              <span className={`block h-3 w-3 m-0.5 rounded-full bg-white transition-transform ${proxyRequired ? 'translate-x-3' : ''}`} />
+            </span>
+            <span className="text-[11px]">
+              Require proxy (kill-switch)
+              <span className="block text-[10px] text-muted-foreground">When on, native relay queries FAIL rather than connect directly if the proxy is unset/unreachable — no silent clearnet fallback.</span>
+            </span>
+          </button>
         </div>
       ) : (
         <div className="rounded-md border bg-muted/30 p-3 space-y-2">

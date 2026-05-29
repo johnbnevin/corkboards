@@ -13,6 +13,7 @@ import * as Keychain from 'react-native-keychain';
 import { nip19, getPublicKey } from 'nostr-tools';
 import { NSecSigner, NConnectSigner, NRelay1 } from '@nostrify/nostrify';
 import { handleLogoutStorage, switchActiveUser } from '../lib/storageKeys';
+import { clearAllMessages } from '../lib/dmMessageStore';
 import { clearRelayCache } from './NostrProvider';
 import { clearCollapsedNotesModuleState } from '../hooks/useCollapsedNotes';
 import { evictCachedProfile, clearProfileCache } from '../lib/cacheStore';
@@ -376,6 +377,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearRelayCache();
     clearCollapsedNotesModuleState();
     clearProfileCache();
+    // Purge decrypted DM plaintext too — it must not survive a full logout.
+    try { clearAllMessages(); } catch { /* best-effort */ }
     setState({ pubkey: null, signer: null, loading: false, accounts: [] });
   }, []);
 

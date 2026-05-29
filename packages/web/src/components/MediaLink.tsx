@@ -454,6 +454,15 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
 
   return (
     <div className="my-2 rounded-lg overflow-hidden">
+      {/*
+        sandbox keeps these third-party players boxed: no top-navigation, no
+        form submission, no popups, no pointer-lock. `allow-same-origin` is
+        required by the providers (Spotify/Twitch/Apple Music read their own
+        cookies/storage) and is safe here — the framed src is always a remote
+        third-party origin, never corkboards' own origin, so the browser keeps
+        the frame in its own origin and it cannot reach back into this page.
+        frame-src in the CSP (index.html) is the allowlist of who may be framed.
+      */}
       <Iframe
         src={embed.url}
         className={`w-full ${aspectClass}`}

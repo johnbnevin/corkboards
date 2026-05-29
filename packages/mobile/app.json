@@ -3,6 +3,7 @@
     "name": "Corkboards",
     "slug": "corkboards",
     "version": "0.5.3b",
+    "scheme": "corkboards",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",

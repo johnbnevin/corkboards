@@ -154,12 +154,17 @@ export function selectRelays(opts: {
  * filters can be batched per relay instead of fanning out one query per
  * (author, relay) pair.
  *
- * Returns Map<relayUrl, authors-using-this-relay>.
+ * Returns Map<relayUrl, authors-using-this-relay>. When `maxAuthorsPerGroup`
+ * is given, a relay's author list is split into multiple suffixed entries
+ * (`<url>#1`, `<url>#2`, …) so a single relay can't accumulate an unbounded
+ * author count that the caller forgets to chunk; strip the `#n` suffix before
+ * connecting. Without the cap a relay maps to one (possibly large) list.
  */
 export function groupAuthorsByRelay(
   authors: readonly string[],
   authorRelays: ReadonlyMap<string, readonly string[]>,
   fallbacks: readonly string[],
+  maxAuthorsPerGroup?: number,
 ): Map<string, string[]> {
   const groups = new Map<string, string[]>();
   for (const pubkey of authors) {
@@ -171,7 +176,20 @@ export function groupAuthorsByRelay(
       groups.set(url, list);
     }
   }
-  return groups;
+  if (!maxAuthorsPerGroup || maxAuthorsPerGroup <= 0) return groups;
+
+  const chunked = new Map<string, string[]>();
+  for (const [url, list] of groups) {
+    if (list.length <= maxAuthorsPerGroup) {
+      chunked.set(url, list);
+      continue;
+    }
+    for (let i = 0; i < list.length; i += maxAuthorsPerGroup) {
+      const part = list.slice(i, i + maxAuthorsPerGroup);
+      chunked.set(i === 0 ? url : `${url}#${i / maxAuthorsPerGroup}`, part);
+    }
+  }
+  return chunked;
 }
 
 // ─── Re-exports for ergonomics ──────────────────────────────────────────────

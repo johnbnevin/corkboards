@@ -24,7 +24,10 @@ export function useNostrPublish(): UseMutationResult<NostrEvent> {
         throw new Error("User is not logged in");
       }
 
-      const tags = t.tags ?? [];
+      // Clone so we never mutate the caller's tags array in place. A shared
+      // reference would otherwise accumulate a duplicate `client` tag on retry
+      // / resubmit and silently mutate the caller's source object.
+      const tags = [...(t.tags ?? [])];
 
       // Client tag is OFF by default — attaching it to every event creates
       // fingerprintable metadata that survives in the public relay record

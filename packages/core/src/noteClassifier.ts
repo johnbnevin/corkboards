@@ -1,7 +1,7 @@
 import { type NostrEvent } from '@nostrify/nostrify';
 
 /** Returns true only for a well-formed 64-char lowercase hex event ID. */
-function isValidEventId(id: unknown): id is string {
+export function isValidEventId(id: unknown): id is string {
   return typeof id === 'string' && /^[0-9a-f]{64}$/.test(id);
 }
 

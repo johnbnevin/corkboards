@@ -11,20 +11,8 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "Corkboards",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 800,
-        "minHeight": 600,
-        "resizable": true,
-        "fullscreen": false,
-        "contentProtected": true
-      }
-    ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; connect-src 'self' ipc: http://ipc.localhost wss: https:; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; connect-src 'self' ipc: http://ipc.localhost wss: https:; font-src 'self' data:; object-src 'none'; frame-src 'self' https://*.youtube.com https://*.youtube-nocookie.com https://*.spotify.com https://*.soundcloud.com https://player.vimeo.com https://player.twitch.tv https://clips.twitch.tv https://open.spotify.com https://w.soundcloud.com https://bandcamp.com https://*.bandcamp.com https://rumble.com https://odysee.com https://embed.tidal.com https://embed.music.apple.com; base-uri 'self'; form-action 'self'; upgrade-insecure-requests"
     }
   },
   "bundle": {

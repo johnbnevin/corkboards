@@ -24,13 +24,29 @@ if (isTauri && !('__tauriConsoleOverride' in window)) {
   (window as unknown as Record<string, unknown>).__tauriConsoleOverride = true;
   clearTauriLog();
 
+  // Defense-in-depth: tauriLog persists to a plaintext file on disk, so scrub
+  // any secret that a stray log statement might carry before it lands there.
+  // We redact only unambiguous secrets — nsec/ncryptsec keys and `secret=`
+  // params — NOT bare 64-hex, since pubkeys and event ids are also 64-hex and
+  // public; blanket-redacting them would make the logs useless.
+  const SECRET_PATTERNS: Array<[RegExp, string]> = [
+    [/nsec1[0-9a-z]{20,}/gi, 'nsec1[REDACTED]'],
+    [/ncryptsec1[0-9a-z]{20,}/gi, 'ncryptsec1[REDACTED]'],
+    [/(secret=)[^&\s"']+/gi, '$1[REDACTED]'],
+  ];
+  const redactSecrets = (s: string): string => {
+    let out = s;
+    for (const [re, rep] of SECRET_PATTERNS) out = out.replace(re, rep);
+    return out;
+  };
+
   const fmt = (args: unknown[]): string => {
     const ts = new Date().toISOString();
     const msg = args.map(a => {
       if (typeof a === 'string') return a;
       try { return JSON.stringify(a); } catch { return String(a); }
     }).join(' ');
-    return `${ts} ${msg}`;
+    return redactSecrets(`${ts} ${msg}`);
   };
 
   const origLog = console.log.bind(console);

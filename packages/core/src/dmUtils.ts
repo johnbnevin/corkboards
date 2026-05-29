@@ -4,7 +4,11 @@ import type { NostrEvent } from '@nostrify/nostrify';
 // recognised. See dmConstants.ts for context.
 
 /**
- * Get the recipient pubkey from a DM event
+ * Get the recipient pubkey from a DM event.
+ *
+ * NOTE: assumes a single-recipient conversation and returns the FIRST `p` tag.
+ * NIP-17 group rumors can carry multiple `p` tags; this app models 1:1 DMs
+ * only, so multi-recipient rumors collapse to their first recipient here.
  */
 export function getRecipientPubkey(event: NostrEvent): string | undefined {
   return event.tags?.find(([name]) => name === 'p')?.[1];

@@ -57,7 +57,7 @@ export function NostrSync() {
           }
         }
       } catch (error) {
-        console.error('Failed to sync relays from Nostr:', error);
+        if (import.meta.env.DEV) console.error('Failed to sync relays from Nostr:', error);
       }
     };
 

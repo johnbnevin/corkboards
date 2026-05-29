@@ -54,7 +54,7 @@ pub async fn relay_subscribe(
         .and_then(|v| v.as_u64())
         .map(|v| v as usize)
         .unwrap_or(DEFAULT_LIMIT_CAP)
-        .min(DEFAULT_LIMIT_CAP * 10); // hard ceiling even if JS asks for more
+        .min(DEFAULT_LIMIT_CAP * 5); // hard ceiling even if JS asks for more (caps `seen` growth)
 
     // Bounded channel — backpressure so a fast relay can't outrun the emit loop
     // and balloon memory before JS drains the queue. Capacity scales with limit
@@ -63,7 +63,6 @@ pub async fn relay_subscribe(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(channel_capacity);
 
     // Spawn one task per relay — all connect and query concurrently
-    let url_count = urls.len();
     let handles: Vec<_> = urls
         .into_iter()
         .map(|url| {
@@ -91,7 +90,6 @@ pub async fn relay_subscribe(
         })
         .collect();
     drop(tx); // channel closes when all spawned senders finish
-    let _ = url_count;
 
     // Deduplicate and stream to JS in small batches via app.emit()
     let event_name = format!("relay-{}", sub_id);
@@ -164,6 +162,19 @@ pub async fn relay_query(
 /// per query so toggling the setting takes effect on the next connection
 /// without an app restart.
 async fn do_query(url: String, filter: Value) -> RelayQueryResult {
+    // Only ws/wss are valid relay schemes. Rejecting others stops a crafted URL
+    // from coercing the proxy path into a raw SOCKS/TCP connect to an arbitrary
+    // internal host:port (an SSRF-style primitive over the IPC boundary).
+    let scheme_ok = url::Url::parse(&url)
+        .map(|u| matches!(u.scheme(), "ws" | "wss"))
+        .unwrap_or(false);
+    if !scheme_ok {
+        return RelayQueryResult {
+            events: vec![],
+            error: Some("unsupported relay scheme (ws/wss only)".to_string()),
+        };
+    }
+
     match proxy::current_proxy() {
         Some(proxy_url) => match connect_via_proxy(&url, &proxy_url).await {
             Ok(ws) => run_query(ws, filter).await,
@@ -172,15 +183,37 @@ async fn do_query(url: String, filter: Value) -> RelayQueryResult {
                 error: Some(format!("proxy connect: {e}")),
             },
         },
-        None => match connect_async(url.as_str()).await {
-            Ok((ws, _)) => run_query(ws, filter).await,
-            Err(e) => RelayQueryResult {
-                events: vec![],
-                error: Some(format!("connect: {e}")),
-            },
-        },
+        None => {
+            // Kill-switch: when the user requires the proxy, never silently fall
+            // back to a direct clearnet connection — that would leak their IP and
+            // full Nostr filter. Fail the query instead.
+            if proxy::proxy_required() {
+                return RelayQueryResult {
+                    events: vec![],
+                    error: Some("proxy required but not configured — refusing direct connection".to_string()),
+                };
+            }
+            match connect_async(url.as_str()).await {
+                Ok((ws, _)) => run_query(ws, filter).await,
+                Err(e) => RelayQueryResult {
+                    events: vec![],
+                    error: Some(format!("connect: {e}")),
+                },
+            }
+        }
     }
 }
+
+// TLS note (applies to both connect paths below): relay `wss://` connections are
+// validated against the OS system trust store with hostname verification (via
+// native-tls). Certificate PINNING is intentionally NOT implemented:
+//   1. Relays use auto-rotating certs (Let's Encrypt, ~60–90 days), so pinning a
+//      fingerprint would break connectivity on every rotation.
+//   2. It would only cover this native Rust path — WebView relay sockets use the
+//      webview/OS TLS stack and can't be pinned here anyway.
+// Residual risk: a hostile or compromised CA could MITM relay metadata. Users who
+// need protection from that should route through Tor (proxy settings) onto a
+// hidden-service relay, where the .onion address itself authenticates the endpoint.
 
 /// SOCKS5-proxied WebSocket handshake. For `wss://`, wraps the SOCKS stream
 /// with native-tls; for `ws://`, uses the SOCKS stream directly.

@@ -101,9 +101,9 @@ async function purgeLegacyNip04Once(db: IDBPDatabase): Promise<void> {
 
     await store.put('1', NIP04_PURGE_FLAG_KEY);
     await tx.done;
-    console.info('[MessageStore] NIP-04 history purged');
+    if (import.meta.env.DEV) console.info('[MessageStore] NIP-04 history purged');
   } catch (e) {
-    console.warn('[MessageStore] NIP-04 purge skipped (will retry next launch):', e);
+    if (import.meta.env.DEV) console.warn('[MessageStore] NIP-04 purge skipped (will retry next launch):', e);
   }
 }
 

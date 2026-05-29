@@ -24,3 +24,6 @@ native-tls = "0.2"
 url = "2"
 dirs = "5"
 futures-util = "0.3"
+# Used by signer.rs to sign events and do NIP-04/44 encryption inside Rust so
+# the nsec (read from the OS keychain) never crosses the IPC boundary into JS.
+nostr = { version = "0.44.3", default-features = false, features = ["std", "nip04", "nip44"] }

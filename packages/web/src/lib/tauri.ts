@@ -93,6 +93,45 @@ export async function keychainDelete(key: string): Promise<boolean> {
   }
 }
 
+// ─── Native Signer (nsec stays in Rust/keychain) ──────────────────────────────
+// These delegate signing + NIP-04/44 encryption to Rust so the nsec never enters
+// JS. Used by createTauriNsecSigner (lib/tauriSigner.ts) for nsec logins on
+// desktop. They throw when not in Tauri — callers only use them in that context.
+
+/** Sign an unsigned event template in Rust; returns the full signed event. */
+export async function tauriSignEvent(
+  pubkey: string,
+  unsigned: { kind: number; content: string; tags: string[][]; created_at: number },
+): Promise<Record<string, unknown>> {
+  const res = await invoke<Record<string, unknown>>('sign_event', { pubkey, unsigned });
+  if (!res) throw new Error('tauriSignEvent: not running in Tauri');
+  return res;
+}
+
+export async function tauriNip44Encrypt(pubkey: string, peerPubkey: string, plaintext: string): Promise<string> {
+  const res = await invoke<string>('nip44_encrypt', { pubkey, peerPubkey, plaintext });
+  if (res == null) throw new Error('tauriNip44Encrypt: not running in Tauri');
+  return res;
+}
+
+export async function tauriNip44Decrypt(pubkey: string, peerPubkey: string, ciphertext: string): Promise<string> {
+  const res = await invoke<string>('nip44_decrypt', { pubkey, peerPubkey, ciphertext });
+  if (res == null) throw new Error('tauriNip44Decrypt: not running in Tauri');
+  return res;
+}
+
+export async function tauriNip04Encrypt(pubkey: string, peerPubkey: string, plaintext: string): Promise<string> {
+  const res = await invoke<string>('nip04_encrypt', { pubkey, peerPubkey, plaintext });
+  if (res == null) throw new Error('tauriNip04Encrypt: not running in Tauri');
+  return res;
+}
+
+export async function tauriNip04Decrypt(pubkey: string, peerPubkey: string, ciphertext: string): Promise<string> {
+  const res = await invoke<string>('nip04_decrypt', { pubkey, peerPubkey, ciphertext });
+  if (res == null) throw new Error('tauriNip04Decrypt: not running in Tauri');
+  return res;
+}
+
 // ─── Native Relay Query ───────────────────────────────────────────────────────
 
 interface RelayQueryResult {
@@ -186,6 +225,39 @@ export async function tauriGetProxy(): Promise<string | null> {
 export async function tauriSetProxy(url: string | null): Promise<void> {
   if (!isTauri) return;
   await invoke('set_proxy', { url: url && url.trim().length > 0 ? url.trim() : null });
+}
+
+/**
+ * Read the "require proxy" kill-switch. When true, native relay queries refuse
+ * to fall back to a direct clearnet connection if the proxy is unset/fails.
+ */
+export async function tauriGetProxyRequired(): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    return (await invoke<boolean>('get_proxy_required')) ?? false;
+  } catch (e) {
+    console.warn('[tauri] get_proxy_required failed:', e);
+    return false;
+  }
+}
+
+/** Enable/disable the "require proxy" kill-switch. */
+export async function tauriSetProxyRequired(required: boolean): Promise<void> {
+  if (!isTauri) return;
+  await invoke('set_proxy_required', { required });
+}
+
+/**
+ * True if the proxy config file existed but failed to parse — the UI should
+ * warn the user their proxy setting may not be active (avoids silent clearnet).
+ */
+export async function tauriProxyLoadFailed(): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    return (await invoke<boolean>('proxy_load_failed')) ?? false;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -146,6 +146,10 @@ export function useAuthor(pubkey: string | undefined, enabled = true) {
         // query reruns for a different pubkey before this resolves.
         const capturedPubkey = pubkey;
         fetchAuthorFromNetwork(capturedPubkey, signal, nostr as NostrPool).then((result) => {
+          // Bail if this query was cancelled (account switch / logout / unmount)
+          // while the refresh was in flight — don't write a now-stale entry into
+          // a cache that may belong to a different session.
+          if (signal.aborted) return;
           if (result.metadata) {
             queryClient.setQueryData(['author', capturedPubkey], result);
           }

@@ -50,7 +50,9 @@ export const DM_PROTOCOL_CONFIG = {
   [DM_PROTOCOL.UNKNOWN]: {
     label: 'Unknown',
     description: 'Unknown protocol',
-    kind: 0,
+    // Sentinel: -1 (not a real Nostr kind). Avoids colliding with kind 0
+    // (profile metadata) if anything maps kind → protocol via this config.
+    kind: -1,
   },
 } as const;
 

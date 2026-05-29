@@ -4,6 +4,8 @@ import type { NPool } from '@nostrify/nostrify';
 import { useMemo } from 'react';
 
 import { useAuthor } from './useAuthor.ts';
+import { isTauri } from '@/lib/tauri';
+import { createTauriNsecSigner } from '@/lib/tauriSigner';
 
 /**
  * Module-scoped NUser cache.
@@ -28,6 +30,16 @@ const USER_CACHE_MAX = 32;
 function buildUser(login: NLoginType, nostr: NPool): NUser {
   switch (login.type) {
     case 'nsec':
+      // On Tauri desktop, sign + encrypt in Rust so the nsec never enters JS
+      // (it lives only in the OS keychain). Duck-type an NUser — the app only
+      // consumes `.method`/`.pubkey`/`.signer`. Web/mobile keep the JS signer.
+      if (isTauri) {
+        return {
+          method: 'nsec',
+          pubkey: login.pubkey,
+          signer: createTauriNsecSigner(login.pubkey),
+        } as unknown as NUser;
+      }
       return NUser.fromNsecLogin(login);
     case 'bunker':
       return NUser.fromBunkerLogin(login, nostr);
@@ -38,7 +50,7 @@ function buildUser(login: NLoginType, nostr: NPool): NUser {
   }
 }
 
-function getOrCreateUser(login: NLoginType, nostr: NPool): NUser {
+export function getOrCreateUser(login: NLoginType, nostr: NPool): NUser {
   const key = `${login.type}:${login.pubkey}:${login.id ?? ''}`;
   const cached = _userCache.get(key);
   if (cached) return cached;

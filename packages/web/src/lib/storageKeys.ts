@@ -100,7 +100,11 @@ export function restoreUserData(pubkey: string): void {
 }
 
 export function switchActiveUser(oldPubkey: string | null, newPubkey: string): void {
-  _switchActiveUser(webStorage, oldPubkey, newPubkey);
+  _switchActiveUser(webStorage, oldPubkey, newPubkey, () => {
+    // Signal that this was an account switch, not a new session. sessionStorage
+    // survives a page reload but not new tabs/windows.
+    try { sessionStorage.setItem('corkboard:account-switch', '1'); } catch { /* restricted */ }
+  });
 }
 
 export function getActiveUserPubkey(): string | null {

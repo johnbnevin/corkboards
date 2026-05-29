@@ -5,6 +5,8 @@
  * variable length and non-string values in practice.
  */
 
+import { isUnsafeHost } from './ipUtils';
+
 export type NostrTag = string[];
 
 /**
@@ -72,32 +74,11 @@ export function isSecureRelay(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'wss:' || parsed.hostname.length === 0) return false;
-    // Block private/localhost IPs to prevent SSRF-like data leaks
-    const host = parsed.hostname.toLowerCase();
-    if (host === 'localhost') return false;
-    // IPv6 private ranges: loopback, link-local, unique local, IPv4-mapped
-    if (host.startsWith('[')) {
-      const ipv6 = host.slice(1, -1).toLowerCase(); // strip brackets, normalize
-      if (ipv6 === '::1') return false;                             // loopback
-      // Expanded zero forms: 0:0:0:0:0:0:0:1 and similar
-      if (/^(0:){7}1$/.test(ipv6) || /^0{0,4}(::)0{0,4}1$/.test(ipv6)) return false;
-      if (ipv6.startsWith('fe80')) return false;                    // link-local (fe80::/10)
-      if (ipv6.startsWith('fc') || ipv6.startsWith('fd')) return false; // unique local (fc00::/7)
-      if (ipv6.startsWith('::ffff:')) return false;                 // IPv4-mapped IPv6
-      // Block IPv4-compatible (deprecated but still routable to localhost)
-      if (ipv6.startsWith('::') && ipv6.includes('.')) return false;
-      return true;
-    }
-    // IPv4 private ranges: 0.x.x.x, 10.x.x.x, 127.x.x.x, 169.254.x.x, 172.16-31.x.x, 192.168.x.x, 255.x.x.x
-    const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (ipv4Match) {
-      const [, a, b, c, d] = ipv4Match.map(Number);
-      if (a > 255 || b > 255 || c > 255 || d > 255) return false;
-      if (a === 0 || a === 10 || a === 127 || a === 255) return false;
-      if (a === 192 && b === 168) return false;
-      if (a === 172 && b >= 16 && b <= 31) return false;
-      if (a === 169 && b === 254) return false;
-    }
+    // Block private/localhost/loopback/link-local hosts (in any IP encoding —
+    // decimal, hex, octal, short-form, or IPv6) to prevent SSRF-like leaks of
+    // the user's follow graph / DM recipients to an internal address.
+    if (isUnsafeHost(parsed.hostname)) return false;
+    if (parsed.username || parsed.password) return false;
     return true;
   } catch { return false; }
 }

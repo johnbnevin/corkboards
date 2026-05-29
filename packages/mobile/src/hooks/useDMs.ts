@@ -17,6 +17,7 @@ import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 import { formatConversationTime } from '@core/dmUtils';
 import { secureRandomInt } from '@core/cryptoUtils';
+import { readMessagesFromDB, upsertMessages, updateLastSync } from '../lib/dmMessageStore';
 
 export interface DecryptedMessage {
   id: string;
@@ -78,6 +79,11 @@ async function unwrapGiftWrap(
 
     if (rumor.kind !== 14) return null;
 
+    // NIP-59 spoofing guard: the rumor author MUST equal the (signed) seal
+    // author. A mismatch means a third party sealed a rumor claiming to be
+    // from someone else — reject it rather than display a forged sender.
+    if (rumor.pubkey && rumor.pubkey !== seal.pubkey) return null;
+
     const senderPubkey = seal.pubkey;
     const isMine = senderPubkey === pubkey;
 
@@ -114,6 +120,35 @@ export function useNip17DMEvents() {
     queryFn: async () => {
       if (!pubkey || !signer?.nip44) return { messages: [], partnerMap: new Map() };
 
+      const byId = new Map<string, UnwrappedMessage>();
+      const partnerMap = new Map<string, string>(); // messageId → partnerPubkey
+
+      // 1. Seed from the local encrypted cache — instant display on open and
+      //    persistence across sessions (parity with web's dmMessageStore use).
+      try {
+        const cached = readMessagesFromDB(pubkey);
+        if (cached) {
+          for (const [partner, p] of Object.entries(cached.participants)) {
+            for (const ev of p.messages) {
+              const msg: UnwrappedMessage = {
+                id: ev.id,
+                content: ev.content,
+                created_at: ev.created_at,
+                pubkey: ev.pubkey,
+                isMine: ev.pubkey === pubkey,
+                protocol: 'nip17',
+                partnerPubkey: partner,
+              };
+              byId.set(msg.id, msg);
+              partnerMap.set(msg.id, partner);
+            }
+          }
+        }
+      } catch { /* cache read is best-effort */ }
+
+      // 2. Fetch recent gift wraps and decrypt. NIP-17 wrap timestamps are
+      //    randomized up to 2 days, so we re-fetch a fixed window rather than a
+      //    fragile `since` cursor that could silently miss back-dated wraps.
       const wraps = await nostr.query(
         [{ kinds: [1059], '#p': [pubkey], limit: 200 }],
         { signal: AbortSignal.timeout(15000) },
@@ -123,18 +158,35 @@ export function useNip17DMEvents() {
         wraps.map(wrap => unwrapGiftWrap(wrap, pubkey, signer as { nip44: { decrypt: (r: string, c: string) => Promise<string> } })),
       );
 
-      const messages: DecryptedMessage[] = [];
-      const partnerMap = new Map<string, string>(); // messageId → partnerPubkey
-
+      // 3. Merge freshly decrypted messages and persist them per partner.
+      const freshByPartner = new Map<string, NostrEvent[]>();
       for (const result of results) {
         if (result.status === 'fulfilled' && result.value) {
           const msg = result.value;
-          messages.push(msg);
+          byId.set(msg.id, msg);
           partnerMap.set(msg.id, msg.partnerPubkey);
+          const arr = freshByPartner.get(msg.partnerPubkey) ?? [];
+          // Store the decrypted rumor as a minimal pseudo-event (the partner is
+          // encoded in the shard key, so the p-tag is enough to reconstruct it).
+          arr.push({
+            id: msg.id,
+            pubkey: msg.pubkey,
+            created_at: msg.created_at,
+            kind: 14,
+            content: msg.content,
+            tags: [['p', msg.partnerPubkey]],
+            sig: '',
+          } as NostrEvent);
+          freshByPartner.set(msg.partnerPubkey, arr);
         }
       }
 
-      messages.sort((a, b) => a.created_at - b.created_at);
+      try {
+        for (const [partner, evs] of freshByPartner) upsertMessages(pubkey, partner, evs);
+        updateLastSync(pubkey, Math.floor(Date.now() / 1000));
+      } catch { /* persistence is best-effort */ }
+
+      const messages = [...byId.values()].sort((a, b) => a.created_at - b.created_at);
       return { messages, partnerMap };
     },
     enabled: !!pubkey && !!(signer as { nip44?: unknown } | null)?.nip44,

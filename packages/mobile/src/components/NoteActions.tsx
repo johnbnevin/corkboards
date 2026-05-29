@@ -4,10 +4,13 @@
  */
 import { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, Platform, TextInput, Modal } from 'react-native';
+import { useQueryClient } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 import { useZap } from '../hooks/useZap';
+import { useNoteEngagement } from '../hooks/useNoteEngagement';
+import { EmojiPickerModal } from './EmojiPicker';
 
 interface NoteActionsProps {
   event: NostrEvent;
@@ -19,10 +22,24 @@ interface NoteActionsProps {
 export function NoteActions({ event, onReply, isBookmarked = false, onToggleBookmark }: NoteActionsProps) {
   const { nostr } = useNostr();
   const { pubkey, signer } = useAuth();
-  const [liked, setLiked] = useState(false);
-  const [reposted, setReposted] = useState(false);
+  const queryClient = useQueryClient();
+  const { data: engagement } = useNoteEngagement(event.id);
+  // Optimistic local overrides; fall back to the real relay-derived state.
+  const [likedOverride, setLikedOverride] = useState<boolean | null>(null);
+  const [repostedOverride, setRepostedOverride] = useState<boolean | null>(null);
+  const [likePending, setLikePending] = useState(false);
+  const [repostPending, setRepostPending] = useState(false);
   const [zapModalVisible, setZapModalVisible] = useState(false);
   const [zapAmount, setZapAmount] = useState('21');
+  const [emojiPickerVisible, setEmojiPickerVisible] = useState(false);
+
+  // Real relay state wins once it confirms the action; the optimistic override
+  // only fills the gap until the engagement query refetches (and is reverted in
+  // the publish catch on failure), so no clearing effect is needed.
+  const liked = engagement?.liked || (likedOverride ?? false);
+  const reposted = engagement?.reposted || (repostedOverride ?? false);
+  const likeCount = (engagement?.likeCount ?? 0) + (likedOverride && !engagement?.liked ? 1 : 0);
+  const repostCount = (engagement?.repostCount ?? 0) + (repostedOverride && !engagement?.reposted ? 1 : 0);
 
   const { zap, isZapping, error: zapError, clearError: clearZapError, lud16, isConnected: nwcConnected } = useZap(event);
 
@@ -42,29 +59,41 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     action();
   };
 
-  const handleLike = async () => {
-    if (!signer) return;
-    setLiked(true);
+  // Publish a kind-7 reaction. `content` is '+' for a plain like or an emoji /
+  // ':shortcode:' for an emoji reaction; `emojiTag` carries the NIP-30 custom
+  // emoji definition when applicable.
+  const publishReaction = async (content: string, emojiTag?: string[]) => {
+    if (!signer || likePending) return;
+    setLikePending(true);
+    setLikedOverride(true);
     try {
-      const template = {
+      const tags: string[][] = [['e', event.id], ['p', event.pubkey]];
+      if (emojiTag) tags.push(emojiTag);
+      const signed = await signer.signEvent({
         kind: 7,
-        content: '+',
-        tags: [
-          ['e', event.id],
-          ['p', event.pubkey],
-        ],
+        content,
+        tags,
         created_at: Math.floor(Date.now() / 1000),
-      };
-      const signed = await signer.signEvent(template);
+      });
       await nostr.event(signed);
+      queryClient.invalidateQueries({ queryKey: ['note-engagement', event.id] });
     } catch {
-      setLiked(false);
+      setLikedOverride(null);
+    } finally {
+      setLikePending(false);
     }
   };
 
+  const handleLike = async () => {
+    // Guard against double-publish: already liked, or a publish is in flight.
+    if (!signer || liked || likePending) return;
+    await publishReaction('+');
+  };
+
   const handleRepost = async () => {
-    if (!signer) return;
-    setReposted(true);
+    if (!signer || reposted || repostPending) return;
+    setRepostPending(true);
+    setRepostedOverride(true);
     try {
       const template = {
         kind: 6,
@@ -77,8 +106,11 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
       };
       const signed = await signer.signEvent(template);
       await nostr.event(signed);
+      queryClient.invalidateQueries({ queryKey: ['note-engagement', event.id] });
     } catch {
-      setReposted(false);
+      setRepostedOverride(null);
+    } finally {
+      setRepostPending(false);
     }
   };
 
@@ -137,18 +169,23 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
         <TouchableOpacity
           style={styles.action}
           onPress={() => requireAuth(handleRepost)}
+          disabled={repostPending}
         >
           <Text style={[styles.icon, reposted && styles.activeRepost]}>↻</Text>
-          {reposted && <Text style={styles.repostLabel}>reposted</Text>}
+          {repostCount > 0 && <Text style={[styles.count, reposted && styles.activeRepost]}>{repostCount}</Text>}
         </TouchableOpacity>
 
         <TouchableOpacity
           style={styles.action}
           onPress={() => requireAuth(handleLike)}
+          onLongPress={() => requireAuth(() => setEmojiPickerVisible(true))}
+          delayLongPress={300}
+          disabled={likePending}
         >
           <Text style={[styles.icon, liked && styles.activeLike]}>
             {liked ? '♥' : '♡'}
           </Text>
+          {likeCount > 0 && <Text style={[styles.count, liked && styles.activeLike]}>{likeCount}</Text>}
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -172,6 +209,7 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
             ) : (
               <Text style={[styles.icon, styles.zapIcon]}>⚡</Text>
             )}
+            {(engagement?.zapCount ?? 0) > 0 && <Text style={[styles.count, styles.zapIcon]}>{engagement?.zapCount}</Text>}
           </TouchableOpacity>
         ) : null}
       </View>
@@ -199,6 +237,14 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
           </View>
         </View>
       </Modal>
+
+      {/* Long-press the like button to react with a standard or custom (NIP-30) emoji */}
+      <EmojiPickerModal
+        visible={emojiPickerVisible}
+        onClose={() => setEmojiPickerVisible(false)}
+        onSelectEmoji={(emoji) => publishReaction(emoji)}
+        onSelectCustomEmoji={(shortcode, url) => publishReaction(`:${shortcode}:`, ['emoji', shortcode, url])}
+      />
     </>
   );
 }
@@ -211,7 +257,7 @@ const styles = StyleSheet.create({
   activeRepost: { color: '#22c55e' },
   activeBookmark: { color: '#f97316' },
   zapIcon: { color: '#f59e0b' },
-  repostLabel: { fontSize: 11, color: '#22c55e' },
+  count: { fontSize: 12, color: '#b3b3b3' },
   // Android zap modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center' },
   modalCard: { backgroundColor: '#2a2a2a', borderRadius: 12, padding: 20, width: 260, gap: 12 },

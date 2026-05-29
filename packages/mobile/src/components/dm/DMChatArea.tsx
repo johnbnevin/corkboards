@@ -25,7 +25,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   Linking,
-  Image,
 } from 'react-native';
 import { useConversationMessages, useSendDM } from '../../hooks/useDMs';
 import type { DecryptedMessage } from '../../hooks/useDMs';
@@ -84,9 +83,16 @@ function FileAttachment({ url }: { url: string }) {
       activeOpacity={0.8}
       style={styles.attachmentContainer}
     >
-      <Image
-        source={{ uri: url }}
+      {/*
+        Route DM image attachments through SizeGuardedImage (same as avatars) so
+        the image proxy + size guard apply. A raw <Image> would fetch the host
+        directly — leaking the recipient's IP and enabling tracking-pixel
+        deanonymization via a sender-planted image.
+      */}
+      <SizeGuardedImage
+        uri={url}
         style={styles.attachmentImage}
+        type="image"
         resizeMode="cover"
       />
     </TouchableOpacity>

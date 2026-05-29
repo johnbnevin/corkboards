@@ -8,13 +8,14 @@
  *      file metadata) in 32 KB chunks.
  *   4. A NIP-78 app-specific event (kind:30078, d-tag `corkboard:backup`)
  *      is published referencing the uploaded chunks and their Blossom URLs.
- *   5. The AES key is NIP-04 encrypted to the user's own pubkey and stored
- *      in the kind:30078 event — restore requires the same nsec.
+ *   5. The AES key is encrypted to the user's own pubkey (NIP-44 when the
+ *      signer supports it, falling back to NIP-04 only for legacy signers)
+ *      and stored in the kind:30078 event — restore requires the same nsec.
  *
  * For NIP-46 (bunker) users, the AES key is encrypted locally first, and
  * the remote signer only signs the envelope event.
  *
- * Relevant NIPs: 04 (encryption), 78 (app-specific data), 94 (file metadata).
+ * Relevant NIPs: 44/04 (encryption), 78 (app-specific data), 94 (file metadata).
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { triggerDownload } from '@/lib/triggerDownload';
@@ -96,8 +97,9 @@ export function getBlossomServers(): string[] {
 
 /** Save custom blossom server list */
 export function setBlossomServers(servers: string[]): void {
+  // idbSetSync already schedules the async IDB persist internally — no need to
+  // also call idbSet (that was a redundant double-write of the same value).
   idbSetSync(BLOSSOM_SERVERS_KEY, JSON.stringify(servers));
-  idbSet(BLOSSOM_SERVERS_KEY, JSON.stringify(servers));
 }
 
 // Resolved list used throughout this module

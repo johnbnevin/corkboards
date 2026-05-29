@@ -596,6 +596,24 @@ export function DMProvider({ children, config }: DMProviderProps) {
         };
       }
 
+      // NIP-59 spoofing guard: the rumor author MUST equal the seal author.
+      // Without this a third party could seal a rumor whose `pubkey` claims to
+      // be someone else, making a forged message appear to come from a trusted
+      // contact. The seal is signed, the rumor is not — so the seal's pubkey is
+      // the only authenticated identity and the rumor must match it.
+      if (messageEvent.pubkey !== sealEvent.pubkey) {
+        return {
+          processedMessage: {
+            ...event,
+            content: '',
+            decryptedContent: '',
+            error: 'Sender spoofing detected — rumor author does not match seal author',
+          },
+          conversationPartner: event.pubkey,
+          sealEvent,
+        };
+      }
+
       let conversationPartner: string;
       if (sealEvent.pubkey === user.pubkey) {
         const recipient = messageEvent.tags.find(([name]) => name === 'p')?.[1];

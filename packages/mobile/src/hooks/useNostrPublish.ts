@@ -11,6 +11,7 @@ import { useMutation, type UseMutationResult } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
+import { useAppContext } from './useAppContext';
 
 // created_at is auto-filled by the hook when omitted, so callers don't need to provide it.
 type PublishInput = Omit<NostrEvent, 'id' | 'pubkey' | 'sig' | 'created_at'> & { created_at?: number };
@@ -18,6 +19,7 @@ type PublishInput = Omit<NostrEvent, 'id' | 'pubkey' | 'sig' | 'created_at'> & {
 export function useNostrPublish(): UseMutationResult<NostrEvent, Error, PublishInput> {
   const { nostr } = useNostr();
   const { signer } = useAuth();
+  const { config } = useAppContext();
 
   return useMutation({
     mutationFn: async (t: PublishInput) => {
@@ -27,8 +29,13 @@ export function useNostrPublish(): UseMutationResult<NostrEvent, Error, PublishI
 
       const tags = [...(t.tags ?? [])];
 
-      // Client tag omitted by default to avoid fingerprinting users.
-      // (Opt-in via settings, matching web behavior.)
+      // Client tag is OFF by default — attaching it to every event creates
+      // fingerprintable metadata that lives forever in the public relay record.
+      // Opt-in via settings (parity with web's useNostrPublish). Skip kind 0
+      // (profile metadata) regardless — some relays reject extra tags there.
+      if (config.publishClientTag === true && t.kind !== 0 && !tags.some(([name]) => name === 'client')) {
+        tags.push(['client', 'corkboards.me']);
+      }
 
       const event = await signer.signEvent({
         kind: t.kind,

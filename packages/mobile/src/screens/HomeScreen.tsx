@@ -28,6 +28,7 @@ import { FeedFilters } from '../components/FeedFilters';
 import type { KindFilter, NoteKindStats } from '../components/NoteKindToggles';
 import { ZapDialog } from '../components/ZapDialog';
 import { ProfileModalProvider } from '../components/ProfileModal';
+import { DeepLinkHandler } from '../components/DeepLinkHandler';
 import { ComposeScreen } from './ComposeScreen';
 import { ProfileScreen } from './ProfileScreen';
 import { ThreadScreen } from './ThreadScreen';
@@ -473,6 +474,7 @@ export function HomeScreen() {
 
   return (
     <ProfileModalProvider onViewThread={(id) => setViewingThread(id)}>
+      <DeepLinkHandler onThread={setViewingThread} />
       <View style={styles.container}>
         {/* ── Header ─────────────────────────────────────────────────── */}
         <View style={styles.header}>

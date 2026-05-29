@@ -5,32 +5,62 @@
 //! it through a process-wide `Mutex<Option<String>>` so `relay.rs` can read it
 //! cheaply on every connection.
 //!
-//! Cypherpunk note: when set, every relay query (including outbox lookups and
-//! REQ subscriptions) goes through SOCKS5. The user's IP and the contents of
-//! Nostr filters — pubkeys followed, hashtags subscribed, DM-recipient pubkey —
-//! never reach the relay over a direct connection. `socks5h://` resolves the
-//! relay hostname through the proxy (Tor-style), preventing local DNS leaks.
+//! Cypherpunk note: when set, every NATIVE relay query (outbox lookups and REQ
+//! subscriptions routed through Rust) goes through SOCKS5 — the user's IP and
+//! the contents of Nostr filters (followed pubkeys, hashtags, DM-recipient
+//! pubkey) never reach the relay over a direct connection. `socks5h://` resolves
+//! the relay hostname through the proxy (Tor-style), preventing local DNS leaks.
+//!
+//! `proxy_required` is a kill-switch: when set, `relay.rs` MUST refuse to fall
+//! back to a direct clearnet connection if the proxy is unset or fails — so a
+//! Tor-only user is never silently deanonymized by a missing/failed proxy.
+//!
+//! NOTE: this only covers native Rust relay traffic. WebView WebSockets and
+//! HTTP(S) (images, etc.) are handled by WebKit and do NOT traverse this proxy.
 
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, Once};
 
 static PROXY_URL: Mutex<Option<String>> = Mutex::new(None);
+static PROXY_REQUIRED: Mutex<bool> = Mutex::new(false);
 static INIT: Once = Once::new();
+/// Set when the on-disk config existed but could not be parsed — surfaced to the
+/// UI so a Tor user knows their proxy setting may not have loaded.
+static LOAD_FAILED: Mutex<bool> = Mutex::new(false);
 
 fn config_path() -> Option<PathBuf> {
     let base = dirs::data_local_dir()?;
     Some(base.join("me.corkboards.desktop").join("proxy.json"))
 }
 
+/// Lock helper that recovers from a poisoned mutex instead of panicking.
+fn lock<'a, T>(m: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn load_from_disk() {
     let Some(path) = config_path() else { return };
-    let Ok(content) = fs::read_to_string(&path) else { return };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else { return };
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        // No file yet is normal (proxy unconfigured); only flag real read errors.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            *lock(&LOAD_FAILED) = true;
+            return;
+        }
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
+        *lock(&LOAD_FAILED) = true;
+        return;
+    };
     if let Some(s) = v.get("url").and_then(|x| x.as_str()) {
         if !s.is_empty() {
-            *PROXY_URL.lock().unwrap() = Some(s.to_string());
+            *lock(&PROXY_URL) = Some(s.to_string());
         }
+    }
+    if let Some(req) = v.get("required").and_then(|x| x.as_bool()) {
+        *lock(&PROXY_REQUIRED) = req;
     }
 }
 
@@ -38,15 +68,22 @@ fn load_from_disk() {
 /// First call also loads from disk; subsequent calls read the in-memory value.
 pub fn current_proxy() -> Option<String> {
     INIT.call_once(load_from_disk);
-    PROXY_URL.lock().unwrap().clone()
+    lock(&PROXY_URL).clone()
 }
 
-fn save_to_disk(url: Option<&str>) -> Result<(), String> {
+/// True when the user requires all native relay traffic to go through the proxy.
+/// `relay.rs` must error rather than connect directly when this is set.
+pub fn proxy_required() -> bool {
+    INIT.call_once(load_from_disk);
+    *lock(&PROXY_REQUIRED)
+}
+
+fn save_to_disk(url: Option<&str>, required: bool) -> Result<(), String> {
     let path = config_path().ok_or_else(|| "no config dir".to_string())?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
-    let body = serde_json::json!({ "url": url.unwrap_or("") }).to_string();
+    let body = serde_json::json!({ "url": url.unwrap_or(""), "required": required }).to_string();
     fs::write(&path, body).map_err(|e| format!("write: {e}"))
 }
 
@@ -69,11 +106,35 @@ pub fn set_proxy(url: Option<String>) -> Result<(), String> {
         None | Some("") => None,
         Some(s) => Some(validate(s)?),
     };
-    *PROXY_URL.lock().unwrap() = normalized.clone();
-    save_to_disk(normalized.as_deref())
+    *lock(&PROXY_URL) = normalized.clone();
+    *lock(&LOAD_FAILED) = false;
+    let required = *lock(&PROXY_REQUIRED);
+    save_to_disk(normalized.as_deref(), required)
 }
 
 #[tauri::command]
 pub fn get_proxy() -> Option<String> {
     current_proxy()
+}
+
+/// Enable/disable the "require proxy" kill-switch.
+#[tauri::command]
+pub fn set_proxy_required(required: bool) -> Result<(), String> {
+    INIT.call_once(load_from_disk);
+    *lock(&PROXY_REQUIRED) = required;
+    let url = lock(&PROXY_URL).clone();
+    save_to_disk(url.as_deref(), required)
+}
+
+#[tauri::command]
+pub fn get_proxy_required() -> bool {
+    proxy_required()
+}
+
+/// True if the proxy config file existed but failed to parse — the UI should
+/// warn the user that their proxy setting may not be active.
+#[tauri::command]
+pub fn proxy_load_failed() -> bool {
+    INIT.call_once(load_from_disk);
+    *lock(&LOAD_FAILED)
 }

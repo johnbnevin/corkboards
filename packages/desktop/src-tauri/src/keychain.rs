@@ -32,16 +32,23 @@ pub fn keychain_store(key: String, value: String) -> Result<(), String> {
     entry.set_password(&value).map_err(|_| "Failed to store keychain entry".to_string())
 }
 
-/// Retrieve a secret from the OS keychain.
-#[tauri::command]
-pub fn keychain_get(key: String) -> Result<Option<String>, String> {
-    validate_key(&key)?;
-    let entry = Entry::new(SERVICE_NAME, &key).map_err(|_| "Failed to access keychain".to_string())?;
+/// Internal: read a secret from the OS keychain by key. Shared by the
+/// `keychain_get` command and the Rust signer (`signer.rs`), so the secret can
+/// be used in-process without ever returning it to JS.
+pub(crate) fn get_secret(key: &str) -> Result<Option<String>, String> {
+    validate_key(key)?;
+    let entry = Entry::new(SERVICE_NAME, key).map_err(|_| "Failed to access keychain".to_string())?;
     match entry.get_password() {
         Ok(password) => Ok(Some(password)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(_) => Err("Failed to retrieve keychain entry".to_string()),
     }
+}
+
+/// Retrieve a secret from the OS keychain.
+#[tauri::command]
+pub fn keychain_get(key: String) -> Result<Option<String>, String> {
+    get_secret(&key)
 }
 
 /// Delete a secret from the OS keychain.

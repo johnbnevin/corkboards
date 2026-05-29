@@ -9,6 +9,7 @@
  */
 
 import { applyImageProxy } from './imageProxy';
+import { isUnsafeHost } from './ipUtils';
 
 const THUMBNAIL_SIZE = 64;
 const PREVIEW_SIZE = 400;
@@ -64,7 +65,7 @@ export function optimizeAvatarUrl(url: string | undefined): string | undefined {
     const u = new URL(url);
 
     for (const [host, optimizer] of Object.entries(KNOWN_THUMBNAIL_HOSTS)) {
-      if (u.hostname.endsWith(host)) {
+      if (u.hostname === host || u.hostname.endsWith('.' + host)) {
         optimized = optimizer(url, THUMBNAIL_SIZE);
         break;
       }
@@ -83,12 +84,17 @@ export function optimizeAvatarUrl(url: string | undefined): string | undefined {
 export function optimizeMediaUrl(url: string, isPreview: boolean = false): string {
   const size = isPreview ? PREVIEW_SIZE : THUMBNAIL_SIZE;
 
+  // Reject private/loopback/SSRF-encoded hosts before they reach an <img>/fetch.
+  // Without an image proxy configured the raw URL is otherwise loaded directly,
+  // letting a malicious note probe internal addresses from the user's browser.
+  if (shouldRejectUrl(url, 'media')) return '';
+
   let optimized = url;
   try {
     const u = new URL(url);
 
     for (const [host, optimizer] of Object.entries(KNOWN_THUMBNAIL_HOSTS)) {
-      if (u.hostname.endsWith(host)) {
+      if (u.hostname === host || u.hostname.endsWith('.' + host)) {
         optimized = optimizer(url, size);
         break;
       }
@@ -113,28 +119,10 @@ export function shouldRejectUrl(url: string, type: 'avatar' | 'media'): boolean 
       return true;
     }
 
-    // Block private/localhost IPs to prevent SSRF probing via image URLs
-    const host = u.hostname.toLowerCase();
-    if (host === 'localhost') return true;
-    // IPv4 private ranges
-    const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (ipv4Match) {
-      const [, a, b, c, d] = ipv4Match.map(Number);
-      // Reject malformed octets (>255)
-      if (a > 255 || b > 255 || c > 255 || d > 255) return true;
-      if (a === 0 || a === 10 || a === 127 || a === 255) return true;
-      if (a === 192 && b === 168) return true;
-      if (a === 172 && b >= 16 && b <= 31) return true;
-      if (a === 169 && b === 254) return true; // AWS metadata endpoint
-    }
-    // IPv6 private ranges
-    if (host.startsWith('[')) {
-      const ipv6 = host.slice(1, -1);
-      if (ipv6 === '::1') return true;
-      if (ipv6.startsWith('fe80:')) return true;
-      if (ipv6.startsWith('fc') || ipv6.startsWith('fd')) return true;
-      if (ipv6.startsWith('::ffff:')) return true;
-    }
+    // Block private/localhost/loopback/link-local hosts (in any IP encoding)
+    // to prevent SSRF probing via attacker-supplied image URLs.
+    if (isUnsafeHost(u.hostname)) return true;
+
     // Block credentials in URL
     if (u.username || u.password) return true;
 
@@ -145,12 +133,15 @@ export function shouldRejectUrl(url: string, type: 'avatar' | 'media'): boolean 
 }
 
 export function getPlaceholderAvatar(pubkey: string): string {
-  const hue = (parseInt(pubkey.slice(0, 8), 16) % 360);
+  // Sanitize to hex so a non-hex input can never inject markup into the inline SVG.
+  const hex = (pubkey || '').replace(/[^0-9a-fA-F]/g, '');
+  const hue = hex.length >= 8 ? parseInt(hex.slice(0, 8), 16) % 360 : 0;
+  const initials = (hex.slice(0, 2) || '??').toUpperCase();
   return `data:image/svg+xml,${encodeURIComponent(`
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
       <rect fill="hsl(${hue}, 70%, 60%)" width="64" height="64"/>
       <text x="32" y="40" font-family="sans-serif" font-size="24" fill="white" text-anchor="middle">
-        ${pubkey.slice(0, 2).toUpperCase()}
+        ${initials}
       </text>
     </svg>
   `)}`;

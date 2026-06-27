@@ -10,8 +10,8 @@
  * Own events (pubkey === user.pubkey) are excluded.
  */
 
-import { useState, useCallback, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useCallback, useMemo } from 'react';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { useNostr } from '@/hooks/useNostr';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -131,28 +131,47 @@ export function getZapAmountSats(event: NostrEvent): number | null {
   return null;
 }
 
+const NOTIF_PAGE_SIZE = 100;
+const NOTIF_KINDS = [1, 6, 7, 16, 9735];
+
+interface NotifPage {
+  items: NotificationItem[];
+  /** Cursor for the next (older) page: oldest raw created_at − 1, or null. */
+  cursor: number | null;
+  /** Raw event count from the relay (before own/dupe filtering) — drives hasMore. */
+  rawCount: number;
+}
+
 export function useNotifications(enabled: boolean) {
   const { nostr } = useNostr();
   const { user } = useCurrentUser();
-  const limitRef = useRef(100);
-  const [, forceUpdate] = useState(0);
-  // Track the newest notification timestamp so StatusBar can show "Newer" button
-  const newestTimestampRef = useRef<number | null>(null);
-  const [newestTimestamp, setNewestTimestamp] = useState<number | null>(null);
 
-  const { data, isLoading, refetch } = useQuery({
+  // Incremental, cursor-based paging. The old approach inflated `limit` and
+  // re-pulled the ENTIRE window on every "load more" (500 events to reveal 100).
+  // Each page now fetches only the next PAGE_SIZE older notifications via `until`.
+  const { data, isLoading, refetch, fetchNextPage, hasNextPage } = useInfiniteQuery({
     queryKey: ['notifications', user?.pubkey],
-    queryFn: async () => {
-      if (!user?.pubkey) return [];
+    initialPageParam: undefined as number | undefined,
+    queryFn: async ({ pageParam }): Promise<NotifPage> => {
+      if (!user?.pubkey) return { items: [], cursor: null, rawCount: 0 };
 
       const events = await nostr.query(
-        [{ kinds: [1, 6, 7, 16, 9735], '#p': [user.pubkey], limit: limitRef.current }],
+        [{
+          kinds: NOTIF_KINDS,
+          '#p': [user.pubkey],
+          limit: NOTIF_PAGE_SIZE,
+          ...(pageParam ? { until: pageParam } : {}),
+        }],
         { signal: AbortSignal.timeout(12000) },
       );
 
+      // Track the oldest RAW timestamp for the cursor (own/dupe filtering below
+      // would otherwise undercount and stop paging early).
+      let oldest = Infinity;
       const seen = new Set<string>();
       const items = events
         .filter(e => {
+          if (e.created_at < oldest) oldest = e.created_at;
           if (seen.has(e.id)) return false;
           seen.add(e.id);
           return e.pubkey !== user.pubkey; // exclude own events
@@ -165,41 +184,50 @@ export function useNotifications(enabled: boolean) {
           senderPubkey: event.kind === 9735 ? getZapSenderPubkey(event) : null,
         }));
 
-      // Track the newest timestamp for "Newer" button
-      if (items.length > 0) {
-        const newest = items[0].event.created_at;
-        newestTimestampRef.current = newest;
-        setNewestTimestamp(newest);
-      }
-
-      return items;
+      return { items, cursor: oldest === Infinity ? null : oldest - 1, rawCount: events.length };
     },
+    getNextPageParam: (last) =>
+      last.rawCount >= NOTIF_PAGE_SIZE && last.cursor !== null ? last.cursor : undefined,
     enabled: enabled && !!user?.pubkey,
     staleTime: 30_000,
     gcTime: 5 * 60_000,
+    // Notifications used to silently return [] on a single slow-relay timeout
+    // and cache that for 30s. Match the feed's resilience: retry on
+    // failure/abort, and refetch when the tab regains focus or the network
+    // reconnects (fixes "empty / won't load until I refresh after idle").
+    retry: 2,
+    retryDelay: (attempt) => Math.min(2000 * 2 ** attempt, 10_000),
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
 
-  const loadMore = useCallback((count = 100) => {
-    limitRef.current += count;
-    // Refetch with the new limit — existing data stays visible (same queryKey)
-    refetch();
-    forceUpdate(n => n + 1);
-  }, [refetch]);
+  // Flatten pages, dedup across page boundaries, newest-first.
+  const notifications = useMemo(() => {
+    const seen = new Set<string>();
+    const out: NotificationItem[] = [];
+    for (const page of data?.pages ?? []) {
+      for (const item of page.items) {
+        if (seen.has(item.event.id)) continue;
+        seen.add(item.event.id);
+        out.push(item);
+      }
+    }
+    return out.sort((a, b) => b.event.created_at - a.event.created_at);
+  }, [data]);
 
-  // Load newer notifications since the newest one we have
-  const loadNewer = useCallback(() => {
-    // Simply refetch — the query fetches the newest N notifications,
-    // so any newer ones since last fetch will be included.
-    refetch();
-  }, [refetch]);
+  const loadMore = useCallback(() => { fetchNextPage(); }, [fetchNextPage]);
+
+  // Load newer: refetch from the top (first page has no `until`, so it pulls the
+  // newest notifications, picking up anything since the last fetch).
+  const loadNewer = useCallback(() => { refetch(); }, [refetch]);
 
   return {
-    notifications: data ?? [],
+    notifications,
     isLoading,
     refetch,
     loadMore,
     loadNewer,
-    hasMore: (data?.length ?? 0) >= limitRef.current,
-    newestTimestamp,
+    hasMore: !!hasNextPage,
+    newestTimestamp: notifications.length > 0 ? notifications[0].event.created_at : null,
   };
 }

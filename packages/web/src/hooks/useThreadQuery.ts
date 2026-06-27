@@ -22,7 +22,7 @@ import {
   type ThreadNode,
   type FlatThreadRow,
 } from '@core/threadTree'
-import { fetchEventWithOutbox, setCachedEvent } from '@/lib/fetchEvent'
+import { fetchEventWithOutbox, setCachedEvent, getCachedEvent } from '@/lib/fetchEvent'
 
 const THREAD_STALE_TIME = 2 * 60 * 1000 // 2 minutes
 const THREAD_GC_TIME = 10 * 60 * 1000   // 10 minutes
@@ -71,6 +71,10 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     queryKey: ['thread-target', eventId],
     queryFn: async () => {
       if (!eventId) return null
+      // Instant hit if we already have the event cached (e.g. it was just
+      // visible in the feed) — avoids a blank modal while relays respond.
+      const cached = getCachedEvent(eventId)
+      if (cached) return cached
       // Try NPool first (uses reqRouter with outbox routing), fall back to fetchEventWithOutbox
       const events = await nostr.query(
         [{ ids: [eventId], limit: 1 }],
@@ -81,13 +85,19 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
         return events[0]
       }
       // Fallback: direct relay queries with outbox discovery
-      return fetchEventWithOutbox(eventId, nostr)
+      const viaOutbox = await fetchEventWithOutbox(eventId, nostr)
+      if (viaOutbox) return viaOutbox
+      // Not found on this attempt. THROW rather than returning null: a null
+      // success gets cached and renders as a permanent "No thread data found"
+      // with no retry. Throwing lets React Query retry (and keeps the skeleton
+      // up), then surface a real error + "Try again" if it stays unreachable.
+      throw new Error('Event not found')
     },
     enabled: !!eventId,
     staleTime: THREAD_STALE_TIME,
     gcTime: THREAD_GC_TIME,
-    retry: 2,
-    retryDelay: 1000,
+    retry: 3,
+    retryDelay: (attempt) => Math.min(800 * 2 ** attempt, 4000),
   })
 
   // Derive root ID from target event's thread tags
@@ -161,7 +171,9 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     if (rootId) {
       queryClient.setQueryData<NostrEvent[]>(
         ['thread-tree', rootId],
-        (old) => old ? [...old, event] : [event],
+        // Dedup by id — a double-submit or a concurrent refetch can inject the
+        // same reply twice, bloating the cache and miscounting allEvents.
+        (old) => old?.some(e => e.id === event.id) ? old : [...(old ?? []), event],
       )
     }
   }, [rootId, queryClient])

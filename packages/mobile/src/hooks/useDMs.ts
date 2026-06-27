@@ -17,7 +17,7 @@ import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 import { formatConversationTime } from '@core/dmUtils';
 import { secureRandomInt } from '@core/cryptoUtils';
-import { readMessagesFromDB, upsertMessages, updateLastSync } from '../lib/dmMessageStore';
+import { readMessagesFromDB, upsertMessages, updateLastSync, getLastSync } from '../lib/dmMessageStore';
 
 export interface DecryptedMessage {
   id: string;
@@ -33,6 +33,39 @@ export interface Conversation {
   lastMessage: string;
   lastActivity: number;
   unreadHint: boolean;
+}
+
+/** A file attachment for a NIP-17 file DM (kind 15). Mirrors web's FileAttachment. */
+export interface DMAttachment {
+  url: string;
+  mimeType?: string;
+  size?: number;
+  name?: string;
+  /** Blossom upload tags — `x` = sha256, `ox` = original sha256 (NIP-94). */
+  tags?: string[][];
+}
+
+/** Append attachment URLs to the message body (so clients that only read text
+ *  still see the links). Mirrors web's prepareMessageContent. */
+function prepareMessageContent(content: string, attachments: DMAttachment[]): string {
+  if (attachments.length === 0) return content;
+  const fileUrls = attachments.map(f => f.url).join('\n');
+  return content ? `${content}\n\n${fileUrls}` : fileUrls;
+}
+
+/** Build NIP-92 `imeta` tags for attachments. Mirrors web's createImetaTags. */
+function createImetaTags(attachments: DMAttachment[]): string[][] {
+  return attachments.map(file => {
+    const tag = ['imeta', `url ${file.url}`];
+    if (file.mimeType) tag.push(`m ${file.mimeType}`);
+    if (file.size) tag.push(`size ${file.size}`);
+    if (file.name) tag.push(`alt ${file.name}`);
+    for (const t of file.tags ?? []) {
+      if (t[0] === 'x') tag.push(`x ${t[1]}`);
+      if (t[0] === 'ox') tag.push(`ox ${t[1]}`);
+    }
+    return tag;
+  });
 }
 
 // ============================================================================
@@ -77,7 +110,9 @@ async function unwrapGiftWrap(
     const rumorJson = await withDecryptTimeout(signer.nip44.decrypt(seal.pubkey, seal.content));
     const rumor = JSON.parse(rumorJson) as { kind: number; content: string; pubkey?: string; created_at?: number; id?: string; tags?: string[][] };
 
-    if (rumor.kind !== 14) return null;
+    // kind 14 = text DM, kind 15 = file/attachment DM (NIP-17). Web accepts
+    // both; mobile previously dropped kind 15, silently hiding attachment DMs.
+    if (rumor.kind !== 14 && rumor.kind !== 15) return null;
 
     // NIP-59 spoofing guard: the rumor author MUST equal the (signed) seal
     // author. A mismatch means a third party sealed a rumor claiming to be
@@ -146,13 +181,46 @@ export function useNip17DMEvents() {
         }
       } catch { /* cache read is best-effort */ }
 
-      // 2. Fetch recent gift wraps and decrypt. NIP-17 wrap timestamps are
-      //    randomized up to 2 days, so we re-fetch a fixed window rather than a
-      //    fragile `since` cursor that could silently miss back-dated wraps.
-      const wraps = await nostr.query(
-        [{ kinds: [1059], '#p': [pubkey], limit: 200 }],
-        { signal: AbortSignal.timeout(15000) },
-      );
+      // 2. Fetch gift wraps to decrypt. On the FIRST sync (no prior lastSync) we
+      //    walk back through history in batches so heavy DM users backfill their
+      //    full conversation history into the cache — not just the most recent
+      //    ~200 (web does the same via DMProvider's batched scan). On later
+      //    refetches the cache already holds history, so a single recent window
+      //    picks up new messages cheaply. NIP-17 wrap timestamps are randomized
+      //    up to 2 days; we dedup by id and step the cursor strictly backward.
+      const wraps: NostrEvent[] = [];
+      if (getLastSync(pubkey) !== null) {
+        const recent = await nostr.query(
+          [{ kinds: [1059], '#p': [pubkey], limit: 200 }],
+          { signal: AbortSignal.timeout(15000) },
+        );
+        wraps.push(...recent);
+      } else {
+        const SCAN_BATCH_SIZE = 500;
+        const SCAN_TOTAL_LIMIT = 5000;
+        const seenWrap = new Set<string>();
+        let until: number | undefined;
+        while (wraps.length < SCAN_TOTAL_LIMIT) {
+          const filter = until !== undefined
+            ? { kinds: [1059], '#p': [pubkey], limit: SCAN_BATCH_SIZE, until }
+            : { kinds: [1059], '#p': [pubkey], limit: SCAN_BATCH_SIZE };
+          let batch: NostrEvent[];
+          try {
+            batch = await nostr.query([filter], { signal: AbortSignal.timeout(15000) });
+          } catch {
+            break;
+          }
+          let added = 0;
+          let oldest = Infinity;
+          for (const w of batch) {
+            if (w.created_at < oldest) oldest = w.created_at;
+            if (!seenWrap.has(w.id)) { seenWrap.add(w.id); wraps.push(w); added++; }
+          }
+          // End of available history: a short page, no new wraps, or no events.
+          if (batch.length < SCAN_BATCH_SIZE || added === 0 || oldest === Infinity) break;
+          until = oldest - 1; // strictly decreasing so pagination terminates
+        }
+      }
 
       const results = await Promise.allSettled(
         wraps.map(wrap => unwrapGiftWrap(wrap, pubkey, signer as { nip44: { decrypt: (r: string, c: string) => Promise<string> } })),
@@ -280,9 +348,11 @@ export function useSendDM() {
     mutationFn: async ({
       recipientPubkey,
       content,
+      attachments = [],
     }: {
       recipientPubkey: string;
       content: string;
+      attachments?: DMAttachment[];
     }) => {
       if (!pubkey || !signer) throw new Error('Not logged in');
       if (!(signer as { nip44?: unknown }).nip44) {
@@ -294,6 +364,7 @@ export function useSendDM() {
         recipientPubkey,
         content,
         nostr,
+        attachments,
       );
     },
     onSuccess: () => {
@@ -309,6 +380,7 @@ async function sendNip17(
   recipientPubkey: string,
   content: string,
   nostr: { event(e: NostrEvent): Promise<void> },
+  attachments: DMAttachment[] = [],
 ): Promise<NostrEvent> {
   const now = Math.floor(Date.now() / 1000);
 
@@ -318,11 +390,12 @@ async function sendNip17(
     return baseTime - secureRandomInt(twoDaysInSeconds);
   };
 
-  // Step 1: Create rumor (kind 14, unsigned plaintext DM)
+  // Step 1: Create rumor (unsigned plaintext DM). kind 15 = file DM with imeta
+  // tags (NIP-17/NIP-92), kind 14 = text-only. Mirrors web's DMProvider.
   const rumor = {
-    kind: 14,
-    content,
-    tags: [['p', recipientPubkey]],
+    kind: attachments.length > 0 ? 15 : 14,
+    content: prepareMessageContent(content, attachments),
+    tags: [['p', recipientPubkey], ...createImetaTags(attachments)],
     created_at: now,
     pubkey: senderPubkey,
   };

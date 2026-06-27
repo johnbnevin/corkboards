@@ -16,7 +16,7 @@ import {
   type ThreadNode,
   type FlatThreadRow,
 } from '@core/threadTree';
-import { fetchEventWithOutbox, setCachedEvent } from '../lib/fetchEvent';
+import { fetchEventWithOutbox, setCachedEvent, getCachedEvent } from '../lib/fetchEvent';
 
 const THREAD_STALE_TIME = 2 * 60 * 1000;
 const THREAD_GC_TIME = 10 * 60 * 1000;
@@ -53,6 +53,9 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     queryKey: ['thread-target', eventId],
     queryFn: async () => {
       if (!eventId) return null;
+      // Instant hit if the event is already cached (e.g. just seen in the feed).
+      const cached = getCachedEvent(eventId);
+      if (cached) return cached;
       const events = await nostr.query(
         [{ ids: [eventId], limit: 1 }],
         { signal: AbortSignal.timeout(5000) },
@@ -61,13 +64,18 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
         setCachedEvent(events[0].id, events[0]);
         return events[0];
       }
-      return fetchEventWithOutbox(eventId, nostr);
+      const viaOutbox = await fetchEventWithOutbox(eventId, nostr);
+      if (viaOutbox) return viaOutbox;
+      // Not found this attempt. THROW (don't return null) so React Query retries
+      // and the UI shows a loading/stuck indicator instead of a permanent
+      // "No thread data found" empty state.
+      throw new Error('Event not found');
     },
     enabled: !!eventId,
     staleTime: THREAD_STALE_TIME,
     gcTime: THREAD_GC_TIME,
-    retry: 2,
-    retryDelay: 1000,
+    retry: 3,
+    retryDelay: (attempt) => Math.min(800 * 2 ** attempt, 4000),
   });
 
   const rootId = useMemo(() => {
@@ -133,7 +141,9 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     if (rootId) {
       queryClient.setQueryData<NostrEvent[]>(
         ['thread-tree', rootId],
-        (old) => old ? [...old, event] : [event],
+        // Dedup by id — a double-submit or a concurrent refetch can inject the
+        // same reply twice, bloating the cache and miscounting allEvents.
+        (old) => old?.some(e => e.id === event.id) ? old : [...(old ?? []), event],
       );
     }
   }, [rootId, queryClient]);

@@ -8,10 +8,13 @@ import type { useNostr } from './NostrProvider';
 import { FEED_KINDS } from '@core/feedConstants';
 import { baseTimeWindow } from '@core/rss';
 import type { RssFeedResult } from '@core/rss';
+import { deduplicateAndSort } from '@core/feedAlgorithms';
 
 // Re-export core constants for convenience
 export { FEED_PAGE_SIZE_MOBILE, FEED_LOAD_MORE_COUNT, AUTHOR_BATCH_SIZE, MAX_PARALLEL_BATCHES, FEED_KINDS } from '@core/feedConstants';
 export { rssItemId, rssItemsToEvents } from '@core/rss';
+// Shared pure feed algorithms (were duplicated here and on web).
+export { deduplicateAndSort, mergeEvents } from '@core/feedAlgorithms';
 
 // RSS proxy — absolute URL so it works from the mobile app (no relative paths)
 const RSS_PROXY = 'https://corkboards.me/rss-proxy.php';
@@ -156,28 +159,3 @@ export async function batchFetchByAuthors(opts: BatchFetchOpts): Promise<NostrEv
   }
 }
 
-// ─── Deduplication ──────────────────────────────────────────────────────────
-
-/**
- * Deduplicate events by ID and sort by created_at descending.
- */
-export function deduplicateAndSort(events: NostrEvent[]): NostrEvent[] {
-  const seen = new Set<string>();
-  const deduped = events.filter(e => {
-    if (seen.has(e.id)) return false;
-    seen.add(e.id);
-    return true;
-  });
-  return deduped.sort((a, b) => b.created_at - a.created_at);
-}
-
-/**
- * Merge new events into an existing array, deduplicating by ID.
- * Returns the merged, sorted array.
- */
-export function mergeEvents(existing: NostrEvent[], incoming: NostrEvent[]): NostrEvent[] {
-  const existingIds = new Set(existing.map(e => e.id));
-  const trulyNew = incoming.filter(e => !existingIds.has(e.id));
-  if (trulyNew.length === 0) return existing;
-  return [...existing, ...trulyNew].sort((a, b) => b.created_at - a.created_at);
-}

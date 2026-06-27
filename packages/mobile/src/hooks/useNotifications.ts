@@ -12,8 +12,8 @@
  * Mirrors the web version (packages/web/src/hooks/useNotifications.ts).
  */
 
-import { useState, useCallback } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useCallback, useMemo } from 'react';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
@@ -34,7 +34,7 @@ export interface NotificationItem {
 }
 
 function classifyNotification(event: NostrEvent): NotificationType {
-  if (event.kind === 6) return 'repost';
+  if (event.kind === 6 || event.kind === 16) return 'repost';
   if (event.kind === 7) return 'reaction';
   if (event.kind === 9735) return 'zap';
   if (event.kind === 1) {
@@ -60,8 +60,8 @@ function getTargetInfo(event: NostrEvent): {
     };
   }
 
-  // For kind 1 (reply) and kind 6 (repost), find the root or parent e-tag
-  if (event.kind === 1 || event.kind === 6) {
+  // For kind 1 (reply) and kind 6/16 (repost), find the root or parent e-tag
+  if (event.kind === 1 || event.kind === 6 || event.kind === 16) {
     const eTags = event.tags.filter(t => t[0] === 'e');
     // NIP-10: prefer 'reply' marker, then 'root', then last e-tag
     const replyTag = eTags.find(t => t[3] === 'reply') ?? eTags.find(t => t[3] === 'root');
@@ -133,25 +133,45 @@ export function getZapAmountSats(event: NostrEvent): number | null {
   return null;
 }
 
+const NOTIF_PAGE_SIZE = 100;
+const NOTIF_KINDS = [1, 6, 7, 16, 9735];
+
+interface NotifPage {
+  items: NotificationItem[];
+  /** Cursor for the next (older) page: oldest raw created_at − 1, or null. */
+  cursor: number | null;
+  /** Raw event count from the relay (before own/dupe filtering) — drives hasMore. */
+  rawCount: number;
+}
+
 export function useNotifications(enabled = true) {
   const { nostr } = useNostr();
   const { pubkey } = useAuth();
-  const [limit, setLimit] = useState(100);
-  const [newestTimestamp, setNewestTimestamp] = useState<number | null>(null);
 
-  const { data, isLoading, refetch } = useQuery({
-    queryKey: ['notifications', pubkey, limit],
-    queryFn: async () => {
-      if (!pubkey) return [];
+  // Incremental, cursor-based paging — the old approach inflated `limit` and
+  // re-pulled the entire window on every "load more". Each page now fetches only
+  // the next PAGE_SIZE older notifications via `until`. (Mirrors web.)
+  const { data, isLoading, refetch, fetchNextPage, hasNextPage } = useInfiniteQuery({
+    queryKey: ['notifications', pubkey],
+    initialPageParam: undefined as number | undefined,
+    queryFn: async ({ pageParam }): Promise<NotifPage> => {
+      if (!pubkey) return { items: [], cursor: null, rawCount: 0 };
 
       const events = await nostr.query(
-        [{ kinds: [1, 6, 7, 9735], '#p': [pubkey], limit }],
+        [{
+          kinds: NOTIF_KINDS,
+          '#p': [pubkey],
+          limit: NOTIF_PAGE_SIZE,
+          ...(pageParam ? { until: pageParam } : {}),
+        }],
         { signal: AbortSignal.timeout(12000) },
       );
 
+      let oldest = Infinity;
       const seen = new Set<string>();
       const items = events
         .filter(e => {
+          if (e.created_at < oldest) oldest = e.created_at;
           if (seen.has(e.id)) return false;
           seen.add(e.id);
           return e.pubkey !== pubkey; // exclude own events
@@ -164,29 +184,43 @@ export function useNotifications(enabled = true) {
           senderPubkey: event.kind === 9735 ? getZapSenderPubkey(event) : null,
         }));
 
-      if (items.length > 0) {
-        setNewestTimestamp(items[0].event.created_at);
-      }
-
-      return items;
+      return { items, cursor: oldest === Infinity ? null : oldest - 1, rawCount: events.length };
     },
+    getNextPageParam: (last) =>
+      last.rawCount >= NOTIF_PAGE_SIZE && last.cursor !== null ? last.cursor : undefined,
     enabled: enabled && !!pubkey,
     staleTime: 30_000,
     gcTime: 5 * 60_000,
+    // Match the feed's resilience so a single slow-relay timeout doesn't leave
+    // notifications stuck empty: retry on failure/abort, and refetch on reconnect.
+    retry: 2,
+    retryDelay: (attempt) => Math.min(2000 * 2 ** attempt, 10_000),
+    refetchOnReconnect: true,
   });
 
-  const loadMore = useCallback(() => setLimit(l => l + 100), []);
+  const notifications = useMemo(() => {
+    const seen = new Set<string>();
+    const out: NotificationItem[] = [];
+    for (const page of data?.pages ?? []) {
+      for (const item of page.items) {
+        if (seen.has(item.event.id)) continue;
+        seen.add(item.event.id);
+        out.push(item);
+      }
+    }
+    return out.sort((a, b) => b.event.created_at - a.event.created_at);
+  }, [data]);
 
-  // Load newer notifications — simply refetch since query gets newest N
+  const loadMore = useCallback(() => { fetchNextPage(); }, [fetchNextPage]);
   const loadNewer = useCallback(() => { refetch(); }, [refetch]);
 
   return {
-    notifications: data ?? [],
+    notifications,
     isLoading,
     refetch,
     loadMore,
     loadNewer,
-    hasMore: (data?.length ?? 0) >= limit,
-    newestTimestamp,
+    hasMore: !!hasNextPage,
+    newestTimestamp: notifications.length > 0 ? notifications[0].event.created_at : null,
   };
 }

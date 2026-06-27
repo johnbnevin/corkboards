@@ -106,10 +106,25 @@ export function useAutoSaveTrigger({
       }).catch((e) => debugWarn('[AutoSave] Unexpected error during Blossom auto-save:', e));
     };
 
-    const onVisibilityHidden = () => {
-      if (document.visibilityState === 'hidden' && hasUnsavedChanges() && Date.now() - pageLoadTime.current >= cooldownMs) {
-        debugLog('[AutoSave] forcing save on background (cross-device sync)');
-        autoSaveBackup().catch(e => debugWarn('[AutoSave] bg save failed:', e));
+    const onVisibilityChange = () => {
+      const pastCooldown = Date.now() - pageLoadTime.current >= cooldownMs;
+      if (document.visibilityState === 'hidden') {
+        if (hasUnsavedChanges() && pastCooldown) {
+          debugLog('[AutoSave] forcing save on background (cross-device sync)');
+          autoSaveBackup().catch(e => debugWarn('[AutoSave] bg save failed:', e));
+        }
+      } else if (document.visibilityState === 'visible' && hasUnsavedChanges() && pastCooldown) {
+        // Returning to the tab: the save attempted while hidden may have failed
+        // (suspended tab / dropped connection), leaving the "Auto-save failed"
+        // state. Retry shortly after regaining focus so it recovers on its own.
+        debugLog('[AutoSave] visible — retrying save for unsaved changes');
+        setTimeout(() => {
+          if (hasUnsavedChanges()) {
+            autoSaveBackup()
+              .then((saved) => { if (saved) setBackupIndicator('saved'); })
+              .catch(e => debugWarn('[AutoSave] resume save failed:', e));
+          }
+        }, 2000);
       }
     };
     const onBeforeUnload = () => {
@@ -119,13 +134,13 @@ export function useAutoSaveTrigger({
     };
 
     const pollInterval = setInterval(() => triggerIfReady('poll-30s'), POLL_INTERVAL_MS);
-    document.addEventListener('visibilitychange', onVisibilityHidden);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('beforeunload', onBeforeUnload);
     triggerIfReady('mount');
 
     return () => {
       clearInterval(pollInterval);
-      document.removeEventListener('visibilitychange', onVisibilityHidden);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('beforeunload', onBeforeUnload);
     };
   }, [enabled, backupStatus, autoSaveBackup, hasUnsavedChanges, lastBackupTs, toast, setBackupIndicator, cooldownMs]);

@@ -25,6 +25,7 @@ import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 import { useNip65Relays } from '../hooks/useNip65Relays';
 import { useContacts } from '../hooks/useFeed';
+import { resolveContactBase, applyContactChange } from '../lib/contactList';
 import { useMuteList } from '../hooks/useMuteList';
 import { useNostrPublish } from '../hooks/useNostrPublish';
 import { useLocalStorage } from '../hooks/useLocalStorage';
@@ -183,18 +184,27 @@ function ProfileModalDialog({ pubkey, isOpen, onClose, onViewThread }: ProfileMo
   };
 
   const handleFollow = async () => {
-    if (!myPubkey || !signer || !contacts) return;
+    if (!myPubkey || !signer) return;
     setFollowLoading(true);
     try {
-      const newContacts = [...contacts, pubkey];
+      // Re-read the real list from relays before replacing it — never publish
+      // a kind 3 from a possibly-empty cache (would nuke the follow list), and
+      // preserve every other follow's relay hint + petname + the event content.
+      const base = await resolveContactBase(nostr, myPubkey, contacts, 'add');
+      if (base === null) {
+        Alert.alert("Couldn't follow", 'Could not load your current follow list. Please try again.');
+        return;
+      }
+      const result = applyContactChange(base, { add: pubkey });
+      if (!result) return; // already following
       const event = await signer.signEvent({
         kind: 3,
-        content: '',
-        tags: newContacts.map(pk => ['p', pk]),
+        content: result.content,
+        tags: result.tags,
         created_at: Math.floor(Date.now() / 1000),
       });
       await nostr.event(event);
-      queryClient.setQueryData(['contacts', myPubkey], newContacts);
+      queryClient.setQueryData(['contacts', myPubkey], result.pubkeys);
       Alert.alert('Followed', `Now following ${displayName}`);
     } catch (err) {
       Alert.alert('Failed', err instanceof Error ? err.message : 'Unknown error');
@@ -204,7 +214,7 @@ function ProfileModalDialog({ pubkey, isOpen, onClose, onViewThread }: ProfileMo
   };
 
   const handleUnfollow = () => {
-    if (!myPubkey || !signer || !contacts) return;
+    if (!myPubkey || !signer) return;
     Alert.alert('Unfollow', `Stop following ${displayName}?`, [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -213,15 +223,21 @@ function ProfileModalDialog({ pubkey, isOpen, onClose, onViewThread }: ProfileMo
         onPress: async () => {
           setFollowLoading(true);
           try {
-            const newContacts = contacts.filter(pk => pk !== pubkey);
+            const base = await resolveContactBase(nostr, myPubkey, contacts, 'remove');
+            if (base === null) {
+              Alert.alert("Couldn't unfollow", 'Could not load your current follow list. Please try again.');
+              return;
+            }
+            const result = applyContactChange(base, { remove: pubkey });
+            if (!result) return; // already not following
             const event = await signer.signEvent({
               kind: 3,
-              content: '',
-              tags: newContacts.map(pk => ['p', pk]),
+              content: result.content,
+              tags: result.tags,
               created_at: Math.floor(Date.now() / 1000),
             });
             await nostr.event(event);
-            queryClient.setQueryData(['contacts', myPubkey], newContacts);
+            queryClient.setQueryData(['contacts', myPubkey], result.pubkeys);
           } catch (err) {
             Alert.alert('Failed', err instanceof Error ? err.message : 'Unknown error');
           } finally {

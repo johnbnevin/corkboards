@@ -7,6 +7,7 @@ import { NSchema as n } from '@nostrify/nostrify';
 import type { NostrEvent, NostrFilter, NostrMetadata } from '@nostrify/nostrify';
 import { useNostr, FALLBACK_RELAYS } from '../lib/NostrProvider';
 import { getCachedProfile, cacheProfile } from '../lib/cacheStore';
+import { PROFILE_TTL_MS } from '@core/cacheConfig';
 
 // Cap simultaneous profile network fetches to avoid overwhelming relays/device.
 const MAX_CONCURRENT_AUTHOR_FETCHES = 6;
@@ -42,8 +43,9 @@ interface NostrPool {
   relay: (url: string) => { query: (filters: NostrFilter[], opts?: { signal?: AbortSignal }) => Promise<NostrEvent[]> };
 }
 
-const CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24h — keep in sync with web
-const STALE_TIME = 24 * 60 * 60 * 1000;
+// Single source of truth shared with web — was a drifted 24h copy.
+const CACHE_MAX_AGE = PROFILE_TTL_MS;
+const STALE_TIME = PROFILE_TTL_MS;
 
 async function fetchAuthorFromNetwork(
   pubkey: string,

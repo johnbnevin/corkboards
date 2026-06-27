@@ -121,9 +121,12 @@ interface SizeGuardedImageProps {
   style?: StyleProp<ImageStyle>;
   type?: 'avatar' | 'image';
   resizeMode?: 'cover' | 'contain' | 'stretch' | 'center';
+  /** Called when the underlying <Image> fails to load (e.g. 404). Lets callers
+   *  retry the same blob on another Blossom server. */
+  onError?: () => void;
 }
 
-export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMode = 'cover' }: SizeGuardedImageProps) {
+export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMode = 'cover', onError }: SizeGuardedImageProps) {
   // Apply the user's image proxy here so HEAD probe + final render both hit
   // the proxied URL. Non-http(s) URLs (data:, blob:) pass through unchanged.
   const uri = applyImageProxy(rawUri);
@@ -172,7 +175,7 @@ export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMod
   }
 
   if (status === 'allowed' || status === 'override') {
-    return <Image source={{ uri }} style={style} resizeMode={resizeMode} />;
+    return <Image source={{ uri }} style={style} resizeMode={resizeMode} onError={onError} />;
   }
 
   // Blocked or unknown

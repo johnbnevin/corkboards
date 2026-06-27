@@ -124,8 +124,11 @@ export function ThreadContent({
           onReactionPublished={onReactionPublished}
         />
       ) : (
-        <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-          No thread data found.
+        <div className="flex-1 flex items-center justify-center p-4">
+          <div className="text-center text-sm text-muted-foreground">
+            <p className="mb-2">This thread couldn't be loaded from your relays.</p>
+            <Button variant="outline" size="sm" onClick={refetch}>Try again</Button>
+          </div>
         </div>
       )}
 

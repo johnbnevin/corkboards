@@ -1,10 +1,11 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useMemo } from 'react'
 import { Iframe } from '@/components/ui/iframe'
 import { LightboxTrigger } from '@/components/ui/lightbox'
 import { SizeGuardedImage } from '@/components/SizeGuardedImage'
 import { ExternalLink, UtensilsCrossed, Film, AlertCircle } from 'lucide-react'
 import { optimizeMediaUrl } from '@/lib/imageUtils'
 import { isImageUrl, isCdnHost } from '@/lib/mediaUtils'
+import { getBlossomFallbackUrls } from '@core/blossom'
 
 /** Video player with loading indicator */
 function VideoPlayer({ src, poster }: { src: string; poster?: string }) {
@@ -132,11 +133,20 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
   const [imageError, setImageError] = useState(false)
   // When a CDN-hosted "image" fails to load, try rendering as video instead
   const [tryVideoFallback, setTryVideoFallback] = useState(false)
+  // Index into [url, ...blossom mirror URLs]; advanced when the current source
+  // 404s/errors so we retry the same hash on another Blossom server.
+  const [srcIndex, setSrcIndex] = useState(0)
   const [revealed, setRevealed] = useState(false)
   const [twitchRevealed, setTwitchRevealed] = useState(false)
 
+  // Same blob, alternate servers — only non-empty for content-addressed Blossom URLs.
+  const imageSources = useMemo(() => [url, ...getBlossomFallbackUrls(url)], [url])
+  const currentImageUrl = imageSources[srcIndex] ?? url
+
   useEffect(() => {
     setImageError(false)
+    setTryVideoFallback(false)
+    setSrcIndex(0)
 
     const getEmbedInfo = (): EmbedInfo | null => {
       try {
@@ -337,9 +347,11 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
 
   // Render image in lightbox (with video fallback for CDN hosts)
   if (embed.type === 'image') {
-    // CDN image failed → try rendering as video player instead of a dead link
+    // CDN image failed → try rendering as video player instead of a dead link.
+    // Use currentImageUrl (the last Blossom server we tried) so the video hits a
+    // server that actually has the blob, not the original that already 404'd.
     if (imageError && tryVideoFallback) {
-      return <VideoPlayer src={url} poster={poster} />
+      return <VideoPlayer src={currentImageUrl} poster={poster} />
     }
     if (imageError) {
       if (!isSafeUrl(url)) return <span className="text-muted-foreground text-sm break-all">{url}</span>
@@ -361,13 +373,20 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
       )
     }
     return (
-      <LightboxTrigger src={embed.url} className="inline-block my-2">
+      <LightboxTrigger src={optimizeMediaUrl(currentImageUrl, true)} className="inline-block my-2">
         <SizeGuardedImage
-          src={optimizeMediaUrl(embed.url, true)}
+          key={currentImageUrl}
+          src={optimizeMediaUrl(currentImageUrl, true)}
           alt=""
           className="max-w-full max-h-[500px] rounded-lg object-contain hover:opacity-90 transition-opacity"
           loading="lazy"
           onError={() => {
+            // The blob might still exist on another Blossom server — retry the
+            // same hash there before treating the image as failed.
+            if (srcIndex < imageSources.length - 1) {
+              setSrcIndex(i => i + 1)
+              return
+            }
             // On CDN hosts (Blossom, nostr.build, etc.), extensionless URLs
             // might be videos served without an image-compatible content type.
             // Try rendering as a video player before giving up.
@@ -456,18 +475,21 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
     <div className="my-2 rounded-lg overflow-hidden">
       {/*
         sandbox keeps these third-party players boxed: no top-navigation, no
-        form submission, no popups, no pointer-lock. `allow-same-origin` is
-        required by the providers (Spotify/Twitch/Apple Music read their own
-        cookies/storage) and is safe here — the framed src is always a remote
-        third-party origin, never corkboards' own origin, so the browser keeps
-        the frame in its own origin and it cannot reach back into this page.
-        frame-src in the CSP (index.html) is the allowlist of who may be framed.
+        form submission, no pointer-lock. `allow-same-origin` is required by the
+        providers (Spotify/Twitch/Apple Music read their own cookies/storage)
+        and is safe here — the framed src is always a remote third-party origin,
+        never corkboards' own origin, so the browser keeps the frame in its own
+        origin and it cannot reach back into this page. `allow-popups`
+        (+ escape-sandbox) lets a USER-initiated "open in app / try Tidal" CTA
+        actually open the provider in a new tab — without it those buttons
+        silently did nothing (the reported Tidal bug). frame-src in the CSP
+        (index.html) is the allowlist of who may be framed.
       */}
       <Iframe
         src={embed.url}
         className={`w-full ${aspectClass}`}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-        sandbox="allow-scripts allow-presentation allow-same-origin"
+        sandbox="allow-scripts allow-presentation allow-same-origin allow-popups allow-popups-to-escape-sandbox"
       />
     </div>
   )

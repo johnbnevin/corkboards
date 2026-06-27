@@ -41,7 +41,7 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
   const likeCount = (engagement?.likeCount ?? 0) + (likedOverride && !engagement?.liked ? 1 : 0);
   const repostCount = (engagement?.repostCount ?? 0) + (repostedOverride && !engagement?.reposted ? 1 : 0);
 
-  const { zap, isZapping, error: zapError, clearError: clearZapError, lud16, isConnected: nwcConnected } = useZap(event);
+  const { zap, isZapping, error: zapError, clearError: clearZapError, canZap, isConnected: nwcConnected } = useZap(event);
 
   // Show zap errors via Alert; clear immediately so the same error can re-fire next time.
   useEffect(() => {
@@ -119,7 +119,7 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
       Alert.alert('No wallet', 'Connect a Lightning wallet in Settings to send zaps.');
       return;
     }
-    if (!lud16) {
+    if (!canZap) {
       Alert.alert('No lightning address', 'This user has no lightning address set.');
       return;
     }
@@ -197,8 +197,8 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
           </Text>
         </TouchableOpacity>
 
-        {/* Zap button — shown when author has a lightning address */}
-        {lud16 ? (
+        {/* Zap button — shown when author has a lightning address (lud16 or lud06) */}
+        {canZap ? (
           <TouchableOpacity
             style={styles.action}
             onPress={() => requireAuth(handleZapPress)}

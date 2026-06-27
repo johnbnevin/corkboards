@@ -3,6 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- Privacy: never leak which note/page a media or fetch request came from.
+         Media hosts in untrusted notes get the user's IP regardless, but they
+         should never learn the referring URL too. -->
+    <meta name="referrer" content="no-referrer" />
     <meta name="description" content="A customizable multi-column pinned note social feed reader and profile creator built on nostr. Zap bitcoin to creators and receive bitcoin for posts others find valuable.">
     <meta name="keywords" content="corkboards.me, social feed, feed reader, pinned, nostr, notes, private, uncensorable, zap, bitcoin">
     <meta property="og:type" content="website">

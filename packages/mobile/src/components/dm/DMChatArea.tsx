@@ -25,9 +25,12 @@ import {
   KeyboardAvoidingView,
   Platform,
   Linking,
+  Alert,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { useConversationMessages, useSendDM } from '../../hooks/useDMs';
-import type { DecryptedMessage } from '../../hooks/useDMs';
+import type { DecryptedMessage, DMAttachment } from '../../hooks/useDMs';
+import { useUploadFile } from '../../hooks/useUploadFile';
 import { useAuthor } from '../../hooks/useAuthor';
 import { SizeGuardedImage } from '../SizeGuardedImage';
 import { formatTimeAgo } from '@core/formatTimeAgo';
@@ -171,7 +174,9 @@ interface DMChatAreaProps {
 export function DMChatArea({ partnerPubkey, onBack }: DMChatAreaProps) {
   const { data: allMessages, isLoading } = useConversationMessages(partnerPubkey);
   const { mutate: sendDM, isPending } = useSendDM();
+  const { mutateAsync: uploadFile, isPending: uploading } = useUploadFile();
   const [draft, setDraft] = useState('');
+  const [attachments, setAttachments] = useState<DMAttachment[]>([]);
   const [displayCount, setDisplayCount] = useState(PAGE_SIZE);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const flatListRef = useRef<FlatList<DecryptedMessage>>(null);
@@ -204,12 +209,47 @@ export function DMChatArea({ partnerPubkey, onBack }: DMChatAreaProps) {
     setTimeout(() => setIsLoadingMore(false), 100);
   }, [hasMoreMessages, isLoadingMore]);
 
+  // Pick an image, upload it to Blossom, and attach it to the next message.
+  // Same flow as ComposeScreen; sent as a NIP-17 kind-15 file DM.
+  const handleAttachImage = useCallback(async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.8,
+        allowsEditing: false,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+
+      const asset = result.assets[0];
+      const response = await fetch(asset.uri);
+      const blob = await response.blob();
+      const fileName = asset.fileName || `image-${Date.now()}.jpg`;
+      const file = new File([blob], fileName, { type: asset.mimeType || 'image/jpeg' });
+
+      const tags = await uploadFile(file);
+      const url = tags.find((t: string[]) => t[0] === 'url')?.[1]
+        || tags.find((t: string[]) => t[0] === 'ox')?.[1];
+      if (!url) throw new Error('Upload returned no URL');
+
+      setAttachments(prev => [...prev, {
+        url,
+        mimeType: tags.find((t: string[]) => t[0] === 'm')?.[1] || asset.mimeType,
+        size: Number(tags.find((t: string[]) => t[0] === 'size')?.[1]) || asset.fileSize || undefined,
+        name: fileName,
+        tags, // createImetaTags picks out x/ox
+      }]);
+    } catch (err) {
+      Alert.alert('Upload failed', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }, [uploadFile]);
+
   const handleSend = useCallback(() => {
     const text = draft.trim();
-    if (!text) return;
+    if (!text && attachments.length === 0) return;
     setDraft('');
-    sendDM({ recipientPubkey: partnerPubkey, content: text });
-  }, [draft, partnerPubkey, sendDM]);
+    setAttachments([]);
+    sendDM({ recipientPubkey: partnerPubkey, content: text, attachments });
+  }, [draft, attachments, partnerPubkey, sendDM]);
 
   return (
     <KeyboardAvoidingView
@@ -269,8 +309,36 @@ export function DMChatArea({ partnerPubkey, onBack }: DMChatAreaProps) {
         />
       )}
 
+      {/* Pending attachments preview */}
+      {attachments.length > 0 && (
+        <View style={styles.attachPreviewRow}>
+          {attachments.map((a, i) => (
+            <View key={`${a.url}-${i}`} style={styles.attachPreviewItem}>
+              <SizeGuardedImage uri={a.url} type="image" style={styles.attachPreviewImage} resizeMode="cover" />
+              <TouchableOpacity
+                style={styles.attachRemoveBtn}
+                onPress={() => setAttachments(prev => prev.filter((_, idx) => idx !== i))}
+              >
+                <Text style={styles.attachRemoveText}>×</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+        </View>
+      )}
+
       {/* Compose bar */}
       <View style={styles.composeBar}>
+        <TouchableOpacity
+          style={[styles.attachBtn, uploading && styles.sendBtnDisabled]}
+          onPress={handleAttachImage}
+          disabled={uploading}
+        >
+          {uploading ? (
+            <ActivityIndicator color="#b3b3b3" size="small" />
+          ) : (
+            <Text style={styles.attachIcon}>+</Text>
+          )}
+        </TouchableOpacity>
         <TextInput
           style={styles.composeInput}
           placeholder="Message..."
@@ -283,9 +351,9 @@ export function DMChatArea({ partnerPubkey, onBack }: DMChatAreaProps) {
         />
         <View style={styles.sendCol}>
           <TouchableOpacity
-            style={[styles.sendBtn, (!draft.trim() || isPending) && styles.sendBtnDisabled]}
+            style={[styles.sendBtn, ((!draft.trim() && attachments.length === 0) || isPending) && styles.sendBtnDisabled]}
             onPress={handleSend}
-            disabled={!draft.trim() || isPending}
+            disabled={(!draft.trim() && attachments.length === 0) || isPending}
           >
             {isPending ? (
               <ActivityIndicator color="#f97316" size="small" />
@@ -434,4 +502,36 @@ const styles = StyleSheet.create({
   sendText: { color: '#f97316', fontSize: 14, fontWeight: '600' },
   protocolHint: { fontSize: 9, color: '#555' },
   loadingText: { color: '#b3b3b3', fontSize: 14 },
+  attachBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#2a2a2a',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachIcon: { color: '#b3b3b3', fontSize: 22, lineHeight: 24 },
+  attachPreviewRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+  },
+  attachPreviewItem: { position: 'relative' },
+  attachPreviewImage: { width: 64, height: 64, borderRadius: 8 },
+  attachRemoveBtn: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#000',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#404040',
+  },
+  attachRemoveText: { color: '#f2f2f2', fontSize: 14, lineHeight: 16 },
 });

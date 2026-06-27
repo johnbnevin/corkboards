@@ -9,19 +9,20 @@
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { BlossomUploader } from '@nostrify/nostrify/uploaders';
+import type { NostrSigner } from '@nostrify/nostrify';
+import { KNOWN_BLOSSOM_SERVERS } from '@core/blossom';
 import { useAuth } from '../lib/AuthContext';
 import { useNostr } from '../lib/NostrProvider';
 
-const DEFAULT_BLOSSOM_SERVERS = [
-  'https://blossom.band/',
-  'https://blossom.yakihonne.com/',
-  'https://blossom.f7z.io/',
-  'https://blossom.ditto.pub/',
-  'https://cdn.sovbit.host/',
-  'https://blossom.primal.net/',
-];
+// Shared with the render-time fallback set so a mirrored blob can always be
+// re-fetched from a peer server.
+const DEFAULT_BLOSSOM_SERVERS = [...KNOWN_BLOSSOM_SERVERS];
 
 const UPLOAD_TIMEOUT_MS = 10000;
+
+// Total servers we try to land each blob on, for redundancy. First success is
+// returned immediately; the rest are mirrored in the background.
+const MIRROR_COPIES = 3;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, server: string): Promise<T> {
   return Promise.race([
@@ -30,6 +31,22 @@ function withTimeout<T>(promise: Promise<T>, ms: number, server: string): Promis
       setTimeout(() => reject(new Error(`Upload to ${server} timed out after ${ms}ms`)), ms)
     )
   ]);
+}
+
+// Mirror a file to additional servers in the background (best effort). Stops
+// once `count` copies succeed. Never throws — failures are silently ignored.
+async function mirrorToServers(file: File, servers: string[], count: number, signer: NostrSigner): Promise<void> {
+  let landed = 0;
+  for (const server of servers) {
+    if (landed >= count) break;
+    try {
+      const uploader = new BlossomUploader({ servers: [server], signer });
+      await withTimeout(uploader.upload(file), UPLOAD_TIMEOUT_MS, server);
+      landed++;
+    } catch {
+      // best effort — try the next server
+    }
+  }
 }
 
 export function useUploadFile() {
@@ -88,7 +105,10 @@ export function useUploadFile() {
       const serverList = Array.from(servers);
       let lastError: Error | null = null;
 
-      for (const server of serverList) {
+      // Return the first success immediately, then mirror the same blob to
+      // MIRROR_COPIES-1 more servers in the background for redundancy.
+      for (let i = 0; i < serverList.length; i++) {
+        const server = serverList[i];
         try {
           const uploader = new BlossomUploader({
             servers: [server],
@@ -96,6 +116,10 @@ export function useUploadFile() {
           });
 
           const tags = await withTimeout(uploader.upload(file), UPLOAD_TIMEOUT_MS, server);
+
+          const others = serverList.filter((_, idx) => idx !== i);
+          void mirrorToServers(file, others, MIRROR_COPIES - 1, signer);
+
           return tags;
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err));

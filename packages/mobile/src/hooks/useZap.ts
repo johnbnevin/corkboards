@@ -8,15 +8,7 @@ import { useAuth } from '../lib/AuthContext';
 import { useAuthor } from './useAuthor';
 import { useNwc } from './useNwc';
 import { ZAP_RELAYS } from '../lib/NostrProvider';
-
-function lud16ToUrl(lud16: string): string {
-  const atIdx = lud16.lastIndexOf('@');
-  if (atIdx < 1) throw new Error('Invalid lightning address');
-  const name = lud16.slice(0, atIdx);
-  const domain = lud16.slice(atIdx + 1);
-  if (!domain || domain.includes('/') || domain.includes('\\')) throw new Error('Invalid lightning address domain');
-  return `https://${domain}/.well-known/lnurlp/${encodeURIComponent(name)}`;
-}
+import { resolveZapEndpoint, isSafeZapUrl } from '@core/zap';
 
 export function useZap(note: NostrEvent | null) {
   const { signer } = useAuth();
@@ -26,9 +18,13 @@ export function useZap(note: NostrEvent | null) {
   const [error, setError] = useState<string | null>(null);
 
   const lud16 = authorData?.metadata?.lud16;
+  // Resolve the LNURL-pay endpoint from lud16 OR lud06 (bech32 LNURL). Some
+  // users only set lud06, which the old lud16-only check treated as "no address".
+  const zapEndpoint = resolveZapEndpoint(authorData?.metadata);
+  const canZap = !!zapEndpoint;
 
   const zap = useCallback(async (amountSats: number, comment?: string) => {
-    if (!note || !signer || !lud16) {
+    if (!note || !signer || !zapEndpoint) {
       setError('Missing note, user, or lightning address');
       return;
     }
@@ -43,9 +39,8 @@ export function useZap(note: NostrEvent | null) {
     try {
       const amountMsats = amountSats * 1000;
 
-      // 1. Resolve lud16 to LNURL pay endpoint
-      const lnurlUrl = lud16ToUrl(lud16);
-      const lnurlResponse = await fetch(lnurlUrl, { signal: AbortSignal.timeout(15000) });
+      // 1. Fetch the LNURL pay info (endpoint resolved from lud16 or lud06)
+      const lnurlResponse = await fetch(zapEndpoint, { signal: AbortSignal.timeout(15000) });
       if (!lnurlResponse.ok) throw new Error(`LNURL server returned ${lnurlResponse.status}`);
       const lnurlText = await lnurlResponse.text();
       let lnurlData: Record<string, unknown>;
@@ -67,6 +62,12 @@ export function useZap(note: NostrEvent | null) {
 
       // 2. Build callback URL — include zap request only if server supports NIP-57
       const callback = lnurlData.callback as string;
+      // SSRF guard: the callback comes from the (untrusted) LNURL server's JSON.
+      // Never fetch it — or POST a signed zap request to it — unless it's https
+      // and not a private/metadata host.
+      if (!isSafeZapUrl(callback)) {
+        throw new Error('LNURL server returned an unsafe callback URL');
+      }
       const separator = callback.includes('?') ? '&' : '?';
       let invoiceUrl = `${callback}${separator}amount=${amountMsats}`;
 
@@ -109,9 +110,9 @@ export function useZap(note: NostrEvent | null) {
     } finally {
       setIsZapping(false);
     }
-  }, [note, signer, lud16, isConnected, payInvoice]);
+  }, [note, signer, zapEndpoint, isConnected, payInvoice]);
 
   const clearError = useCallback(() => setError(null), []);
 
-  return { zap, isZapping, error, clearError, lud16, isConnected };
+  return { zap, isZapping, error, clearError, lud16, canZap, isConnected };
 }

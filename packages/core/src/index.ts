@@ -33,6 +33,10 @@ export * from './failedNotes';
 export * from './nostrUtils';
 export * from './cryptoUtils';
 export * from './imageUtils';
+export * from './blossom';
+export * from './zap';
+export * from './contactList';
+export * from './feedAlgorithms';
 export * from './ipUtils';
 export * from './relayConstants';
 

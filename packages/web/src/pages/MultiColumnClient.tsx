@@ -23,6 +23,7 @@ import { ToastBar, useFeedToast } from '@/components/ToastBar';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
 import { type NostrEvent } from '@nostrify/nostrify';
+import { useContactActions } from '@/hooks/useContactActions';
 import { useNip65Relays } from '@/hooks/useNip65Relays';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { classifyNote, type NoteClassification } from '@/lib/noteClassifier';
@@ -1046,26 +1047,9 @@ export function MultiColumnClient() {
   const [backupIndicator, setBackupIndicator] = useState<'idle' | 'unsaved' | 'saved'>('idle');
   const [showDownloadPrompt, setShowDownloadPrompt] = useState(false);
 
-  // Soft refresh: re-fetch broken avatars/nicknames and failed notes without disrupting the UI
+  // Soft refresh state. The handler itself is defined after useFeedPagination
+  // (below) because it also pulls newer notes via loadNewerNotes.
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const handleSoftRefresh = useCallback(() => {
-    if (isRefreshing) return;
-    setIsRefreshing(true);
-    // Re-fetch authors with empty/missing metadata (broken avatars & nicknames)
-    queryClient.invalidateQueries({
-      queryKey: ['author'],
-      predicate: (query) => {
-        const data = query.state.data as { metadata?: Record<string, unknown> } | undefined;
-        return query.state.status === 'error' || !data?.metadata || Object.keys(data.metadata).length === 0;
-      },
-    });
-    // Re-fetch notes that errored (content that failed to load)
-    queryClient.invalidateQueries({
-      queryKey: ['note'],
-      predicate: (query) => query.state.status === 'error',
-    });
-    setTimeout(() => setIsRefreshing(false), 2000);
-  }, [isRefreshing, queryClient]);
 
   // Prompt to download settings backup every 30 days
   const hasCheckedDownloadPrompt = useRef(false);
@@ -2245,6 +2229,12 @@ export function MultiColumnClient() {
     profileModalState.contacts = contacts || [];
   }, [contacts]);
 
+  // Safe kind-3 follow-list mutation — extracted into useContactActions so this
+  // data-loss-sensitive logic lives in one focused, reusable place. It re-reads
+  // the authoritative list at click time, preserves petnames/relay hints/content,
+  // and refuses a removal it can't confirm. See useContactActions / @core/contactList.
+  const safeUpdateContacts = useContactActions(user, contacts);
+
   // Listen for profile action events
   useEffect(() => {
     const handleNewCorkboard = (e: Event) => {
@@ -2281,19 +2271,8 @@ export function MultiColumnClient() {
 
     const handleFollow = (e: Event) => {
       const { pubkey } = (e as CustomEvent<ProfileActionDetail>).detail;
-      if (!user?.pubkey || !contacts) return;
-      if (contacts.includes(pubkey)) return;
-
-      // Publish updated Kind 3 contact list
-      const newContacts = [...contacts, pubkey];
-      createEvent({
-        kind: 3,
-        content: '',
-        tags: newContacts.map(pk => ['p', pk]),
-      });
-      // Optimistically update cached contacts — avoids full feed refetch/scroll reset
-      queryClient.setQueryData(['contacts', user.pubkey], newContacts);
-      toast({ title: 'Followed', description: 'Contact list updated' });
+      if (!user?.pubkey) return;
+      void safeUpdateContacts({ add: pubkey }, { title: 'Followed', description: 'Contact list updated' });
     };
 
     const handleMute = async (e: Event) => {
@@ -2317,7 +2296,7 @@ export function MultiColumnClient() {
       window.removeEventListener(PROFILE_ACTION_FOLLOW, handleFollow);
       window.removeEventListener(PROFILE_ACTION_MUTE, handleMute);
     };
-  }, [contacts, user?.pubkey, createEvent, queryClient, toast, setCustomFeeds, setActiveTab, mutePubkey, customFeeds]);
+  }, [contacts, user?.pubkey, createEvent, queryClient, toast, setCustomFeeds, setActiveTab, mutePubkey, customFeeds, safeUpdateContacts]);
 
 
 
@@ -2376,6 +2355,38 @@ export function MultiColumnClient() {
   useEffect(() => {
     batchProgressCallbackRef.current = _paginationSetBatchProgressInternal;
   }, [_paginationSetBatchProgressInternal]);
+
+  // Reload button: pull newer notes for the active tab AND retry any content
+  // that previously failed (broken avatars/nicknames, errored notes). The
+  // "pull newer" part is what makes the button feel like it does something even
+  // when nothing is in an error state. Non-destructive — keeps scroll/feed.
+  const handleSoftRefresh = useCallback(() => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    // Pull newer notes at the leading edge of the active feed.
+    try {
+      const r = loadNewerNotes?.();
+      if (r && typeof (r as Promise<unknown>).catch === 'function') {
+        (r as Promise<unknown>).catch(() => {});
+      }
+    } catch {
+      // ignore — the retry pass below still runs
+    }
+    // Re-fetch authors with empty/missing metadata (broken avatars & nicknames)
+    queryClient.invalidateQueries({
+      queryKey: ['author'],
+      predicate: (query) => {
+        const data = query.state.data as { metadata?: Record<string, unknown> } | undefined;
+        return query.state.status === 'error' || !data?.metadata || Object.keys(data.metadata).length === 0;
+      },
+    });
+    // Re-fetch notes that errored (content that failed to load)
+    queryClient.invalidateQueries({
+      queryKey: ['note'],
+      predicate: (query) => query.state.status === 'error',
+    });
+    setTimeout(() => setIsRefreshing(false), 2000);
+  }, [isRefreshing, queryClient, loadNewerNotes]);
 
   // Autofetch extracted into useAutoFetch — interval, visibility gating,
   // and tab-switch re-trigger all live there. Three relay-storm bugs traced
@@ -2626,11 +2637,23 @@ export function MultiColumnClient() {
             allSelfNotes.push(n);
           }
         }
-        if (baseNotes.length > 0 && allSelfNotes.length > 0) {
-          const oldestTimestamp = baseNotes.reduce((min, n) => n.created_at < min ? n.created_at : min, baseNotes[0].created_at);
-          const filteredUserNotes = allSelfNotes.filter(n => n.created_at >= oldestTimestamp);
+        // Define the visible window from OTHER authors' notes only — own notes
+        // must never widen it. Then clamp own notes to [oldest, newest] so a
+        // recently-posted (or very old) own note can't appear outside the
+        // window the user is actually looking at.
+        const windowNotes = baseNotes.filter(n => n.pubkey !== user.pubkey);
+        if (windowNotes.length > 0 && allSelfNotes.length > 0) {
+          let oldestTimestamp = windowNotes[0].created_at;
+          let newestTimestamp = windowNotes[0].created_at;
+          for (const n of windowNotes) {
+            if (n.created_at < oldestTimestamp) oldestTimestamp = n.created_at;
+            if (n.created_at > newestTimestamp) newestTimestamp = n.created_at;
+          }
+          const filteredUserNotes = allSelfNotes.filter(
+            n => n.created_at >= oldestTimestamp && n.created_at <= newestTimestamp,
+          );
           baseNotes = [...baseNotes, ...filteredUserNotes];
-        } else if (baseNotes.length === 0 && allSelfNotes.length > 0) {
+        } else if (windowNotes.length === 0 && allSelfNotes.length > 0) {
           // Feed is empty but user has notes — show them unfiltered
           baseNotes = [...allSelfNotes];
         }
@@ -3553,7 +3576,7 @@ export function MultiColumnClient() {
                   </DropdownMenu>
                 )}
                 {canLoadNotes && (
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Refresh failed content" onClick={handleSoftRefresh}>
+                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Refresh feed — pull newer notes & retry failed content" onClick={handleSoftRefresh}>
                     <RefreshCw className={`h-3.5 w-3.5 text-muted-foreground ${isRefreshing ? 'animate-spin' : ''}`} />
                   </Button>
                 )}
@@ -3734,7 +3757,7 @@ export function MultiColumnClient() {
                 </DropdownMenu>
               )}
               {canLoadNotes && (
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Refresh failed content" onClick={handleSoftRefresh}>
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Refresh feed — pull newer notes & retry failed content" onClick={handleSoftRefresh}>
                   <RefreshCw className={`h-3.5 w-3.5 text-muted-foreground ${isRefreshing ? 'animate-spin' : ''}`} />
                 </Button>
               )}
@@ -4171,20 +4194,14 @@ export function MultiColumnClient() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    disabled={!contacts}
+                    disabled={isLoadingContacts}
                     className={`text-xs gap-1 ${contacts?.includes(activeTab) ? 'text-green-600' : 'text-purple-600 hover:text-purple-700'}`}
                     onClick={() => {
-                      if (!contacts || !user?.pubkey) return;
-                      if (contacts.includes(activeTab)) {
-                        const newContacts = contacts.filter(pk => pk !== activeTab);
-                        createEvent({ kind: 3, content: '', tags: newContacts.map(pk => ['p', pk]) });
-                        queryClient.setQueryData(['contacts', user.pubkey], newContacts);
-                        toast({ title: 'Unfollowed', description: 'Contact list updated' });
+                      if (!user?.pubkey) return;
+                      if (contacts?.includes(activeTab)) {
+                        void safeUpdateContacts({ remove: activeTab }, { title: 'Unfollowed', description: 'Contact list updated' });
                       } else {
-                        const newContacts = [...contacts, activeTab];
-                        createEvent({ kind: 3, content: '', tags: newContacts.map(pk => ['p', pk]) });
-                        queryClient.setQueryData(['contacts', user.pubkey], newContacts);
-                        toast({ title: 'Followed', description: 'Contact list updated' });
+                        void safeUpdateContacts({ add: activeTab }, { title: 'Followed', description: 'Contact list updated' });
                       }
                     }}
                   >
@@ -4258,18 +4275,12 @@ export function MultiColumnClient() {
               onDeleteFeed={(feedId) => setDeleteFeedId(feedId)}
               isFollowed={isCustomFeedTab && activeCustomFeed?.pubkeys?.length === 1 ? contacts?.includes(activeCustomFeed.pubkeys[0]) : undefined}
               onToggleFollow={isCustomFeedTab && activeCustomFeed?.pubkeys?.length === 1 && user?.pubkey ? () => {
-                if (!contacts || !user?.pubkey) return;
+                if (!user?.pubkey) return;
                 const pk = activeCustomFeed!.pubkeys[0];
-                if (contacts.includes(pk)) {
-                  const newContacts = contacts.filter(c => c !== pk);
-                  createEvent({ kind: 3, content: '', tags: newContacts.map(c => ['p', c]) });
-                  queryClient.setQueryData(['contacts', user.pubkey], newContacts);
-                  toast({ title: 'Unfollowed', description: 'Contact list updated' });
+                if (contacts?.includes(pk)) {
+                  void safeUpdateContacts({ remove: pk }, { title: 'Unfollowed', description: 'Contact list updated' });
                 } else {
-                  const newContacts = [...contacts, pk];
-                  createEvent({ kind: 3, content: '', tags: newContacts.map(c => ['p', c]) });
-                  queryClient.setQueryData(['contacts', user.pubkey], newContacts);
-                  toast({ title: 'Followed', description: 'Contact list updated' });
+                  void safeUpdateContacts({ add: pk }, { title: 'Followed', description: 'Contact list updated' });
                 }
               } : undefined}
               onThreadClick={openThread}

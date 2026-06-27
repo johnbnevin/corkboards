@@ -7,6 +7,8 @@
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { useNostr } from '@nostrify/react';
 import { debugLog, debugWarn, debugError } from '@/lib/debug';
+import { deduplicateAndSort } from '@core/feedAlgorithms';
+export { deduplicateAndSort, mergeEvents } from '@core/feedAlgorithms';
 
 // Re-export core constants and helpers
 import { FEED_KINDS as _FEED_KINDS, RSS_PROXY } from '@core/feedConstants';
@@ -142,15 +144,7 @@ export async function batchFetchByAuthors(opts: BatchFetchOpts): Promise<NostrEv
     const events = allEvents.flat();
     debugLog(`[batchFetch] Got ${events.length} events from ${authors.length} authors (${chunks.length} chunks)`);
 
-    // Deduplicate and sort
-    const seen = new Set<string>();
-    const deduped = events.filter(e => {
-      if (seen.has(e.id)) return false;
-      seen.add(e.id);
-      return true;
-    });
-
-    return deduped.sort((a, b) => b.created_at - a.created_at);
+    return deduplicateAndSort(events);
   } catch (err) {
     debugWarn('[batchFetch] Query failed:', err);
     onProgress?.(1, 1);
@@ -202,10 +196,7 @@ export async function fetchByHashtags(opts: HashtagFetchOpts): Promise<NostrEven
       { signal: AbortSignal.timeout(timeout) },
     );
 
-    const seen = new Set<string>();
-    return events
-      .filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; })
-      .sort((a, b) => b.created_at - a.created_at);
+    return deduplicateAndSort(events);
   } catch (err) {
     debugWarn('[hashtagFetch] Query failed:', err);
     return [];

@@ -13,6 +13,10 @@ const parentNoteCache = new Map<string, NostrEvent>();
 const failedFirstPass = new Set<string>();
 
 const MAX_CONCURRENT_POOL_QUERIES = 6;
+// First-pass ceiling + short second-pass delay so reply parents that the fast
+// batch query missed appear quickly instead of seconds later. (Mirrors web.)
+const FIRST_PASS_TIMEOUT_MS = 6000;
+const SECOND_PASS_DELAY_MS = 800;
 let _activePoolQueries = 0;
 const _poolQueryQueue: Array<() => void> = [];
 
@@ -67,15 +71,30 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
   const queryClient = useQueryClient();
   const secondPassScheduled = useRef(false);
 
-  const normalized: ParentRequest[] = requests.map(r =>
-    typeof r === 'string' ? { eventId: r } : r
-  );
+  // Stable content signature of the request set. The memos below (and the
+  // second-pass effect) key off this so they only recompute when the actual IDs
+  // change — not on every render. Previously these arrays were rebuilt every
+  // render, so the second-pass effect (which lists uniqueRequests as a dep)
+  // re-ran constantly, arming-and-cancelling its timer and leaving genuinely-
+  // missing parents blank. (Mirrors web.)
+  const cacheKey = useMemo(() => {
+    const ids = requests
+      .map(r => (typeof r === 'string' ? r : r?.eventId))
+      .filter((id): id is string => !!id && id.length > 0);
+    return Array.from(new Set(ids)).sort().join(',');
+  }, [requests]);
 
-  const uniqueRequests = Array.from(
-    new Map(normalized.filter(r => r.eventId?.length > 0).map(r => [r.eventId, r])).values()
-  );
-  const uniqueIds = uniqueRequests.map(r => r.eventId);
-  const cacheKey = uniqueIds.sort().join(',');
+  const uniqueRequests = useMemo<ParentRequest[]>(() => {
+    const normalized: ParentRequest[] = requests.map(r =>
+      typeof r === 'string' ? { eventId: r } : r
+    );
+    return Array.from(
+      new Map(normalized.filter(r => r.eventId?.length > 0).map(r => [r.eventId, r])).values()
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on cacheKey, the content signature of `requests`
+  }, [cacheKey]);
+
+  const uniqueIds = useMemo(() => uniqueRequests.map(r => r.eventId), [uniqueRequests]);
   const queryKey = useMemo(() => ['parent-notes', cacheKey], [cacheKey]);
 
   const query = useQuery({
@@ -93,7 +112,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
             if (signal.aborted) return Promise.resolve([] as NostrEvent[]);
             return nostr.query(
               [{ ids: uncachedIds }],
-              { signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]) }
+              { signal: AbortSignal.any([signal, AbortSignal.timeout(FIRST_PASS_TIMEOUT_MS)]) }
             );
           });
           for (const event of events) {
@@ -161,7 +180,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
         queryClient.invalidateQueries({ queryKey });
       }
       secondPassScheduled.current = false;
-    }, 3000);
+    }, SECOND_PASS_DELAY_MS);
 
     return () => {
       mounted = false;

@@ -72,9 +72,26 @@ export function AutoSaveManager() {
             if (__DEV__) console.warn('[AutoSave] bg save failed:', e);
           });
         }
-      } else if (nextState === 'active' && lastHiddenRef.current > 0 && !idleCheckDoneRef.current) {
+      } else if (nextState === 'active' && lastHiddenRef.current > 0) {
         const awayMs = Date.now() - lastHiddenRef.current;
-        if (awayMs >= 5 * 60 * 1000) {
+
+        // Retry the save that likely FAILED when we backgrounded: the OS tears
+        // down the network as the app suspends, so the forced background upload
+        // to Blossom often times out, leaving changes unsaved (the red notice
+        // the user sees on return). Wait briefly for connectivity to recover,
+        // then save again. This is the main fix for "autosaves failing".
+        if (hasUnsavedChanges()) {
+          if (__DEV__) console.log('[AutoSave] resume — retrying save for unsaved changes');
+          setTimeout(() => {
+            if (hasUnsavedChanges()) {
+              autoSaveBackup().catch(e => {
+                if (__DEV__) console.warn('[AutoSave] resume save failed:', e);
+              });
+            }
+          }, 2500);
+        }
+
+        if (awayMs >= 5 * 60 * 1000 && !idleCheckDoneRef.current) {
           idleCheckDoneRef.current = true;
           // Auto-restore check after 5+ min in background
           if (__DEV__) console.log(`[AutoSave] back from ${Math.round(awayMs / 60000)}min idle, checking for newer backup`);

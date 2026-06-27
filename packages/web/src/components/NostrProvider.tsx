@@ -243,9 +243,32 @@ export function setRelayAuthSigner(signer: AuthSigner | null): void {
   _authSigner = signer;
 }
 
+/**
+ * Relays we'll auto-answer a NIP-42 AUTH challenge for: the user's own
+ * configured (NIP-65) relays plus the app's default relay sets. A NIP-42 AUTH
+ * response is a SIGNED event that cryptographically binds the user's pubkey to
+ * their IP/connection at that relay — a passive de-anonymization primitive. We
+ * therefore MUST NOT auto-authenticate to arbitrary relays pulled in during
+ * outbox fan-out (other authors' relays); a hostile relay there could otherwise
+ * force the link with a single challenge. Unknown relays are declined — the
+ * query simply returns nothing from them, which is the safe default.
+ */
+function isRelayAuthAllowed(relayUrl: string): boolean {
+  const target = normalizeRelayUrl(relayUrl);
+  const { read, write } = getUserRelays();
+  for (const u of [...read, ...write, ...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]) {
+    if (normalizeRelayUrl(u) === target) return true;
+  }
+  return false;
+}
+
 async function handleRelayAuthChallenge(relayUrl: string, challenge: string): Promise<NostrEvent> {
   const signer = _authSigner;
   if (!signer) throw new Error('No active signer for NIP-42 relay AUTH');
+  if (!isRelayAuthAllowed(relayUrl)) {
+    // Don't bind the user's identity to a relay they never chose (NIP-42 de-anon).
+    throw new Error(`Declining NIP-42 AUTH for non-configured relay: ${relayUrl}`);
+  }
   return signer.signEvent({
     kind: 22242,
     created_at: Math.floor(Date.now() / 1000),

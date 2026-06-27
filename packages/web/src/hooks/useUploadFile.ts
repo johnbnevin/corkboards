@@ -1,22 +1,22 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { BlossomUploader } from '@nostrify/nostrify/uploaders';
+import type { NostrSigner } from '@nostrify/nostrify';
+import { KNOWN_BLOSSOM_SERVERS } from '@core/blossom';
 
 import { useCurrentUser } from "./useCurrentUser";
 import { useNostr } from "./useNostr";
 
-// Default blossom servers in order of preference
-// nostr.build is first (most reliable), then major community servers
-const DEFAULT_BLOSSOM_SERVERS = [
-  'https://blossom.band/',
-  'https://blossom.yakihonne.com/',
-  'https://blossom.f7z.io/',
-  'https://blossom.ditto.pub/',
-  'https://cdn.sovbit.host/',
-  'https://blossom.primal.net/',
-];
+// Default blossom servers in order of preference (shared with the render-time
+// fallback set so a mirrored blob can always be re-fetched from a peer server).
+const DEFAULT_BLOSSOM_SERVERS = [...KNOWN_BLOSSOM_SERVERS];
 
 // Timeout for each upload attempt (10 seconds)
 const UPLOAD_TIMEOUT_MS = 10000;
+
+// Total number of servers we try to land each blob on, for redundancy. The
+// first success is returned immediately; the rest are mirrored in the
+// background so the same sha256 survives any single server pruning the file.
+const MIRROR_COPIES = 3;
 
 // Helper to add timeout to a promise
 function withTimeout<T>(promise: Promise<T>, ms: number, server: string): Promise<T> {
@@ -26,6 +26,22 @@ function withTimeout<T>(promise: Promise<T>, ms: number, server: string): Promis
       setTimeout(() => reject(new Error(`Upload to ${server} timed out after ${ms}ms`)), ms)
     )
   ]);
+}
+
+// Mirror a file to additional servers in the background (best effort). Stops
+// once `count` copies succeed. Never throws — failures are silently ignored.
+async function mirrorToServers(file: File, servers: string[], count: number, signer: NostrSigner): Promise<void> {
+  let landed = 0;
+  for (const server of servers) {
+    if (landed >= count) break;
+    try {
+      const uploader = new BlossomUploader({ servers: [server], signer });
+      await withTimeout(uploader.upload(file), UPLOAD_TIMEOUT_MS, server);
+      landed++;
+    } catch {
+      // best effort — try the next server
+    }
+  }
 }
 
 export function useUploadFile() {
@@ -89,8 +105,11 @@ export function useUploadFile() {
       const serverList = Array.from(servers);
       let lastError: Error | null = null;
 
-      // Try each server until one succeeds (with timeout)
-      for (const server of serverList) {
+      // Try each server until one succeeds (with timeout). Return the first
+      // success right away so posting stays responsive, then mirror the same
+      // blob to MIRROR_COPIES-1 more servers in the background for redundancy.
+      for (let i = 0; i < serverList.length; i++) {
+        const server = serverList[i];
         try {
           const uploader = new BlossomUploader({
             servers: [server],
@@ -98,6 +117,10 @@ export function useUploadFile() {
           });
 
           const tags = await withTimeout(uploader.upload(file), UPLOAD_TIMEOUT_MS, server);
+
+          const others = serverList.filter((_, idx) => idx !== i);
+          void mirrorToServers(file, others, MIRROR_COPIES - 1, user.signer);
+
           return tags;
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err));

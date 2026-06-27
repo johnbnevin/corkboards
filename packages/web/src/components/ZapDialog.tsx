@@ -22,7 +22,7 @@ interface ZapDialogProps {
 
 export function ZapDialog({ note, open, onOpenChange, onOpenWalletSettings }: ZapDialogProps) {
   const { data: authorData } = useAuthor(note?.pubkey);
-  const { zap, isZapping, error, lud16, isConnected } = useZap(note);
+  const { zap, isZapping, error, lud16, canZap, isConnected } = useZap(note);
   const { toast } = useToast();
   const [amount, setAmount] = useState(21);
   const [customAmount, setCustomAmount] = useState('');
@@ -51,7 +51,8 @@ export function ZapDialog({ note, open, onOpenChange, onOpenWalletSettings }: Za
     }
   };
 
-  const noLud16 = !lud16 && note;
+  // "Can't receive zaps" only when neither lud16 nor lud06 resolves an endpoint.
+  const noZapAddress = !canZap && note;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -78,7 +79,7 @@ export function ZapDialog({ note, open, onOpenChange, onOpenWalletSettings }: Za
           </div>
         </div>
 
-        {noLud16 ? (
+        {noZapAddress ? (
           <p className="text-sm text-muted-foreground py-2">
             This author hasn't set a lightning address — they can't receive zaps yet.
           </p>

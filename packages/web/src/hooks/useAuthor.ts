@@ -5,6 +5,7 @@ import { getCachedProfile, cacheProfile } from '@/lib/cacheStore';
 import { FALLBACK_RELAYS } from '@/components/NostrProvider';
 import { getBackupRelaysUsed } from '@/hooks/useNostrBackup';
 import { debugWarn } from '@/lib/debug';
+import { PROFILE_TTL_MS } from '@core/cacheConfig';
 
 // Cap simultaneous profile network fetches to avoid opening too many WebSocket
 // connections at once (WebKit crashes above ~50 concurrent WS connections).
@@ -42,8 +43,9 @@ interface AuthorResult {
   metadata?: NostrMetadata;
 }
 
-const CACHE_MAX_AGE = 48 * 60 * 60 * 1000; // 48 hours
-const STALE_TIME = 48 * 60 * 60 * 1000; // 48 hours - profiles rarely change
+// Single source of truth shared with mobile (profiles rarely change).
+const CACHE_MAX_AGE = PROFILE_TTL_MS;
+const STALE_TIME = PROFILE_TTL_MS;
 
 async function fetchAuthorFromNetwork(
   pubkey: string,

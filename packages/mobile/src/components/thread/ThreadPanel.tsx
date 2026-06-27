@@ -105,7 +105,10 @@ export function ThreadPanel({ eventId, onClose, onNavigateThread: _onNavigateThr
         />
       ) : (
         <View style={styles.center}>
-          <Text style={styles.emptyText}>No thread data found.</Text>
+          <Text style={styles.emptyText}>This thread couldn't be loaded from your relays.</Text>
+          <TouchableOpacity onPress={() => refetch()} style={styles.retryBtn}>
+            <Text style={styles.retryText}>Try again</Text>
+          </TouchableOpacity>
         </View>
       )}
 
@@ -161,5 +164,5 @@ const styles = StyleSheet.create({
     borderColor: '#404040',
   },
   retryText: { color: '#f2f2f2', fontSize: 13 },
-  emptyText: { color: '#666', fontSize: 14 },
+  emptyText: { color: '#666', fontSize: 14, textAlign: 'center', marginBottom: 8 },
 });

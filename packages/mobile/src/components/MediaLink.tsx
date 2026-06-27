@@ -16,6 +16,7 @@ import {
   StyleSheet,
 } from 'react-native';
 import { SizeGuardedImage } from './SizeGuardedImage';
+import { getBlossomFallbackUrls } from '@core/blossom';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56;
@@ -111,6 +112,18 @@ function getEmbedInfo(url: string, forceVideo?: boolean): EmbedInfo | null {
       return { url, type: 'link-preview', title: 'Spotify' };
     }
 
+    // Tidal — tap opens the original tidal.com link, which deep-links into the
+    // Tidal app where the user is logged in. The web embed is unreliable without
+    // a browser login, so on mobile we go straight to the app.
+    if (u.hostname.includes('tidal.com')) {
+      return { url, type: 'link-preview', title: 'Tidal' };
+    }
+
+    // Apple Music
+    if (u.hostname.includes('music.apple.com')) {
+      return { url, type: 'link-preview', title: 'Apple Music' };
+    }
+
     // Rumble
     if (u.hostname.includes('rumble.com')) {
       return { url, type: 'link-preview', title: 'Rumble Video' };
@@ -133,8 +146,21 @@ interface MediaLinkProps {
 
 export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: forceVideo }: MediaLinkProps) {
   const [revealed, setRevealed] = useState(false);
+  // Index into [url, ...blossom mirror URLs]; advanced when the current source
+  // fails to load so we retry the same hash on another Blossom server.
+  const [srcIndex, setSrcIndex] = useState(0);
+  // Reset the fallback index when the url prop changes — done in render (the
+  // React-recommended "adjust state on prop change" pattern) rather than an
+  // effect, which would cause an extra render + a lint warning.
+  const [prevUrl, setPrevUrl] = useState(url);
+  if (url !== prevUrl) {
+    setPrevUrl(url);
+    setSrcIndex(0);
+  }
 
   const embed = useMemo(() => getEmbedInfo(url, forceVideo), [url, forceVideo]);
+  const imageSources = useMemo(() => [url, ...getBlossomFallbackUrls(url)], [url]);
+  const currentImageUrl = imageSources[srcIndex] ?? url;
 
   if (!embed) {
     if (!isSafeUrl(url)) {
@@ -163,14 +189,20 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
     return (
       <TouchableOpacity
         activeOpacity={0.9}
-        onPress={() => Linking.openURL(embed.url)}
+        onPress={() => Linking.openURL(currentImageUrl)}
         style={styles.mediaContainer}
       >
         <SizeGuardedImage
-          uri={embed.url}
+          key={currentImageUrl}
+          uri={currentImageUrl}
           style={styles.mediaImage}
           type="image"
           resizeMode="cover"
+          onError={() => {
+            // The blob might still exist on another Blossom server — retry the
+            // same hash there before giving up.
+            if (srcIndex < imageSources.length - 1) setSrcIndex(i => i + 1);
+          }}
         />
       </TouchableOpacity>
     );

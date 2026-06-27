@@ -203,21 +203,32 @@ export function useLoginActions() {
       params.append('url', 'https://corkboards.me');
       params.append('perms', 'get_public_key,sign_event,nip44_encrypt,nip44_decrypt');
 
+      // Inner abort controller — aborted as soon as we get the connect response,
+      // which cleanly closes all the connect subscriptions. Without this, the
+      // abandoned for-await generators keep reading on the same relay and fill
+      // NRelay1's buffer, BLOCKING the subsequent NConnectSigner.getPublicKey()
+      // response from being delivered — the "hangs 30-60s on the login screen"
+      // symptom. (nostrconnect() already does this; amberConnect() didn't.)
+      const connectAbort = new AbortController();
+      signal?.addEventListener('abort', () => connectAbort.abort());
+
       // Open direct relay connections (not through NPool)
       const relays = connectRelays.map(url => createRelayDirect(url, { backoff: false, idleTimeout: false }));
       const subs = relays.map(relay =>
         relay.req(
           [{ kinds: [24133], '#p': [clientPubkey] }],
-          { signal },
+          { signal: connectAbort.signal },
         )
       );
 
-      // Listen for signer's connect response — race all relays
-      const responsePromise = new Promise<string>((resolve, reject) => {
+      // Listen for signer's connect response — race all relays. Track WHICH
+      // relay delivered the response so we reuse that (proven-reachable, fastest)
+      // relay for the NConnectSigner below, instead of blindly using relays[0].
+      const responsePromise = new Promise<{ pubkey: string; relayIndex: number }>((resolve, reject) => {
         let resolved = false;
         signal?.addEventListener('abort', () => { if (!resolved) reject(new Error('aborted')); });
 
-        for (const sub of subs) {
+        subs.forEach((sub, relayIndex) => {
           (async () => {
             try {
               for await (const msg of sub) {
@@ -229,7 +240,8 @@ export function useLoginActions() {
                     const response = JSON.parse(decrypted);
                     if (typeof response === 'object' && response !== null && response.result === secret) {
                       resolved = true;
-                      resolve(event.pubkey);
+                      connectAbort.abort(); // close connect subs so they don't block getPublicKey
+                      resolve({ pubkey: event.pubkey, relayIndex });
                       return;
                     }
                   } catch { /* not our response */ }
@@ -237,7 +249,7 @@ export function useLoginActions() {
               }
             } catch { /* subscription closed or errored */ }
           })();
-        }
+        });
       });
 
       // Trigger Amber — use Intent URI on Android, link click on desktop
@@ -255,11 +267,14 @@ export function useLoginActions() {
       }
 
       // Wait for signer's response
-      const bunkerPubkey = await responsePromise;
+      const { pubkey: bunkerPubkey, relayIndex } = await responsePromise;
 
-      // Get the user's actual pubkey via NIP-46
+      // Get the user's actual pubkey via NIP-46 over the relay that actually
+      // delivered Amber's response (proven reachable) — not a hardcoded relays[0]
+      // that Amber may not be answering on, which made getPublicKey crawl toward
+      // its 60s timeout (the "hangs 30-60s on the login screen" symptom).
       const signer = new NConnectSigner({
-        relay: relays[0],
+        relay: relays[relayIndex],
         pubkey: bunkerPubkey,
         signer: clientSigner,
         timeout: 60_000,

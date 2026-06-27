@@ -59,13 +59,20 @@ export function useSignerConnect(_type: 'amber') {
       // Listen for NIP-46 connect response on relay.nsec.app
       const relay = new NRelay1(NSEC_APP_RELAY);
 
+      // Inner abort — closed once we have the response so the abandoned connect
+      // subscription doesn't keep reading and fill NRelay1's buffer, which would
+      // block the subsequent getPublicKey() response on the same relay (the
+      // "hangs 30-60s on the login screen" symptom). Mirrors web's amberConnect.
+      const connectAbort = new AbortController();
+      signal.addEventListener('abort', () => connectAbort.abort());
+
       const bunkerPubkey = await new Promise<string>((resolve, reject) => {
         let resolved = false;
         signal.addEventListener('abort', () => { if (!resolved) reject(new Error('aborted')); });
 
         (async () => {
           try {
-            const sub = relay.req([{ kinds: [24133], '#p': [clientPubkey] }], { signal });
+            const sub = relay.req([{ kinds: [24133], '#p': [clientPubkey] }], { signal: connectAbort.signal });
             for await (const msg of sub) {
               if (resolved) return;
               if (msg[0] === 'EVENT') {
@@ -75,6 +82,7 @@ export function useSignerConnect(_type: 'amber') {
                   const response = JSON.parse(decrypted);
                   if (typeof response === 'object' && response !== null && response.result === secret) {
                     resolved = true;
+                    connectAbort.abort(); // close connect sub so it doesn't block getPublicKey
                     resolve(event.pubkey);
                   }
                 } catch { /* not our response */ }

@@ -13,7 +13,7 @@ import { isSecureRelay } from '@core/nostrUtils';
 import { RELAY_CACHE_TTL_MS } from '@core/cacheConfig';
 import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
 import { getSessionSignal } from '../hooks/useSessionAbort';
-import { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS } from '@core/relayConstants';
+import { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS, NOSTRCONNECT_RELAYS, NSEC_APP_RELAY } from '@core/relayConstants';
 import { useAuth } from './AuthContext';
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS };
 
@@ -236,7 +236,14 @@ function isRelayAuthAllowed(relayUrl: string): boolean {
   const norm = (u: string) => u.replace(/\/+$/, '');
   const target = norm(relayUrl);
   const { read, write } = getUserRelays();
-  for (const u of [...read, ...write, ...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]) {
+  // NOSTRCONNECT_RELAYS + NSEC_APP_RELAY are the fixed NIP-46 signer-negotiation
+  // relays the user deliberately logs in through — known app infrastructure, not
+  // the fan-out-discovered author relays the de-anon guard targets.
+  for (const u of [
+    ...read, ...write,
+    ...FALLBACK_RELAYS, ...READ_ONLY_RELAYS,
+    ...NOSTRCONNECT_RELAYS, NSEC_APP_RELAY,
+  ]) {
     if (norm(u) === target) return true;
   }
   return false;

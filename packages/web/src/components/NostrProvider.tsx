@@ -13,7 +13,7 @@ import { isTauri, tauriQuery } from '@/lib/tauri';
 import { getOrCreateUser } from '@/hooks/useCurrentUser';
 // Re-exported for backwards compatibility — canonical source is @/lib/relayConstants
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
-import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
+import { FALLBACK_RELAYS, READ_ONLY_RELAYS, NOSTRCONNECT_RELAYS, NSEC_APP_RELAY } from '@/lib/relayConstants';
 
 interface NostrProviderProps {
   children: React.ReactNode;
@@ -256,7 +256,16 @@ export function setRelayAuthSigner(signer: AuthSigner | null): void {
 function isRelayAuthAllowed(relayUrl: string): boolean {
   const target = normalizeRelayUrl(relayUrl);
   const { read, write } = getUserRelays();
-  for (const u of [...read, ...write, ...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]) {
+  // NOSTRCONNECT_RELAYS + NSEC_APP_RELAY are the fixed NIP-46 signer-negotiation
+  // relays the user DELIBERATELY logs in through (nostrconnect / Amber / bunker).
+  // Declining AUTH on these stalls login ("waiting for Amber…" → abort) whenever
+  // a signer is already registered. They're known app infrastructure, not the
+  // passively fan-out-discovered author relays the de-anon guard targets.
+  for (const u of [
+    ...read, ...write,
+    ...FALLBACK_RELAYS, ...READ_ONLY_RELAYS,
+    ...NOSTRCONNECT_RELAYS, NSEC_APP_RELAY,
+  ]) {
     if (normalizeRelayUrl(u) === target) return true;
   }
   return false;

@@ -21,24 +21,10 @@ import './index.css';
 function installDomMutationGuard(): void {
   if (typeof Node !== 'function' || !Node.prototype) return;
 
-  // TEMPORARY DIAGNOSTIC (v0.7.14): when the guard skips a removal/insertion it
-  // means React's reconciliation desynced from the real DOM — the symptom is
-  // stale leftover DOM (e.g. a whole previous tab staying on the page below the
-  // new one). Log the first few occurrences IN PRODUCTION, tagged, so a staging
-  // repro reveals exactly when/where it fires. Capped so it can't spam.
-  let guardLogCount = 0;
-  const GUARD_LOG_CAP = 30;
-  const logGuard = (msg: string) => {
-    if (guardLogCount < GUARD_LOG_CAP) {
-      guardLogCount++;
-      try { console.warn(`[dom-guard #${guardLogCount}] ${msg}`); } catch { /* noop */ }
-    }
-  };
-
   const originalRemoveChild = Node.prototype.removeChild;
   Node.prototype.removeChild = function <T extends Node>(this: Node, child: T): T {
     if (child.parentNode !== this) {
-      logGuard(`removeChild skipped — node not a child of <${(this as Element).nodeName ?? '?'}> (real parent: <${(child.parentNode as Element)?.nodeName ?? 'none'}>)`);
+      if (import.meta.env.DEV) console.warn('[dom-guard] removeChild: node is not a child of this node — ignoring');
       return child;
     }
     return originalRemoveChild.call(this, child) as T;
@@ -47,7 +33,7 @@ function installDomMutationGuard(): void {
   const originalInsertBefore = Node.prototype.insertBefore;
   Node.prototype.insertBefore = function <T extends Node>(this: Node, node: T, ref: Node | null): T {
     if (ref && ref.parentNode !== this) {
-      logGuard(`insertBefore appended — ref not a child of <${(this as Element).nodeName ?? '?'}>`);
+      if (import.meta.env.DEV) console.warn('[dom-guard] insertBefore: reference is not a child of this node — appending');
       return originalInsertBefore.call(this, node, null) as T;
     }
     return originalInsertBefore.call(this, node, ref) as T;

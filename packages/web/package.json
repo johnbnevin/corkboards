@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 3000",
-    "build": "vite build -l error && node -e \"const fs=require('fs');const v=Date.now();let h=fs.readFileSync('dist/index.html','utf8');h=h.replace('index.js','index.js?v='+v).replace('index.css','index.css?v='+v);fs.writeFileSync('dist/index.html',h)\" && cp dist/index.html dist/404.html && echo 'Project built successfully!'",
+    "build": "vite build -l error && node -e \"const fs=require('fs');const v=Date.now();let h=fs.readFileSync('dist/index.html','utf8');h=h.replace('index.js','index.js?v='+v).replace('index.css','index.css?v='+v);fs.writeFileSync('dist/index.html',h);try{let sw=fs.readFileSync('dist/sw.js','utf8');sw=sw.replace('CACHE_VERSION',v);fs.writeFileSync('dist/sw.js',sw)}catch(e){}\" && cp dist/index.html dist/404.html && echo 'Project built successfully!'",
     "test": "tsc --noEmit && eslint && vitest run --reporter=dot --silent && vite build -l error && cp dist/index.html dist/404.html && echo 'All tests passed!'",
     "deploy": "npm run build && npx -y nostr-deploy-cli deploy --skip-setup"
   },

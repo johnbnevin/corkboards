@@ -1,11 +1,14 @@
 // Service worker — caches app shell so returning from background doesn't trigger a full reload.
 // Uses a network-first strategy for navigation and cache-first for static assets.
 
-// Bump this whenever the cached app shell (index.html / CSP) must be refreshed.
-// A changed CACHE_NAME also changes this file's bytes, which is what makes the
-// browser detect and install the new service worker (and purge the old cache,
-// including a stale index.html with an outdated CSP, in the activate handler).
-const CACHE_NAME = 'corkboards-v4';
+// CACHE_VERSION is rewritten to a unique build timestamp by the production
+// build step (see packages/web/package.json "build"), so EVERY deploy ships a
+// new CACHE_NAME. That changes this file's bytes → the browser installs the new
+// SW → the activate handler purges ALL previous caches. This prevents stale
+// chunks from surviving a deploy, including the bug where a cached plain
+// `index.js` ran alongside the fresh `index.js?v=…` and mounted the app twice.
+// In dev (no build step) the literal token is a valid, stable cache name.
+const CACHE_NAME = 'corkboards-CACHE_VERSION';
 
 // On install, immediately activate (don't wait for existing tabs to close)
 self.addEventListener('install', () => self.skipWaiting());

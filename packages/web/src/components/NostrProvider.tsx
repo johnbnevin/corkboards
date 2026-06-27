@@ -13,7 +13,7 @@ import { isTauri, tauriQuery } from '@/lib/tauri';
 import { getOrCreateUser } from '@/hooks/useCurrentUser';
 // Re-exported for backwards compatibility — canonical source is @/lib/relayConstants
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
-import { FALLBACK_RELAYS, READ_ONLY_RELAYS, NOSTRCONNECT_RELAYS, NSEC_APP_RELAY } from '@/lib/relayConstants';
+import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
 
 interface NostrProviderProps {
   children: React.ReactNode;
@@ -243,41 +243,17 @@ export function setRelayAuthSigner(signer: AuthSigner | null): void {
   _authSigner = signer;
 }
 
-/**
- * Relays we'll auto-answer a NIP-42 AUTH challenge for: the user's own
- * configured (NIP-65) relays plus the app's default relay sets. A NIP-42 AUTH
- * response is a SIGNED event that cryptographically binds the user's pubkey to
- * their IP/connection at that relay — a passive de-anonymization primitive. We
- * therefore MUST NOT auto-authenticate to arbitrary relays pulled in during
- * outbox fan-out (other authors' relays); a hostile relay there could otherwise
- * force the link with a single challenge. Unknown relays are declined — the
- * query simply returns nothing from them, which is the safe default.
- */
-function isRelayAuthAllowed(relayUrl: string): boolean {
-  const target = normalizeRelayUrl(relayUrl);
-  const { read, write } = getUserRelays();
-  // NOSTRCONNECT_RELAYS + NSEC_APP_RELAY are the fixed NIP-46 signer-negotiation
-  // relays the user DELIBERATELY logs in through (nostrconnect / Amber / bunker).
-  // Declining AUTH on these stalls login ("waiting for Amber…" → abort) whenever
-  // a signer is already registered. They're known app infrastructure, not the
-  // passively fan-out-discovered author relays the de-anon guard targets.
-  for (const u of [
-    ...read, ...write,
-    ...FALLBACK_RELAYS, ...READ_ONLY_RELAYS,
-    ...NOSTRCONNECT_RELAYS, NSEC_APP_RELAY,
-  ]) {
-    if (normalizeRelayUrl(u) === target) return true;
-  }
-  return false;
-}
-
 async function handleRelayAuthChallenge(relayUrl: string, challenge: string): Promise<NostrEvent> {
   const signer = _authSigner;
   if (!signer) throw new Error('No active signer for NIP-42 relay AUTH');
-  if (!isRelayAuthAllowed(relayUrl)) {
-    // Don't bind the user's identity to a relay they never chose (NIP-42 de-anon).
-    throw new Error(`Declining NIP-42 AUTH for non-configured relay: ${relayUrl}`);
-  }
+  // NOTE: a previous build gated this to an allowlist of "trusted" relays to
+  // avoid a NIP-42 de-anonymization vector (auto-binding the user's pubkey to
+  // their IP at arbitrary fan-out relays). In practice that broke every
+  // DELIBERATE relay connection that needs AUTH — NIP-46 login signaling relays
+  // AND NWC wallet relays (NIP-47) — because those are dynamic/per-user and not
+  // in any static allowlist, causing login hangs and zap/NWC timeouts. The
+  // operational cost outweighed the marginal privacy gain, so we answer AUTH for
+  // any relay we're actively talking to (the pre-v0.7.12 behavior).
   return signer.signEvent({
     kind: 22242,
     created_at: Math.floor(Date.now() / 1000),

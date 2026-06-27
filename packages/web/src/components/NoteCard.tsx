@@ -1569,28 +1569,4 @@ export const NoteCard = React.memo(function NoteCard({
     </Card>
     </div>
   )
-}, noteCardPropsEqual)
-
-/**
- * Custom memo comparator. FeedGrid builds a fresh arrow closure for nearly every
- * callback prop on each render (`onPinClick={() => onPinClick(note.id)}`, …), so
- * the default shallow compare never matched and every visible card re-rendered
- * whenever FeedGrid re-rendered (e.g. a scroll-driven renderLimit bump). Those
- * callbacks' behaviour is fully determined by the DATA props they close over
- * (chiefly `note`), so we compare every non-function prop normally — any real
- * data change still re-renders — and ignore function identity. Net effect:
- * scroll-load only renders the newly-added cards instead of the whole column.
- */
-function noteCardPropsEqual(prev: NoteCardProps, next: NoteCardProps): boolean {
-  const keys = new Set([...Object.keys(prev), ...Object.keys(next)]) as Set<keyof NoteCardProps>;
-  for (const k of keys) {
-    const a = prev[k];
-    const b = next[k];
-    // Skip callbacks: their identity churns every render but their behaviour is
-    // pinned to the data props (compared below). A presence flip (fn↔undefined)
-    // always coincides with a data-prop change (note ref / isOwnNote / isMeTab).
-    if (typeof a === 'function' || typeof b === 'function') continue;
-    if (a !== b) return false;
-  }
-  return true;
-}
+})

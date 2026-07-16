@@ -330,7 +330,7 @@ const MAX_RELAY_CACHE = 5000;
 
 // Tiered relay routing thresholds (see reqRouter below)
 const BULK_AUTHOR_THRESHOLD = 10; // >= this many authors → bulk tier (no per-author expansion)
-const MAX_BULK_RELAYS = 2;        // query only 2 relays at a time; expand if results disagree
+const MAX_FEED_RELAYS = 12;       // bulk feed: bounded outbox coverage (was a flat 2; see selectFeedRelays)
 const MAX_TARGETED_RELAYS = 3;    // cap for targeted queries (threads, profiles)
 const MAX_REFERENCE_RELAYS = 8;   // cap for author-less reference queries (thread replies, reactions, comments, notifications)
 let relayCache: Map<string, string[]> = new Map();
@@ -538,15 +538,58 @@ function hasIdLookup(filters: NostrFilter[]): boolean {
   return filters.some(f => Array.isArray(f.ids) && f.ids.length > 0);
 }
 
+// Coverage-ranked relay set for bulk feeds (follows feed + any corkboard with
+// many authors). This IS the outbox model, made bounded: instead of opening a
+// socket per followed author (900+ on large feeds) or the old flat 2 relays
+// (which missed anyone not on those 2), we query the union of
+//   - the user's configured read relays,
+//   - fallback + archive/indexer relays (cover authors whose NIP-65 list we
+//     haven't fetched yet), and
+//   - the write relays the followed authors actually publish to, ranked by how
+//     many of them each relay covers,
+// capped at MAX_FEED_RELAYS. Coverage improves as authors' relay lists load.
+function selectFeedRelays(authors: string[]): string[] {
+  const selected = new Set<string>();
+  const userRelays = getUserRelays();
+  // Guaranteed: user reads + fallbacks + indexers (broad safety net).
+  userRelays.read.forEach(r => selected.add(normalizeRelayUrl(r)));
+  FALLBACK_RELAYS.forEach(r => selected.add(normalizeRelayUrl(r)));
+  READ_ONLY_RELAYS.forEach(r => selected.add(normalizeRelayUrl(r)));
+
+  // Rank the authors' own write relays (their outbox) by coverage. Read the
+  // cache directly (not getRelayCache) to avoid LRU churn over many authors.
+  const coverage = new Map<string, number>();
+  for (const author of authors) {
+    const relays = relayCache.get(author);
+    if (!relays) continue;
+    for (const r of relays) {
+      const n = normalizeRelayUrl(r);
+      if (selected.has(n) || isRelayBlocked(n)) continue;
+      coverage.set(n, (coverage.get(n) ?? 0) + 1);
+    }
+  }
+  const ranked = [...coverage.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [relay] of ranked) {
+    if (selected.size >= MAX_FEED_RELAYS) break;
+    selected.add(relay);
+  }
+
+  const all = [...selected];
+  const healthy = all.filter(r => !isRelayBlocked(r));
+  const blocked = all.filter(r => isRelayBlocked(r));
+  return [...healthy, ...blocked].slice(0, MAX_FEED_RELAYS);
+}
+
 // ─── Outbox Model Relay Routing ──────────────────────────────────────────────
 //
 // createPool() implements the NIP-65 outbox model with two tiers:
 //
 //   reqRouter:
 //     Tier 1 — Bulk feed queries (authors >= BULK_AUTHOR_THRESHOLD):
-//       Use user's configured read relays + FALLBACK_RELAYS, capped at
-//       MAX_BULK_RELAYS. No per-author relay expansion. This caps WebSocket
-//       connections to 4–8 total instead of potentially 900+ on large feeds.
+//       Bounded outbox model via selectFeedRelays: user read relays + fallbacks
+//       + indexers + the authors' own write relays ranked by coverage, capped at
+//       MAX_FEED_RELAYS. Covers the followed authors' outboxes without opening a
+//       socket per follow (the 900+ risk of naive per-pubkey expansion).
 //
 //     Tier 2 — Targeted queries (authors < BULK_AUTHOR_THRESHOLD):
 //       Full outbox model: per-author relays (up to 3 each) + user's read
@@ -575,9 +618,10 @@ function createPool(): NPool {
     },
 
     // Tiered routing for reading.
-    //   - Bulk (≥ BULK_AUTHOR_THRESHOLD authors): minimize WS fan-out;
-    //     send the whole batch to MAX_BULK_RELAYS picked from user-read + fallbacks.
-    //     We also batch 500 authors per filter to avoid relay-side truncation.
+    //   - Bulk (≥ BULK_AUTHOR_THRESHOLD authors): bounded outbox via
+    //     selectFeedRelays (coverage-ranked author write relays + user read +
+    //     fallbacks/indexers, capped at MAX_FEED_RELAYS). Batch 500 authors per
+    //     filter to avoid relay-side truncation.
     //   - Targeted (< BULK_AUTHOR_THRESHOLD authors, or non-author queries):
     //     hand off to welshman's getFilterSelections so the outbox model is
     //     applied per-pubkey with proper scoring + fallback policy.
@@ -586,19 +630,10 @@ function createPool(): NPool {
       const authors = extractAuthorsFromFilters(filters);
 
       if (authors.length >= BULK_AUTHOR_THRESHOLD) {
-        // Tier 1 — Bulk feed query: skip welshman's per-author expansion to
-        // keep WS connection count low; instead query a small set of high-fan-out
-        // relays. Welshman's per-pubkey routing on 1000+ contacts would open
-        // a connection per follow.
-        const userRelays = getUserRelays();
-        const relaysToQuery = new Set<string>();
-        userRelays.read.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
-        FALLBACK_RELAYS.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
-        READ_ONLY_RELAYS.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
-        const all = Array.from(relaysToQuery);
-        const healthy = all.filter(r => !isRelayBlocked(r));
-        const blocked = all.filter(r => isRelayBlocked(r));
-        const capped = [...healthy, ...blocked].slice(0, MAX_BULK_RELAYS);
+        // Tier 1 — Bulk feed query (follows feed + large corkboards): apply the
+        // outbox model with a bounded, coverage-ranked relay set instead of
+        // welshman's per-pubkey expansion (which would open a socket per follow).
+        const capped = selectFeedRelays(authors);
 
         // Batch authors at 500 per filter to avoid silent relay truncation.
         const MAX_AUTHORS_PER_FILTER = 500;

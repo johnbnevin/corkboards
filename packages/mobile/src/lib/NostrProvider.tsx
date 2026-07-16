@@ -33,7 +33,7 @@ const MAX_RELAY_CACHE = 3000; // 3000 vs 5000 on web — conservative mobile mem
 
 // Tiered relay routing thresholds (keep in sync with web NostrProvider)
 const BULK_AUTHOR_THRESHOLD = 10;
-const MAX_BULK_RELAYS = 2;
+const MAX_FEED_RELAYS = 12;       // bulk feed: bounded outbox coverage (see selectFeedRelays)
 const MAX_TARGETED_RELAYS = 3;
 const MAX_REFERENCE_RELAYS = 8;   // cap for author-less reference queries (thread replies, reactions, comments, notifications)
 const MAX_AUTHORS_PER_FILTER = 500;
@@ -354,6 +354,38 @@ function hasIdLookup(filters: NostrFilter[]): boolean {
   return filters.some(f => Array.isArray(f.ids) && f.ids.length > 0);
 }
 
+// Coverage-ranked relay set for bulk feeds (follows feed + large corkboards) —
+// the bounded outbox model. Union of user read relays + fallbacks/indexers + the
+// followed authors' own write relays ranked by coverage, capped at
+// MAX_FEED_RELAYS. Keep in sync with web selectFeedRelays.
+function selectFeedRelays(authors: string[]): string[] {
+  const selected = new Set<string>();
+  const userRelays = getUserRelays();
+  userRelays.read.forEach(r => selected.add(r));
+  FALLBACK_RELAYS.forEach(r => selected.add(r));
+  READ_ONLY_RELAYS.forEach(r => selected.add(r));
+
+  const coverage = new Map<string, number>();
+  for (const author of authors) {
+    const relays = relayCache.get(author);
+    if (!relays) continue;
+    for (const r of relays) {
+      if (selected.has(r) || isRelayBlocked(r)) continue;
+      coverage.set(r, (coverage.get(r) ?? 0) + 1);
+    }
+  }
+  const ranked = [...coverage.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [relay] of ranked) {
+    if (selected.size >= MAX_FEED_RELAYS) break;
+    selected.add(relay);
+  }
+
+  const all = [...selected];
+  const healthy = all.filter(r => !isRelayBlocked(r));
+  const blocked = all.filter(r => isRelayBlocked(r));
+  return [...healthy, ...blocked].slice(0, MAX_FEED_RELAYS);
+}
+
 // ============================================================================
 // Pool factory
 // ============================================================================
@@ -377,12 +409,10 @@ function createPool(): NPoolType {
       });
 
       if (authors.length >= BULK_AUTHOR_THRESHOLD) {
-        // Tier 1 — Bulk feed query: use user's read relays + FALLBACK_RELAYS, capped
-        const userRelays = getUserRelays();
-        userRelays.read.forEach(r => relaysToQuery.add(r));
-        FALLBACK_RELAYS.forEach(r => relaysToQuery.add(r));
-        READ_ONLY_RELAYS.forEach(r => relaysToQuery.add(r));
-        const capped = Array.from(relaysToQuery).slice(0, MAX_BULK_RELAYS);
+        // Tier 1 — Bulk feed query (follows feed + large corkboards): bounded
+        // outbox model via selectFeedRelays (coverage-ranked author write relays
+        // + user reads + fallbacks/indexers), instead of a flat 2 relays.
+        const capped = selectFeedRelays(authors);
 
         for (const relay of capped) {
           if (authors.length <= MAX_AUTHORS_PER_FILTER) {

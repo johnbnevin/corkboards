@@ -58,7 +58,12 @@ export function GlobalLightbox() {
 
   const lightboxContent = (
     <div
-      className="fixed inset-0 z-[9999]"
+      // pointer-events-auto is REQUIRED: this portal mounts on document.body, and
+      // when the photo is opened from inside a Radix modal (thread/compose/profile),
+      // Radix sets body { pointer-events: none } — without this the lightbox is
+      // visible but dead (X/backdrop clicks never fire, and clicks/scroll fall
+      // through to the UI behind).
+      className="fixed inset-0 z-[9999] pointer-events-auto"
       onClick={(e) => {
         e.stopPropagation()
         e.preventDefault()
@@ -186,7 +191,8 @@ export function Lightbox({ src, alt = '', isOpen, onClose }: LightboxProps) {
 
   const lightboxContent = (
     <div
-      className="fixed inset-0 z-[9999]"
+      // pointer-events-auto: see GlobalLightbox — counters Radix body pointer-events:none.
+      className="fixed inset-0 z-[9999] pointer-events-auto"
       onClick={(e) => { e.stopPropagation(); e.preventDefault(); onClose() }}
     >
       <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={(e) => { e.stopPropagation(); e.preventDefault(); onClose() }} />

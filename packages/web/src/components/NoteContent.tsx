@@ -6,7 +6,6 @@ import { NoteLink } from './NoteLink'
 import { ProfileLink } from './ProfileLink'
 import { MediaLink } from './MediaLink'
 import { isImageUrl } from '@/lib/mediaUtils'
-import { stripTrackingParams } from '@core/sanitizeUtils'
 import { InlineLink } from './InlineLink'
 import { useHashtagAction } from '@/contexts/hashtagAction'
 import { WebLink } from './WebLink'
@@ -101,8 +100,9 @@ const MarkdownText = memo(function MarkdownText({ text, emojiMap }: { text: stri
             try { safe = ['http:', 'https:'].includes(new URL(href.trim()).protocol) } catch { /* empty */ }
           }
           if (!safe) return <span>{ec(children)}</span>
-          const cleanHref = stripTrackingParams(href!.trim())
-          return <InlineLink href={cleanHref}>{ec(children)}</InlineLink>
+          // Pass the RAW href — InlineLink strips trackers and offers the
+          // original via right-click.
+          return <InlineLink url={href!.trim()}>{ec(children)}</InlineLink>
         },
         // Code blocks
         pre: ({ children }) => (

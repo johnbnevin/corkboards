@@ -71,15 +71,27 @@ function HashtagLink({ tag }: { tag: string }) {
 function WebLink({ url }: { url: string }) {
   // Strip tracking params before opening/displaying (parity with web).
   const clean = stripTrackingParams(url);
+  const hasTracker = clean !== url;
   const display = clean.replace(/^https?:\/\/(www\.)?/, '').slice(0, 50);
-  const copy = async () => {
-    try {
-      await Clipboard.setStringAsync(clean);
+  const copyText = async (text: string) => {
+    try { await Clipboard.setStringAsync(text); } catch { /* clipboard unavailable */ }
+  };
+  const onLongPress = () => {
+    // When a tracker was stripped, offer clean vs original (action sheet);
+    // otherwise just copy.
+    if (hasTracker) {
+      Alert.alert('Copy link', clean, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Copy link', onPress: () => copyText(clean) },
+        { text: 'Copy original (with trackers)', onPress: () => copyText(url) },
+      ]);
+    } else {
+      copyText(clean);
       Alert.alert('Link copied', clean);
-    } catch { /* clipboard unavailable */ }
+    }
   };
   return (
-    <Text style={styles.link} onPress={() => Linking.openURL(clean)} onLongPress={copy}>
+    <Text style={styles.link} onPress={() => Linking.openURL(clean)} onLongPress={onLongPress}>
       {display}{clean.length > 50 ? '…' : ''}
     </Text>
   );

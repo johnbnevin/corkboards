@@ -273,7 +273,20 @@ export function HomeScreen() {
 
   // ── Pick the right data for the active tab ──────────────────────────────────
   const isCustomTab = !!activeFeedId;
-  const rawEvents = isCustomTab ? customNotes : rawFollowEvents;
+  // For a corkboard, reconcile its own fetch with the follows feed for its
+  // members, so notes visible on the follows tab also appear here (dismiss is
+  // shared by note id, so they stay consistent). Parity with web corkboardNotes.
+  const rawEvents = useMemo(() => {
+    if (!isCustomTab) return rawFollowEvents;
+    const feedPubkeys = new Set(activeCustomFeed?.pubkeys ?? []);
+    const fromFollow = (rawFollowEvents ?? []).filter(e => feedPubkeys.has(e.pubkey));
+    const seen = new Set<string>();
+    const out: NostrEvent[] = [];
+    for (const e of [...(customNotes ?? []), ...fromFollow]) {
+      if (!seen.has(e.id)) { seen.add(e.id); out.push(e); }
+    }
+    return out;
+  }, [isCustomTab, rawFollowEvents, customNotes, activeCustomFeed?.pubkeys]);
   const isLoading = isCustomTab ? customLoading : followLoading;
   const isError = isCustomTab ? false : followError;
   const isFetching = isCustomTab ? customLoading : followFetching;

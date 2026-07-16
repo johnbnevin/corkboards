@@ -2227,19 +2227,27 @@ export function MultiColumnClient() {
   const corkboardNotes = useMemo(() => {
     if (!isCustomFeedTab || !activeCustomFeed) return undefined;
 
-    // Get notes from custom feed cache (separate from global follow cache)
+    // The corkboard's own fetch (covers members you don't follow) + hashtag + RSS.
     const nostrNotes = customFeedNotesData ?? [];
     const htNotes = [...(hashtagNotes ?? []), ...extraHashtagNotes];
     const rss = customFeedRssNotes ?? [];
 
-    // Merge hashtag notes into nostr notes
-    const allNostr = [...nostrNotes];
-    const seenIds = new Set(nostrNotes.map(n => n.id));
-    for (const n of htNotes) {
+    // Reconcile with the all-follows cache: pull every note it holds for this
+    // corkboard's members — and the user's own notes when "include my notes" is
+    // on — so anything visible on 'all follows' also appears here, with the same
+    // wider coverage. Dismiss is shared by note id, so the two stay consistent.
+    const feedPubkeys = new Set(activeCustomFeed.pubkeys);
+    if (showOwnNotes && user?.pubkey) feedPubkeys.add(user.pubkey);
+    const fromFollowCache = (followNotesCache ?? []).filter(n => feedPubkeys.has(n.pubkey));
+
+    // Merge corkboard fetch + follow-cache subset + hashtag notes, dedup by id.
+    const allNostr: NostrEvent[] = [];
+    const seenIds = new Set<string>();
+    for (const n of [...nostrNotes, ...fromFollowCache, ...htNotes]) {
       if (!seenIds.has(n.id)) { allNostr.push(n); seenIds.add(n.id); }
     }
 
-    debugLog('[corkboard] nostrNotes:', nostrNotes.length, 'hashtagNotes:', htNotes.length, 'rssNotes:', rss.length);
+    debugLog('[corkboard] nostrNotes:', nostrNotes.length, 'followCacheSubset:', fromFollowCache.length, 'hashtagNotes:', htNotes.length, 'rssNotes:', rss.length);
 
     // Merge RSS notes with Nostr+hashtag notes, filtering RSS to the time window
     if (rss.length === 0) return allNostr.sort((a, b) => b.created_at - a.created_at);
@@ -2267,7 +2275,7 @@ export function MultiColumnClient() {
       }
     }
     return merged.sort((a, b) => b.created_at - a.created_at);
-  }, [isCustomFeedTab, activeCustomFeed, customFeedNotesData, hashtagNotes, extraHashtagNotes, customFeedRssNotes]);
+  }, [isCustomFeedTab, activeCustomFeed, customFeedNotesData, hashtagNotes, extraHashtagNotes, customFeedRssNotes, followNotesCache, showOwnNotes, user?.pubkey]);
   const _isLoadingCorkboardNotes = isLoadingFollowCache && isCustomFeedTab;
 
 

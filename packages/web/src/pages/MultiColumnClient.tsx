@@ -681,19 +681,30 @@ export function MultiColumnClient() {
   const [localBackupOpen, setLocalBackupOpen] = useState(false);
 
   // Thread modal
-  const [threadEventId, setThreadEventId] = useState<string | null>(null);
-  const [isThreadModalOpen, setIsThreadModalOpen] = useState(false);
+  // Persist the note being read so a reload (SW picking up a new build, or a
+  // mobile/tab eviction) reopens it instead of dropping the user back to the
+  // feed. sessionStorage survives a same-tab reload; cleared when the thread is
+  // closed so we only restore a thread that was actually open on return.
+  const OPEN_THREAD_KEY = 'corkboard:open-thread';
+  const [threadEventId, setThreadEventId] = useState<string | null>(() => {
+    try { return sessionStorage.getItem(OPEN_THREAD_KEY) || null; } catch { return null; }
+  });
+  const [isThreadModalOpen, setIsThreadModalOpen] = useState<boolean>(() => {
+    try { return !!sessionStorage.getItem(OPEN_THREAD_KEY); } catch { return false; }
+  });
   // When set, auto-open reply compose after the thread loads
   const autoReplyNoteRef = useRef<NostrEvent | null>(null);
 
   const openThread = (eventId: string) => {
     autoReplyNoteRef.current = null;
+    try { sessionStorage.setItem(OPEN_THREAD_KEY, eventId); } catch { /* sessionStorage unavailable */ }
     setThreadEventId(eventId);
     setIsThreadModalOpen(true);
   };
 
   const openThreadAndReply = useCallback((note: NostrEvent) => {
     autoReplyNoteRef.current = note;
+    try { sessionStorage.setItem(OPEN_THREAD_KEY, note.id); } catch { /* sessionStorage unavailable */ }
     setThreadEventId(note.id);
     setIsThreadModalOpen(true);
   }, []);
@@ -4551,6 +4562,7 @@ export function MultiColumnClient() {
             setIsThreadModalOpen(false);
             setThreadEventId(null);
             autoReplyNoteRef.current = null;
+            try { sessionStorage.removeItem(OPEN_THREAD_KEY); } catch { /* sessionStorage unavailable */ }
           }}
           onQuote={openQuote}
           onRepost={openRepost}

@@ -7,6 +7,7 @@ import { ProfileLink } from './ProfileLink'
 import { MediaLink } from './MediaLink'
 import { isImageUrl } from '@/lib/mediaUtils'
 import { stripTrackingParams } from '@core/sanitizeUtils'
+import { InlineLink } from './InlineLink'
 import { useHashtagAction } from '@/contexts/hashtagAction'
 import { WebLink } from './WebLink'
 import { SizeGuardedImage } from './SizeGuardedImage'
@@ -101,11 +102,7 @@ const MarkdownText = memo(function MarkdownText({ text, emojiMap }: { text: stri
           }
           if (!safe) return <span>{ec(children)}</span>
           const cleanHref = stripTrackingParams(href!.trim())
-          return (
-            <a href={cleanHref} target="_blank" rel="noopener noreferrer" className="text-purple-500 hover:text-purple-600 underline" onClick={(e) => e.stopPropagation()}>
-              {ec(children)}
-            </a>
-          )
+          return <InlineLink href={cleanHref}>{ec(children)}</InlineLink>
         },
         // Code blocks
         pre: ({ children }) => (

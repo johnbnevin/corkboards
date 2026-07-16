@@ -33,6 +33,8 @@ import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { HashtagActionContext } from '@/contexts/hashtagAction';
+import { DeletedAuthorsContext } from '@/contexts/deletedAuthors';
+import { useDeletedAuthors } from '@/hooks/useDeletedAuthors';
 import { ProfileCard } from '@/components/ProfileCard';
 import { ThreadPanel } from '@/components/thread'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
@@ -3136,6 +3138,15 @@ export function MultiColumnClient() {
   // Stats from deduped notes — these match the visible counts in the kind toggles
   const activeTabStats = useMemo(() => computeNoteKindStats(deduplicatedNotes, eventLookup), [deduplicatedNotes, eventLookup]);
 
+  // Detect deleted/vanished authors (NIP-09 profile deletion / NIP-62 vanish)
+  // across the feed's visible authors in one batched query, so their posts can
+  // render a graceful "Deleted account" treatment. Provided via context below.
+  const visibleAuthors = useMemo(
+    () => [...new Set(deduplicatedNotes.map(n => n.pubkey).filter(p => p && p !== 'rss-feed'))],
+    [deduplicatedNotes],
+  );
+  const deletedAuthors = useDeletedAuthors(visibleAuthors);
+
   // Batch fetch parent notes for replies
   const { data: parentNotes } = useParentNotes(canLoadNotes ? parentIdsNeeded : []);
 
@@ -3530,6 +3541,7 @@ export function MultiColumnClient() {
 
   return (
     <HashtagActionContext.Provider value={hashtagActionValue}>
+    <DeletedAuthorsContext.Provider value={deletedAuthors}>
     <div className="min-h-screen bg-background">
       <div className="w-full px-4 py-0.5 pb-2 sm:py-1.5 sm:pb-4">
         {/* Header — responsive: stacked on mobile, single row on desktop */}
@@ -4780,6 +4792,7 @@ export function MultiColumnClient() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </DeletedAuthorsContext.Provider>
     </HashtagActionContext.Provider>
   );
 }

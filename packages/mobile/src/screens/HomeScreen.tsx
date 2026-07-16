@@ -12,6 +12,8 @@ import {
   Alert,
 } from 'react-native';
 import { HashtagActionContext } from '../contexts/hashtagAction';
+import { DeletedAuthorsContext } from '../contexts/deletedAuthors';
+import { useDeletedAuthors } from '../hooks/useDeletedAuthors';
 import type { FlatList as FlatListType } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useFeed, useContacts, useFeedLoadMore } from '../hooks/useFeed';
@@ -398,6 +400,14 @@ export function HomeScreen() {
     }
   }, [filteredEvents, prefetchFromNotes]);
 
+  // Detect deleted/vanished authors (NIP-09 profile deletion / NIP-62 vanish)
+  // across the feed's visible authors in one batched query, provided via context.
+  const visibleAuthors = useMemo(
+    () => [...new Set((filteredEvents ?? []).map(n => n.pubkey).filter(Boolean))],
+    [filteredEvents],
+  );
+  const deletedAuthors = useDeletedAuthors(visibleAuthors);
+
   // ── Feed label ──────────────────────────────────────────────────────────────
   const feedLabel = useMemo(() => {
     const count = filteredEvents?.length ?? 0;
@@ -508,6 +518,7 @@ export function HomeScreen() {
 
   return (
     <HashtagActionContext.Provider value={hashtagActionValue}>
+    <DeletedAuthorsContext.Provider value={deletedAuthors}>
     <ProfileModalProvider onViewThread={(id) => setViewingThread(id)}>
       <DeepLinkHandler onThread={setViewingThread} />
       <View style={styles.container}>
@@ -660,6 +671,7 @@ export function HomeScreen() {
         />
       </View>
     </ProfileModalProvider>
+    </DeletedAuthorsContext.Provider>
     </HashtagActionContext.Provider>
   );
 }

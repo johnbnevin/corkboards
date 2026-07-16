@@ -17,6 +17,7 @@ import { NoteContent } from '@/components/NoteContent'
 import { visibleLength, findVisibleCutoff } from '@/lib/textTruncation'
 import { ClickableProfile, profileModalState, PROFILE_ACTION_FOLLOW } from '@/components/ProfileModal'
 import { genUserName } from '@/lib/genUserName'
+import { useIsDeletedAuthor } from '@/contexts/deletedAuthors'
 import { formatTimeAgoCompact } from '@/lib/formatTimeAgo'
 import { optimizeAvatarUrl } from '@/lib/imageUtils'
 import { nip19 } from 'nostr-tools'
@@ -511,6 +512,8 @@ export const NoteCard = React.memo(function NoteCard({
   const effectiveBlurMedia = mediaFilterActive ? false : blurMedia;
   const isRss = note.pubkey === 'rss-feed'
   const { data: author, isFetching: isAuthorFetching } = useAuthor(isRss ? undefined : note.pubkey)
+  // Author confirmed deleted/vanished (NIP-09 profile deletion / NIP-62 vanish).
+  const isDeletedAuthor = useIsDeletedAuthor(isRss ? undefined : note.pubkey)
   const { isCollapsed, isCollapsedThisSession, isSoftDismissed, toggleCollapsed, dismiss, undoDismiss, canUndoDismiss, isBatchTrigger } = useCollapsedNotes()
   const queryClient = useQueryClient()
   const metadata = author?.metadata
@@ -522,8 +525,11 @@ export const NoteCard = React.memo(function NoteCard({
   const rssFeedIcon = isRss ? note.tags.find(t => t[0] === 'feed_icon')?.[1] : undefined
   const displayName = isRss
     ? (rssFeedName || 'RSS Feed')
-    : (metadata?.display_name || metadata?.name || (profileLoading ? '' : genUserName(note.pubkey)))
-  const avatarUrl = optimizeAvatarUrl(isRss ? rssFeedIcon : metadata?.picture)
+    : isDeletedAuthor
+      ? 'Deleted account'
+      : (metadata?.display_name || metadata?.name || (profileLoading ? '' : genUserName(note.pubkey)))
+  // Deleted authors get a neutral (blank) avatar rather than a possibly-stale picture.
+  const avatarUrl = isDeletedAuthor ? undefined : optimizeAvatarUrl(isRss ? rssFeedIcon : metadata?.picture)
   const collapsed = isCollapsed(note.id)
   const softDismissed = isSoftDismissed(note.id)
 
@@ -783,7 +789,7 @@ export const NoteCard = React.memo(function NoteCard({
   return (
     <div ref={cardRef} data-note-id={note.id} style={{ containerType: 'inline-size' }}>
     <Card
-      className={`relative cursor-pointer hover:bg-accent/50 transition-colors group/card overflow-hidden ${isPinned ? 'border-orange-500 dark:border-orange-400' : ''} ${isOwnNote ? 'border-2 border-orange-500 dark:border-orange-400' : ''} ${isFresh ? 'border-purple-500 dark:border-purple-400 bg-purple-50/50 dark:bg-purple-950/30' : ''}`}
+      className={`relative cursor-pointer hover:bg-accent/50 transition-colors group/card overflow-hidden ${isPinned ? 'border-orange-500 dark:border-orange-400' : ''} ${isOwnNote ? 'border-2 border-orange-500 dark:border-orange-400' : ''} ${isFresh ? 'border-purple-500 dark:border-purple-400 bg-purple-50/50 dark:bg-purple-950/30' : ''} ${isDeletedAuthor ? 'opacity-70' : ''}`}
       onClick={(e) => {
         // Don't open thread modal when clicking links or interactive elements inside the card
         const target = e.target as HTMLElement
@@ -800,6 +806,12 @@ export const NoteCard = React.memo(function NoteCard({
         if (onOpenThread) { onOpenThread(threadTargetId) } else { onThreadClick?.() }
       }}
     >
+      {/* Deleted/vanished author notice — pl-12 clears the top-left corner button */}
+      {isDeletedAuthor && (
+        <div className="pl-12 pr-3 py-1 text-[11px] text-muted-foreground bg-muted/30 border-b">
+          ⊘ This user deleted their account.
+        </div>
+      )}
       {/* Save for later / Minimize — green corner, top-left */}
       {/* Show on normal cards (not forceExpanded) OR on saved-for-later page */}
       {(!forceExpanded || isOnSavedForLaterPage) && (

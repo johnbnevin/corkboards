@@ -19,6 +19,7 @@ import { NoteActions } from './NoteActions';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { formatTimeAgo } from '@core/formatTimeAgo';
 import { genUserName } from '@core/genUserName';
+import { useIsDeletedAuthor } from '../contexts/deletedAuthors';
 import { visibleLength, findVisibleCutoff } from '@core/textTruncation';
 
 // ============================================================================
@@ -122,11 +123,14 @@ export function NoteCard({
 
   const { data: repostAuthorData } = useAuthor(event.pubkey);
   const { data } = useAuthor(displayEvent.pubkey);
-  const displayName =
-    data?.metadata?.display_name || data?.metadata?.name || genUserName(displayEvent.pubkey);
+  // Author confirmed deleted/vanished (NIP-09 profile deletion / NIP-62 vanish).
+  const isDeletedAuthor = useIsDeletedAuthor(displayEvent.pubkey);
+  const displayName = isDeletedAuthor
+    ? 'Deleted account'
+    : (data?.metadata?.display_name || data?.metadata?.name || genUserName(displayEvent.pubkey));
   const repostName =
     repostAuthorData?.metadata?.display_name || repostAuthorData?.metadata?.name || genUserName(event.pubkey);
-  const avatar = data?.metadata?.picture;
+  const avatar = isDeletedAuthor ? undefined : data?.metadata?.picture;
 
   // Check if this is a reply with a parent context
   const isReply = !!parentNote;
@@ -143,10 +147,13 @@ export function NoteCard({
 
   return (
     <TouchableOpacity
-      style={[styles.card, isFresh && styles.freshCard]}
+      style={[styles.card, isFresh && styles.freshCard, isDeletedAuthor && styles.deletedCard]}
       onPress={() => onViewThread?.(displayEvent.id)}
       activeOpacity={0.8}
     >
+      {isDeletedAuthor && (
+        <Text style={styles.deletedNotice}>⊘ This user deleted their account.</Text>
+      )}
       {/* Repost banner */}
       {isRepost && (
         <Text style={styles.repostBanner}>{'↻'} {repostName} reposted</Text>
@@ -222,6 +229,14 @@ const styles = StyleSheet.create({
   freshCard: {
     borderColor: '#a855f7',
     borderWidth: 1.5,
+  },
+  deletedCard: {
+    opacity: 0.7,
+  },
+  deletedNotice: {
+    fontSize: 11,
+    color: '#8a8a8a',
+    marginBottom: 6,
   },
   repostBanner: {
     fontSize: 11,

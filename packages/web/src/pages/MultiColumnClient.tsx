@@ -2777,6 +2777,10 @@ export function MultiColumnClient() {
     }
 
     const DISPLAYABLE_KINDS = new Set([1, 6, 7, 16, 20, 21, 22, 30023, 34235, 34236, 9735, 9802]);
+    // Standalone "content" kinds — notes that render on their own (not engagement
+    // events). Used to suppress a reaction/zap card when the note it targets is
+    // already present in the feed as its own post.
+    const CONTENT_KINDS = new Set([1, 20, 21, 22, 30023, 34235, 34236, 9802]);
     const displayableNotes = allNotes.filter(note =>
       note.kind !== 5 && DISPLAYABLE_KINDS.has(note.kind)
     ).filter(note => !deletedNoteIds.has(note.id))
@@ -2897,15 +2901,18 @@ export function MultiColumnClient() {
         if (note.kind === 7) {
           const targetId = note.tags.find(t => t[0] === 'e')?.[1];
           if (targetId) getOrCreateEngagement(targetId).reactions.push(note);
-          // Suppress if target is already visible (original dedup behavior)
-          if (targetId && eventLookup.has(targetId) && (eventLookup.get(targetId)!.kind === 1 || eventLookup.get(targetId)!.kind === 30023)) {
+          // Suppress the reaction card when the note it targets is already in the
+          // feed as its own post (any content kind) — the reaction is redundant.
+          const target = targetId ? eventLookup.get(targetId) : undefined;
+          if (target && CONTENT_KINDS.has(target.kind)) {
             return false;
           }
         }
         if (note.kind === 9735) {
           const targetId = note.tags.find(t => t[0] === 'e')?.[1];
           if (targetId) getOrCreateEngagement(targetId).zaps.push(note);
-          if (targetId && eventLookup.has(targetId) && (eventLookup.get(targetId)!.kind === 1 || eventLookup.get(targetId)!.kind === 30023)) {
+          const target = targetId ? eventLookup.get(targetId) : undefined;
+          if (target && CONTENT_KINDS.has(target.kind)) {
             return false;
           }
         }

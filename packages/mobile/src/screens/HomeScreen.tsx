@@ -286,9 +286,13 @@ export function HomeScreen() {
       ? rawEvents.filter(e => !mutedPubkeys.has(e.pubkey))
       : rawEvents;
 
+    // Standalone "content" kinds — notes that render on their own. A reaction/zap
+    // card is suppressed when the note it targets is already in the feed as one
+    // of these.
+    const CONTENT_KINDS = new Set([1, 20, 21, 22, 30023, 34235, 34236, 9802]);
     const originalNoteIds = new Set<string>();
     for (const e of filtered) {
-      if (e.kind === 1 || e.kind === 30023) originalNoteIds.add(e.id);
+      if (CONTENT_KINDS.has(e.kind)) originalNoteIds.add(e.id);
     }
     const seen = new Set<string>();
     const seenRepostedIds = new Set<string>();

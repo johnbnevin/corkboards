@@ -32,6 +32,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { HashtagActionContext } from '@/contexts/hashtagAction';
 import { ProfileCard } from '@/components/ProfileCard';
 import { ThreadPanel } from '@/components/thread'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
@@ -90,7 +91,7 @@ import { useAccountSwitchEffect } from '@/hooks/useAccountSwitchEffect';
 import { useBulkAuthorPrefetch } from '@/hooks/useBulkAuthorPrefetch';
 import { useAutoRestoreCountdown } from '@/hooks/useAutoRestoreCountdown';
 import { useAutoSaveTrigger } from '@/hooks/useAutoSaveTrigger';
-import { idbGetSync, idbSetSync } from '@/lib/idb';
+import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { getCachedProfiles, setCachedProfiles, getProfilesNeedingRefresh, markProfileRefreshed } from '@/lib/profileCache';
 
 import { TIPS } from '@/lib/tips';
@@ -223,13 +224,13 @@ function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrEvent>):
     try { targetEvent = JSON.parse(event.content) as NostrEvent; } catch { /* not JSON */ }
   }
 
-  // Video: kind 34235, 34236, video URLs, repost of video, or reaction to video
-  if (hasVideoContent(event) || repostedKind === 34235 || repostedKind === 34236 || (targetEvent && hasVideoContent(targetEvent))) {
+  // Video: kind 21/22 (NIP-71), 34235/34236, video URLs, repost of video, or reaction to video
+  if (event.kind === 21 || event.kind === 22 || hasVideoContent(event) || repostedKind === 34235 || repostedKind === 34236 || repostedKind === 21 || repostedKind === 22 || (targetEvent && hasVideoContent(targetEvent))) {
     cats.add('videos');
   }
 
-  // Image: image URLs in content, or reaction/repost targeting an image
-  if (hasImageContent(event) || (targetEvent && hasImageContent(targetEvent))) {
+  // Image: kind 20 (NIP-68 picture), image URLs in content, or reaction/repost targeting an image
+  if (event.kind === 20 || hasImageContent(event) || (targetEvent && hasImageContent(targetEvent))) {
     cats.add('images');
   }
 
@@ -457,6 +458,9 @@ export function MultiColumnClient() {
   // Optimistic tab: updates instantly for visual feedback while content re-renders
   const [optimisticTab, setOptimisticTab] = useState(activeTab);
   const [isTabPending, startTabTransition] = useTransition();
+  // True once the user (or a deep link) has picked a tab this session — used to
+  // avoid the cold-start restore below clobbering a deliberate navigation.
+  const userChoseTabRef = useRef(false);
   // "Back to top" indicator — lifted up so useScrollPersistence can drive it.
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
   // Scroll persistence: per-tab position saved to sessionStorage, restored on
@@ -467,9 +471,14 @@ export function MultiColumnClient() {
   // Flag to suppress scroll-to-note after tab switch (so autofetch doesn't override)
   const suppressScrollTargetUntil = useRef(0);
   const setActiveTab = useCallback((tab: string) => {
+    userChoseTabRef.current = true;
     // Suppress scroll targets for 2s after tab switch so autofetch doesn't override
     suppressScrollTargetUntil.current = Date.now() + 2000;
+    // Fast, same-session copy for in-tab reloads…
     sessionStorage.setItem('corkboard:active-tab', tab);
+    // …and a durable, per-user copy (IDB, isolated + backed up) so a full app
+    // relaunch after idle restores the last-viewed tab instead of dropping to 'me'.
+    idbSetSync(STORAGE_KEYS.ACTIVE_TAB, tab);
     setOptimisticTab(tab);
     if (tab === 'notifications') markNotificationsSeen();
     // Wrap heavy state update in transition so content re-renders in background
@@ -480,6 +489,30 @@ export function MultiColumnClient() {
     onTabChangeScroll(tab);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- markNotificationsSeen declared after this hook (forward ref)
   }, [startTabTransition, onTabChangeScroll]);
+
+  // Cold-start tab restore. sessionStorage is wiped when the OS/PWA evicts the
+  // app during idle, so on a full relaunch the initializer above sees an empty
+  // session and lands on 'me'. The durable per-user ACTIVE_TAB key (IDB) holds
+  // the real last-viewed tab, but IDB's sync cache is empty until idbReady, so
+  // we can only read it after mount and correct the tab then. Skipped when the
+  // session already had a tab (in-tab reload), for new users, or once the user
+  // has navigated — so this never fights a deliberate choice.
+  useEffect(() => {
+    if (sessionStorage.getItem('corkboard:active-tab')) return;
+    if (sessionStorage.getItem('corkboard:new-user')) return;
+    let cancelled = false;
+    (async () => {
+      await idbReady;
+      if (cancelled || userChoseTabRef.current) return;
+      const durable = idbGetSync(STORAGE_KEYS.ACTIVE_TAB);
+      if (durable && durable !== 'me' && !userChoseTabRef.current) {
+        setActiveTab(durable);
+      }
+    })();
+    return () => { cancelled = true; };
+    // mount-only; setActiveTab is stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [defaultColumnCount, _setDefaultColumnCount] = usePlatformStorage<number>(STORAGE_KEYS.DEFAULT_COLUMN_COUNT, 3);
   const [featuresModalOpen, setFeaturesModalOpen] = useState(false);
@@ -1206,6 +1239,38 @@ export function MultiColumnClient() {
     filterSettings?: TabFilterSettings;
   }
   const [customFeeds, setCustomFeeds] = useLocalStorage<CustomFeed[]>('nostr-custom-feeds', []);
+
+  // Hashtag → "open in a new corkboard?" prompt. NoteContent (deeply nested)
+  // requests this via HashtagActionContext; we hold the pending tag and, on
+  // confirm, create (or reuse) a hashtag-filtered corkboard and switch to it.
+  const [hashtagPrompt, setHashtagPrompt] = useState<string | null>(null);
+  const hashtagActionValue = useMemo(() => ({
+    onHashtagClick: (tag: string) => setHashtagPrompt(tag.replace(/^#/, '').toLowerCase()),
+  }), []);
+  const confirmOpenHashtagFeed = useCallback((tag: string) => {
+    const norm = tag.replace(/^#/, '').toLowerCase();
+    // Reuse an existing single-hashtag corkboard for this tag instead of piling up dupes.
+    const existing = customFeeds.find(f =>
+      (f.hashtags?.length === 1) && f.hashtags[0] === norm &&
+      f.pubkeys.length === 0 && f.rssUrls.length === 0,
+    );
+    if (existing) {
+      setActiveTab(`feed:${existing.id}`);
+      toast({ title: `Opened #${norm}` });
+      return;
+    }
+    const newFeed: CustomFeed = {
+      id: Date.now().toString(),
+      title: `#${norm}`,
+      pubkeys: [],
+      relays: [],
+      rssUrls: [],
+      hashtags: [norm],
+    };
+    setCustomFeeds(prev => [...prev, newFeed]);
+    setActiveTab(`feed:${newFeed.id}`);
+    toast({ title: 'Corkboard created', description: `New corkboard for #${norm}` });
+  }, [customFeeds, setCustomFeeds, setActiveTab, toast]);
 
   // ─── Migrate legacy "friends" (individual pubkey tabs) to custom corkboards ──
   // Friends were stored as an array of pubkeys; each becomes a single-pubkey corkboard.
@@ -2682,7 +2747,7 @@ export function MultiColumnClient() {
       }
     }
 
-    const DISPLAYABLE_KINDS = new Set([1, 6, 7, 16, 30023, 34235, 34236, 9735, 9802]);
+    const DISPLAYABLE_KINDS = new Set([1, 6, 7, 16, 20, 21, 22, 30023, 34235, 34236, 9735, 9802]);
     const displayableNotes = allNotes.filter(note =>
       note.kind !== 5 && DISPLAYABLE_KINDS.has(note.kind)
     ).filter(note => !deletedNoteIds.has(note.id))
@@ -3464,6 +3529,7 @@ export function MultiColumnClient() {
   }
 
   return (
+    <HashtagActionContext.Provider value={hashtagActionValue}>
     <div className="min-h-screen bg-background">
       <div className="w-full px-4 py-0.5 pb-2 sm:py-1.5 sm:pb-4">
         {/* Header — responsive: stacked on mobile, single row on desktop */}
@@ -4696,6 +4762,25 @@ export function MultiColumnClient() {
 
       {/* Scroll-to-top is now rendered inside StatusBar as a triangle adjacent to the red collapse button */}
     </div>
+
+      {/* Hashtag → open in a new corkboard? */}
+      <AlertDialog open={hashtagPrompt !== null} onOpenChange={(open) => { if (!open) setHashtagPrompt(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Open #{hashtagPrompt} in a new corkboard?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This creates a corkboard that shows notes tagged #{hashtagPrompt}. Your current view stays open.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => { if (hashtagPrompt) confirmOpenHashtagFeed(hashtagPrompt); setHashtagPrompt(null); }}>
+              Open corkboard
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </HashtagActionContext.Provider>
   );
 }
 

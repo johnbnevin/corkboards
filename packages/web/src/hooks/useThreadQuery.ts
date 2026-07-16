@@ -22,10 +22,17 @@ import {
   type ThreadNode,
   type FlatThreadRow,
 } from '@core/threadTree'
-import { fetchEventWithOutbox, setCachedEvent, getCachedEvent } from '@/lib/fetchEvent'
+import { fetchEventWithOutbox, setCachedEvent, getCachedEvent, clearEventCache } from '@/lib/fetchEvent'
 
 const THREAD_STALE_TIME = 2 * 60 * 1000 // 2 minutes
 const THREAD_GC_TIME = 10 * 60 * 1000   // 10 minutes
+
+// Second-pass (author-outbox) discovery tuning.
+// A cap on how many thread participants we re-query by outbox, and a chunk size
+// kept *under* the pool's BULK_AUTHOR_THRESHOLD (10) so each chunk stays in the
+// per-author outbox tier instead of collapsing to the narrow bulk tier.
+const MAX_THREAD_AUTHORS = 48
+const OUTBOX_AUTHOR_CHUNK = 8
 
 export interface UseThreadQueryResult {
   /** The root ThreadNode tree */
@@ -107,13 +114,15 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     return tags.root || targetEvent.id
   }, [targetEvent])
 
-  // Query 2: Fetch entire thread (all events referencing root)
+  // Query 2 (pass 1): Fetch the thread by reference.
+  // This #e-tag query has no `authors`, so the pool routes it via the wide-net
+  // "reference" tier (user read relays + fallbacks). It catches replies that
+  // were broadcast to common relays and renders immediately.
   const { data: threadEvents, isLoading: isLoadingThread, error: threadError } = useQuery({
     queryKey: ['thread-tree', rootId],
     queryFn: async () => {
       if (!rootId) return []
 
-      // Single bulk query — NPool's reqRouter handles relay routing
       const idsToQuery = rootId === eventId ? [rootId] : [rootId, eventId!]
       const events = await nostr.query(
         [{ kinds: [1, 7], '#e': idsToQuery, limit: 500 }],
@@ -139,10 +148,54 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     enabled: !!rootId && !!targetEvent,
     staleTime: THREAD_STALE_TIME,
     gcTime: THREAD_GC_TIME,
-    retry: 1,
+    retry: 2,
   })
 
-  const allEvents = useMemo(() => threadEvents ?? [], [threadEvents])
+  // Participants discovered in pass 1 — the pubkeys we can now route by outbox.
+  // Sorted for a stable query key so this doesn't refetch on every render.
+  const participantAuthors = useMemo(() => {
+    const set = new Set<string>()
+    for (const e of threadEvents ?? []) set.add(e.pubkey)
+    if (targetEvent) set.add(targetEvent.pubkey)
+    return Array.from(set).sort().slice(0, MAX_THREAD_AUTHORS)
+  }, [threadEvents, targetEvent])
+
+  // Query 2 (pass 2): Author-outbox discovery.
+  // An author-less #e query can't use the outbox model, so a reply written only
+  // to its author's own relay is invisible to pass 1. Re-query the same thread
+  // scoped to the participants we just found — adding `authors` lets the pool
+  // route to each author's own relays. Chunked under BULK_AUTHOR_THRESHOLD so
+  // each chunk stays in the per-author outbox tier. Runs after pass 1 so the UI
+  // shows results first, then fills in.
+  const { data: outboxEvents } = useQuery({
+    queryKey: ['thread-outbox', rootId, participantAuthors],
+    queryFn: async () => {
+      if (!rootId || participantAuthors.length === 0) return []
+      const idsToQuery = rootId === eventId ? [rootId] : [rootId, eventId!]
+      const chunks: string[][] = []
+      for (let i = 0; i < participantAuthors.length; i += OUTBOX_AUTHOR_CHUNK) {
+        chunks.push(participantAuthors.slice(i, i + OUTBOX_AUTHOR_CHUNK))
+      }
+      const results = await Promise.all(
+        chunks.map(chunk =>
+          nostr.query(
+            [{ kinds: [1, 7], '#e': idsToQuery, authors: chunk, limit: 500 }],
+            { signal: AbortSignal.timeout(6000) },
+          ).catch(() => [] as NostrEvent[]),
+        ),
+      )
+      return results.flat()
+    },
+    enabled: !!rootId && !!targetEvent && participantAuthors.length > 0,
+    staleTime: THREAD_STALE_TIME,
+    gcTime: THREAD_GC_TIME,
+    retry: 2,
+  })
+
+  const allEvents = useMemo(
+    () => deduplicateEvents([...(threadEvents ?? []), ...(outboxEvents ?? [])]),
+    [threadEvents, outboxEvents],
+  )
 
   // Build tree from flat events
   const tree = useMemo(() => {
@@ -158,8 +211,18 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
 
   const refetch = useCallback(() => {
     setInjectedReply(null)
-    if (eventId) queryClient.invalidateQueries({ queryKey: ['thread-target', eventId] })
-    if (rootId) queryClient.invalidateQueries({ queryKey: ['thread-tree', rootId] })
+    // A manual refresh should hit the network fresh, not re-serve a stale/partial
+    // cached result — the user reaching for refresh means what they have is wrong.
+    // Drop the cached target event so query 1 re-runs outbox discovery, and reset
+    // (not just invalidate) the tree/outbox passes so they refetch from relays.
+    if (eventId) {
+      clearEventCache(eventId)
+      queryClient.resetQueries({ queryKey: ['thread-target', eventId] })
+    }
+    if (rootId) {
+      queryClient.resetQueries({ queryKey: ['thread-tree', rootId] })
+      queryClient.resetQueries({ queryKey: ['thread-outbox', rootId] })
+    }
   }, [eventId, rootId, queryClient])
 
   const injectReply = useCallback((event: NostrEvent) => {

@@ -6,6 +6,8 @@ import { NoteLink } from './NoteLink'
 import { ProfileLink } from './ProfileLink'
 import { MediaLink } from './MediaLink'
 import { isImageUrl } from '@/lib/mediaUtils'
+import { stripTrackingParams } from '@core/sanitizeUtils'
+import { useHashtagAction } from '@/contexts/hashtagAction'
 import { WebLink } from './WebLink'
 import { SizeGuardedImage } from './SizeGuardedImage'
 import ReactMarkdown from 'react-markdown'
@@ -98,8 +100,9 @@ const MarkdownText = memo(function MarkdownText({ text, emojiMap }: { text: stri
             try { safe = ['http:', 'https:'].includes(new URL(href.trim()).protocol) } catch { /* empty */ }
           }
           if (!safe) return <span>{ec(children)}</span>
+          const cleanHref = stripTrackingParams(href!.trim())
           return (
-            <a href={href} target="_blank" rel="noopener noreferrer" className="text-purple-500 hover:text-purple-600 underline" onClick={(e) => e.stopPropagation()}>
+            <a href={cleanHref} target="_blank" rel="noopener noreferrer" className="text-purple-500 hover:text-purple-600 underline" onClick={(e) => e.stopPropagation()}>
               {ec(children)}
             </a>
           )
@@ -159,10 +162,14 @@ const MarkdownText = memo(function MarkdownText({ text, emojiMap }: { text: stri
   )
 });
 
-// Extract video URLs and poster URLs from imeta tags (NIP-71 video events)
-function getImetaData(event: NostrEvent): { posters: Map<string, string>; videoUrls: string[] } {
+// Extract media URLs from imeta tags (NIP-92). Picture events (kind 20) and
+// video events (kinds 21/22/34235/34236) carry their media here rather than in
+// the content field, so we classify each imeta entry as a video (with optional
+// poster) or a standalone image.
+function getImetaData(event: NostrEvent): { posters: Map<string, string>; videoUrls: string[]; imageUrls: string[] } {
   const posters = new Map<string, string>()
   const videoUrls: string[] = []
+  const imageUrls: string[] = []
   for (const tag of event.tags) {
     if (tag[0] !== 'imeta') continue
     let url = ''
@@ -175,15 +182,22 @@ function getImetaData(event: NostrEvent): { posters: Map<string, string>; videoU
       else if (entry.startsWith('image ') && !image) image = entry.slice(6)
       else if (entry.startsWith('m ')) mime = entry.slice(2)
     }
-    if (url && image) posters.set(url, image)
-    if (url && (mime.startsWith('video/') || /\.(mp4|webm|mov|m3u8)(\?|$)/i.test(url))) {
+    if (!url) continue
+    const isVideo = mime.startsWith('video/') || /\.(mp4|webm|mov|m3u8)(\?|$)/i.test(url)
+    if (isVideo) {
+      if (image) posters.set(url, image)
       videoUrls.push(url)
+    } else if (mime.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|avif)(\?|$)/i.test(url)) {
+      imageUrls.push(url)
     }
   }
-  return { posters, videoUrls }
+  return { posters, videoUrls, imageUrls }
 }
 
 export function NoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, depth = 0 }: NoteContentProps) {
+  // When present (inside the main client), hashtag taps prompt to open a new
+  // corkboard instead of navigating away. Absent elsewhere → plain navigation.
+  const hashtagAction = useHashtagAction()
   // NIP-30 custom emoji map: shortcode → image URL
   const emojiMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -222,8 +236,8 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
     return expanded;
   }, [event.content, emojiMap])
 
-  // Build poster map and video URL set from imeta tags (NIP-71)
-  const { posters: imetaPosters, videoUrls: imetaVideoUrls } = useMemo(() => getImetaData(event), [event])
+  // Build poster map and media URL sets from imeta tags (NIP-92)
+  const { posters: imetaPosters, videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls } = useMemo(() => getImetaData(event), [event])
   const imetaVideoUrlSet = useMemo(() => new Set(imetaVideoUrls), [imetaVideoUrls])
 
   // Group consecutive image media parts for horizontal layout
@@ -285,16 +299,32 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
         return <MediaLink key={i} url={part.value} blurMedia={blurMedia} poster={imetaPosters.get(part.value)} isVideo={imetaVideoUrlSet.has(part.value)} />
       case 'web':
         return <WebLink key={i} url={part.value} />
-      case 'hashtag':
+      case 'hashtag': {
+        const tag = part.value.slice(1)
+        // Inside the main client, intercept to offer "open in a new corkboard?";
+        // elsewhere fall back to normal /t/:hashtag navigation.
+        if (hashtagAction) {
+          return (
+            <a
+              key={i}
+              href={`/t/${tag}`}
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); hashtagAction.onHashtagClick(tag) }}
+              className="text-purple-500 hover:text-purple-600 font-medium cursor-pointer"
+            >
+              {part.value}
+            </a>
+          )
+        }
         return (
           <Link
             key={i}
-            href={`/t/${part.value.slice(1)}`}
+            href={`/t/${tag}`}
             className="text-purple-500 hover:text-purple-600 font-medium"
           >
             {part.value}
           </Link>
         )
+      }
       case 'markdown':
         return <MarkdownText key={i} text={part.value} emojiMap={emojiMap} />
       case 'emoji': {
@@ -322,13 +352,26 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
         }
         return renderPart(group.part, group.index)
       })}
-      {/* Render imeta videos not already in content (kind 34235/34236 video events) */}
-      {(event.kind === 34235 || event.kind === 34236) && (() => {
+      {/* Render imeta media (NIP-92) not already shown inline. Picture (kind 20)
+          and video (kinds 21/22/34235/34236) events keep their media in imeta
+          with an empty or caption-only content field, so without this a quoted
+          or feed-level picture/video post renders blank. Dedup against URLs
+          already present in the content text. Applies to ALL kinds so quoted
+          media of any kind embeds correctly. */}
+      {(() => {
         const contentUrls = new Set(content.filter(p => p.type === 'media').map(p => p.value))
+        const missingImages = imetaImageUrls.filter(url => !contentUrls.has(url))
         const missingVideos = imetaVideoUrls.filter(url => !contentUrls.has(url))
-        return missingVideos.map(videoUrl => (
-          <MediaLink key={videoUrl} url={videoUrl} blurMedia={blurMedia} poster={imetaPosters.get(videoUrl)} isVideo />
-        ))
+        return (
+          <>
+            {missingImages.map(imageUrl => (
+              <MediaLink key={`imeta-img-${imageUrl}`} url={imageUrl} blurMedia={blurMedia} />
+            ))}
+            {missingVideos.map(videoUrl => (
+              <MediaLink key={`imeta-vid-${videoUrl}`} url={videoUrl} blurMedia={blurMedia} poster={imetaPosters.get(videoUrl)} isVideo />
+            ))}
+          </>
+        )
       })()}
     </div>
   )

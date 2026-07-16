@@ -70,6 +70,12 @@ function clearBackupCheckedSync(pubkey: string) {
 const _CHUNK_SIZE = 32768;
 const D_TAG_PREFIX = 'corkboard:backup';
 const MAX_LOG_ENTRIES = 100;
+// Bounded ring for manual/named backups. Each manual save reuses one of a fixed
+// set of slot d-tags (`corkboard:backup:s0`..`s{N-1}`) round-robin, so on-relay
+// storage stays capped at N addressable events instead of leaking a fresh
+// timestamp-tagged event on every save. Autosave keeps its own `:auto` slot.
+const MANUAL_BACKUP_SLOTS = 5;
+const BACKUP_SLOT_CURSOR_KEY = STORAGE_KEYS.BACKUP_SLOT_CURSOR;
 
 // Default blossom servers for backup file upload.
 // blossom.band is excluded: it rejects application/octet-stream blobs (HTTP 415)
@@ -561,7 +567,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
           ? await signer.nip04.encrypt(pubkey, manifestJson)
           : manifestJson;
 
-      const dTag = `${D_TAG_PREFIX}:${now}`;
+      // Bounded ring: rotate through a fixed set of slots instead of minting a
+      // new timestamp d-tag per save (which accumulated forever on relays).
+      // Forward-only — pre-existing timestamp-tagged backups are left untouched
+      // and age out with the relays naturally.
+      const slotCursor = parseInt(idbGetSync(BACKUP_SLOT_CURSOR_KEY) || '0', 10) || 0;
+      const slot = ((slotCursor % MANUAL_BACKUP_SLOTS) + MANUAL_BACKUP_SLOTS) % MANUAL_BACKUP_SLOTS;
+      const dTag = `${D_TAG_PREFIX}:s${slot}`;
       const manifestEvent = await signer.signEvent({
         kind: 30078,
         content: encryptedManifest,
@@ -613,6 +625,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setStatus('saved');
         idbSetSync(LAST_BACKUP_TS_KEY, String(now));
         idbSetSync(LAST_CHUNK_COUNT_KEY, '0'); // v4 uses Blossom, no chunks
+        idbSetSync(BACKUP_SLOT_CURSOR_KEY, String(slotCursor + 1)); // advance the ring
         idbRemoveSync('corkboard:preferred-checkpoint'); // new save is now the latest
         setLastBackupTs(now);
 

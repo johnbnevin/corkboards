@@ -11,8 +11,13 @@ import {
   StyleSheet,
   TouchableOpacity,
   Dimensions,
+  Alert,
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { nip19 } from 'nostr-tools';
+import { stripTrackingParams } from '@core/sanitizeUtils';
+import { parseListing } from '@core/nip99';
+import { useHashtagAction } from '../contexts/hashtagAction';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useQuery } from '@tanstack/react-query';
 import { hasHtmlContent } from '@core/sanitizeUtils';
@@ -56,14 +61,26 @@ function NoteMention({ id }: { id: string }) {
 }
 
 function HashtagLink({ tag }: { tag: string }) {
+  const action = useHashtagAction();
+  if (action) {
+    return <Text style={styles.hashtag} onPress={() => action.onHashtagClick(tag)}>#{tag}</Text>;
+  }
   return <Text style={styles.hashtag}>#{tag}</Text>;
 }
 
 function WebLink({ url }: { url: string }) {
-  const display = url.replace(/^https?:\/\/(www\.)?/, '').slice(0, 50);
+  // Strip tracking params before opening/displaying (parity with web).
+  const clean = stripTrackingParams(url);
+  const display = clean.replace(/^https?:\/\/(www\.)?/, '').slice(0, 50);
+  const copy = async () => {
+    try {
+      await Clipboard.setStringAsync(clean);
+      Alert.alert('Link copied', clean);
+    } catch { /* clipboard unavailable */ }
+  };
   return (
-    <Text style={styles.link} onPress={() => Linking.openURL(url)}>
-      {display}{url.length > 50 ? '…' : ''}
+    <Text style={styles.link} onPress={() => Linking.openURL(clean)} onLongPress={copy}>
+      {display}{clean.length > 50 ? '…' : ''}
     </Text>
   );
 }
@@ -136,6 +153,19 @@ function QuotedNote({ noteId }: { noteId: string }) {
   const displayName = authorData?.metadata?.display_name || authorData?.metadata?.name || genUserName(event.pubkey);
   const avatar = authorData?.metadata?.picture;
 
+  // Picture/video posts (kinds 20/21/22/34235/34236) keep media in imeta with an
+  // empty or caption-only content field, and NIP-99 listings (30402) keep their
+  // title/image in tags. Show a thumbnail + a sensible title so quoted media and
+  // listings aren't blank cards.
+  const listingTitle = event.kind === 30402 ? event.tags.find(t => t[0] === 'title')?.[1] : undefined;
+  const imageTag = event.tags.find(t => t[0] === 'image')?.[1];
+  const { imageUrls: quotedImages } = getImetaMedia(event);
+  const previewImage = imageTag || quotedImages[0];
+  const bodyText = listingTitle
+    || event.content.replace(/<[^>]*>/g, '').trim()
+    || event.tags.find(t => t[0] === 'alt')?.[1]
+    || '';
+
   return (
     <View style={styles.quotedCard}>
       <View style={styles.quotedHeader}>
@@ -148,17 +178,27 @@ function QuotedNote({ noteId }: { noteId: string }) {
         )}
         <Text style={styles.quotedName} numberOfLines={1}>{displayName}</Text>
       </View>
-      <Text style={styles.quotedContent} numberOfLines={3}>
-        {event.content.replace(/<[^>]*>/g, '').slice(0, 300)}
-      </Text>
+      {bodyText.length > 0 && (
+        <Text style={styles.quotedContent} numberOfLines={3}>
+          {bodyText.slice(0, 300)}
+        </Text>
+      )}
+      {previewImage && (
+        <View style={styles.mediaContainer}>
+          <InlineImage url={previewImage} />
+        </View>
+      )}
     </View>
   );
 }
 
-// Extract video URLs from imeta tags (NIP-71 video events).
-// Keep in sync with web's getImetaData in packages/web/src/components/NoteContent.tsx.
-function getImetaVideoUrls(event: import('@nostrify/nostrify').NostrEvent): string[] {
-  const urls: string[] = [];
+// Extract media URLs from imeta tags (NIP-92). Picture events (kind 20) and
+// video events (kinds 21/22/34235/34236) carry their media here rather than in
+// the content field. Keep in sync with web's getImetaData.
+const IMAGE_EXT_IMETA = /\.(jpg|jpeg|png|gif|webp|avif)(\?|$)/i;
+function getImetaMedia(event: import('@nostrify/nostrify').NostrEvent): { videoUrls: string[]; imageUrls: string[] } {
+  const videoUrls: string[] = [];
+  const imageUrls: string[] = [];
   for (const tag of event.tags) {
     if (tag[0] !== 'imeta') continue;
     let url = '';
@@ -169,11 +209,11 @@ function getImetaVideoUrls(event: import('@nostrify/nostrify').NostrEvent): stri
       if (entry.startsWith('url ')) url = entry.slice(4);
       else if (entry.startsWith('m ')) mime = entry.slice(2);
     }
-    if (url && (mime.startsWith('video/') || VIDEO_EXT.test(url))) {
-      urls.push(url);
-    }
+    if (!url) continue;
+    if (mime.startsWith('video/') || VIDEO_EXT.test(url)) videoUrls.push(url);
+    else if (mime.startsWith('image/') || IMAGE_EXT_IMETA.test(url)) imageUrls.push(url);
   }
-  return urls;
+  return { videoUrls, imageUrls };
 }
 
 // ============================================================================
@@ -326,9 +366,32 @@ function LongFormPreview({ event, numberOfLines }: NoteContentProps) {
   );
 }
 
+/** NIP-99 classified listing (kind 30402) preview — Gamma Markets fields. */
+function ListingPreview({ event, numberOfLines }: NoteContentProps) {
+  const { title, summary, price, images, location, status, visibility, stock } = parseListing(event);
+  const image = images[0];
+  const desc = event.content.replace(/<[^>]*>/g, '').trim().slice(0, 300);
+  const outOfStock = stock === 0;
+  return (
+    <View>
+      {image ? <View style={styles.mediaContainer}><InlineImage url={image} /></View> : null}
+      <View style={styles.listingHeader}>
+        <Text style={styles.listingTitle} numberOfLines={2}>{title}</Text>
+        {price ? <Text style={styles.listingPrice}>{price}</Text> : null}
+      </View>
+      {visibility === 'pre-order' ? <Text style={styles.listingMeta}>Pre-order</Text> : null}
+      {typeof stock === 'number' && stock > 0 ? <Text style={styles.listingMeta}>{stock} in stock</Text> : null}
+      {location ? <Text style={styles.listingMeta}>📍 {location}</Text> : null}
+      {summary ? <Text style={styles.content} numberOfLines={2}>{summary}</Text> : null}
+      {desc ? <Text style={styles.content} numberOfLines={numberOfLines ?? 5}>{desc}</Text> : null}
+      {status === 'sold' ? <Text style={styles.listingSold}>SOLD</Text> : outOfStock ? <Text style={styles.listingSold}>OUT OF STOCK</Text> : null}
+    </View>
+  );
+}
+
 export function NoteContent({ event, numberOfLines }: NoteContentProps) {
   // Hooks must run unconditionally on every render (rules-of-hooks). The
-  // kind === 30023 branch is taken AFTER all hooks have been called.
+  // kind === 30023 / 30402 branches are taken AFTER all hooks have been called.
 
   // NIP-30 custom emoji map: shortcode → image URL
   const emojiMap = useMemo(() => {
@@ -370,15 +433,16 @@ export function NoteContent({ event, numberOfLines }: NoteContentProps) {
     return expanded;
   }, [event.content, emojiMap]);
 
-  // Extract imeta video URLs for kind 34235 events (NIP-71)
-  const imetaVideoUrls = useMemo(() => {
-    if (event.kind !== 34235) return [];
-    return getImetaVideoUrls(event);
-  }, [event]);
+  // Extract imeta media (NIP-92) for all kinds — picture (20) and video
+  // (21/22/34235/34236) events carry media here with empty/caption content.
+  const { videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls } = useMemo(() => getImetaMedia(event), [event]);
 
-  // Long-form (kind 30023) — branch AFTER all hooks have been called.
+  // Long-form (kind 30023) / listing (kind 30402) — branch AFTER all hooks.
   if (event.kind === 30023) {
     return <LongFormPreview event={event} numberOfLines={numberOfLines} />;
+  }
+  if (event.kind === 30402) {
+    return <ListingPreview event={event} numberOfLines={numberOfLines} />;
   }
 
   // Separate inline parts from block-level media
@@ -431,16 +495,25 @@ export function NoteContent({ event, numberOfLines }: NoteContentProps) {
         </View>
       ))}
 
-      {/* Render imeta videos not already in content (kind 34235 NIP-71 video events) */}
-      {imetaVideoUrls.length > 0 && (() => {
-        const contentVideoUrls = new Set(mediaParts.filter(p => p.type === 'video').map(p => p.value));
-        return imetaVideoUrls
-          .filter(url => !contentVideoUrls.has(url))
-          .map(url => (
-            <View key={`imeta-${url}`} style={styles.mediaContainer}>
-              <InlineVideo url={url} />
-            </View>
-          ));
+      {/* Render imeta media (NIP-92) not already shown inline. Picture (kind 20)
+          and video (kinds 21/22/34235/34236) events keep media in imeta with an
+          empty/caption content field, so without this they'd render blank. */}
+      {(imetaVideoUrls.length > 0 || imetaImageUrls.length > 0) && (() => {
+        const contentUrls = new Set(mediaParts.map(p => p.value));
+        return (
+          <>
+            {imetaImageUrls.filter(url => !contentUrls.has(url)).map(url => (
+              <View key={`imeta-img-${url}`} style={styles.mediaContainer}>
+                <InlineImage url={url} />
+              </View>
+            ))}
+            {imetaVideoUrls.filter(url => !contentUrls.has(url)).map(url => (
+              <View key={`imeta-vid-${url}`} style={styles.mediaContainer}>
+                <InlineVideo url={url} />
+              </View>
+            ))}
+          </>
+        );
       })()}
 
       {/* Quote posts — render inline preview for q-tagged events */}
@@ -483,6 +556,12 @@ const styles = StyleSheet.create({
   longFormBadgeText: { backgroundColor: '#333', color: '#a855f7', fontSize: 11, fontWeight: '600', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, overflow: 'hidden' },
   longFormTitle: { fontSize: 15, fontWeight: '600', color: '#f2f2f2', flex: 1 },
   readMore: { color: '#a855f7', fontSize: 13, marginTop: 6, textDecorationLine: 'underline' },
+  // Listing (NIP-99 kind 30402)
+  listingHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginTop: 4 },
+  listingTitle: { fontSize: 15, fontWeight: '600', color: '#f2f2f2', flex: 1 },
+  listingPrice: { fontSize: 13, fontWeight: '700', color: '#22c55e' },
+  listingMeta: { fontSize: 12, color: '#8a8a8a', marginTop: 2 },
+  listingSold: { fontSize: 12, fontWeight: '700', color: '#ef4444', marginTop: 4 },
   // Quoted notes
   quotedCard: { borderWidth: 1, borderColor: '#404040', borderRadius: 10, padding: 10, backgroundColor: '#1f1f1f' },
   quotedHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },

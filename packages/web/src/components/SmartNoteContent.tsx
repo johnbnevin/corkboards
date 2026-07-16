@@ -3,6 +3,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import { visibleLength } from '@core/textTruncation';
 import { hasHtmlContent, sanitizeHtml } from '@/lib/sanitize';
 import { NoteContent } from './NoteContent';
+import { ListingCard } from './ListingCard';
 
 const SPOILER_THRESHOLD = 750;
 
@@ -59,6 +60,20 @@ const MAX_EMBED_DEPTH = 3;
 export function SmartNoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, forceExpand = false, _embedDepth = 0 }: SmartNoteContentProps) {
   const [expanded, setExpanded] = useState(false);
 
+  // NIP-99 classified listing (kind 30402) — structured fields live in tags, so
+  // render the dedicated card instead of treating the body as a plain note.
+  if (event.kind === 30402) {
+    return (
+      <ListingCard
+        event={event}
+        className={className}
+        inModalContext={inModalContext}
+        onViewThread={onViewThread}
+        blurMedia={blurMedia}
+      />
+    );
+  }
+
   const text = event.content;
   const visLen = visibleLength(text);
   const isLong = visLen > SPOILER_THRESHOLD * 1.5;
@@ -82,20 +97,27 @@ export function SmartNoteContent({ event, className, inModalContext = false, onV
     );
   }
 
-  // Video kinds have content in imeta tags, not necessarily in the content field
-  const isVideoKind = event.kind === 34235 || event.kind === 34236;
-  const hasMedia = isVideoKind || /https?:\/\/\S+\.(jpg|jpeg|png|gif|webp|mp4|webm|mov)/i.test(text)
+  // Picture/video events keep their media in imeta (NIP-92) tags, not the
+  // content field. Treat any event carrying imeta as having media so NoteContent
+  // gets a chance to render it (kind 20 pictures, 21/22/34235/34236 video, etc.).
+  const hasImeta = event.tags.some(t => t[0] === 'imeta');
+  const hasMedia = hasImeta || /https?:\/\/\S+\.(jpg|jpeg|png|gif|webp|mp4|webm|mov)/i.test(text)
     || /https?:\/\/[^\s]*(nostr\.build|blossom\.|cdn\.sovbit|files\.primal|cdn\.satellite|void\.cat|media\.nostr\.band)/i.test(text);
   const hasNostrRefs = /(nostr:)?(note1|npub1|nprofile1|nevent1|naddr1)[a-zA-Z0-9]+/.test(text);
 
-  // If no visible text, no media, and no nostr references, show debug info for unsupported/empty content
+  // If no visible text, no media, and no nostr references, fall back to the
+  // NIP-31 `alt` tag (a human-readable summary many clients attach to novel
+  // kinds) so unknown events read as text instead of a raw "kind N" debug line.
   if (visLen === 0 && !hasMedia && !hasNostrRefs && !text.startsWith('{')) {
+    const altTag = event.tags.find(t => t[0] === 'alt')?.[1];
     return (
       <div className={className}>
-        <span className="text-xs text-muted-foreground font-mono">
-          kind {event.kind} · {event.id.slice(0, 12)}…
-          {text.length > 0 && <span className="block mt-1 break-all opacity-60">{text.slice(0, 200)}</span>}
-        </span>
+        {altTag
+          ? <span className="text-sm text-muted-foreground">{altTag}</span>
+          : <span className="text-xs text-muted-foreground font-mono">
+              kind {event.kind} · {event.id.slice(0, 12)}…
+              {text.length > 0 && <span className="block mt-1 break-all opacity-60">{text.slice(0, 200)}</span>}
+            </span>}
       </div>
     );
   }

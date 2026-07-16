@@ -153,8 +153,10 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
         </div>
       )}
 
-      {/* Content */}
-      <ScrollArea className="flex-1">
+      {/* Content — min-h-0 is REQUIRED for a flex child to scroll: without it the
+          item's default min-height:auto lets it grow past the container and mobile
+          Chromium/Brave refuses to scroll (desktop browsers are more lenient). */}
+      <ScrollArea className="flex-1 min-h-0 overscroll-contain">
         {search && searchResults ? (
           <div className="p-2 space-y-2">
             {/* Standard results */}

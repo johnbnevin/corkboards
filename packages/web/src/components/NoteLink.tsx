@@ -13,6 +13,7 @@ import { genUserName } from '@/lib/genUserName'
 import { ExternalLink, RotateCw } from 'lucide-react'
 
 import { NoteContent } from '@/components/NoteContent'
+import { ListingCard } from '@/components/ListingCard'
 import { visibleLength, findVisibleCutoff } from '@/lib/textTruncation'
 import { fetchEventWithOutbox, fetchNaddrWithOutbox } from '@/lib/fetchEvent'
 import { registerFailedNote } from '@/lib/failedNotes'
@@ -126,7 +127,9 @@ function InlineNoteLinkContent({
         </div>
       </CardHeader>
       <CardContent className="pt-0">
-        {effectiveExpanded ? (
+        {event.kind === 30402 ? (
+          <ListingCard event={event} bare blurMedia={blurMedia} inModalContext onViewThread={onViewThread} />
+        ) : effectiveExpanded ? (
           <>
             <NoteContent event={event} className="text-sm" blurMedia={blurMedia} inModalContext onViewThread={onViewThread} depth={depth} />
             {isExpanded && (

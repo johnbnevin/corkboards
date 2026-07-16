@@ -95,6 +95,9 @@ export const STORAGE_KEYS = {
   LAST_BACKUP_TS: 'corkboard:last-backup-ts',
   LAST_CHUNK_COUNT: 'corkboard:last-chunk-count',
   BACKUP_CHECKED: 'corkboard:backup-checked',
+  // Round-robin cursor for the bounded manual-backup slot ring (keeps on-relay
+  // backups capped instead of leaking one addressable event per manual save).
+  BACKUP_SLOT_CURSOR: 'corkboard:backup-slot-cursor',
   LAST_BACKUP_DATA: 'corkboard:last-backup-data',
   LAST_BACKUP_HASHES: 'corkboard:last-backup-hashes',
   LAST_BACKUP_COUNTS: 'corkboard:last-backup-counts',
@@ -228,6 +231,7 @@ function getAllPerUserKeys(): string[] {
     STORAGE_KEYS.REMOTE_CHECKPOINTS, // per-user but not backed up (discovered from relays)
     STORAGE_KEYS.LAST_BACKUP_TS,
     STORAGE_KEYS.LAST_CHUNK_COUNT,
+    STORAGE_KEYS.BACKUP_SLOT_CURSOR, // per-user local bookkeeping (not backed up)
     STORAGE_KEYS.LAST_BACKUP_DATA,
     STORAGE_KEYS.LAST_BACKUP_HASHES,
     STORAGE_KEYS.LAST_BACKUP_COUNTS,

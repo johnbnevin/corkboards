@@ -21,3 +21,48 @@ export function hasHtmlContent(content: string): boolean {
 export function isContentFromUser(contentPubkey: string, userPubkey?: string): boolean {
   return !!userPubkey && contentPubkey === userPubkey;
 }
+
+// ─── Link tracker stripping ──────────────────────────────────────────────────
+//
+// Removes well-known analytics/click-tracking query parameters from URLs before
+// they're rendered, so users don't leak referral fingerprints and links look
+// clean. Only KNOWN tracking params are removed — functional params (auth
+// tokens, signatures, ids the site needs) are preserved, so this is safe to run
+// on any external link. Ambiguous short params (si, spm, scm) are intentionally
+// excluded to avoid breaking legitimate links.
+
+const TRACKING_PARAM_PREFIXES = [
+  'utm_', 'fb_', 'ga_', '_hs', 'hsa_', 'mc_', 'oly_', 'vero_', 'pk_', 'mtm_', 'matomo_', 'piwik_',
+];
+
+const TRACKING_PARAMS = new Set([
+  'fbclid', 'gclid', 'gclsrc', 'dclid', 'gbraid', 'wbraid', 'gad_source',
+  'msclkid', 'twclid', 'ttclid', 'igshid', 'igsh', 'yclid', 'ysclid', '_openstat',
+  '__hssc', '__hstc', '__hsfp', 'hsctatracking',
+  'mkt_tok', 's_cid', 'ml_subscriber', 'ml_subscriber_hash',
+  'ref_src', 'ref_url', '_ga', '_gl',
+]);
+
+function isTrackingParam(key: string): boolean {
+  const k = key.toLowerCase();
+  return TRACKING_PARAMS.has(k) || TRACKING_PARAM_PREFIXES.some(p => k.startsWith(p));
+}
+
+/**
+ * Strip known tracking parameters from an http(s) URL. Returns the original
+ * string unchanged if it can't be parsed, isn't http(s), or has no trackers.
+ */
+export function stripTrackingParams(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return rawUrl;
+    const toDelete = [...u.searchParams.keys()].filter(isTrackingParam);
+    if (toDelete.length === 0) return rawUrl;
+    for (const key of toDelete) u.searchParams.delete(key);
+    let out = u.toString();
+    if (out.endsWith('?')) out = out.slice(0, -1);
+    return out;
+  } catch {
+    return rawUrl;
+  }
+}

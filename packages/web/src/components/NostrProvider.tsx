@@ -332,6 +332,7 @@ const MAX_RELAY_CACHE = 5000;
 const BULK_AUTHOR_THRESHOLD = 10; // >= this many authors → bulk tier (no per-author expansion)
 const MAX_BULK_RELAYS = 2;        // query only 2 relays at a time; expand if results disagree
 const MAX_TARGETED_RELAYS = 3;    // cap for targeted queries (threads, profiles)
+const MAX_REFERENCE_RELAYS = 8;   // cap for author-less reference queries (thread replies, reactions, comments, notifications)
 let relayCache: Map<string, string[]> = new Map();
 
 // BroadcastChannel for cross-tab communication (replaces localStorage polling)
@@ -518,6 +519,18 @@ function extractAuthorsFromFilters(filters: NostrFilter[]): string[] {
   return Array.from(authors);
 }
 
+// A "reference query" targets events by tag (#e/#a/#p) rather than by author —
+// e.g. thread replies (#e root), reactions/comments (#e/#a), notifications (#p).
+// The outbox model can't route these per-author (we don't know who replied), so
+// welshman only reaches the default relays. These queries need a wider net.
+function hasReferenceTag(filters: NostrFilter[]): boolean {
+  return filters.some(f =>
+    Object.prototype.hasOwnProperty.call(f, '#e') ||
+    Object.prototype.hasOwnProperty.call(f, '#a') ||
+    Object.prototype.hasOwnProperty.call(f, '#p'),
+  );
+}
+
 // ─── Outbox Model Relay Routing ──────────────────────────────────────────────
 //
 // createPool() implements the NIP-65 outbox model with two tiers:
@@ -597,6 +610,25 @@ function createPool(): NPool {
             routes.set(relay, batchedFilters);
           }
         }
+      } else if (authors.length === 0 && hasReferenceTag(filters)) {
+        // Tier 2b — Reference query (thread replies, reactions, comments,
+        // notifications): the filter selects events by #e/#a/#p tag with no
+        // authors, so per-author outbox routing is impossible — we don't know
+        // who replied. Welshman alone only reaches the default relays, which is
+        // why threads sometimes load no replies at all: a reply written only to
+        // its author's own relay is never queried. Cast a wide net across the
+        // user's configured read relays plus fallbacks/indexers so replies that
+        // live on the user's own relays are actually fetched.
+        const userRelays = getUserRelays();
+        const relaysToQuery = new Set<string>();
+        userRelays.read.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
+        FALLBACK_RELAYS.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
+        READ_ONLY_RELAYS.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
+        const all = Array.from(relaysToQuery);
+        const healthy = all.filter(r => !isRelayBlocked(r));
+        const blocked = all.filter(r => isRelayBlocked(r));
+        const capped = [...healthy, ...blocked].slice(0, MAX_REFERENCE_RELAYS);
+        for (const relay of capped) routes.set(relay, filters);
       } else {
         // Tier 2 — Targeted query: delegate to welshman's getFilterSelections.
         // It applies the outbox model per-pubkey using the relayCache we expose
@@ -625,7 +657,9 @@ function createPool(): NPool {
 
       if (DEBUG) {
         const relayList = Array.from(routes.keys());
-        const tier = authors.length >= BULK_AUTHOR_THRESHOLD ? 'T1-bulk' : 'T2-welshman';
+        const tier = authors.length >= BULK_AUTHOR_THRESHOLD
+          ? 'T1-bulk'
+          : (authors.length === 0 && hasReferenceTag(filters)) ? 'T2b-reference' : 'T2-welshman';
         const filterDesc = filters.map(f => `kinds=${f.kinds?.join(',')} authors=${f.authors?.length ?? 0} ids=${f.ids?.length ?? 0}`).join(' | ');
         debugLog(`reqRouter [${tier}] authors=${authors.length} → ${routes.size} relays: ${relayList.join(', ')} | filters: ${filterDesc}`);
       }

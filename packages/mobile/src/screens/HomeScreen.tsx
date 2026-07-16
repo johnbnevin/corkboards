@@ -9,7 +9,9 @@ import {
   TouchableOpacity,
   Modal,
   ScrollView,
+  Alert,
 } from 'react-native';
+import { HashtagActionContext } from '../contexts/hashtagAction';
 import type { FlatList as FlatListType } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useFeed, useContacts, useFeedLoadMore } from '../hooks/useFeed';
@@ -72,8 +74,8 @@ function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrEvent>):
     try { targetEvent = JSON.parse(event.content) as NostrEvent; } catch { /* not JSON */ }
   }
 
-  if (hasVideoContent(event) || repostedKind === 34235 || repostedKind === 34236 || (targetEvent && hasVideoContent(targetEvent))) cats.add('videos');
-  if (hasImageContent(event) || (targetEvent && hasImageContent(targetEvent))) cats.add('images');
+  if (event.kind === 21 || event.kind === 22 || hasVideoContent(event) || repostedKind === 34235 || repostedKind === 34236 || repostedKind === 21 || repostedKind === 22 || (targetEvent && hasVideoContent(targetEvent))) cats.add('videos');
+  if (event.kind === 20 || hasImageContent(event) || (targetEvent && hasImageContent(targetEvent))) cats.add('images');
   if (event.kind === 30023 && event.tags.some(t => (t[0] === 'r' && t[1]?.includes('zap.cooking')) || (t[0] === 't' && t[1] === 'recipe'))) cats.add('recipes');
   if (event.kind === 6 || event.kind === 16) cats.add('reposts');
   if (event.kind === 7 || event.kind === 9735) cats.add('reactions');
@@ -185,7 +187,39 @@ export function HomeScreen() {
 
   // ── Tab / feed switching ────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useLocalStorage<FeedTab>('home:active-tab', 'following');
-  const [customFeeds] = useLocalStorage<CustomFeed[]>('nostr-custom-feeds', []);
+  const [customFeeds, setCustomFeeds] = useLocalStorage<CustomFeed[]>('nostr-custom-feeds', []);
+
+  // Hashtag → "open in a new corkboard?" prompt (parity with web). Deeply-nested
+  // NoteContent requests this via HashtagActionContext; we confirm, then create
+  // (or reuse) a hashtag-filtered corkboard and switch to it.
+  const handleHashtagPress = useCallback((tag: string) => {
+    const norm = tag.replace(/^#/, '').toLowerCase();
+    Alert.alert(
+      `Open #${norm} in a new corkboard?`,
+      `This creates a corkboard that shows notes tagged #${norm}.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Open corkboard',
+          onPress: () => {
+            const existing = customFeeds.find(f =>
+              f.hashtags?.length === 1 && f.hashtags[0] === norm &&
+              f.pubkeys.length === 0 && f.rssUrls.length === 0,
+            );
+            if (existing) { setActiveTab(`feed:${existing.id}`); return; }
+            const newFeed: CustomFeed = {
+              id: Date.now().toString(),
+              title: `#${norm}`,
+              pubkeys: [], relays: [], rssUrls: [], hashtags: [norm],
+            };
+            setCustomFeeds(prev => [...prev, newFeed]);
+            setActiveTab(`feed:${newFeed.id}`);
+          },
+        },
+      ],
+    );
+  }, [customFeeds, setCustomFeeds, setActiveTab]);
+  const hashtagActionValue = useMemo(() => ({ onHashtagClick: handleHashtagPress }), [handleHashtagPress]);
 
   // ── Filter state ────────────────────────────────────────────────────────────
   const [filtersCollapsed, setFiltersCollapsed] = useState(true);
@@ -473,6 +507,7 @@ export function HomeScreen() {
   ];
 
   return (
+    <HashtagActionContext.Provider value={hashtagActionValue}>
     <ProfileModalProvider onViewThread={(id) => setViewingThread(id)}>
       <DeepLinkHandler onThread={setViewingThread} />
       <View style={styles.container}>
@@ -625,6 +660,7 @@ export function HomeScreen() {
         />
       </View>
     </ProfileModalProvider>
+    </HashtagActionContext.Provider>
   );
 }
 

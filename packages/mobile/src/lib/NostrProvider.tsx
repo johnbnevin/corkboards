@@ -35,6 +35,7 @@ const MAX_RELAY_CACHE = 3000; // 3000 vs 5000 on web — conservative mobile mem
 const BULK_AUTHOR_THRESHOLD = 10;
 const MAX_BULK_RELAYS = 2;
 const MAX_TARGETED_RELAYS = 3;
+const MAX_REFERENCE_RELAYS = 8;   // cap for author-less reference queries (thread replies, reactions, comments, notifications)
 const MAX_AUTHORS_PER_FILTER = 500;
 
 // ============================================================================
@@ -334,6 +335,18 @@ function ensureRouterConfigured(): void {
   });
 }
 
+// A "reference query" targets events by tag (#e/#a/#p) rather than by author —
+// e.g. thread replies (#e root), reactions/comments (#e/#a), notifications (#p).
+// The outbox model can't route these per-author (we don't know who replied), so
+// welshman only reaches the default relays. These queries need a wider net.
+function hasReferenceTag(filters: NostrFilter[]): boolean {
+  return filters.some(f =>
+    Object.prototype.hasOwnProperty.call(f, '#e') ||
+    Object.prototype.hasOwnProperty.call(f, '#a') ||
+    Object.prototype.hasOwnProperty.call(f, '#p'),
+  );
+}
+
 // ============================================================================
 // Pool factory
 // ============================================================================
@@ -383,6 +396,24 @@ function createPool(): NPoolType {
             routes.set(relay, batchedFilters);
           }
         }
+      } else if (authors.length === 0 && hasReferenceTag(filters)) {
+        // Tier 2b — Reference query (thread replies, reactions, comments,
+        // notifications): the filter selects events by #e/#a/#p tag with no
+        // authors, so per-author outbox routing is impossible — we don't know
+        // who replied. Welshman alone only reaches the default relays, which is
+        // why threads sometimes load no replies at all: a reply written only to
+        // its author's own relay is never queried. Cast a wide net across the
+        // user's configured read relays plus fallbacks/indexers so replies that
+        // live on the user's own relays are actually fetched.
+        const userRelays = getUserRelays();
+        userRelays.read.forEach(r => relaysToQuery.add(r));
+        FALLBACK_RELAYS.forEach(r => relaysToQuery.add(r));
+        READ_ONLY_RELAYS.forEach(r => relaysToQuery.add(r));
+        const all = Array.from(relaysToQuery);
+        const healthy = all.filter(r => !isRelayBlocked(r));
+        const blocked = all.filter(r => isRelayBlocked(r));
+        const capped = [...healthy, ...blocked].slice(0, MAX_REFERENCE_RELAYS);
+        for (const relay of capped) routes.set(relay, filters);
       } else {
         // Tier 2 — Targeted query: delegate to welshman's getFilterSelections
         // for proper outbox routing with fallback policy.

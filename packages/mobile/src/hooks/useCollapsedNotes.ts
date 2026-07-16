@@ -244,6 +244,19 @@ export function useCollapsedNotes() {
     notifyListeners();
   }, [setDismissedIds]);
 
+  // Restore a specific subset of dismissed notes (e.g. only the user's own).
+  const undismissMany = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    const remove = new Set(ids);
+    setDismissedIds(prev => prev.filter(id => !remove.has(id)));
+    let changed = false;
+    for (const id of ids) { if (_softDismissedSet.delete(id)) changed = true; }
+    if (changed) {
+      _setSoftDismissedIds([..._softDismissedSet]);
+      notifyListeners();
+    }
+  }, [setDismissedIds]);
+
   return {
     isCollapsed,
     isCollapsedThisSession,
@@ -260,7 +273,9 @@ export function useCollapsedNotes() {
     dismissAllCollapsed,
     clearAll,
     clearDismissed,
+    undismissMany,
     collapsedIds,
+    dismissedIds,
     collapsedCount: collapsedIds.length,
     dismissedCount: dismissedIds.length,
     softDismissedCount: softDismissedIds.length,

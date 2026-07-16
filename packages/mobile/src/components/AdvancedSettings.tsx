@@ -41,6 +41,8 @@ function saveImageProxy(template: string) {
 interface AdvancedSettingsProps {
   dismissedCount: number;
   onClearDismissed: () => void;
+  /** Restore only the dismissed notes the user authored (omitted when signed out). */
+  onRestoreOwnDismissed?: () => void;
   onOpenProfileCache: () => void;
   publishClientTag: boolean;
   onToggleClientTag: () => void;
@@ -61,6 +63,7 @@ interface AdvancedSettingsProps {
 export function AdvancedSettings({
   dismissedCount,
   onClearDismissed,
+  onRestoreOwnDismissed,
   onOpenProfileCache,
   publishClientTag,
   onToggleClientTag,
@@ -95,6 +98,18 @@ export function AdvancedSettings({
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Restore notes', onPress: onClearDismissed },
+      ],
+    );
+  };
+
+  const handleRestoreOwnDismissed = () => {
+    if (dismissedCount === 0 || !onRestoreOwnDismissed) return;
+    Alert.alert(
+      'Bring back only your own notes?',
+      'This checks your dismissed notes against your relays and restores just the ones you authored — the rest stay dismissed.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Restore my notes', onPress: onRestoreOwnDismissed },
       ],
     );
   };
@@ -197,6 +212,13 @@ export function AdvancedSettings({
         <TouchableOpacity style={styles.settingRow} onPress={handleClearDismissed}>
           <Text style={styles.settingTitle}>Bring back dismissed ({dismissedCount})</Text>
           <Text style={styles.settingHint}>Restore dismissed notes back into your feed</Text>
+        </TouchableOpacity>
+      )}
+
+      {dismissedCount > 0 && onRestoreOwnDismissed && (
+        <TouchableOpacity style={styles.settingRow} onPress={handleRestoreOwnDismissed}>
+          <Text style={styles.settingTitle}>Bring back only my own notes</Text>
+          <Text style={styles.settingHint}>Restore just the dismissed notes you authored</Text>
         </TouchableOpacity>
       )}
 

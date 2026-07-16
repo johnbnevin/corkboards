@@ -920,7 +920,34 @@ export function MultiColumnClient() {
   const [isFiltersCollapsed, setIsFiltersCollapsed] = useLocalStorage<boolean>('filter-panel-collapsed', isMobile);
 
   // Collapsed notes management
-  const { dismissedCount, isDismissed, isCollapsedThisSession, isSoftDismissed, consolidate: rawConsolidate, clearDismissed, collapsedCount: _collapsedCount, collapsedIds, dismiss, dismissMultiple } = useCollapsedNotes();
+  const { dismissedCount, isDismissed, isCollapsedThisSession, isSoftDismissed, consolidate: rawConsolidate, clearDismissed, undismissMany, dismissedIds, collapsedCount: _collapsedCount, collapsedIds, dismiss, dismissMultiple } = useCollapsedNotes();
+
+  // Restore only the dismissed notes the user authored. The dismissed store keeps
+  // just event IDs, so we ask relays which of them are ours in one batched query
+  // ({ ids, authors:[me] } AND-matches id-set with our pubkey) and un-dismiss only
+  // those — no per-note fetch, no stored-shape change, works on existing data.
+  const restoreOwnDismissed = useCallback(async () => {
+    if (!user?.pubkey || dismissedIds.length === 0) return;
+    toast({ title: 'Finding your dismissed notes…' });
+    const own: string[] = [];
+    const CHUNK = 200;
+    for (let i = 0; i < dismissedIds.length; i += CHUNK) {
+      const chunk = dismissedIds.slice(i, i + CHUNK);
+      try {
+        const events = await nostr.query(
+          [{ ids: chunk, authors: [user.pubkey] }],
+          { signal: AbortSignal.timeout(6000) },
+        );
+        for (const e of events) own.push(e.id);
+      } catch { /* ignore this chunk */ }
+    }
+    if (own.length > 0) {
+      undismissMany(own);
+      toast({ title: `Restored ${own.length} of your note${own.length === 1 ? '' : 's'}` });
+    } else {
+      toast({ title: 'No dismissed notes of yours found', description: "None of your dismissed notes could be found on your relays." });
+    }
+  }, [user?.pubkey, dismissedIds, nostr, undismissMany, toast]);
   const { newCount: newNotificationCount, markSeen: markNotificationsSeen } = useNotificationCount();
 
   // NIP-51 bookmarks (kind 10003) — syncs with collapsed notes
@@ -4641,6 +4668,7 @@ export function MultiColumnClient() {
             <AdvancedSettings
               dismissedCount={dismissedCount}
               onClearDismissed={() => { clearDismissed(); setAdvancedSettingsOpen(false); }}
+              onRestoreOwnDismissed={user?.pubkey ? () => { restoreOwnDismissed(); setAdvancedSettingsOpen(false); } : undefined}
               onOpenProfileCache={() => { setAdvancedSettingsOpen(false); setProfileCacheSettingsOpen(true); }}
               publishClientTag={appConfig.publishClientTag === true}
               onToggleClientTag={() => updateConfig(c => ({ ...c, publishClientTag: !(c.publishClientTag === true) }))}

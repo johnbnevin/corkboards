@@ -41,6 +41,8 @@ import { getImageProxyTemplate, saveImageProxyTemplate } from '@/lib/imageProxyS
 interface AdvancedSettingsProps {
   dismissedCount: number;
   onClearDismissed: () => void;
+  /** Restore only the dismissed notes the user authored (omitted when signed out). */
+  onRestoreOwnDismissed?: () => void;
   onOpenProfileCache: () => void;
   publishClientTag: boolean;
   onToggleClientTag: () => void;
@@ -54,7 +56,7 @@ interface AdvancedSettingsProps {
   onToggleCollapseReactions: () => void;
 }
 
-type ConfirmAction = 'dismissed' | 'cache' | 'clientTag' | 'bookmarks' | 'delete' | null;
+type ConfirmAction = 'dismissed' | 'ownDismissed' | 'cache' | 'clientTag' | 'bookmarks' | 'delete' | null;
 
 interface Relay {
   url: string;
@@ -72,6 +74,7 @@ function StatusDot({ status }: { status: RelayHealth['status'] }) {
 export function AdvancedSettings({
   dismissedCount,
   onClearDismissed,
+  onRestoreOwnDismissed,
   onOpenProfileCache,
   publishClientTag,
   onToggleClientTag,
@@ -97,6 +100,11 @@ export function AdvancedSettings({
       title: 'Bring back dismissed notes?',
       description: `This will restore ${dismissedCount} dismissed note${dismissedCount === 1 ? '' : 's'} to your feed. They will reappear in their original positions.`,
       action: 'Restore notes',
+    },
+    ownDismissed: {
+      title: 'Bring back only your own notes?',
+      description: 'This checks your dismissed notes against your relays and restores just the ones you authored — the rest stay dismissed.',
+      action: 'Restore my notes',
     },
     cache: {
       title: 'Open Profile Cache?',
@@ -128,6 +136,7 @@ export function AdvancedSettings({
   const handleConfirm = () => {
     switch (confirm) {
       case 'dismissed': onClearDismissed(); break;
+      case 'ownDismissed': onRestoreOwnDismissed?.(); break;
       case 'cache': onOpenProfileCache(); break;
       case 'clientTag': onToggleClientTag(); break;
       case 'bookmarks': onTogglePublicBookmarks(); break;
@@ -152,6 +161,16 @@ export function AdvancedSettings({
               Bring back dismissed ({dismissedCount})
             </div>
             <p className="text-xs text-muted-foreground mt-0.5 pl-6">Restore dismissed notes back into your feed</p>
+          </button>
+        )}
+
+        {dismissedCount > 0 && onRestoreOwnDismissed && (
+          <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setConfirm('ownDismissed')}>
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Eye className="h-4 w-4 shrink-0" />
+              Bring back only my own notes
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5 pl-6">Restore just the dismissed notes you authored</p>
           </button>
         )}
 

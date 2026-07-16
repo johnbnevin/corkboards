@@ -15,6 +15,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../lib/AuthContext';
 import { useAuthor } from '../hooks/useAuthor';
 import { useNostrPublish } from '../hooks/useNostrPublish';
+import { useNostr } from '../lib/NostrProvider';
 import { useNwc } from '../hooks/useNwc';
 import { useNostrBackup, getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS } from '../hooks/useNostrBackup';
 import { useContacts } from '../hooks/useFeed';
@@ -193,6 +194,7 @@ export function SettingsScreen() {
   const { data: author } = useAuthor(pubkey ?? undefined);
   const { data: contacts } = useContacts(pubkey ?? undefined);
   const { mutateAsync: publish } = useNostrPublish();
+  const { nostr } = useNostr();
 
   // AppContext for client tag
   const { config, updateConfig } = useAppContext();
@@ -683,6 +685,46 @@ export function SettingsScreen() {
             }
           }}>
             <Text style={styles.buttonText}>Restore dismissed notes</Text>
+          </TouchableOpacity>
+
+          {/* Restore only my own dismissed notes */}
+          <TouchableOpacity style={styles.button} onPress={() => {
+            const raw = mobileStorage.getSync(STORAGE_KEYS.DISMISSED_NOTES);
+            const dismissed = raw ? JSON.parse(raw) as string[] : [];
+            if (dismissed.length === 0) {
+              Alert.alert('No dismissed notes', 'There are no dismissed notes to restore.');
+              return;
+            }
+            Alert.alert(
+              'Bring back only your own notes?',
+              'This checks your dismissed notes against your relays and restores just the ones you authored — the rest stay dismissed.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Restore my notes', onPress: async () => {
+                  if (!pubkey) return;
+                  // One batched query per chunk: { ids, authors:[me] } AND-matches the
+                  // dismissed id-set with our pubkey, so we un-dismiss only our own.
+                  const own = new Set<string>();
+                  const CHUNK = 200;
+                  for (let i = 0; i < dismissed.length; i += CHUNK) {
+                    const chunk = dismissed.slice(i, i + CHUNK);
+                    try {
+                      const events = await nostr.query([{ ids: chunk, authors: [pubkey] }], { signal: AbortSignal.timeout(6000) });
+                      for (const e of events) own.add(e.id);
+                    } catch { /* ignore this chunk */ }
+                  }
+                  if (own.size === 0) {
+                    Alert.alert('None found', 'None of your dismissed notes could be found on your relays.');
+                    return;
+                  }
+                  const remaining = dismissed.filter(id => !own.has(id));
+                  mobileStorage.setSync(STORAGE_KEYS.DISMISSED_NOTES, JSON.stringify(remaining));
+                  Alert.alert('Restored', `Restored ${own.size} of your note${own.size === 1 ? '' : 's'}.`);
+                } },
+              ],
+            );
+          }}>
+            <Text style={styles.buttonText}>Restore my own dismissed notes</Text>
           </TouchableOpacity>
 
           {/* Public bookmarks toggle */}

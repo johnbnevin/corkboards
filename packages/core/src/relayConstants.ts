@@ -31,6 +31,17 @@ export const READ_ONLY_RELAYS = [
 ];
 
 /**
+ * Profile/relay-list indexers — aggregators that hold kind-0 (profile) and
+ * kind-10002 (NIP-65 relay list) for essentially everyone. Queried to resolve a
+ * profile when it isn't on the author's own/known relays (fixes stuck
+ * "user_xxxx" nicknames). purplepag.es is the canonical NIP-65/profile indexer.
+ */
+export const PROFILE_INDEXER_RELAYS = [
+  'wss://purplepag.es',
+  'wss://relay.nostr.band',
+];
+
+/**
  * Relays embedded in NIP-57 kind-9734 zap requests for receipt delivery.
  * These must be stable, well-connected relays that zap receipt processors
  * (wallets, clients) are likely to query.

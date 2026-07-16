@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { NSchema as n } from '@nostrify/nostrify';
 import type { NostrEvent, NostrFilter, NostrMetadata } from '@nostrify/nostrify';
 import { useNostr, FALLBACK_RELAYS } from '../lib/NostrProvider';
+import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 import { getCachedProfile, cacheProfile } from '../lib/cacheStore';
 import { PROFILE_TTL_MS } from '@core/cacheConfig';
 
@@ -73,9 +74,10 @@ async function fetchAuthorFromNetwork(
     }
   }
 
-  // Fallback: try individual relays (same pattern as web)
+  // Fallback: try individual relays (same pattern as web) — profile indexers
+  // first (they hold kind-0 for ~everyone), then a couple of general fallbacks.
   const fallbackSignal = AbortSignal.any([signal, AbortSignal.timeout(3000)]);
-  const relaysToTry = FALLBACK_RELAYS.slice(0, 3);
+  const relaysToTry = [...PROFILE_INDEXER_RELAYS, ...FALLBACK_RELAYS.slice(0, 2)];
 
   try {
     const event = await Promise.any(

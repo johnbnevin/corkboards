@@ -100,6 +100,34 @@ if (isTauri && !('__tauriConsoleOverride' in window)) {
   tauriLog(`[LOG] Corkboards starting — isTauri=true ua=${navigator.userAgent}`);
 }
 
+// ── Broken-bundle self-heal ───────────────────────────────────────────────────
+// If an app JS/CSS chunk fails to load (e.g. a stale cached vendor chunk left by
+// an older cache-first service worker that no longer matches the entry), the app
+// boots blank and a plain refresh can't recover — the SW keeps serving the stale
+// bundle. Catch that once per session, drop the SW + all caches, and reload for a
+// clean fetch, so a user never has to manually clear site data.
+window.addEventListener('error', (event) => {
+  const target = event.target as (HTMLScriptElement & HTMLLinkElement) | null;
+  if (!target || (target.tagName !== 'SCRIPT' && target.tagName !== 'LINK')) return;
+  const href = target.src || target.href || '';
+  if (!href.includes('/assets/')) return;
+  try {
+    if (sessionStorage.getItem('corkboard:bundle-recovery')) return;
+    sessionStorage.setItem('corkboard:bundle-recovery', '1');
+  } catch { /* sessionStorage unavailable */ }
+  void (async () => {
+    try {
+      const regs = (await navigator.serviceWorker?.getRegistrations?.()) ?? [];
+      await Promise.all(regs.map((r) => r.unregister()));
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch { /* best-effort */ }
+    window.location.reload();
+  })();
+}, true); // capture — resource-load errors don't bubble
+
 createRoot(document.getElementById("root")!).render(
   <ErrorBoundary>
     <App />

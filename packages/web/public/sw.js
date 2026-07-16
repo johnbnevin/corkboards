@@ -47,8 +47,14 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Entry JS/CSS (index.js, index.css) — network-first since filenames don't change between deploys
-  if (/\/assets\/index\.(js|css)/.test(url.pathname)) {
+  // ALL app JS/CSS (entry + vendor chunks) — NETWORK-FIRST.
+  // Chunk filenames are stable (no content hash), so a cache-first vendor chunk
+  // can go stale and mismatch a freshly-deployed entry — the app then boots with
+  // an incompatible bundle set and renders a blank screen that survives refresh
+  // (the SW keeps serving the same stale chunk) until site data is cleared.
+  // Fetching JS/CSS network-first keeps the whole bundle set consistent; the
+  // cache is only an offline fallback.
+  if (/\.(js|css)(\?.*)?$/.test(url.pathname)) {
     event.respondWith(
       fetch(request)
         .then((response) => {
@@ -61,8 +67,8 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Static assets (vendor chunks, images, fonts): cache-first, fall back to network
-  if (/\.(js|css|woff2?|ttf|png|jpg|jpeg|gif|svg|ico|webp)(\?.*)?$/.test(url.pathname) ||
+  // Other static assets (images, fonts): cache-first, fall back to network
+  if (/\.(woff2?|ttf|png|jpg|jpeg|gif|svg|ico|webp)(\?.*)?$/.test(url.pathname) ||
       url.pathname.startsWith('/assets/')) {
     event.respondWith(
       caches.match(request).then((cached) => {

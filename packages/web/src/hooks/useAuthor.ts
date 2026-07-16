@@ -3,6 +3,7 @@ import { useNostr } from '@nostrify/react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getCachedProfile, cacheProfile } from '@/lib/cacheStore';
 import { FALLBACK_RELAYS } from '@/components/NostrProvider';
+import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 import { getBackupRelaysUsed } from '@/hooks/useNostrBackup';
 import { debugWarn } from '@/lib/debug';
 import { PROFILE_TTL_MS } from '@core/cacheConfig';
@@ -86,8 +87,10 @@ async function fetchAuthorFromNetwork(
     const bUsed = backupUsed.has(b) ? 1 : 0;
     return aUsed - bUsed;
   });
-  // Only try first 3 to avoid opening too many connections
-  const relaysToTry = sortedRelays.slice(0, 3);
+  // Query the profile indexers first (they hold kind-0 for ~everyone, so they
+  // resolve profiles that aren't on the author's own relays), then a couple of
+  // general fallbacks. Capped to keep concurrent WS connections low.
+  const relaysToTry = [...PROFILE_INDEXER_RELAYS, ...sortedRelays.slice(0, 2)];
 
   try {
     const event = await Promise.any(

@@ -519,16 +519,23 @@ function extractAuthorsFromFilters(filters: NostrFilter[]): string[] {
   return Array.from(authors);
 }
 
-// A "reference query" targets events by tag (#e/#a/#p) rather than by author —
-// e.g. thread replies (#e root), reactions/comments (#e/#a), notifications (#p).
-// The outbox model can't route these per-author (we don't know who replied), so
-// welshman only reaches the default relays. These queries need a wider net.
+// An "unroutable lookup" is an author-less query the outbox model can't route
+// per-pubkey, so welshman only reaches the default relays. Two shapes:
+//   - reference tags (#e/#a/#p): thread replies, reactions/comments, notifications
+//   - bare id lookups (`ids`): fetching a specific event (thread target, quoted
+//     note) whose author we don't know yet — outbox needs an author to route to.
+// Both need a wider net (user read relays + fallbacks + indexers) instead of the
+// ~3 default relays welshman would otherwise pick.
 function hasReferenceTag(filters: NostrFilter[]): boolean {
   return filters.some(f =>
     Object.prototype.hasOwnProperty.call(f, '#e') ||
     Object.prototype.hasOwnProperty.call(f, '#a') ||
     Object.prototype.hasOwnProperty.call(f, '#p'),
   );
+}
+
+function hasIdLookup(filters: NostrFilter[]): boolean {
+  return filters.some(f => Array.isArray(f.ids) && f.ids.length > 0);
 }
 
 // ─── Outbox Model Relay Routing ──────────────────────────────────────────────
@@ -610,15 +617,15 @@ function createPool(): NPool {
             routes.set(relay, batchedFilters);
           }
         }
-      } else if (authors.length === 0 && hasReferenceTag(filters)) {
-        // Tier 2b — Reference query (thread replies, reactions, comments,
-        // notifications): the filter selects events by #e/#a/#p tag with no
-        // authors, so per-author outbox routing is impossible — we don't know
-        // who replied. Welshman alone only reaches the default relays, which is
-        // why threads sometimes load no replies at all: a reply written only to
-        // its author's own relay is never queried. Cast a wide net across the
-        // user's configured read relays plus fallbacks/indexers so replies that
-        // live on the user's own relays are actually fetched.
+      } else if (authors.length === 0 && (hasReferenceTag(filters) || hasIdLookup(filters))) {
+        // Tier 2b — Unroutable lookup (thread replies/reactions/comments/
+        // notifications via #e/#a/#p, OR a bare `ids` fetch of a specific event
+        // like a thread target or quoted note). No authors → per-author outbox
+        // routing is impossible, and welshman alone only reaches ~3 default
+        // relays (even dropping the archive/indexer relays that are best at
+        // finding events by id). That's why a thread target on the author's own
+        // relay fails with "couldn't be loaded from your relays". Cast a wide net
+        // across the user's configured read relays plus fallbacks/indexers.
         const userRelays = getUserRelays();
         const relaysToQuery = new Set<string>();
         userRelays.read.forEach(r => relaysToQuery.add(normalizeRelayUrl(r)));
@@ -659,7 +666,7 @@ function createPool(): NPool {
         const relayList = Array.from(routes.keys());
         const tier = authors.length >= BULK_AUTHOR_THRESHOLD
           ? 'T1-bulk'
-          : (authors.length === 0 && hasReferenceTag(filters)) ? 'T2b-reference' : 'T2-welshman';
+          : (authors.length === 0 && (hasReferenceTag(filters) || hasIdLookup(filters))) ? 'T2b-reference' : 'T2-welshman';
         const filterDesc = filters.map(f => `kinds=${f.kinds?.join(',')} authors=${f.authors?.length ?? 0} ids=${f.ids?.length ?? 0}`).join(' | ');
         debugLog(`reqRouter [${tier}] authors=${authors.length} → ${routes.size} relays: ${relayList.join(', ')} | filters: ${filterDesc}`);
       }

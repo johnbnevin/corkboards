@@ -2622,16 +2622,16 @@ export function MultiColumnClient() {
       if (hasRss) {
         setRssRefetchTrigger(prev => prev + 1);
       }
-      // Authors: paginate from the oldest AUTHOR note (loadCustomFeedOlder walks
-      // progressively older windows), NOT the global count-loader which anchors
-      // to the overall oldest note — so a gap between recent notes and much-older
-      // ones gets filled instead of the loader jumping straight past it.
-      if (hasPubkeys) {
-        await loadCustomFeedOlder();
+      // Authors: fall through to the shared count-based loader below. It ITERATES
+      // (walking the `until` cursor back contiguously via dedupBatch) until it has
+      // accumulated ~`count` NEW notes — so +25/+100 actually load 25/100, cross
+      // gaps without skipping, and never miss notes. The single-window
+      // loadCustomFeedOlder ignored `count` and only ever fetched one batch, which
+      // is why the buttons "loaded just a few more, with gaps".
+      if (!hasPubkeys) {
+        setRevealMoreTick(t => t + 1); // reveal any hashtag/RSS notes just appended
+        return;
       }
-      // Reveal what we just loaded (older notes appended below the fold).
-      setRevealMoreTick(t => t + 1);
-      return;
     }
     // For feeds with pubkeys or non-custom tabs, use the normal count-based loader.
     // Retry with increasing batch sizes if all fetched notes are already dismissed,
@@ -2651,7 +2651,7 @@ export function MultiColumnClient() {
     setFindingUndismissed(false);
     // Reveal what we just loaded (older notes appended below the fold).
     setRevealMoreTick(t => t + 1);
-  }, [isDiscoverTab, loadMoreDiscover, isCustomFeedTab, activeCustomFeed, loadMoreByCount, loadCustomFeedOlder, hashtagNotes, extraHashtagNotes, nostr]);
+  }, [isDiscoverTab, loadMoreDiscover, isCustomFeedTab, activeCustomFeed, loadMoreByCount, hashtagNotes, extraHashtagNotes, nostr]);
 
   // Calculate IndexedDB stats for the current tab
   const _indexedDbStats = useMemo(() => {

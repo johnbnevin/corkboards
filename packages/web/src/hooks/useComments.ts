@@ -49,10 +49,17 @@ export function useComments(root: NostrEvent | URL, limit?: number) {
         }
       });
 
-      // Build a children map for O(n) subtree traversal
+      // Build a children map for O(n) subtree traversal.
+      // (M2) A reply to an ADDRESSABLE root (long-form 30023, referenced by an
+      // `a`-coordinate) or a NIP-73 external target (`i`) has no `e` parent tag,
+      // so key on `e` first and fall back to the `a`/`i` parent reference —
+      // otherwise those top-level replies are invisible in the tree.
       const childrenMap = new Map<string, NostrEvent[]>();
       for (const comment of events) {
-        const parentId = getTagValue(comment, 'e');
+        const parentId =
+          getTagValue(comment, 'e') ??
+          getTagValue(comment, 'a') ??
+          getTagValue(comment, 'i');
         if (parentId) {
           const siblings = childrenMap.get(parentId) ?? [];
           siblings.push(comment);

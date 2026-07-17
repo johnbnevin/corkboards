@@ -278,6 +278,7 @@ export function useCustomFeedNotesCache({
 // ============================================================================
 
 import { idbGet, idbSet, idbRemove, idbKeys } from '@/lib/idb';
+import { withKeyedLock } from '@core/keyedMutex';
 
 const CUSTOM_FEED_CACHE_PREFIX = 'custom-feed-cache:';
 const CUSTOM_FEED_METADATA_PREFIX = 'custom-feed-metadata:';
@@ -301,32 +302,38 @@ const customFeedMemCache = new Map<string, NostrEvent[]>();
 let customFeedCacheLoaded = false;
 
 export async function saveCustomFeedNotes(feedId: string, events: NostrEvent[]): Promise<void> {
-  const key = getCustomFeedCacheKey(feedId);
-  // Prune to most recent notes if over limit
-  const pruned = events.length > MAX_NOTES_PER_FEED
-    ? events.sort((a, b) => b.created_at - a.created_at).slice(0, MAX_NOTES_PER_FEED)
-    : events;
-  await idbSet(key, JSON.stringify(pruned));
-  customFeedMemCache.set(feedId, pruned);
+  // Serialize with mergeCustomFeedNotes/prune on the same feed so a concurrent
+  // read-modify-write can't overwrite this blob (or vice-versa) and drop notes. (C3)
+  return withKeyedLock(`custom-feed:${feedId}`, async () => {
+    const key = getCustomFeedCacheKey(feedId);
+    // Prune to most recent notes if over limit
+    const pruned = events.length > MAX_NOTES_PER_FEED
+      ? events.sort((a, b) => b.created_at - a.created_at).slice(0, MAX_NOTES_PER_FEED)
+      : events;
+    await idbSet(key, JSON.stringify(pruned));
+    customFeedMemCache.set(feedId, pruned);
+  });
 }
 
 export async function mergeCustomFeedNotes(feedId: string, events: NostrEvent[]): Promise<number> {
-  const key = getCustomFeedCacheKey(feedId);
-  const existing = await getCustomFeedNotes(feedId);
-  const existingIds = new Set(existing.map(e => e.id));
+  return withKeyedLock(`custom-feed:${feedId}`, async () => {
+    const key = getCustomFeedCacheKey(feedId);
+    const existing = await getCustomFeedNotes(feedId);
+    const existingIds = new Set(existing.map(e => e.id));
 
-  const newEvents = events.filter(e => !existingIds.has(e.id));
-  if (newEvents.length > 0) {
-    let merged = [...existing, ...newEvents].sort((a, b) => b.created_at - a.created_at);
-    // Prune to limit
-    if (merged.length > MAX_NOTES_PER_FEED) {
-      merged = merged.slice(0, MAX_NOTES_PER_FEED);
+    const newEvents = events.filter(e => !existingIds.has(e.id));
+    if (newEvents.length > 0) {
+      let merged = [...existing, ...newEvents].sort((a, b) => b.created_at - a.created_at);
+      // Prune to limit
+      if (merged.length > MAX_NOTES_PER_FEED) {
+        merged = merged.slice(0, MAX_NOTES_PER_FEED);
+      }
+      await idbSet(key, JSON.stringify(merged));
+      customFeedMemCache.set(feedId, merged);
     }
-    await idbSet(key, JSON.stringify(merged));
-    customFeedMemCache.set(feedId, merged);
-  }
 
-  return newEvents.length;
+    return newEvents.length;
+  });
 }
 
 export async function getCustomFeedNotes(feedId: string): Promise<NostrEvent[]> {
@@ -407,15 +414,18 @@ customFeedCacheLoaded = true;
   try {
     const feedIds = await getAllCustomFeedIds();
     for (const feedId of feedIds) {
-      const key = getCustomFeedCacheKey(feedId);
-      const stored = await idbGet(key);
-      if (!stored) continue;
-      const events: NostrEvent[] = JSON.parse(stored);
-      if (events.length > MAX_NOTES_PER_FEED) {
-        const pruned = events.sort((a, b) => b.created_at - a.created_at).slice(0, MAX_NOTES_PER_FEED);
-        await idbSet(key, JSON.stringify(pruned));
-        debugLog(`[customFeedCache] Pruned feed ${feedId}: ${events.length} → ${pruned.length}`);
-      }
+      // Take the per-feed lock so this prune can't race a live save/merge. (C3/M6)
+      await withKeyedLock(`custom-feed:${feedId}`, async () => {
+        const key = getCustomFeedCacheKey(feedId);
+        const stored = await idbGet(key);
+        if (!stored) return;
+        const events: NostrEvent[] = JSON.parse(stored);
+        if (events.length > MAX_NOTES_PER_FEED) {
+          const pruned = events.sort((a, b) => b.created_at - a.created_at).slice(0, MAX_NOTES_PER_FEED);
+          await idbSet(key, JSON.stringify(pruned));
+          debugLog(`[customFeedCache] Pruned feed ${feedId}: ${events.length} → ${pruned.length}`);
+        }
+      });
     }
   } catch {
     // Best-effort cleanup

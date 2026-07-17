@@ -31,6 +31,14 @@ import { getRelayCache, FALLBACK_RELAYS } from '@/components/NostrProvider'
 import { useToast } from '@/hooks/useToast'
 import { EmojiName } from '@/components/EmojiName'
 
+// (B4) Named constants extracted from inline magic numbers
+/** Character limit for the "more from this author" note previews (discover tab) */
+const AUTHOR_PREVIEW_CHAR_LIMIT = 140;
+/** Backoff ladder (ms) for retrying outbox fetches of reaction/repost targets */
+const OUTBOX_RETRY_DELAYS_MS = [2000, 5000, 15000, 30000, 60000];
+/** Fallback minimum height (px) for dismissed/collapsed placeholder cards with no captured height */
+const PLACEHOLDER_MIN_HEIGHT_PX = 40;
+
 // Preserve dismissed/collapsed note heights across tab switches (survives unmount/remount)
 const MAX_CAPTURED_HEIGHTS = 10000;
 const capturedHeights = new Map<string, number>();
@@ -467,7 +475,7 @@ function DiscoverMoreNotes({ pubkey, currentNoteId, onOpenThread }: { pubkey: st
                 onClick={(e) => { e.stopPropagation(); onOpenThread?.(n.id) }}
               >
                 <span className="text-muted-foreground/60 mr-1.5">{formatTimeAgoCompact(n.created_at)}</span>
-                <span className="line-clamp-2">{n.content.slice(0, 140)}{n.content.length > 140 ? '…' : ''}</span>
+                <span className="line-clamp-2">{n.content.slice(0, AUTHOR_PREVIEW_CHAR_LIMIT)}{n.content.length > AUTHOR_PREVIEW_CHAR_LIMIT ? '…' : ''}</span>
               </button>
             ))
           ) : (
@@ -647,7 +655,7 @@ export const NoteCard = React.memo(function NoteCard({
     enabled: !!reactionTargetId,
     staleTime: 5 * 60 * 1000, // retry after 5 min if previously not found
     retry: 5,
-    retryDelay: (attempt) => [2000, 5000, 15000, 30000, 60000][attempt] ?? 60000,
+    retryDelay: (attempt) => OUTBOX_RETRY_DELAYS_MS[attempt] ?? 60000,
   })
 
   // Fetch the full ancestor chain above the reacted-to event (so we show the whole thread context)
@@ -721,7 +729,7 @@ export const NoteCard = React.memo(function NoteCard({
     enabled: !!repostTargetId,
     staleTime: 5 * 60 * 1000,
     retry: 5,
-    retryDelay: (attempt) => [2000, 5000, 15000, 30000, 60000][attempt] ?? 60000,
+    retryDelay: (attempt) => OUTBOX_RETRY_DELAYS_MS[attempt] ?? 60000,
   })
 
   const repostedEvent = parsedRepost || fetchedRepost || null
@@ -758,7 +766,7 @@ export const NoteCard = React.memo(function NoteCard({
     ? optimizeAvatarUrl(discoverFeaturedMeta?.picture)
     : avatarUrl
 
-  const placeholderStyle = capturedHeights.has(note.id) ? { height: capturedHeights.get(note.id) } : { minHeight: 40 }
+  const placeholderStyle = capturedHeights.has(note.id) ? { height: capturedHeights.get(note.id) } : { minHeight: PLACEHOLDER_MIN_HEIGHT_PX }
 
   // Soft-dismissed placeholder — blank card at exact original height
   if (softDismissed && !forceExpanded) {
@@ -770,6 +778,14 @@ export const NoteCard = React.memo(function NoteCard({
         className={`border-dashed border-muted-foreground/15 bg-transparent flex items-center justify-center ${canUndo ? 'cursor-pointer hover:bg-accent/20 transition-colors' : ''}`}
         style={placeholderStyle}
         onClick={canUndo ? () => undoDismiss(note.id) : undefined}
+        {...(canUndo ? { // (B3) keyboard access for the clickable undo placeholder
+          role: 'button',
+          tabIndex: 0,
+          'aria-label': undoLabel,
+          onKeyDown: (e: React.KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); undoDismiss(note.id) }
+          },
+        } : {})}
       >
         <span className="text-[11px] text-muted-foreground/30 select-none">{undoLabel}</span>
       </Card>
@@ -781,7 +797,16 @@ export const NoteCard = React.memo(function NoteCard({
   // Restored collapsed notes render normally so they don't create phantom blank spots.
   if (collapsed && !forceExpanded && isCollapsedThisSession(note.id)) {
     return (
-      <Card className="border-dashed border-muted-foreground/15 bg-transparent flex items-center justify-center cursor-pointer hover:bg-accent/20 transition-colors" style={placeholderStyle} onClick={() => toggleCollapsed(note.id)} title="Click to expand">
+      <Card
+        className="border-dashed border-muted-foreground/15 bg-transparent flex items-center justify-center cursor-pointer hover:bg-accent/20 transition-colors"
+        style={placeholderStyle}
+        onClick={() => toggleCollapsed(note.id)}
+        title="Click to expand"
+        role="button" /* (B3) keyboard access */
+        tabIndex={0}
+        aria-label="Expand saved-for-later note"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapsed(note.id) } }}
+      >
         <span className="text-[11px] text-muted-foreground/30 select-none">saved for later</span>
       </Card>
     )

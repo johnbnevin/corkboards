@@ -13,7 +13,7 @@
 import { useMemo, useState, useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNostr } from '@/hooks/useNostr'
-import type { NostrEvent } from '@nostrify/nostrify'
+import { NKinds, type NostrEvent } from '@nostrify/nostrify'
 import {
   parseThreadTags,
   buildThreadTree,
@@ -114,18 +114,39 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     return tags.root || targetEvent.id
   }, [targetEvent])
 
+  // (M2) When the thread root is an ADDRESSABLE event (e.g. long-form kind 30023),
+  // replies reference it by its `a`-coordinate (kind:pubkey:d), not by an `e`-tag.
+  // Derive that coordinate so we can ALSO query by `#a` and surface NIP-22 (kind
+  // 1111) + kind-1 replies that would otherwise be invisible to the `#e` query.
+  const rootAddr = useMemo(() => {
+    if (!targetEvent || !NKinds.addressable(targetEvent.kind)) return null
+    // Only the target event itself is addressable-resolvable here; a non-self
+    // root would be a plain event id, handled by the existing #e path.
+    if (rootId !== targetEvent.id) return null
+    const d = targetEvent.tags.find(t => t[0] === 'd')?.[1] ?? ''
+    return `${targetEvent.kind}:${targetEvent.pubkey}:${d}`
+  }, [targetEvent, rootId])
+
   // Query 2 (pass 1): Fetch the thread by reference.
   // This #e-tag query has no `authors`, so the pool routes it via the wide-net
   // "reference" tier (user read relays + fallbacks). It catches replies that
   // were broadcast to common relays and renders immediately.
   const { data: threadEvents, isLoading: isLoadingThread, error: threadError } = useQuery({
-    queryKey: ['thread-tree', rootId],
+    queryKey: ['thread-tree', rootId, rootAddr],
     queryFn: async () => {
       if (!rootId) return []
 
       const idsToQuery = rootId === eventId ? [rootId] : [rootId, eventId!]
+      // (M2) For addressable roots, ALSO query by `#a` coordinate and include
+      // kind 1111 (NIP-22) so replies to the long-form root are not invisible.
+      const filters = rootAddr
+        ? [
+            { kinds: [1, 7], '#e': idsToQuery, limit: 500 },
+            { kinds: [1, 1111], '#a': [rootAddr], limit: 500 },
+          ]
+        : [{ kinds: [1, 7], '#e': idsToQuery, limit: 500 }]
       const events = await nostr.query(
-        [{ kinds: [1, 7], '#e': idsToQuery, limit: 500 }],
+        filters,
         { signal: AbortSignal.timeout(8000) },
       )
 
@@ -168,7 +189,7 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
   // each chunk stays in the per-author outbox tier. Runs after pass 1 so the UI
   // shows results first, then fills in.
   const { data: outboxEvents } = useQuery({
-    queryKey: ['thread-outbox', rootId, participantAuthors],
+    queryKey: ['thread-outbox', rootId, rootAddr, participantAuthors],
     queryFn: async () => {
       if (!rootId || participantAuthors.length === 0) return []
       const idsToQuery = rootId === eventId ? [rootId] : [rootId, eventId!]
@@ -177,12 +198,20 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
         chunks.push(participantAuthors.slice(i, i + OUTBOX_AUTHOR_CHUNK))
       }
       const results = await Promise.all(
-        chunks.map(chunk =>
-          nostr.query(
-            [{ kinds: [1, 7], '#e': idsToQuery, authors: chunk, limit: 500 }],
+        chunks.map(chunk => {
+          // (M2) Route addressable-root replies (#a + kind 1111) through the
+          // per-author outbox tier too, so author-only replies are discovered.
+          const filters = rootAddr
+            ? [
+                { kinds: [1, 7], '#e': idsToQuery, authors: chunk, limit: 500 },
+                { kinds: [1, 1111], '#a': [rootAddr], authors: chunk, limit: 500 },
+              ]
+            : [{ kinds: [1, 7], '#e': idsToQuery, authors: chunk, limit: 500 }]
+          return nostr.query(
+            filters,
             { signal: AbortSignal.timeout(6000) },
-          ).catch(() => [] as NostrEvent[]),
-        ),
+          ).catch(() => [] as NostrEvent[])
+        }),
       )
       return results.flat()
     },

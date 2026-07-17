@@ -200,9 +200,13 @@ export function useCustomFeedNotes({
     hoursLoadedRef.current += hours;
 
     const current = (queryClient.getQueryData(queryKey) as NostrEvent[] | undefined) ?? [];
-    if (current.length === 0) return 0;
 
-    const oldestTimestamp = current.reduce((min, e) => e.created_at < min ? e.created_at : min, current[0].created_at);
+    // Empty cache: anchor at `now` and page backward, rather than no-op'ing — an
+    // author who hasn't posted inside the initial window would otherwise never
+    // load anything on +more. (M8)
+    const oldestTimestamp = current.length > 0
+      ? current.reduce((min, e) => e.created_at < min ? e.created_at : min, current[0].created_at)
+      : Math.floor(Date.now() / 1000) + 1;
     const until = oldestTimestamp - 1;
 
     // Adaptive look-back (parity with web loadOlder): start at the requested step

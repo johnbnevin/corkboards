@@ -201,8 +201,14 @@ export async function getCachedProfiles(
   return results;
 }
 
-export function getCachedProfileSync(pubkey: string): NostrMetadata | null {
-  const profile = memProfileCache.get(pubkey);
+export function getCachedProfileSync(
+  pubkey: string,
+  maxAge: number = 24 * 60 * 60 * 1000
+): NostrMetadata | null {
+  // (M3) Honor maxAge like the async readers do — previously this ignored the
+  // TTL and could serve arbitrarily stale profiles. getFromMemCache evicts and
+  // returns null when the entry is older than maxAge.
+  const profile = getFromMemCache(pubkey, maxAge);
   return profile?.metadata ?? null;
 }
 

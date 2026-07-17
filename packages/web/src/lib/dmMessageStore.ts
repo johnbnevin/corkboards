@@ -1,5 +1,6 @@
 import { openDB, type IDBPDatabase } from 'idb';
 import type { NostrEvent } from '@nostrify/nostrify';
+import { withKeyedLock } from '@core/keyedMutex';
 
 // ============================================================================
 // IndexedDB Schema
@@ -115,15 +116,18 @@ export async function writeMessagesToDB(
   userPubkey: string,
   messageStore: MessageStore
 ): Promise<void> {
-  try {
-    const db = await openDatabase();
-    // Deep-clone before writing so in-flight mutations from concurrent callers
-    // don't corrupt the stored data.
-    await db.put(STORE_NAME, structuredClone(messageStore), userPubkey);
-  } catch (error) {
-    console.error('[MessageStore] ❌ Error writing to IndexedDB:', error);
-    throw error;
-  }
+  // Serialize writes per user so two overlapping persists can't interleave. (C3)
+  return withKeyedLock(`dm-store:${userPubkey}`, async () => {
+    try {
+      const db = await openDatabase();
+      // Deep-clone before writing so in-flight mutations from concurrent callers
+      // don't corrupt the stored data.
+      await db.put(STORE_NAME, structuredClone(messageStore), userPubkey);
+    } catch (error) {
+      console.error('[MessageStore] ❌ Error writing to IndexedDB:', error);
+      throw error;
+    }
+  });
 }
 
 /**

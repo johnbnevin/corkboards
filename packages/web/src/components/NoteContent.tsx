@@ -70,20 +70,18 @@ function replaceEmojis(text: string, emojiMap: Map<string, string>): React.React
 
 /** Renders a markdown text part using react-markdown with GFM support */
 const MarkdownText = memo(function MarkdownText({ text, emojiMap }: { text: string; emojiMap?: Map<string, string> }) {
-  // Process React children to replace :shortcode: in string nodes with emoji images
-  const processChildren = (children: React.ReactNode): React.ReactNode => {
-    if (!emojiMap || emojiMap.size === 0) return children
-    return React.Children.map(children, (child) => {
-      if (typeof child === 'string') return replaceEmojis(child, emojiMap)
-      return child
-    })
-  }
-  const ec = processChildren // shorthand
-
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkBreaks]}
-      components={{
+  // (P7) Memoize the react-markdown components map so it isn't rebuilt every
+  // render. It only closes over emojiMap (via the emoji-replacing `ec`).
+  const components = useMemo(() => {
+    // Process React children to replace :shortcode: in string nodes with emoji images
+    const ec = (children: React.ReactNode): React.ReactNode => {
+      if (!emojiMap || emojiMap.size === 0) return children
+      return React.Children.map(children, (child) => {
+        if (typeof child === 'string') return replaceEmojis(child, emojiMap)
+        return child
+      })
+    }
+    return {
         // Headings
         h1: ({ children }) => <span className="block font-bold text-xl mt-3 mb-1">{ec(children)}</span>,
         h2: ({ children }) => <span className="block font-bold text-lg mt-3 mb-1">{ec(children)}</span>,
@@ -152,7 +150,13 @@ const MarkdownText = memo(function MarkdownText({ text, emojiMap }: { text: stri
           }
           return <input type={type} />
         },
-      }}
+    }
+  }, [emojiMap])
+
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkBreaks]}
+      components={components}
     >
       {text}
     </ReactMarkdown>
@@ -236,6 +240,16 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
   // Build poster map and media URL sets from imeta tags (NIP-92)
   const { posters: imetaPosters, videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls } = useMemo(() => getImetaData(event), [event])
   const imetaVideoUrlSet = useMemo(() => new Set(imetaVideoUrls), [imetaVideoUrls])
+
+  // (P7) Derive imeta media not already shown inline — memoized so the Set +
+  // filters don't rebuild on every render (inputs are already memoized).
+  const { missingImages, missingVideos } = useMemo(() => {
+    const contentUrls = new Set(content.filter(p => p.type === 'media').map(p => p.value))
+    return {
+      missingImages: imetaImageUrls.filter(url => !contentUrls.has(url)),
+      missingVideos: imetaVideoUrls.filter(url => !contentUrls.has(url)),
+    }
+  }, [content, imetaImageUrls, imetaVideoUrls])
 
   // Group consecutive image media parts for horizontal layout
   const groupedContent = useMemo(() => {
@@ -355,21 +369,13 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
           or feed-level picture/video post renders blank. Dedup against URLs
           already present in the content text. Applies to ALL kinds so quoted
           media of any kind embeds correctly. */}
-      {(() => {
-        const contentUrls = new Set(content.filter(p => p.type === 'media').map(p => p.value))
-        const missingImages = imetaImageUrls.filter(url => !contentUrls.has(url))
-        const missingVideos = imetaVideoUrls.filter(url => !contentUrls.has(url))
-        return (
-          <>
-            {missingImages.map(imageUrl => (
-              <MediaLink key={`imeta-img-${imageUrl}`} url={imageUrl} blurMedia={blurMedia} />
-            ))}
-            {missingVideos.map(videoUrl => (
-              <MediaLink key={`imeta-vid-${videoUrl}`} url={videoUrl} blurMedia={blurMedia} poster={imetaPosters.get(videoUrl)} isVideo />
-            ))}
-          </>
-        )
-      })()}
+      {/* (P7) missingImages/missingVideos are memoized above */}
+      {missingImages.map(imageUrl => (
+        <MediaLink key={`imeta-img-${imageUrl}`} url={imageUrl} blurMedia={blurMedia} />
+      ))}
+      {missingVideos.map(videoUrl => (
+        <MediaLink key={`imeta-vid-${videoUrl}`} url={videoUrl} blurMedia={blurMedia} poster={imetaPosters.get(videoUrl)} isVideo />
+      ))}
     </div>
   )
 }

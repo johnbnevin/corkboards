@@ -7,7 +7,7 @@
  * - Preflight: warns before restore if incoming data has fewer items than current.
  */
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '@/lib/storageKeys';
-import { idbGetSync, idbSetSync, idbSet } from '@/lib/idb';
+import { idbGetSync, idbSetSync, idbSet, idbPrimeCache } from '@/lib/idb';
 import { triggerDownload } from '@/lib/triggerDownload';
 
 const LAST_LOCAL_DOWNLOAD_KEY = 'corkboard:last-local-download-ts';
@@ -308,11 +308,19 @@ export async function restoreFromBackupFile(json: string): Promise<number> {
   const validKeys = new Set(BACKED_UP_KEYS as readonly string[]);
   for (const [key, value] of Object.entries(settings)) {
     if (validKeys.has(key) && typeof value === 'string') {
-      idbSetSync(key, value);       // sync cache + dispatch events
-      writes.push(idbSet(key, value)); // persist to IDB
+      // Prime the sync cache + dispatch events, then persist via a SINGLE awaited
+      // write. (Previously idbSetSync ALSO fired its own unawaited idbSet — a
+      // double write whose failures were swallowed, so a quota error during
+      // restore reported success. H4b) idbPrimeCache does no write of its own.
+      idbPrimeCache(key, value);
+      writes.push(idbSet(key, value));
       count++;
     }
   }
-  await Promise.all(writes);
+  const results = await Promise.allSettled(writes);
+  const failed = results.filter(r => r.status === 'rejected');
+  if (failed.length > 0) {
+    throw new Error(`Restore incomplete: ${failed.length}/${count} keys failed to persist (storage full?)`);
+  }
   return count;
 }

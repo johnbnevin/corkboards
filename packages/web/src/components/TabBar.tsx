@@ -8,7 +8,7 @@
  * Extracted from MultiColumnClient.tsx to keep that file manageable.
  */
 
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -176,6 +176,21 @@ export function TabBar({
     }
   }, [activeTab, setActiveTab, onRefreshTab]);
   const [sourcesHelpOpen, setSourcesHelpOpen] = useState(false);
+
+  // (P8) Derive RSS tab short-names once, guarding against malformed stored
+  // URLs — a bare `new URL(feedUrl)` in the render map threw and crashed the
+  // whole tab bar. Fall back to a safe short name on parse failure.
+  const rssShortNames = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const feedUrl of rssFeeds) {
+      let shortName = 'RSS';
+      try {
+        shortName = new URL(feedUrl).hostname.replace('www.', '').split('.')[0] || 'RSS';
+      } catch { /* malformed URL — keep safe fallback */ }
+      map.set(feedUrl, shortName);
+    }
+    return map;
+  }, [rssFeeds]);
 
   // Shared "New Corkboard" dialog content — used in both mobile and desktop
   const newCorkboardDialog = (
@@ -476,7 +491,7 @@ export function TabBar({
                   ))}
 
                   {rssFeeds.map((feedUrl) => {
-                    const shortName = (() => { try { return new URL(feedUrl).hostname.replace('www.', '').split('.')[0]; } catch { return 'RSS'; } })();
+                    const shortName = rssShortNames.get(feedUrl) ?? 'RSS'; // (P8)
                     return (
                       <MobilePill key={`rss:${feedUrl}`} active={activeTab === `rss:${feedUrl}`} onClick={() => handleTabClick(`rss:${feedUrl}`)} accent="orange">
                         <Rss className="h-3.5 w-3.5" />
@@ -665,8 +680,7 @@ export function TabBar({
 
             {/* RSS feeds (draggable) */}
             {rssFeeds.map((feedUrl, index) => {
-              const url = new URL(feedUrl);
-              const shortName = url.hostname.replace('www.', '').split('.')[0];
+              const shortName = rssShortNames.get(feedUrl) ?? 'RSS'; // (P8) guard malformed stored URL
               return (
                 <TabsTrigger
                   key={`rss:${feedUrl}`}

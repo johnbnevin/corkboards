@@ -128,6 +128,18 @@ function isSafeUrl(u: string): boolean {
   return /^https?:\/\//i.test(u.trim())
 }
 
+// (M3) IDs/slugs pulled from user-supplied URLs are interpolated into iframe
+// embed src attributes. Validate each against a strict charset before use so a
+// crafted URL can't inject query params, path segments, or break out of the
+// intended embed target. Most platform IDs are alphanumeric with -/_; some
+// (Apple Music path, Tidal/Spotify ids) may include dots.
+const EMBED_ID_RE = /^[A-Za-z0-9_-]+$/
+const EMBED_ID_DOT_RE = /^[A-Za-z0-9_.-]+$/
+function safeId(id: string | null | undefined, allowDots = false): string | null {
+  if (!id) return null
+  return (allowDots ? EMBED_ID_DOT_RE : EMBED_ID_RE).test(id) ? id : null
+}
+
 export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo }: { url: string; blurMedia?: boolean; poster?: string; isVideo?: boolean }) {
   const [embed, setEmbed] = useState<EmbedInfo | null>(null)
   const [imageError, setImageError] = useState(false)
@@ -184,8 +196,9 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
             }
           }
 
-          if (videoId) {
-            return { url: `https://rumble.com/embed/${videoId}/`, aspectRatio: 'video' }
+          const safeVideoId = safeId(videoId) // (M3)
+          if (safeVideoId) {
+            return { url: `https://rumble.com/embed/${encodeURIComponent(safeVideoId)}/`, aspectRatio: 'video' }
           }
         }
 
@@ -200,10 +213,13 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
           const match = u.pathname.match(/@[^/]+\/([^/:]+):?([^/]*)/)
           if (match) {
             const [, videoName, claimId] = match
-            if (claimId) {
-              return { url: `https://odysee.com/$/embed/${videoName}/${claimId}`, aspectRatio: 'video' }
+            const safeName = safeId(videoName, true) // (M3) slug may contain dots
+            const safeClaim = safeId(claimId, true)
+            if (safeName && claimId) {
+              if (safeClaim) return { url: `https://odysee.com/$/embed/${encodeURIComponent(safeName)}/${encodeURIComponent(safeClaim)}`, aspectRatio: 'video' }
+            } else if (safeName) {
+              return { url: `https://odysee.com/$/embed/${encodeURIComponent(safeName)}`, aspectRatio: 'video' }
             }
-            return { url: `https://odysee.com/$/embed/${videoName}`, aspectRatio: 'video' }
           }
         }
 
@@ -244,18 +260,19 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
           const pathParts = u.pathname.split('/')
           if (pathParts.length < 2) return null
           const type = pathParts[pathParts.length - 2]
-          const id = pathParts[pathParts.length - 1]
+          const rawId = pathParts[pathParts.length - 1]
+          const id = safeId(rawId, true) // (M3) tidal ids may be UUIDs (with dashes) or numeric
           if (!type || !id) return null
 
           if (type === 'track' || type === 'tracks') {
-            return { url: `https://embed.tidal.com/tracks/${id}?layout=gridify`, aspectRatio: 'audio' }
+            return { url: `https://embed.tidal.com/tracks/${encodeURIComponent(id)}?layout=gridify`, aspectRatio: 'audio' }
           } else if (type === 'album' || type === 'albums') {
-            return { url: `https://embed.tidal.com/albums/${id}?layout=gridify`, aspectRatio: 'square' }
+            return { url: `https://embed.tidal.com/albums/${encodeURIComponent(id)}?layout=gridify`, aspectRatio: 'square' }
           } else if (type === 'playlist' || type === 'playlists') {
-            return { url: `https://embed.tidal.com/playlists/${id}?layout=gridify`, aspectRatio: 'square' }
+            return { url: `https://embed.tidal.com/playlists/${encodeURIComponent(id)}?layout=gridify`, aspectRatio: 'square' }
           }
           // Fallback for other Tidal URLs
-          return { url: `https://embed.tidal.com/tracks/${id}?layout=gridify`, aspectRatio: 'audio' }
+          return { url: `https://embed.tidal.com/tracks/${encodeURIComponent(id)}?layout=gridify`, aspectRatio: 'audio' }
         }
 
         // Spotify (tracks, albums, playlists, artists, episodes)
@@ -263,9 +280,13 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
           const pathParts = u.pathname.split('/').filter(Boolean)
           if (pathParts.length >= 2) {
             const type = pathParts[0]
-            const id = pathParts[1]
-            const aspectRatio = type === 'track' ? 'audio' : 'square'
-            return { url: `https://open.spotify.com/embed/${type}/${id}`, aspectRatio }
+            const id = safeId(pathParts[1]) // (M3)
+            // Only allow known Spotify embed types; id must be a bare base62 id
+            const allowedTypes = ['track', 'album', 'playlist', 'artist', 'episode', 'show']
+            if (id && allowedTypes.includes(type)) {
+              const aspectRatio = type === 'track' ? 'audio' : 'square'
+              return { url: `https://open.spotify.com/embed/${type}/${encodeURIComponent(id)}`, aspectRatio }
+            }
           }
         }
 
@@ -279,9 +300,9 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
 
         // Vimeo
         if (u.hostname.includes('vimeo.com')) {
-          const videoId = u.pathname.split('/').filter(Boolean).pop()
+          const videoId = safeId(u.pathname.split('/').filter(Boolean).pop()) // (M3)
           if (videoId) {
-            return { url: `https://player.vimeo.com/video/${videoId}`, aspectRatio: 'video' }
+            return { url: `https://player.vimeo.com/video/${encodeURIComponent(videoId)}`, aspectRatio: 'video' }
           }
         }
 
@@ -291,23 +312,26 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
 
           if (u.hostname.includes('clips.twitch.tv')) {
             // clips.twitch.tv/ClipSlug
-            const clipSlug = pathParts[0]
-            return { url: `https://clips.twitch.tv/embed?clip=${clipSlug}&parent=${window.location.hostname}`, aspectRatio: 'video' }
+            const clipSlug = safeId(pathParts[0]) // (M3)
+            if (!clipSlug) return null
+            return { url: `https://clips.twitch.tv/embed?clip=${encodeURIComponent(clipSlug)}&parent=${window.location.hostname}`, aspectRatio: 'video' }
           } else if (pathParts.includes('clip')) {
             // twitch.tv/channel/clip/ClipSlug
             const clipIndex = pathParts.indexOf('clip')
-            const clipSlug = clipIndex >= 0 && clipIndex + 1 < pathParts.length ? pathParts[clipIndex + 1] : null
+            const clipSlug = safeId(clipIndex >= 0 && clipIndex + 1 < pathParts.length ? pathParts[clipIndex + 1] : null) // (M3)
             if (!clipSlug) return null
-            return { url: `https://clips.twitch.tv/embed?clip=${clipSlug}&parent=${window.location.hostname}`, aspectRatio: 'video' }
+            return { url: `https://clips.twitch.tv/embed?clip=${encodeURIComponent(clipSlug)}&parent=${window.location.hostname}`, aspectRatio: 'video' }
           } else if (pathParts.includes('videos')) {
             // twitch.tv/videos/123456
             const vidIdx = pathParts.indexOf('videos')
-            const videoId = (vidIdx >= 0 && vidIdx + 1 < pathParts.length ? pathParts[vidIdx + 1] : null) || pathParts[1]
-            return { url: `https://player.twitch.tv/?video=${videoId}&parent=${window.location.hostname}`, aspectRatio: 'video' }
+            const videoId = safeId((vidIdx >= 0 && vidIdx + 1 < pathParts.length ? pathParts[vidIdx + 1] : null) || pathParts[1]) // (M3)
+            if (!videoId) return null
+            return { url: `https://player.twitch.tv/?video=${encodeURIComponent(videoId)}&parent=${window.location.hostname}`, aspectRatio: 'video' }
           } else if (pathParts.length === 1) {
             // twitch.tv/channel (live stream)
-            const channel = pathParts[0]
-            return { url: `https://player.twitch.tv/?channel=${channel}&parent=${window.location.hostname}`, aspectRatio: 'video' }
+            const channel = safeId(pathParts[0]) // (M3)
+            if (!channel) return null
+            return { url: `https://player.twitch.tv/?channel=${encodeURIComponent(channel)}&parent=${window.location.hostname}`, aspectRatio: 'video' }
           }
         }
 
@@ -315,14 +339,23 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
         if (u.hostname.includes('music.apple.com')) {
           // Convert music.apple.com URL to embed URL
           // Example: music.apple.com/us/album/album-name/123456?i=789
-          return { url: `https://embed.music.apple.com${u.pathname}${u.search}`, aspectRatio: 'audio' }
+          // (M3) u.pathname/u.search are percent-encoded by the URL parser; still
+          // require the path to be a plain slash-delimited slug and keep only a
+          // numeric `i` query param to prevent smuggling extra iframe params.
+          if (!/^[A-Za-z0-9/_.%-]+$/.test(u.pathname)) return null
+          const iParam = safeId(u.searchParams.get('i'))
+          const search = iParam ? `?i=${encodeURIComponent(iParam)}` : ''
+          return { url: `https://embed.music.apple.com${u.pathname}${search}`, aspectRatio: 'audio' }
         }
 
         // Bandcamp
         if (u.hostname.includes('bandcamp.com')) {
           // Bandcamp requires oEmbed, but we can try iframe embed
+          // (M3) validate the trailing slug before interpolating into the embed src
+          const bcSlug = safeId(u.pathname.split('/').pop())
+          if (!bcSlug) return null
           return {
-            url: `https://bandcamp.com/EmbeddedPlayer/${u.pathname.includes('/album/') ? 'album' : 'track'}=${u.pathname.split('/').pop()}/size=large/bgcol=333333/linkcol=0f91ff/tracklist=false/transparent=true/`,
+            url: `https://bandcamp.com/EmbeddedPlayer/${u.pathname.includes('/album/') ? 'album' : 'track'}=${encodeURIComponent(bcSlug)}/size=large/bgcol=333333/linkcol=0f91ff/tracklist=false/transparent=true/`,
             aspectRatio: 'square'
           }
         }

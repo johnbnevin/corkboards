@@ -2,6 +2,21 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { type NostrEvent } from '@nostrify/nostrify'
 import { useNostr } from '@/hooks/useNostr'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
+import { debugError } from '@/lib/debug'
+
+// (B4) Discovery tuning — named constants replace scattered magic numbers.
+/** Phase 1: how many follows to sample for the fast first batch. */
+const QUICK_FRIENDS_COUNT = 30
+/** Phase 1: how many candidate note IDs to hydrate in the first batch. */
+const QUICK_NOTE_IDS_LIMIT = 20
+/** Phase 2: upper bound on total follows scanned (slice end after QUICK_FRIENDS_COUNT). */
+const MAX_FRIENDS_SCANNED = 200
+/** Phase 2: follows per parallel engagement-query batch. */
+const FRIENDS_BATCH_SIZE = 50
+/** Phase 2: relay `limit` per engagement-query batch. */
+const ENGAGEMENT_BATCH_LIMIT = 150
+/** Phase 2: cap on total original-note IDs hydrated. */
+const MAX_NOTE_IDS = 150
 
 interface DiscoverState {
   notes: NostrEvent[]
@@ -140,8 +155,8 @@ export function useDiscover(follows: string[] | undefined, enabled: boolean = tr
       }
 
       // PHASE 1: Quick first batch - get something on screen fast
-      // Use just first 30 friends, short timeout
-      const quickFriends = follows.slice(0, 30)
+      // Use just first QUICK_FRIENDS_COUNT friends, short timeout
+      const quickFriends = follows.slice(0, QUICK_FRIENDS_COUNT)
 
       // Single query for both kinds [1] and [6] to reduce relay round-trips
       const quickEngagements = await nostr.query([{
@@ -159,7 +174,7 @@ export function useDiscover(follows: string[] | undefined, enabled: boolean = tr
       quickReposts.forEach(processRepost)
 
       // Fetch first batch of original notes
-      const quickNoteIds = Array.from(originalNoteIds).slice(0, 20)
+      const quickNoteIds = Array.from(originalNoteIds).slice(0, QUICK_NOTE_IDS_LIMIT)
       if (quickNoteIds.length > 0) {
         const quickNotes = await nostr.query([{ ids: quickNoteIds }], {
           signal: AbortSignal.timeout(2000)
@@ -176,10 +191,10 @@ export function useDiscover(follows: string[] | undefined, enabled: boolean = tr
       if (signal.aborted) return
 
       // PHASE 2: Load more in background - parallel batches
-      const remainingFriends = follows.slice(30, 200)
+      const remainingFriends = follows.slice(QUICK_FRIENDS_COUNT, MAX_FRIENDS_SCANNED)
       if (remainingFriends.length > 0) {
         // Process remaining friends in parallel batches
-        const batchSize = 50
+        const batchSize = FRIENDS_BATCH_SIZE
         const batches: string[][] = []
         for (let i = 0; i < remainingFriends.length; i += batchSize) {
           batches.push(remainingFriends.slice(i, i + batchSize))
@@ -191,7 +206,7 @@ export function useDiscover(follows: string[] | undefined, enabled: boolean = tr
           const engagements = await nostr.query([{
             kinds: [1, 6],
             authors: batch,
-            limit: 150
+            limit: ENGAGEMENT_BATCH_LIMIT
           }], { signal: AbortSignal.timeout(4000) }).catch((): NostrEvent[] => [])
           return {
             replies: engagements.filter(e => e.kind === 1),
@@ -212,7 +227,7 @@ export function useDiscover(follows: string[] | undefined, enabled: boolean = tr
         // Fetch remaining original notes in parallel batches
         const allNoteIds = Array.from(originalNoteIds)
           .filter(id => !seenNotes.has(id))
-          .slice(0, 150)
+          .slice(0, MAX_NOTE_IDS)
 
         if (allNoteIds.length > 0) {
           const noteBatches: string[][] = []
@@ -252,7 +267,8 @@ export function useDiscover(follows: string[] | undefined, enabled: boolean = tr
       }
 
     } catch (err) {
-      console.error('Discovery error:', err)
+      // (B5) Use the debug helper — raw console.error leaks to prod consoles.
+      debugError('Discovery error:', err)
       setState(prev => ({ ...prev, isLoading: false }))
     } finally {
       isRunningRef.current = false

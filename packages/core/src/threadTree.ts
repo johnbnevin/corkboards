@@ -57,6 +57,35 @@ export function isDirectReply(event: NostrEvent, eventId: string): boolean {
   return getParentId(event) === eventId
 }
 
+/**
+ * Parent reference for TREE ATTACHMENT: the NIP-10 `e` parent when present,
+ * otherwise the NIP-22 addressable parent `a`-coordinate, otherwise the external
+ * `i` reference. Lets a kind-1111 reply attach to an addressable root (e.g.
+ * long-form) that it references by coordinate rather than event id. (M2)
+ */
+export function getParentRef(event: NostrEvent): string | null {
+  const eid = getParentId(event)
+  if (eid) return eid
+  const aTag = event.tags.find(t => t[0] === 'a' && t[1])
+  if (aTag) return aTag[1]!
+  const iTag = event.tags.find(t => t[0] === 'i' && t[1])
+  if (iTag) return iTag[1]!
+  return null
+}
+
+/** Addressable/replaceable coordinate (kind:pubkey[:d]) used to map a coordinate
+ *  reference back to the concrete event id present in the thread set. */
+function threadCoordinate(e: NostrEvent): string | null {
+  if (e.kind >= 30000 && e.kind < 40000) {
+    const d = e.tags.find(t => t[0] === 'd')?.[1] ?? ''
+    return `${e.kind}:${e.pubkey}:${d}`
+  }
+  if (e.kind === 0 || e.kind === 3 || (e.kind >= 10000 && e.kind < 20000)) {
+    return `${e.kind}:${e.pubkey}`
+  }
+  return null
+}
+
 /** Get the root event ID from an event's thread tags */
 export function getRootId(event: NostrEvent): string | null {
   return parseThreadTags(event).root ?? null
@@ -81,6 +110,19 @@ export function buildThreadTree(
   const rootEvent = eventMap.get(rootId)
   if (!rootEvent) return null
 
+  // Map addressable/replaceable coordinates → their concrete event id in this set
+  // so a reply that references its parent by coordinate (NIP-22) attaches. (M2)
+  const coordToId = new Map<string, string>()
+  for (const e of events) {
+    const coord = threadCoordinate(e)
+    if (coord) coordToId.set(coord, e.id)
+  }
+  const resolveParent = (e: NostrEvent): string | null => {
+    const ref = getParentRef(e)
+    if (!ref) return null
+    return coordToId.get(ref) ?? ref
+  }
+
   // Group children by parent ID
   const childrenByParent = new Map<string, NostrEvent[]>()
   const reactionsByTarget = new Map<string, NostrEvent[]>()
@@ -101,7 +143,7 @@ export function buildThreadTree(
       // not thread participants — skip them to avoid duplicating the original post
       continue
     } else {
-      const parentId = getParentId(e)
+      const parentId = resolveParent(e)
       if (parentId) {
         const arr = childrenByParent.get(parentId) || []
         arr.push(e)
@@ -112,7 +154,7 @@ export function buildThreadTree(
 
   // Inject just-posted reply
   if (injectedReply && injectedReply.kind !== 7) {
-    const parentId = getParentId(injectedReply)
+    const parentId = resolveParent(injectedReply)
     if (parentId) {
       const arr = childrenByParent.get(parentId) || []
       if (!arr.some(e => e.id === injectedReply.id)) {

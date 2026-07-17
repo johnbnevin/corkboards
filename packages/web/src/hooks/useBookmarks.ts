@@ -259,8 +259,12 @@ export function useBookmarks(fetchEnabled = true) {
       }
     }
 
-    // Migration: if relay has no bookmark IDs (empty or missing), check for legacy collapsed-notes
-    if (relayResult.ids.length === 0 && !hasMigrated.current()) {
+    // Migration: if relay has no bookmark IDs (empty or missing), check for legacy collapsed-notes.
+    // (M7) Only migrate/mark-done when the remote fetch actually SUCCEEDED (found:true —
+    // an empty-but-confirmed list). A total failure (Promise.any rejected → found:false)
+    // must NOT set the migrated flag, or a one-off relay outage permanently skips the
+    // legacy migration. Leaving it unmarked lets it retry next session.
+    if (relayResult.found && relayResult.ids.length === 0 && !hasMigrated.current()) {
       hasMigrated.current = () => true
       try { idbSetSync('nostr-bookmarks-migrated', 'true') } catch { /* ignore */ }
       debugLog('[bookmarks] No relay bookmarks — checking for legacy collapsed-notes')

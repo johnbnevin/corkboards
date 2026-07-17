@@ -156,6 +156,13 @@ export function DMProvider({ children, config }: DMProviderProps) {
 
   const [messages, setMessages] = useState<MessagesState>(new Map());
   const [lastSync, setLastSync] = useState<LastSyncData>({ nip17: null });
+  // Latest-value refs: the debounced persist must serialize the CURRENT store, not
+  // whatever a stale useCallback closure captured, or a concurrent write clobbers
+  // newly-arrived messages. (C3)
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const lastSyncRef = useRef(lastSync);
+  lastSyncRef.current = lastSync;
   const [isLoading, setIsLoading] = useState(false);
   const [loadingPhase, setDMLoadingPhase] = useState<DMLoadingPhase>(DM_LOADING_PHASES.IDLE);
   const [subscriptions, setSubscriptions] = useState<SubscriptionStatus>({ isNIP17Connected: false });
@@ -1007,6 +1014,8 @@ export function DMProvider({ children, config }: DMProviderProps) {
     try {
       const { writeMessagesToDB } = await import('@/lib/dmMessageStore');
 
+      // Read from refs so we always serialize the LATEST store (C3).
+      const currentMessages = messagesRef.current;
       const messageStore = {
         participants: {} as Record<string, {
           messages: NostrEvent[];
@@ -1014,11 +1023,11 @@ export function DMProvider({ children, config }: DMProviderProps) {
           hasNIP17: boolean;
         }>,
         lastSync: {
-          nip17: lastSync.nip17,
+          nip17: lastSyncRef.current.nip17,
         }
       };
 
-      messages.forEach((participant, participantPubkey) => {
+      currentMessages.forEach((participant, participantPubkey) => {
         messageStore.participants[participantPubkey] = {
           messages: participant.messages.map(msg => ({
             // Store messages in their ORIGINAL ENCRYPTED form.
@@ -1046,7 +1055,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
     } catch (error) {
       if (import.meta.env.DEV) console.error('[DM] Error writing messages to IndexedDB:', error);
     }
-  }, [messages, userPubkey, lastSync]);
+  }, [userPubkey]); // messages/lastSync read via refs (C3) so the callback stays stable
 
   // Trigger debounced write
   const triggerDebouncedWrite = useCallback(() => {

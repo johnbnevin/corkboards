@@ -194,11 +194,14 @@ export async function idbKeys(): Promise<string[]> {
 export async function idbGetAll(): Promise<Map<string, string>> {
   if (!idbAvailable) return new Map(memCache);
   const database = await getDb();
+  // Issue both reads on the SAME readonly transaction/store so keys and values
+  // stay index-aligned. Reading them in two separate transactions let a write
+  // commit in between and mismap keys→values, corrupting the cache. (M1)
   const store = tx(database, 'readonly');
-  const keys = await wrapRequest<IDBValidKey[]>(store.getAllKeys());
-  const values = await wrapRequest<string[]>(
-    (await getDb()).transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAll()
-  );
+  const [keys, values] = await Promise.all([
+    wrapRequest<IDBValidKey[]>(store.getAllKeys()),
+    wrapRequest<string[]>(store.getAll()),
+  ]);
   const map = new Map<string, string>();
   (keys as string[]).forEach((k, i) => map.set(k, values[i]));
   return map;
@@ -230,6 +233,20 @@ export function idbSetSync(key: string, value: string): void {
     () => dispatchSyncEvent(key, tryParse(value)),
     (err) => console.warn('[idb] Failed to persist key (after retry)', key, err),
   );
+}
+
+/** Update the in-memory cache + notify readers WITHOUT scheduling a write.
+ *  For bulk restore, which awaits its own single idbSet per key and needs to
+ *  surface persistence failures instead of firing a second, unawaited write. */
+export function idbPrimeCache(key: string, value: string): void {
+  const skipCache = key.startsWith('custom-feed-cache:') || key === 'corkboard:last-backup-data';
+  if (!skipCache) {
+    if (memCache.size >= MAX_MEM_CACHE && !memCache.has(key)) {
+      memCache.delete(memCache.keys().next().value!);
+    }
+    memCache.set(key, value);
+  }
+  dispatchSyncEvent(key, tryParse(value));
 }
 
 /** Synchronous delete – removes from cache immediately and schedules IDB write. */

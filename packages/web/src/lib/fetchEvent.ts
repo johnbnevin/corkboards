@@ -113,32 +113,49 @@ export async function queryRelay(
   return events
 }
 
+// (M5) Single-flight cache: concurrent parent-note fetches for the same author
+// would each re-discover kind-10002 across all fallback relays. Coalesce them
+// into one in-flight promise per pubkey; the entry is cleared once it settles.
+const _authorRelaysInFlight = new Map<string, Promise<string[]>>()
+
 async function fetchAuthorRelays(pubkey: string): Promise<string[]> {
   const cached = getRelayCache(pubkey)
   if (cached.length > 0) return cached
 
-  const discoveryRelays = [...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]
-  const relayLists = await Promise.all(
-    discoveryRelays.map(relay =>
-      queryRelay(relay, { kinds: [10002], authors: [pubkey], limit: 1 }, 3000)
-        .then(events => events[0] || null)
-        .catch(() => null)
+  const inFlight = _authorRelaysInFlight.get(pubkey)
+  if (inFlight) return inFlight
+
+  const promise = (async (): Promise<string[]> => {
+    const discoveryRelays = [...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]
+    const relayLists = await Promise.all(
+      discoveryRelays.map(relay =>
+        queryRelay(relay, { kinds: [10002], authors: [pubkey], limit: 1 }, 3000)
+          .then(events => events[0] || null)
+          .catch(() => null)
+      )
     )
-  )
 
-  const best = relayLists
-    .filter((e): e is NostrEvent => e !== null)
-    .sort((a, b) => b.created_at - a.created_at)[0]
+    const best = relayLists
+      .filter((e): e is NostrEvent => e !== null)
+      .sort((a, b) => b.created_at - a.created_at)[0]
 
-  if (best) {
-    const relays = best.tags
-      .filter(t => t[0] === 'r' && t[1]?.startsWith('wss://'))
-      .map(t => t[1])
-      .slice(0, 10)
-    if (relays.length > 0) updateRelayCache(pubkey, relays)
-    return relays
+    if (best) {
+      const relays = best.tags
+        .filter(t => t[0] === 'r' && t[1]?.startsWith('wss://'))
+        .map(t => t[1])
+        .slice(0, 10)
+      if (relays.length > 0) updateRelayCache(pubkey, relays)
+      return relays
+    }
+    return []
+  })()
+
+  _authorRelaysInFlight.set(pubkey, promise)
+  try {
+    return await promise
+  } finally {
+    _authorRelaysInFlight.delete(pubkey)
   }
-  return []
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -188,8 +205,12 @@ async function _fetchEventWithOutboxImpl(
   ]).catch(() => null as NostrEvent | null)
 
   if (!result) {
-    const all = await Promise.all(racePromises)
-    result = all.find(e => e !== null) || null
+    // (M4) Hard-cap the fallback: Promise.all(racePromises) can otherwise block
+    // on the slowest relay long past the 4s race timeout. Race it against the
+    // same deadline so a slow relay can't hang the call.
+    const fallbackDeadline = new Promise<null>(resolve => setTimeout(() => resolve(null), 4000))
+    const all = await Promise.race([Promise.all(racePromises), fallbackDeadline])
+    result = all?.find(e => e !== null) || null
   }
 
   if (result) { setCachedEvent(eventId, result); return result }
@@ -257,8 +278,12 @@ export async function fetchNaddrWithOutbox(
   ]).catch(() => null as NostrEvent | null)
 
   if (!result) {
-    const all = await Promise.all(racePromises)
-    result = all.find(e => e !== null) || null
+    // (M4) Hard-cap the fallback: Promise.all(racePromises) can otherwise block
+    // on the slowest relay long past the 4s race timeout. Race it against the
+    // same deadline so a slow relay can't hang the call.
+    const fallbackDeadline = new Promise<null>(resolve => setTimeout(() => resolve(null), 4000))
+    const all = await Promise.race([Promise.all(racePromises), fallbackDeadline])
+    result = all?.find(e => e !== null) || null
   }
 
   if (result) { setCachedEvent(result.id, result); return result }

@@ -29,6 +29,7 @@ import {
   X,
   PlusCircle,
   UserPlus,
+  UserMinus,
   Layers,
   VolumeX,
 } from 'lucide-react'
@@ -52,6 +53,7 @@ export interface ProfileActionDetail {
 export const PROFILE_ACTION_NEW_CORKBOARD = 'profile:new-corkboard'
 export const PROFILE_ACTION_ADD_TO_CORKBOARD = 'profile:add-to-corkboard'
 export const PROFILE_ACTION_FOLLOW = 'profile:follow'
+export const PROFILE_ACTION_UNFOLLOW = 'profile:unfollow'
 export const PROFILE_ACTION_MUTE = 'profile:mute'
 
 // Global state for custom feeds and contacts (set by MultiColumnClient)
@@ -373,7 +375,20 @@ function ProfileModalDialog({ pubkey, isOpen, onClose }: ProfileModalDialogProps
                   </DropdownMenu>
                 )}
 
-                {!profileModalState.contacts.includes(pubkey) && (
+                {profileModalState.contacts.includes(pubkey) ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5 text-muted-foreground hover:text-red-500 hover:border-red-300"
+                    onClick={() => {
+                      window.dispatchEvent(new CustomEvent(PROFILE_ACTION_UNFOLLOW, { detail: { pubkey } }))
+                      onClose()
+                    }}
+                  >
+                    <UserMinus className="h-3.5 w-3.5" />
+                    Unfollow
+                  </Button>
+                ) : (
                   <Button
                     variant="outline"
                     size="sm"

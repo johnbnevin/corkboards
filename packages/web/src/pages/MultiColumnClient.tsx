@@ -47,6 +47,7 @@ import {
   PROFILE_ACTION_NEW_CORKBOARD,
   PROFILE_ACTION_ADD_TO_CORKBOARD,
   PROFILE_ACTION_FOLLOW,
+  PROFILE_ACTION_UNFOLLOW,
   PROFILE_ACTION_MUTE,
   type ProfileActionDetail,
 } from '@/components/ProfileModal';
@@ -2388,6 +2389,12 @@ export function MultiColumnClient() {
       void safeUpdateContacts({ add: pubkey }, { title: 'Followed', description: 'Contact list updated' });
     };
 
+    const handleUnfollow = (e: Event) => {
+      const { pubkey } = (e as CustomEvent<ProfileActionDetail>).detail;
+      if (!user?.pubkey) return;
+      void safeUpdateContacts({ remove: pubkey }, { title: 'Unfollowed', description: 'Contact list updated' });
+    };
+
     const handleMute = async (e: Event) => {
       const { pubkey } = (e as CustomEvent<ProfileActionDetail>).detail;
       try {
@@ -2401,12 +2408,14 @@ export function MultiColumnClient() {
     window.addEventListener(PROFILE_ACTION_NEW_CORKBOARD, handleNewCorkboard);
     window.addEventListener(PROFILE_ACTION_ADD_TO_CORKBOARD, handleAddToCorkboard);
     window.addEventListener(PROFILE_ACTION_FOLLOW, handleFollow);
+    window.addEventListener(PROFILE_ACTION_UNFOLLOW, handleUnfollow);
     window.addEventListener(PROFILE_ACTION_MUTE, handleMute);
 
     return () => {
       window.removeEventListener(PROFILE_ACTION_NEW_CORKBOARD, handleNewCorkboard);
       window.removeEventListener(PROFILE_ACTION_ADD_TO_CORKBOARD, handleAddToCorkboard);
       window.removeEventListener(PROFILE_ACTION_FOLLOW, handleFollow);
+      window.removeEventListener(PROFILE_ACTION_UNFOLLOW, handleUnfollow);
       window.removeEventListener(PROFILE_ACTION_MUTE, handleMute);
     };
   }, [contacts, user?.pubkey, createEvent, queryClient, toast, setCustomFeeds, setActiveTab, mutePubkey, customFeeds, safeUpdateContacts]);

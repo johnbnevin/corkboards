@@ -2,6 +2,7 @@ import { useEffect, useCallback, useState, useRef, useMemo } from 'react';
 import {
   View,
   Text,
+  Image,
   FlatList,
   StyleSheet,
   ActivityIndicator,
@@ -544,7 +545,7 @@ export function HomeScreen() {
         <View style={styles.header}>
           <View style={styles.headerRow}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.title}>Corkboards</Text>
+              <Image source={require('../../assets/corky-logo.png')} style={styles.headerLogo} resizeMode="contain" />
               <Text style={styles.subtitle}>{feedLabel}</Text>
             </View>
             <TouchableOpacity
@@ -704,6 +705,7 @@ const styles = StyleSheet.create({
   header: { paddingHorizontal: 16, paddingTop: 60, paddingBottom: 8, borderBottomWidth: 0, borderBottomColor: '#404040' },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   title: { fontSize: 24, fontWeight: 'bold', color: '#f2f2f2' },
+  headerLogo: { height: 28, width: 135, alignSelf: 'flex-start' },
   subtitle: { fontSize: 12, color: '#b3b3b3', marginTop: 2 },
   composeBtn: {
     width: 36, height: 36, borderRadius: 18,

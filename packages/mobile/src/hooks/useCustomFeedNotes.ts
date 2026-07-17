@@ -204,9 +204,11 @@ export function useCustomFeedNotes({
 
     const oldestTimestamp = current.reduce((min, e) => e.created_at < min ? e.created_at : min, current[0].created_at);
     const until = oldestTimestamp - 1;
-    const since = until - hours * 3600;
+    // No `since` floor — fetch the next batch of older notes and let relays jump
+    // over empty gaps to the next real notes (parity with web loadOlder).
+    const since = 0;
 
-    if (__DEV__) console.log('[customFeedNotes] loadMore', hours, 'hr, since:', new Date(since * 1000).toISOString());
+    if (__DEV__) console.log('[customFeedNotes] loadMore, until:', new Date(until * 1000).toISOString(), '(gap-jumping)');
 
     const events = await batchFetchByAuthors({
       nostr,

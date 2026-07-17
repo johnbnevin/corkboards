@@ -3795,8 +3795,8 @@ export function MultiColumnClient() {
         <div className="flex justify-between items-center mb-2">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
-              <BrandIcon className="h-7 w-7" />
-              <h1 className="text-2xl font-bold text-purple-600 dark:text-purple-400">corkboards.me</h1>
+              <BrandLogo className="h-8 w-auto" />
+              <h1 className="sr-only">corkboards.me</h1>
               <Button
                 variant="ghost"
                 size="sm"

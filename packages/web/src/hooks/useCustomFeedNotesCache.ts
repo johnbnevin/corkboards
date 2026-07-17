@@ -167,12 +167,15 @@ export function useCustomFeedNotesCache({
     if (cached.length === 0) return;
     
     const oldestTimestamp = cached.reduce((min, e) => e.created_at < min ? e.created_at : min, cached[0].created_at);
-    
-    // Fetch notes older than our current oldest
-    const until = oldestTimestamp;
-    const since = oldestTimestamp - (baseWindowSeconds * 3); // Go back 3x base window
-    
-    debugLog(`[customFeedCache] Loading older notes for feed ${feedId}: until ${until} since ${since}`);
+
+    // Fetch the next batch of notes OLDER than our current oldest. No `since`
+    // floor (relays return the most-recent matches in [0, until]) so we jump over
+    // empty gaps to the next real notes instead of stepping through dead windows
+    // — otherwise +25/+100 do nothing when the author has a gap in their history.
+    const until = oldestTimestamp - 1;
+    const since = 0;
+
+    debugLog(`[customFeedCache] Loading older notes for feed ${feedId}: until ${until} (gap-jumping)`);
     
     const events = await batchFetchByAuthors({
       nostr,
@@ -196,7 +199,7 @@ export function useCustomFeedNotesCache({
     }
 
     return events.length;
-  }, [query.data, queryClient, queryKey, nostr, pubkeys, limit, baseWindowSeconds, feedId, onProgress]);
+  }, [query.data, queryClient, queryKey, nostr, pubkeys, limit, feedId, onProgress]);
 
   // Load newer notes for this custom feed
   const loadNewer = useCallback(async () => {

@@ -265,6 +265,7 @@ export function HomeScreen() {
     notes: customNotes,
     isLoading: customLoading,
     refresh: customRefresh,
+    loadMore: customLoadMore,
   } = useCustomFeedNotes({
     feed: customFeedDef,
     isActive: !!activeFeedId,
@@ -272,6 +273,7 @@ export function HomeScreen() {
     multiplier: 1,
     ensureRelays: fetchRelaysForMultiple, // outbox pass: discover corkboard authors' relays first
   });
+  const [customLoadingMore, setCustomLoadingMore] = useState(false);
 
   // ── Pick the right data for the active tab ──────────────────────────────────
   const isCustomTab = !!activeFeedId;
@@ -545,6 +547,7 @@ export function HomeScreen() {
         <View style={styles.header}>
           <View style={styles.headerRow}>
             <View style={{ flex: 1 }}>
+              {/* eslint-disable-next-line @typescript-eslint/no-require-imports -- RN static asset */}
               <Image source={require('../../assets/corky-logo.png')} style={styles.headerLogo} resizeMode="contain" />
               <Text style={styles.subtitle}>{feedLabel}</Text>
             </View>
@@ -626,14 +629,17 @@ export function HomeScreen() {
           }
           ListEmptyComponent={<Text style={styles.emptyText}>No notes found</Text>}
           onEndReached={() => {
-            // Only paginate the standard following/global feed — custom feeds
-            // use their own pagination path inside useCustomFeedNotes.
             if ((isFollowingTab || isGlobalTab) && !isLoadingMore) {
               loadMoreByCount(FEED_PAGE_SIZE_MOBILE);
+            } else if (isCustomTab && !customLoadingMore) {
+              // Custom corkboards paginate through their own cache-backed loader,
+              // which iterates to accumulate a full page of new notes (no gaps).
+              setCustomLoadingMore(true);
+              customLoadMore(0).finally(() => setCustomLoadingMore(false));
             }
           }}
           onEndReachedThreshold={0.5}
-          ListFooterComponent={isLoadingMore ? (
+          ListFooterComponent={(isLoadingMore || customLoadingMore) ? (
             <View style={{ paddingVertical: 16, alignItems: 'center' }}>
               <Text style={{ color: '#888', fontSize: 12 }}>Loading more…</Text>
             </View>

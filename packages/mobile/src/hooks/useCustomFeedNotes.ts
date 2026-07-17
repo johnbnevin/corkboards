@@ -20,6 +20,7 @@ import {
   isCustomFeedCacheLoaded,
 } from './useCustomFeedNotesCache';
 import { FEED_KINDS } from '@core/feedConstants';
+import { dedupBatch, initialUntilCursor, PAGINATION_MAX_ITERATIONS } from '@core/paginationCore';
 import { fetchRssFeed, rssItemsToEvents, rssItemId } from '../lib/feedUtils';
 import { useEffect, useRef, useCallback, useMemo } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -199,53 +200,47 @@ export function useCustomFeedNotes({
 
     hoursLoadedRef.current += hours;
 
-    const current = (queryClient.getQueryData(queryKey) as NostrEvent[] | undefined) ?? [];
+    const existing = (queryClient.getQueryData(queryKey) as NostrEvent[] | undefined) ?? [];
+    const existingIds = new Set(existing.map(e => e.id));
 
-    // Empty cache: anchor at `now` and page backward, rather than no-op'ing — an
-    // author who hasn't posted inside the initial window would otherwise never
-    // load anything on +more. (M8)
-    const oldestTimestamp = current.length > 0
-      ? current.reduce((min, e) => e.created_at < min ? e.created_at : min, current[0].created_at)
-      : Math.floor(Date.now() / 1000) + 1;
-    const until = oldestTimestamp - 1;
+    // Iteratively accumulate ~one page of NEW notes, walking the `until` cursor
+    // back CONTIGUOUSLY (via dedupBatch's oldestReturned) so we cross gaps without
+    // skipping and actually load a full page — not just "a few more". Parity with
+    // web loadMoreByCount. `since:0` lets each query cross an empty stretch to the
+    // next real notes; the cursor advance keeps successive pages contiguous.
+    const target = limit;
+    const allNew: NostrEvent[] = [];
+    let untilCursor = initialUntilCursor(existing);
 
-    // Adaptive look-back (parity with web loadOlder): start at the requested step
-    // just below our current oldest note and widen exponentially only when a
-    // window comes back empty. Returns the MOST-RECENT older notes (days/weeks
-    // back) instead of leaping to years-old history — which a bare `since:0`
-    // query does, because it sweeps back until it collects `limit` notes and for
-    // sparse authors that spans years. Widening still crosses genuine gaps.
-    let windowSeconds = Math.max(hours * 3600, 3600);
-    let events: NostrEvent[] = [];
-    for (let i = 0; i < 8; i++) {
-      const since = Math.max(0, until - windowSeconds);
-      if (__DEV__) console.log('[customFeedNotes] loadMore until:', new Date(until * 1000).toISOString(), 'window', windowSeconds, 's attempt', i + 1);
-      events = await batchFetchByAuthors({
+    for (let iter = 0; iter < PAGINATION_MAX_ITERATIONS && allNew.length < target; iter++) {
+      const raw = await batchFetchByAuthors({
         nostr,
         authors: feed.pubkeys,
-        limit,
-        since,
-        until,
+        limit: target,
+        since: 0,
+        until: untilCursor,
         onProgress: onProgress ?? (() => {}),
       });
-      if (events.length > 0) break;
-      if (since === 0) break; // reached the beginning of time — nothing older exists
-      windowSeconds *= 4;
+      if (raw.length === 0) break;
+      const { trulyNew, oldestReturned } = dedupBatch(raw, existingIds);
+      if (oldestReturned >= untilCursor) break; // no cursor progress — stop
+      untilCursor = oldestReturned - 1;
+      for (const n of trulyNew) { existingIds.add(n.id); allNew.push(n); }
     }
 
-    if (__DEV__) console.log('[customFeedNotes] loadMore got', events.length, 'events');
+    if (__DEV__) console.log('[customFeedNotes] loadMore accumulated', allNew.length, 'new notes');
 
-    if (events.length > 0) {
-      await mergeCustomFeedNotes(feed.id, events);
+    if (allNew.length > 0) {
+      await mergeCustomFeedNotes(feed.id, allNew);
       queryClient.setQueryData(queryKey, (prev: NostrEvent[] | undefined) => {
-        const existing = prev ?? [];
-        const existingIds = new Set(existing.map(e => e.id));
-        const freshEvents = events.filter(e => !existingIds.has(e.id));
-        return [...existing, ...freshEvents].sort((a, b) => b.created_at - a.created_at);
+        const prevEvents = prev ?? [];
+        const seen = new Set(prevEvents.map(e => e.id));
+        const freshEvents = allNew.filter(e => !seen.has(e.id));
+        return [...prevEvents, ...freshEvents].sort((a, b) => b.created_at - a.created_at);
       });
     }
 
-    return events.length;
+    return allNew.length;
   }, [feed, queryKey, queryClient, nostr, limit, onProgress]);
 
   // addNotes — external merge (e.g. from loadMoreByCount)

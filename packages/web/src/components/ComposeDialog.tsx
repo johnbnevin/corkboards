@@ -422,7 +422,10 @@ export function ComposeDialog({
               </Button>
 
               {/* Emoji picker (standard + custom in tabs) */}
-              <Popover>
+              {/* modal: give the popover its own scroll-lock context so the emoji
+                  picker scrolls inside the compose Dialog (the Dialog's
+                  react-remove-scroll otherwise blocks wheel/touch on it). */}
+              <Popover modal>
                 <PopoverTrigger asChild>
                   <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Emoji">
                     <Smile className="h-4 w-4" />

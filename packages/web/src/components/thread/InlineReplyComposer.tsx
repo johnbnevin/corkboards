@@ -124,7 +124,9 @@ export function InlineReplyComposer({ replyTo, onCancel, onPublished, onOpenEmoj
           <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => fileInputRef.current?.click()} disabled={isUploading} title="Upload image or video">
             {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImagePlus className="h-3.5 w-3.5" />}
           </Button>
-          <Popover>
+          {/* modal: own scroll-lock context so the emoji picker scrolls inside
+              the thread Dialog (Dialog's react-remove-scroll otherwise blocks it). */}
+          <Popover modal>
             <PopoverTrigger asChild>
               <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Emoji"><Smile className="h-3.5 w-3.5" /></Button>
             </PopoverTrigger>

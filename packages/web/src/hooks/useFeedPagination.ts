@@ -23,6 +23,11 @@ import { createRelay } from '@/components/NostrProvider';
 // every render for tabs with no newer notes, changing `newerNotes`' identity and
 // re-running the entire dedup/classify pipeline memo each render. (P3)
 const EMPTY_NOTES: NostrEvent[] = [];
+
+// Bounded gap-fill: a "second pass" that scans the visible timeline for time
+// gaps and backfills each — capped so a large gap can never load thousands.
+const GAP_FILL_THRESHOLD_SECONDS = 30 * 60; // ignore gaps smaller than 30 min
+const MAX_GAPS_PER_FILL = 3;                 // fill at most the 3 biggest gaps
 import { useNostr } from '@/hooks/useNostr';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -512,6 +517,73 @@ export function useFeedPagination({
     addCustomFeedNotes, showBriefMessage, fetchAndMergeUserNotes,
   ]);
 
+  // ─── Bounded gap-fill (the "second pass") ───────────────────────────────────
+  // Scan the visible/cached author-notes for time gaps and backfill each with at
+  // most ONE page (`limit`) of the newest notes in that range, for the biggest
+  // MAX_GAPS_PER_FILL gaps only. So a 6-hour coverage gap gets filled, but a huge
+  // gap loads ~a page (not thousands) — click again to pull more of it.
+  const fillGaps = useCallback(async (): Promise<number> => {
+    let authors: string[] = [];
+    if (activeTab === 'me' && userPubkey) authors = [userPubkey];
+    else if (isCustomFeedTab && activeCustomFeed) authors = activeCustomFeed.pubkeys || [];
+    else if (isAllFollowsTab && contacts && contacts.length > 0) authors = contacts;
+    else if (isFriendTab) authors = [activeTab];
+    if (authors.length === 0) return 0;
+
+    const userInContacts = contacts?.includes(userPubkey ?? '') ?? false;
+    const allAuthorsCount = (contacts?.length ?? 0) + (userPubkey && !userInContacts ? 1 : 0);
+    const followCacheKey = ['follow-notes-cache', allAuthorsCount > 0] as const;
+    const userNotesKey = ['user-notes', userPubkey] as const;
+    const customFeedKey = activeCustomFeed ? ['custom-feed-cache', activeCustomFeed.id, activeCustomFeed.pubkeys?.length ?? 0] as const : null;
+    const cacheKey: readonly unknown[] = (activeTab === 'me' && userPubkey)
+      ? userNotesKey
+      : (isCustomFeedTab && customFeedKey ? customFeedKey : followCacheKey);
+
+    // Timeline = cache ∪ on-screen notes for these authors, newest-first.
+    const authorSet = new Set(authors);
+    const cached = (queryClient.getQueryData(cacheKey) as NostrEvent[] | undefined) ?? [];
+    const byId = new Map<string, NostrEvent>();
+    for (const n of cached) if (authorSet.has(n.pubkey)) byId.set(n.id, n);
+    for (const n of currentNotes) if (authorSet.has(n.pubkey)) byId.set(n.id, n);
+    const timeline = [...byId.values()].sort((a, b) => b.created_at - a.created_at);
+    if (timeline.length < 2) return 0;
+
+    const gaps: { since: number; until: number; span: number }[] = [];
+    for (let i = 0; i < timeline.length - 1; i++) {
+      const span = timeline[i].created_at - timeline[i + 1].created_at;
+      if (span > GAP_FILL_THRESHOLD_SECONDS) {
+        gaps.push({ since: timeline[i + 1].created_at + 1, until: timeline[i].created_at - 1, span });
+      }
+    }
+    if (gaps.length === 0) return 0;
+    gaps.sort((a, b) => b.span - a.span);
+
+    const existingIds = new Set(cached.map(e => e.id));
+    const filled: NostrEvent[] = [];
+    for (const g of gaps.slice(0, MAX_GAPS_PER_FILL)) {
+      try {
+        // limit-capped: at most one page of the newest notes in the gap range.
+        const raw = await nostr.query([{
+          kinds: [...FEED_KINDS], authors, since: g.since, until: g.until, limit,
+        }], { signal: AbortSignal.timeout(8000) });
+        for (const e of raw) {
+          if (!existingIds.has(e.id)) { existingIds.add(e.id); filled.push(e); }
+        }
+      } catch { /* non-fatal — fill what we can */ }
+    }
+    if (filled.length === 0) return 0;
+
+    const merged = [...cached, ...filled].sort((a, b) => b.created_at - a.created_at);
+    queryClient.setQueryData(cacheKey, merged);
+    import('@/lib/notesCache').then(({ mergeNotesToCache }) => mergeNotesToCache(filled));
+    if (activeTab === 'me' && onMeTabNotesLoaded) onMeTabNotesLoaded(merged);
+    debugLog('[fillGaps] filled', filled.length, 'notes across', Math.min(gaps.length, MAX_GAPS_PER_FILL), 'gaps');
+    return filled.length;
+  }, [
+    activeTab, isCustomFeedTab, activeCustomFeed, isAllFollowsTab, contacts, isFriendTab,
+    userPubkey, currentNotes, nostr, queryClient, limit, onMeTabNotesLoaded,
+  ]);
+
   // ─── Load Newer ─────────────────────────────────────────────────────────────
 
   const loadNewerNotes = useCallback(async () => {
@@ -670,6 +742,10 @@ export function useFeedPagination({
         setLastFetchTime(Math.floor(Date.now() / 1000));
         showBriefMessage('No new notes found');
       }
+
+      // 'newer' always runs the bounded gap-fill (even when no strictly-newer
+      // notes were found) so internal coverage gaps get backfilled on demand.
+      await fillGaps();
     } catch (err) {
       debugError('[loadNewer] error:', err);
       showBriefMessage('Load failed — try again');
@@ -681,7 +757,7 @@ export function useFeedPagination({
     isAllFollowsTab, isRelayTab, isCustomFeedTab,
     activeTab, contacts, activeCustomFeed, userPubkey, isFriendTab,
     nostr, currentNotes, limit, showBriefMessage, fetchAndMergeUserNotes,
-    setLastFetchTime, setNewerNotes, setNewestTimestamp,
+    setLastFetchTime, setNewerNotes, setNewestTimestamp, fillGaps,
   ]);
 
   // ─── Load More By Count ─────────────────────────────────────────────────────
@@ -879,6 +955,10 @@ export function useFeedPagination({
       } else {
         showBriefMessage('No older notes found');
       }
+
+      // Second pass: bounded gap-fill so any coverage gaps in the (now larger)
+      // timeline get backfilled — capped, so a big gap won't load thousands.
+      await fillGaps();
     } catch (err) {
       debugError('[loadMoreByCount] error:', err);
       showBriefMessage('Load failed — try again');
@@ -891,7 +971,7 @@ export function useFeedPagination({
     activeTab, contacts, activeCustomFeed, userPubkey, isFriendTab,
     nostr, queryClient, limit, _multiplier, currentNotes,
     showBriefMessage, onMeTabNotesLoaded, fetchAndMergeUserNotes,
-    setLastFetchTime, setNewerNotes, setNewestTimestamp,
+    setLastFetchTime, setNewerNotes, setNewestTimestamp, fillGaps,
   ]);
 
   return {

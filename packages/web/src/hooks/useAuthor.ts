@@ -53,73 +53,50 @@ async function fetchAuthorFromNetwork(
   signal: AbortSignal,
   nostr: NostrPool
 ): Promise<AuthorResult> {
-  try {
-    const [event] = await nostr.query(
-      [{ kinds: [0], authors: [pubkey], limit: 1 }],
-      { signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]) },
-    );
+  const netSignal = AbortSignal.any([signal, AbortSignal.timeout(4000)]);
 
-    if (event) {
-      try {
-        const metadata = n.json().pipe(n.metadata()).parse(event.content);
-        cacheProfile(pubkey, metadata, event).catch((err) => {
-          debugWarn('[useAuthor] Cache write failed:', err);
-        });
-        return { metadata, event };
-      } catch (err) {
-        debugWarn('[useAuthor] Metadata parse failed for', pubkey.slice(0, 8), err);
-        return { event };
-      }
-    }
-  } catch (err) {
-    // Fall through to fallback
-    if ((err as Error)?.name !== 'AbortError') {
-      debugWarn('[useAuthor] Pool query failed for', pubkey.slice(0, 8), (err as Error)?.message);
-    }
+  // Prefer fallback relays not recently used for backup, to spread load.
+  const backupUsed = getBackupRelaysUsed();
+  const fallbacks = [...FALLBACK_RELAYS]
+    .sort((a, b) => (backupUsed.has(a) ? 1 : 0) - (backupUsed.has(b) ? 1 : 0))
+    .slice(0, 2);
+
+  const firstEvent = (evs: NostrEvent[]): NostrEvent => {
+    const e = evs[0];
+    if (!e) throw new Error('no event');
+    return e;
+  };
+
+  // Race the pool + profile indexers + a couple of fallbacks IN PARALLEL, taking
+  // the first valid kind-0. The indexers (purplepag.es, relay.nostr.band) hold
+  // profiles for ~everyone, so a parallel race resolves far more reliably than
+  // querying the pool first and only falling back on failure — the "some users
+  // still show as user_xxxx" case.
+  const attempts: Promise<NostrEvent>[] = [
+    nostr.query([{ kinds: [0], authors: [pubkey], limit: 1 }], { signal: netSignal }).then(firstEvent),
+    ...[...PROFILE_INDEXER_RELAYS, ...fallbacks].map((relayUrl) =>
+      nostr.relay(relayUrl)
+        .query([{ kinds: [0], authors: [pubkey], limit: 1 }], { signal: netSignal })
+        .then(firstEvent),
+    ),
+  ];
+
+  let event: NostrEvent;
+  try {
+    event = await Promise.any(attempts);
+  } catch {
+    return {};
   }
 
-  const fallbackSignal = AbortSignal.any([signal, AbortSignal.timeout(3000)]);
-
-  // Prefer relays not recently used for backup to spread load
-  const backupUsed = getBackupRelaysUsed();
-  const sortedRelays = [...FALLBACK_RELAYS].sort((a, b) => {
-    const aUsed = backupUsed.has(a) ? 1 : 0;
-    const bUsed = backupUsed.has(b) ? 1 : 0;
-    return aUsed - bUsed;
-  });
-  // Query the profile indexers first (they hold kind-0 for ~everyone, so they
-  // resolve profiles that aren't on the author's own relays), then a couple of
-  // general fallbacks. Capped to keep concurrent WS connections low.
-  const relaysToTry = [...PROFILE_INDEXER_RELAYS, ...sortedRelays.slice(0, 2)];
-
   try {
-    const event = await Promise.any(
-      relaysToTry.map(async (relayUrl) => {
-        const relay = nostr.relay(relayUrl);
-        const [ev] = await relay.query(
-          [{ kinds: [0], authors: [pubkey], limit: 1 }],
-          { signal: fallbackSignal }
-        );
-        if (!ev) throw new Error('no event');
-        return ev;
-      })
-    );
-
-    try {
-      const metadata = n.json().pipe(n.metadata()).parse(event.content);
-      cacheProfile(pubkey, metadata, event).catch((err) => {
-        debugWarn('[useAuthor] Fallback cache write failed:', err);
-      });
-      return { metadata, event };
-    } catch (err) {
-      debugWarn('[useAuthor] Fallback metadata parse failed for', pubkey.slice(0, 8), err);
-      return { event };
-    }
+    const metadata = n.json().pipe(n.metadata()).parse(event.content);
+    cacheProfile(pubkey, metadata, event).catch((err) => {
+      debugWarn('[useAuthor] Cache write failed:', err);
+    });
+    return { metadata, event };
   } catch (err) {
-    if ((err as Error)?.name !== 'AggregateError') {
-      debugWarn('[useAuthor] All fallback relays failed for', pubkey.slice(0, 8));
-    }
-    return {};
+    debugWarn('[useAuthor] Metadata parse failed for', pubkey.slice(0, 8), err);
+    return { event };
   }
 }
 
@@ -170,8 +147,11 @@ export function useAuthor(pubkey: string | undefined, enabled = true) {
 
       return withConcurrencyLimit(() => fetchAuthorFromNetwork(pubkey, signal, nostr as NostrPool));
     },
-    staleTime: STALE_TIME,
+    // Resolved profiles cache for the full TTL; a still-unresolved one (no
+    // metadata) goes stale in 30s so it re-checks on the next access instead of
+    // being stuck as "user_xxxx" for the whole TTL.
+    staleTime: (query) => (query.state.data?.metadata ? STALE_TIME : 30_000),
     gcTime: CACHE_MAX_AGE,
-    retry: 1,
+    retry: 2,
   });
 }

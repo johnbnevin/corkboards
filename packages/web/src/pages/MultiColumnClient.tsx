@@ -2615,9 +2615,14 @@ export function MultiColumnClient() {
       if (hasRss) {
         setRssRefetchTrigger(prev => prev + 1);
       }
-      // No authors to paginate → done. Otherwise fall through to the author
-      // (pubkey) count-based loader below.
-      if (!hasPubkeys) return;
+      // Authors: paginate from the oldest AUTHOR note (loadCustomFeedOlder walks
+      // progressively older windows), NOT the global count-loader which anchors
+      // to the overall oldest note — so a gap between recent notes and much-older
+      // ones gets filled instead of the loader jumping straight past it.
+      if (hasPubkeys) {
+        await loadCustomFeedOlder();
+      }
+      return;
     }
     // For feeds with pubkeys or non-custom tabs, use the normal count-based loader.
     // Retry with increasing batch sizes if all fetched notes are already dismissed,
@@ -2635,7 +2640,7 @@ export function MultiColumnClient() {
       batchSize = Math.min(batchSize * 2, 200);
     }
     setFindingUndismissed(false);
-  }, [isDiscoverTab, loadMoreDiscover, isCustomFeedTab, activeCustomFeed, loadMoreByCount, hashtagNotes, extraHashtagNotes, nostr]);
+  }, [isDiscoverTab, loadMoreDiscover, isCustomFeedTab, activeCustomFeed, loadMoreByCount, loadCustomFeedOlder, hashtagNotes, extraHashtagNotes, nostr]);
 
   // Calculate IndexedDB stats for the current tab
   const _indexedDbStats = useMemo(() => {

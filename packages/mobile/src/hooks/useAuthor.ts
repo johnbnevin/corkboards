@@ -53,58 +53,40 @@ async function fetchAuthorFromNetwork(
   signal: AbortSignal,
   nostr: NostrPool,
 ): Promise<AuthorResult> {
+  const netSignal = AbortSignal.any([signal, AbortSignal.timeout(4000)]);
+
+  const firstEvent = (evs: NostrEvent[]): NostrEvent => {
+    const e = evs[0];
+    if (!e) throw new Error('no event');
+    return e;
+  };
+
+  // Race the pool + profile indexers + a couple of fallbacks IN PARALLEL, taking
+  // the first valid kind-0 — resolves far more reliably than pool-then-fallback
+  // (keeps profiles from getting stuck as "user_xxxx"). Parity with web.
+  const attempts: Promise<NostrEvent>[] = [
+    nostr.query([{ kinds: [0], authors: [pubkey], limit: 1 }], { signal: netSignal }).then(firstEvent),
+    ...[...PROFILE_INDEXER_RELAYS, ...FALLBACK_RELAYS.slice(0, 2)].map((relayUrl) =>
+      nostr.relay(relayUrl)
+        .query([{ kinds: [0], authors: [pubkey], limit: 1 }], { signal: netSignal })
+        .then(firstEvent),
+    ),
+  ];
+
+  let event: NostrEvent;
   try {
-    const [event] = await nostr.query(
-      [{ kinds: [0], authors: [pubkey], limit: 1 }],
-      { signal: AbortSignal.any([signal, AbortSignal.timeout(4000)]) },
-    );
-    if (event) {
-      try {
-        const metadata = n.json().pipe(n.metadata()).parse(event.content);
-        cacheProfile(pubkey, metadata, event);
-        return { metadata, event };
-      } catch (err) {
-        if (__DEV__) console.warn('[useAuthor] Metadata parse failed for', pubkey.slice(0, 8), err);
-        return { event };
-      }
-    }
-  } catch (err) {
-    if (__DEV__ && (err as Error)?.name !== 'AbortError') {
-      console.warn('[useAuthor] Pool query failed for', pubkey.slice(0, 8), (err as Error)?.message);
-    }
+    event = await Promise.any(attempts);
+  } catch {
+    return {};
   }
 
-  // Fallback: try individual relays (same pattern as web) — profile indexers
-  // first (they hold kind-0 for ~everyone), then a couple of general fallbacks.
-  const fallbackSignal = AbortSignal.any([signal, AbortSignal.timeout(3000)]);
-  const relaysToTry = [...PROFILE_INDEXER_RELAYS, ...FALLBACK_RELAYS.slice(0, 2)];
-
   try {
-    const event = await Promise.any(
-      relaysToTry.map(async (relayUrl) => {
-        const relay = nostr.relay(relayUrl);
-        const [ev] = await relay.query(
-          [{ kinds: [0], authors: [pubkey], limit: 1 }],
-          { signal: fallbackSignal },
-        );
-        if (!ev) throw new Error('no event');
-        return ev;
-      }),
-    );
-
-    try {
-      const metadata = n.json().pipe(n.metadata()).parse(event.content);
-      cacheProfile(pubkey, metadata, event);
-      return { metadata, event };
-    } catch (err) {
-      if (__DEV__) console.warn('[useAuthor] Fallback metadata parse failed for', pubkey.slice(0, 8), err);
-      return { event };
-    }
+    const metadata = n.json().pipe(n.metadata()).parse(event.content);
+    cacheProfile(pubkey, metadata, event);
+    return { metadata, event };
   } catch (err) {
-    if (__DEV__ && (err as Error)?.name !== 'AggregateError') {
-      console.warn('[useAuthor] All fallback relays failed for', pubkey.slice(0, 8));
-    }
-    return {};
+    if (__DEV__) console.warn('[useAuthor] Metadata parse failed for', pubkey.slice(0, 8), err);
+    return { event };
   }
 }
 
@@ -146,9 +128,11 @@ export function useAuthor(pubkey: string | undefined) {
 
       return withConcurrencyLimit(() => fetchAuthorFromNetwork(pubkey, signal, nostr as NostrPool));
     },
-    staleTime: STALE_TIME,
+    // Unresolved profiles (no metadata) go stale fast so they re-check instead
+    // of sticking as "user_xxxx" for the whole TTL. Parity with web.
+    staleTime: (query) => (query.state.data?.metadata ? STALE_TIME : 30_000),
     gcTime: CACHE_MAX_AGE,
-    retry: 1,
+    retry: 2,
     enabled: !!pubkey,
   });
 }

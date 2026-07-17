@@ -7,12 +7,19 @@ import { optimizeMediaUrl } from '@/lib/imageUtils'
 import { isImageUrl, isCdnHost } from '@/lib/mediaUtils'
 import { getBlossomFallbackUrls } from '@core/blossom'
 
-/** Video player with loading indicator */
-function VideoPlayer({ src, poster }: { src: string; poster?: string }) {
+/** Video player with loading indicator. Accepts multiple sources (the canonical
+ *  URL + Blossom mirrors) and tries the next on error before declaring failure —
+ *  so a dead mirror doesn't produce a spurious "Failed to load video". */
+function VideoPlayer({ sources, poster }: { sources: string[]; poster?: string }) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [buffered, setBuffered] = useState(0)
+  const [srcIdx, setSrcIdx] = useState(0)
   const playIntentRef = useRef(false)
+  const srcIdxRef = useRef(0)
+  const sourcesRef = useRef(sources)
+  sourcesRef.current = sources
+  const src = sources[srcIdx] ?? sources[0] ?? ''
 
   useEffect(() => {
     const video = videoRef.current
@@ -42,7 +49,15 @@ function VideoPlayer({ src, poster }: { src: string; poster?: string }) {
     }
 
     const handleError = () => {
-      setLoadState('error')
+      // Try the next mirror (same blob, different Blossom server) before giving
+      // up — only show the error once every source has failed.
+      if (srcIdxRef.current < sourcesRef.current.length - 1) {
+        srcIdxRef.current += 1
+        setSrcIdx(srcIdxRef.current)
+        setLoadState('loading')
+      } else {
+        setLoadState('error')
+      }
     }
 
     // Capture play intent - user clicked play but video might not be ready
@@ -384,7 +399,8 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
     // Use currentImageUrl (the last Blossom server we tried) so the video hits a
     // server that actually has the blob, not the original that already 404'd.
     if (imageError && tryVideoFallback) {
-      return <VideoPlayer src={currentImageUrl} poster={poster} />
+      // Try the canonical URL first, then every Blossom mirror, before failing.
+      return <VideoPlayer sources={imageSources} poster={poster} />
     }
     if (imageError) {
       if (!isSafeUrl(url)) return <span className="text-muted-foreground text-sm break-all">{url}</span>
@@ -479,7 +495,7 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
   // Direct video or forceVideo (imeta) — always render inline player, never blur
   const isDirectVideo = isVideoUrl(url) || forceVideo
   if (isDirectVideo) {
-    return <VideoPlayer src={embed.url} poster={poster} />
+    return <VideoPlayer sources={[embed.url, ...getBlossomFallbackUrls(embed.url)]} poster={poster} />
   }
 
   // Compact placeholder for iframe embeds (Rumble, etc.) — keep blur for these

@@ -33,6 +33,7 @@ export interface CustomFeedDef {
   pubkeys: string[];
   relays: string[];
   rssUrls: string[];
+  hashtags?: string[];
   columnCount?: number;
 }
 
@@ -165,9 +166,14 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
     onClearFilters,
   };
 
+  // A corkboard shows a single person's profile only when it is PURELY one npub
+  // (no hashtags, no RSS) — otherwise it's a mixed corkboard and should show the
+  // user's chosen title + what it contains.
+  const isPureSinglePubkey = !!isCustomFeedTab && activeCustomFeed?.pubkeys.length === 1
+    && (activeCustomFeed?.hashtags?.length ?? 0) === 0
+    && (activeCustomFeed?.rssUrls?.length ?? 0) === 0;
   // Hook must be called unconditionally (Rules of Hooks).
-  const singleCustomFeedPubkey = isCustomFeedTab && activeCustomFeed?.pubkeys.length === 1
-    ? activeCustomFeed.pubkeys[0] : '';
+  const singleCustomFeedPubkey = isPureSinglePubkey ? activeCustomFeed!.pubkeys[0] : '';
   const { data: customFeedAuthor } = useAuthor(singleCustomFeedPubkey);
 
   // ── Relay tab ──────────────────────────────────────────────────────────────
@@ -227,7 +233,7 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
 
   // ── Custom corkboard tab ───────────────────────────────────────────────────
   if (isCustomFeedTab && activeCustomFeed) {
-    const isSingleAuthor = activeCustomFeed.pubkeys.length === 1;
+    const isSingleAuthor = isPureSinglePubkey;
     const singlePubkey = isSingleAuthor ? activeCustomFeed.pubkeys[0] : null;
     const metadata = customFeedAuthor?.metadata;
     const displayName = metadata?.display_name || metadata?.name || (singlePubkey ? genUserName(singlePubkey) : '');
@@ -305,19 +311,22 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
                     </>
                   ) : (
                     <>
-                      <Layers className="h-8 w-8 text-purple-500" />
+                      <Layers className="h-8 w-8 text-purple-500 shrink-0" />
                       <div className="flex-1 min-w-0">
-                        <h3 className="font-semibold">{activeCustomFeed.title}</h3>
-                        <p className="text-sm text-muted-foreground">
-                          {activeCustomFeed.pubkeys.length} friends
-                          {activeCustomFeed.relays.length > 0 && ` • ${activeCustomFeed.relays.length} relays`}
-                          {activeCustomFeed.rssUrls?.length > 0 && ` • ${activeCustomFeed.rssUrls.length} RSS`}
+                        <h3 className="font-semibold break-words">{activeCustomFeed.title}</h3>
+                        <p className="text-sm text-muted-foreground break-words">
+                          {[
+                            activeCustomFeed.pubkeys.length > 0 && `${activeCustomFeed.pubkeys.length} ${activeCustomFeed.pubkeys.length === 1 ? 'npub' : 'npubs'}`,
+                            (activeCustomFeed.hashtags?.length ?? 0) > 0 && `${activeCustomFeed.hashtags!.length} ${activeCustomFeed.hashtags!.length === 1 ? 'hashtag' : 'hashtags'}`,
+                            (activeCustomFeed.rssUrls?.length ?? 0) > 0 && `${activeCustomFeed.rssUrls.length} RSS`,
+                            activeCustomFeed.relays.length > 0 && `${activeCustomFeed.relays.length} relays`,
+                          ].filter(Boolean).join(' • ')}
                         </p>
                       </div>
                     </>
                   )}
                 </div>
-                <div className="mt-3 pt-2 border-t flex items-center gap-2 text-xs text-muted-foreground">
+                <div className="mt-3 pt-2 border-t flex flex-wrap items-center gap-x-2 gap-y-2 text-xs text-muted-foreground">
                   {hasFilteredNotes ? (
                     <span className="text-orange-600 dark:text-orange-400">Notes found but filtered by settings.</span>
                   ) : (

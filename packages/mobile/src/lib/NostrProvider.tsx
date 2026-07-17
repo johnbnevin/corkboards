@@ -346,7 +346,8 @@ function hasReferenceTag(filters: NostrFilter[]): boolean {
   return filters.some(f =>
     Object.prototype.hasOwnProperty.call(f, '#e') ||
     Object.prototype.hasOwnProperty.call(f, '#a') ||
-    Object.prototype.hasOwnProperty.call(f, '#p'),
+    Object.prototype.hasOwnProperty.call(f, '#p') ||
+    Object.prototype.hasOwnProperty.call(f, '#t'),  // hashtag feeds — no authors, need wide coverage
   );
 }
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef, useTransition, lazy, Suspense } from 'react';
+import { RSS_PUBKEY } from '@core/rss';
 import { useSeoMeta } from '@unhead/react';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostr } from '@/hooks/useNostr';
@@ -3204,7 +3205,7 @@ export function MultiColumnClient() {
   // across the feed's visible authors in one batched query, so their posts can
   // render a graceful "Deleted account" treatment. Provided via context below.
   const visibleAuthors = useMemo(
-    () => [...new Set(deduplicatedNotes.map(n => n.pubkey).filter(p => p && p !== 'rss-feed'))],
+    () => [...new Set(deduplicatedNotes.map(n => n.pubkey).filter(p => p && p !== RSS_PUBKEY))],
     [deduplicatedNotes],
   );
   const deletedAuthors = useDeletedAuthors(visibleAuthors);

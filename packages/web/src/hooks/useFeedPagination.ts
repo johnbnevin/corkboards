@@ -15,6 +15,7 @@
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { RSS_PUBKEY } from '@core/rss';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { createRelay } from '@/components/NostrProvider';
 import { useNostr } from '@/hooks/useNostr';
@@ -212,7 +213,7 @@ export function useFeedPagination({
       const notesToTrack = activeTab === 'me'
         ? currentNotes
         : currentNotes.filter(n => {
-            if (n.pubkey === 'rss-feed') return false; // RSS items don't represent Nostr fetch window
+            if (n.pubkey === RSS_PUBKEY) return false; // RSS items don't represent Nostr fetch window
             if (userPubkey && n.pubkey === userPubkey) return false; // own posts
             return true;
           });

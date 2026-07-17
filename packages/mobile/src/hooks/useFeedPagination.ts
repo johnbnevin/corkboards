@@ -15,6 +15,7 @@
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { RSS_PUBKEY } from '@core/rss';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useNostr } from '../lib/NostrProvider';
 import { useQueryClient } from '@tanstack/react-query';
@@ -173,7 +174,7 @@ export function useFeedPagination({
       const notesToTrack = activeTab === 'me'
         ? currentNotes
         : currentNotes.filter(n => {
-            if (n.pubkey === 'rss-feed') return false;
+            if (n.pubkey === RSS_PUBKEY) return false;
             if (userPubkey && n.pubkey === userPubkey) return false;
             return true;
           });

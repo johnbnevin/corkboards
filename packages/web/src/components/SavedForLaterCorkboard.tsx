@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, memo, useCallback } from 'react';
+import { RSS_PUBKEY } from '@core/rss';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { NoteCard } from '@/components/NoteCard';
 import { Button } from '@/components/ui/button';
@@ -239,7 +240,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
                     note={note}
                     onThreadClick={() => onThreadClick(note.id)}
                     onOpenThread={onOpenThread}
-                    onZapClick={note.pubkey !== 'rss-feed' ? () => setZapTargetNote(note) : undefined}
+                    onZapClick={note.pubkey !== RSS_PUBKEY ? () => setZapTargetNote(note) : undefined}
                     isPinned={pinnedIds.includes(note.id)}
                     showPinButton
                     onPinClick={() => handlePinNote(note.id)}

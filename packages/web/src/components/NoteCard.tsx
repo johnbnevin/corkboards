@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react'
+import { RSS_PUBKEY } from '@core/rss';
 import { toast } from '@/hooks/useToast'
 import { type NostrEvent } from '@nostrify/nostrify'
 import { EngagementBar } from '@/components/EngagementBar'
@@ -510,7 +511,7 @@ export const NoteCard = React.memo(function NoteCard({
 }: NoteCardProps) {
   // When a media filter is active, override blurMedia to show all media
   const effectiveBlurMedia = mediaFilterActive ? false : blurMedia;
-  const isRss = note.pubkey === 'rss-feed'
+  const isRss = note.pubkey === RSS_PUBKEY
   const { data: author, isFetching: isAuthorFetching } = useAuthor(isRss ? undefined : note.pubkey)
   // Author confirmed deleted/vanished (NIP-09 profile deletion / NIP-62 vanish).
   const isDeletedAuthor = useIsDeletedAuthor(isRss ? undefined : note.pubkey)

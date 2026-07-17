@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { RSS_PUBKEY } from '@core/rss';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { type NoteClassification } from '@/lib/noteClassifier';
 import { NoteCard } from '@/components/NoteCard';
@@ -412,9 +413,9 @@ export const FeedGrid = React.memo(function FeedGrid({
                         onThreadClick={() => onThreadClick(note.id)}
                         onComment={onComment ? () => onComment(note) : undefined}
                         onOpenThread={onOpenThread}
-                        onZapClick={note.pubkey !== 'rss-feed' && onZapClick ? () => onZapClick(note) : undefined}
-                        onRepost={note.pubkey !== 'rss-feed' && onRepost ? () => onRepost(note) : undefined}
-                        onPinToBoard={note.pubkey !== 'rss-feed' && onPinToBoard ? () => onPinToBoard(note) : undefined}
+                        onZapClick={note.pubkey !== RSS_PUBKEY && onZapClick ? () => onZapClick(note) : undefined}
+                        onRepost={note.pubkey !== RSS_PUBKEY && onRepost ? () => onRepost(note) : undefined}
+                        onPinToBoard={note.pubkey !== RSS_PUBKEY && onPinToBoard ? () => onPinToBoard(note) : undefined}
                         parentNote={parentNote}
                         isFresh={freshNoteIds.has(note.id)}
                         isOwnNote={activeTab !== 'me' && !!userPubkey && note.pubkey === userPubkey}

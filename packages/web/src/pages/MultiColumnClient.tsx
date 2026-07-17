@@ -1515,7 +1515,7 @@ export function MultiColumnClient() {
   const [feedHashtags, setFeedHashtags] = useState<Set<string>>(new Set());
 
   /** Parse raw input into a feed source type + value, or null if unrecognized. */
-  const parseFeedSource = useCallback((raw: string): { type: 'relay' | 'rss' | 'pubkey' | 'hashtag'; value: string; platform?: string; label?: string } | null => {
+  const parseFeedSource = useCallback((raw: string): { type: 'relay' | 'rss' | 'pubkey' | 'hashtag'; value: string; platform?: string; label?: string; httpsUpgraded?: boolean } | null => {
     const input = raw.trim();
     if (!input) return null;
 
@@ -1527,8 +1527,12 @@ export function MultiColumnClient() {
     if (input.startsWith('wss://') || input.startsWith('ws://')) {
       return { type: 'relay', value: input };
     }
-    if (input.startsWith('http://') || input.startsWith('https://')) {
+    if (input.startsWith('https://')) {
       return { type: 'rss', value: input };
+    }
+    // Feeds are fetched via an HTTPS-only proxy — upgrade http→https automatically.
+    if (input.startsWith('http://')) {
+      return { type: 'rss', value: 'https://' + input.slice('http://'.length), httpsUpgraded: true };
     }
     // Bare domain/URL without protocol — auto-prepend https://
     if (input.includes('.') && !input.startsWith('npub') && !input.startsWith('nprofile')) {
@@ -1564,6 +1568,10 @@ export function MultiColumnClient() {
         }
       } else if (parsed.type === 'rss') {
         setFeedRssUrls(prev => new Set([...prev, parsed.value]));
+        // Notify when we upgraded http:// → https:// (feeds load via an HTTPS-only proxy)
+        if (parsed.httpsUpgraded) {
+          toast({ title: 'Changed to HTTPS', description: "Feeds load over a secure (HTTPS) proxy, so we switched http:// to https://. If this feed doesn't load, it may only be served over plain HTTP." });
+        }
         // Notify when a social media URL was auto-converted
         if (parsed.platform) {
           toast({ title: `${parsed.platform} detected`, description: `Converted to RSS feed for ${parsed.label}` });
@@ -2177,7 +2185,10 @@ export function MultiColumnClient() {
     queryFn: async () => {
       const { fetchByHashtags } = await import('@/lib/feedUtils');
       const now = Math.floor(Date.now() / 1000);
-      const since = now - 3600 * feedLimitMultiplier;
+      // Wide window (7 days × multiplier), limit-capped: fetch the most recent
+      // hashtag notes regardless of the (narrow) author window, so a hashtag's
+      // notes actually appear on first load instead of only after paginating.
+      const since = now - 3600 * 24 * 7 * feedLimitMultiplier;
       return fetchByHashtags({ nostr, hashtags: activeHashtags, limit: feedLimit, since });
     },
     enabled: canLoadNotes && isCustomFeedTab && activeHashtags.length > 0,
@@ -2576,32 +2587,36 @@ export function MultiColumnClient() {
       const hasHashtags = (activeCustomFeed.hashtags?.length ?? 0) > 0;
       const hasRss = (activeCustomFeed.rssUrls?.length ?? 0) > 0;
 
-      if (!hasPubkeys && (hasHashtags || hasRss)) {
-        if (hasHashtags) {
-          // Find the oldest note currently displayed to paginate from
-          const allCurrent = [...(hashtagNotes ?? []), ...extraHashtagNotes];
-          const oldest = allCurrent.length > 0
-            ? allCurrent.reduce((min, n) => n.created_at < min ? n.created_at : min, allCurrent[0].created_at)
-            : Math.floor(Date.now() / 1000);
-          const until = oldest - 1;
-          try {
-            const { fetchByHashtags } = await import('@/lib/feedUtils');
-            const older = await fetchByHashtags({
-              nostr, hashtags: activeCustomFeed.hashtags ?? [], limit: count, since: 0, until,
+      // Widen EVERY source this corkboard uses — not just one. Previously this
+      // only paginated hashtags/RSS when there were NO pubkeys, so a mixed board
+      // (npubs + hashtags + RSS) only ever loaded more author notes and hashtag/
+      // RSS notes never appeared beyond their initial window. We optimize for
+      // never missing notes, so load more from all of them.
+      if (hasHashtags) {
+        const allCurrent = [...(hashtagNotes ?? []), ...extraHashtagNotes];
+        const oldest = allCurrent.length > 0
+          ? allCurrent.reduce((min, n) => n.created_at < min ? n.created_at : min, allCurrent[0].created_at)
+          : Math.floor(Date.now() / 1000);
+        const until = oldest - 1;
+        try {
+          const { fetchByHashtags } = await import('@/lib/feedUtils');
+          const older = await fetchByHashtags({
+            nostr, hashtags: activeCustomFeed.hashtags ?? [], limit: count, since: 0, until,
+          });
+          if (older.length > 0) {
+            setExtraHashtagNotes(prev => {
+              const seen = new Set(prev.map(n => n.id));
+              return [...prev, ...older.filter(n => !seen.has(n.id))];
             });
-            if (older.length > 0) {
-              setExtraHashtagNotes(prev => {
-                const seen = new Set(prev.map(n => n.id));
-                return [...prev, ...older.filter(n => !seen.has(n.id))];
-              });
-            }
-          } catch { /* ignore */ }
-        }
-        if (hasRss) {
-          setRssRefetchTrigger(prev => prev + 1);
-        }
-        return;
+          }
+        } catch { /* ignore */ }
       }
+      if (hasRss) {
+        setRssRefetchTrigger(prev => prev + 1);
+      }
+      // No authors to paginate → done. Otherwise fall through to the author
+      // (pubkey) count-based loader below.
+      if (!hasPubkeys) return;
     }
     // For feeds with pubkeys or non-custom tabs, use the normal count-based loader.
     // Retry with increasing batch sizes if all fetched notes are already dismissed,

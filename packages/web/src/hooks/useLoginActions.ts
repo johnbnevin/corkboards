@@ -186,7 +186,23 @@ export function useLoginActions() {
 
     // Login via nostrconnect:// deep link (Amber on Android)
     async amberConnect(signal?: AbortSignal): Promise<void> {
-      const sk = generateSecretKey();
+      // Reuse a persisted client key across sessions. Amber grants "always" to a
+      // specific client pubkey; generating a fresh key every login made Amber
+      // treat each connection as a new app and re-prompt every time. This key
+      // only authorizes the NIP-46 channel (revocable in Amber), not identity.
+      const AMBER_CLIENT_KEY = 'corkboard:amber-client-nsec';
+      let sk: Uint8Array | undefined;
+      try {
+        const stored = localStorage.getItem(AMBER_CLIENT_KEY);
+        if (stored) {
+          const decoded = nip19.decode(stored);
+          if (decoded.type === 'nsec') sk = decoded.data as Uint8Array;
+        }
+      } catch { /* ignore */ }
+      if (!sk) {
+        sk = generateSecretKey();
+        try { localStorage.setItem(AMBER_CLIENT_KEY, nip19.nsecEncode(sk)); } catch { /* ignore */ }
+      }
       const clientPubkey = getPublicKey(sk);
       const clientNsec = nip19.nsecEncode(sk);
       const clientSigner = new NSecSigner(sk);

@@ -204,20 +204,30 @@ export function useCustomFeedNotes({
 
     const oldestTimestamp = current.reduce((min, e) => e.created_at < min ? e.created_at : min, current[0].created_at);
     const until = oldestTimestamp - 1;
-    // No `since` floor — fetch the next batch of older notes and let relays jump
-    // over empty gaps to the next real notes (parity with web loadOlder).
-    const since = 0;
 
-    if (__DEV__) console.log('[customFeedNotes] loadMore, until:', new Date(until * 1000).toISOString(), '(gap-jumping)');
-
-    const events = await batchFetchByAuthors({
-      nostr,
-      authors: feed.pubkeys,
-      limit,
-      since,
-      until,
-      onProgress: onProgress ?? (() => {}),
-    });
+    // Adaptive look-back (parity with web loadOlder): start at the requested step
+    // just below our current oldest note and widen exponentially only when a
+    // window comes back empty. Returns the MOST-RECENT older notes (days/weeks
+    // back) instead of leaping to years-old history — which a bare `since:0`
+    // query does, because it sweeps back until it collects `limit` notes and for
+    // sparse authors that spans years. Widening still crosses genuine gaps.
+    let windowSeconds = Math.max(hours * 3600, 3600);
+    let events: NostrEvent[] = [];
+    for (let i = 0; i < 8; i++) {
+      const since = Math.max(0, until - windowSeconds);
+      if (__DEV__) console.log('[customFeedNotes] loadMore until:', new Date(until * 1000).toISOString(), 'window', windowSeconds, 's attempt', i + 1);
+      events = await batchFetchByAuthors({
+        nostr,
+        authors: feed.pubkeys,
+        limit,
+        since,
+        until,
+        onProgress: onProgress ?? (() => {}),
+      });
+      if (events.length > 0) break;
+      if (since === 0) break; // reached the beginning of time — nothing older exists
+      windowSeconds *= 4;
+    }
 
     if (__DEV__) console.log('[customFeedNotes] loadMore got', events.length, 'events');
 

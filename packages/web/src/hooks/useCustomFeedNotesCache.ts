@@ -167,24 +167,32 @@ export function useCustomFeedNotesCache({
     if (cached.length === 0) return;
     
     const oldestTimestamp = cached.reduce((min, e) => e.created_at < min ? e.created_at : min, cached[0].created_at);
-
-    // Fetch the next batch of notes OLDER than our current oldest. No `since`
-    // floor (relays return the most-recent matches in [0, until]) so we jump over
-    // empty gaps to the next real notes instead of stepping through dead windows
-    // — otherwise +25/+100 do nothing when the author has a gap in their history.
     const until = oldestTimestamp - 1;
-    const since = 0;
 
-    debugLog(`[customFeedCache] Loading older notes for feed ${feedId}: until ${until} (gap-jumping)`);
-    
-    const events = await batchFetchByAuthors({
-      nostr,
-      authors: pubkeys,
-      limit,
-      until,
-      since,
-      onProgress: onProgress ?? (() => {}),
-    });
+    // Adaptive look-back: start at the base window just below our current oldest
+    // note and widen exponentially only when a window comes back empty. This
+    // returns the MOST-RECENT older notes (days/weeks back) rather than leaping
+    // straight to years-old history — which is what a bare `since:0` query does,
+    // because it sweeps backward until it collects `limit` notes and, for sparse
+    // authors, that spans years. Widening still crosses genuine gaps (unlike the
+    // old fixed window, which got stuck returning nothing across a gap).
+    let windowSeconds = baseWindowSeconds;
+    let events: NostrEvent[] = [];
+    for (let i = 0; i < 8; i++) {
+      const since = Math.max(0, until - windowSeconds);
+      debugLog(`[customFeedCache] Loading older notes for feed ${feedId}: until ${until}, window ${windowSeconds}s (attempt ${i + 1})`);
+      events = await batchFetchByAuthors({
+        nostr,
+        authors: pubkeys,
+        limit,
+        until,
+        since,
+        onProgress: onProgress ?? (() => {}),
+      });
+      if (events.length > 0) break;
+      if (since === 0) break; // reached the beginning of time — nothing older exists
+      windowSeconds *= 4;
+    }
 
     if (events.length > 0) {
       await mergeCustomFeedNotes(feedId, events);
@@ -199,7 +207,7 @@ export function useCustomFeedNotesCache({
     }
 
     return events.length;
-  }, [query.data, queryClient, queryKey, nostr, pubkeys, limit, feedId, onProgress]);
+  }, [query.data, queryClient, queryKey, nostr, pubkeys, limit, feedId, onProgress, baseWindowSeconds]);
 
   // Load newer notes for this custom feed
   const loadNewer = useCallback(async () => {

@@ -2577,6 +2577,11 @@ export function MultiColumnClient() {
   // "Finding undismissed" state — only triggered from +25/+100 clicks when all
   // fetched notes are already dismissed. NOT auto-triggered by manual dismissal.
   const [findingUndismissed, setFindingUndismissed] = useState(false);
+
+  // Bumped after a +25/+100 load so FeedGrid grows its render window to reveal the
+  // just-loaded (older) notes — otherwise they stay sliced off below the fold until
+  // a scroll or Consolidate. See FeedGrid revealMoreTick.
+  const [revealMoreTick, setRevealMoreTick] = useState(0);
   const allDismissedRef = useRef(false);
 
   // Wrapper for count-based load more (+25, +100) — handles hashtag/RSS-only feeds
@@ -2624,6 +2629,8 @@ export function MultiColumnClient() {
       if (hasPubkeys) {
         await loadCustomFeedOlder();
       }
+      // Reveal what we just loaded (older notes appended below the fold).
+      setRevealMoreTick(t => t + 1);
       return;
     }
     // For feeds with pubkeys or non-custom tabs, use the normal count-based loader.
@@ -2642,6 +2649,8 @@ export function MultiColumnClient() {
       batchSize = Math.min(batchSize * 2, 200);
     }
     setFindingUndismissed(false);
+    // Reveal what we just loaded (older notes appended below the fold).
+    setRevealMoreTick(t => t + 1);
   }, [isDiscoverTab, loadMoreDiscover, isCustomFeedTab, activeCustomFeed, loadMoreByCount, loadCustomFeedOlder, hashtagNotes, extraHashtagNotes, nostr]);
 
   // Calculate IndexedDB stats for the current tab
@@ -4483,6 +4492,7 @@ export function MultiColumnClient() {
           isLookingFurther={isCustomFeedTab ? isLookingFurtherCustomFeed : false}
           isLoadingNewer={isLoadingNewer}
           blankSpaceCount={blankSpaceCount}
+          revealMoreTick={revealMoreTick}
           onLoadNewer={isSavedTab ? () => {} : loadNewerNotes}
           onLoadMore={isSavedTab ? () => {} : handleLoadMore}
           onConsolidate={consolidate}

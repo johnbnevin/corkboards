@@ -95,6 +95,11 @@ interface FeedGridProps {
   isLoadingNewer: boolean;
   /** Number of blank/collapsed placeholders in the current view */
   blankSpaceCount: number;
+  /** Increments each time the user clicks +25/+100 — grows the render window so
+   *  the just-loaded OLDER notes actually render (they're appended below the fold
+   *  and, since the column-first ids don't change, wouldn't otherwise show until a
+   *  scroll or a Consolidate). */
+  revealMoreTick?: number;
   /** Called when "Load newer posts" is clicked */
   onLoadNewer: () => void;
   /** Called when "Load more posts" is clicked with specific hours */
@@ -174,6 +179,7 @@ export const FeedGrid = React.memo(function FeedGrid({
   isLookingFurther,
   isLoadingNewer: _isLoadingNewer,
   blankSpaceCount: _blankSpaceCount,
+  revealMoreTick,
   onLoadNewer: _onLoadNewer,
   onLoadMore: _onLoadMore,
   onConsolidate: _onConsolidate,
@@ -220,6 +226,17 @@ export const FeedGrid = React.memo(function FeedGrid({
       setRenderLimit(INITIAL_RENDER_PER_COL);
     }
   }, [columns]);
+
+  // Explicit "+25/+100" reveal: the user asked to load more, so grow the render
+  // window to include the notes that were just appended (older notes land past
+  // the current renderLimit and, because the column-first ids don't change, the
+  // reset effect above never fires for them). Runs only on the tick change, so
+  // lazy rendering stays in effect for normal scrolling.
+  useEffect(() => {
+    if (!revealMoreTick) return; // 0 / undefined = initial mount, nothing to reveal
+    setRenderLimit(Math.min(maxColLength, MAX_RENDER_PER_COL));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealMoreTick]);
 
   // Expand render window when user scrolls near the bottom
   const sentinelRef = useRef<HTMLDivElement>(null);

@@ -17,11 +17,34 @@ import {
   Modal,
   Image,
 } from 'react-native';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { getBlossomFallbackUrls } from '@core/blossom';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56;
+
+/**
+ * InlineVideo — plays a video in-place with native controls (expo-video). Kept a
+ * separate component so its useVideoPlayer hook stays out of MediaLink's
+ * conditional render branches (Rules of Hooks). Does not autoplay.
+ */
+function InlineVideo({ url }: { url: string }) {
+  const player = useVideoPlayer(url, (p) => {
+    p.loop = false;
+  });
+  return (
+    <View style={styles.videoContainer}>
+      <VideoView
+        player={player}
+        style={styles.videoPlayer}
+        contentFit="contain"
+        nativeControls
+        allowsFullscreen
+      />
+    </View>
+  );
+}
 
 // ─── URL detection helpers ───────────────────────────────────────────────────
 
@@ -258,15 +281,8 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
         </TouchableOpacity>
       );
     }
-    return (
-      <TouchableOpacity
-        style={styles.videoPlaceholder}
-        onPress={() => Linking.openURL(embed.url)}
-      >
-        <Text style={styles.videoIcon}>{'>'}</Text>
-        <Text style={styles.videoLabel}>Play video</Text>
-      </TouchableOpacity>
-    );
+    // Inline player (native controls) instead of kicking out to the browser.
+    return <InlineVideo url={embed.url} />;
   }
 
   // Render link preview
@@ -349,19 +365,18 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
-  videoPlaceholder: {
+  videoContainer: {
     width: MEDIA_WIDTH,
-    height: 80,
-    backgroundColor: '#333',
     borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-    gap: 8,
+    overflow: 'hidden',
+    backgroundColor: '#000',
     marginVertical: 6,
   },
-  videoIcon: { color: '#b3b3b3', fontSize: 20 },
-  videoLabel: { color: '#999', fontSize: 13 },
+  videoPlayer: {
+    width: MEDIA_WIDTH,
+    height: Math.round((MEDIA_WIDTH * 9) / 16),
+    backgroundColor: '#000',
+  },
   blurPlaceholder: {
     width: MEDIA_WIDTH,
     height: 36,

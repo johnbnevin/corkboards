@@ -240,7 +240,43 @@ export function useCustomFeedNotes({
       });
     }
 
-    return allNew.length;
+    // Second pass: bounded gap-fill. Scan the timeline for gaps > 30 min and
+    // backfill the biggest few (≤3), each capped at one page (`limit`) of the
+    // newest notes in the gap — so a 6-hour gap fills but a huge one won't load
+    // thousands. Parity with web fillGaps.
+    const timeline = ((queryClient.getQueryData(queryKey) as NostrEvent[] | undefined) ?? [])
+      .slice().sort((a, b) => b.created_at - a.created_at);
+    const GAP_FILL_THRESHOLD_SECONDS = 30 * 60;
+    const MAX_GAPS_PER_FILL = 3;
+    const gaps: { since: number; until: number; span: number }[] = [];
+    for (let i = 0; i < timeline.length - 1; i++) {
+      const span = timeline[i].created_at - timeline[i + 1].created_at;
+      if (span > GAP_FILL_THRESHOLD_SECONDS) {
+        gaps.push({ since: timeline[i + 1].created_at + 1, until: timeline[i].created_at - 1, span });
+      }
+    }
+    gaps.sort((a, b) => b.span - a.span);
+    const seenIds = new Set(timeline.map(e => e.id));
+    const filled: NostrEvent[] = [];
+    for (const g of gaps.slice(0, MAX_GAPS_PER_FILL)) {
+      const raw = await batchFetchByAuthors({
+        nostr, authors: feed.pubkeys, limit, since: g.since, until: g.until,
+        onProgress: onProgress ?? (() => {}),
+      }).catch(() => [] as NostrEvent[]);
+      for (const e of raw) if (!seenIds.has(e.id)) { seenIds.add(e.id); filled.push(e); }
+    }
+    if (filled.length > 0) {
+      await mergeCustomFeedNotes(feed.id, filled);
+      queryClient.setQueryData(queryKey, (prev: NostrEvent[] | undefined) => {
+        const prevEvents = prev ?? [];
+        const seen = new Set(prevEvents.map(e => e.id));
+        const fresh = filled.filter(e => !seen.has(e.id));
+        return [...prevEvents, ...fresh].sort((a, b) => b.created_at - a.created_at);
+      });
+      if (__DEV__) console.log('[customFeedNotes] gap-fill added', filled.length);
+    }
+
+    return allNew.length + filled.length;
   }, [feed, queryKey, queryClient, nostr, limit, onProgress]);
 
   // addNotes — external merge (e.g. from loadMoreByCount)

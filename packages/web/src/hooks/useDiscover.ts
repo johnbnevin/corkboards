@@ -51,9 +51,10 @@ export function useDiscover(follows: string[] | undefined, enabled: boolean = tr
 
   const runDiscovery = useCallback(async () => {
     if (!shouldRun || !follows || isRunningRef.current) return
+    if (!user?.pubkey) return // narrows `user` for TS (B2 — no non-null assertion)
 
     // Check cache first (valid for 5 minutes)
-    const cacheKey = user!.pubkey
+    const cacheKey = user.pubkey
     const cached = discoverCache.get(cacheKey)
     if (cached && cached.lastUpdated && Date.now() - cached.lastUpdated < 5 * 60 * 1000) {
       setState(cached)
@@ -69,7 +70,7 @@ export function useDiscover(follows: string[] | undefined, enabled: boolean = tr
 
     try {
       const followSet = new Set(follows)
-      const userPubkey = user!.pubkey
+      const userPubkey = user.pubkey
 
       const engagementMap = new Map<string, { type: 'reply' | 'repost' | 'quote'; by: string }[]>()
       const originalNoteIds = new Set<string>()

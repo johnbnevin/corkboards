@@ -2216,7 +2216,7 @@ export function MultiColumnClient() {
 
   // RSS for custom corkboard (if feed has RSS URLs) — fetches ALL URLs
   const hasRssInCustomFeed = isCustomFeedTab && (activeCustomFeed?.rssUrls?.length ?? 0) > 0;
-  const activeRssUrls = hasRssInCustomFeed ? activeCustomFeed!.rssUrls : [];
+  const activeRssUrls = hasRssInCustomFeed ? (activeCustomFeed?.rssUrls ?? []) : [];
   const { data: customFeedRssNotes, refetch: refetchCustomRss } = useQuery<NostrEvent[]>({
     queryKey: ['custom-feed-rss', activeCustomFeed?.id, activeRssUrls.join(',')],
     queryFn: async () => {
@@ -4463,7 +4463,8 @@ export function MultiColumnClient() {
               isFollowed={isCustomFeedTab && activeCustomFeed?.pubkeys?.length === 1 ? contacts?.includes(activeCustomFeed.pubkeys[0]) : undefined}
               onToggleFollow={isCustomFeedTab && activeCustomFeed?.pubkeys?.length === 1 && user?.pubkey ? () => {
                 if (!user?.pubkey) return;
-                const pk = activeCustomFeed!.pubkeys[0];
+                const pk = activeCustomFeed?.pubkeys?.[0];
+                if (!pk) return;
                 if (contacts?.includes(pk)) {
                   void safeUpdateContacts({ remove: pk }, { title: 'Unfollowed', description: 'Contact list updated' });
                 } else {

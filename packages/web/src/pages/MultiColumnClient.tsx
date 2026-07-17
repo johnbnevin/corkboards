@@ -35,6 +35,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { HashtagActionContext } from '@/contexts/hashtagAction';
 import { DeletedAuthorsContext } from '@/contexts/deletedAuthors';
+import { BrandIcon } from '@/components/BrandIcon';
+import { BrandLogo } from '@/components/BrandLogo';
 import { useDeletedAuthors } from '@/hooks/useDeletedAuthors';
 import { ProfileCard } from '@/components/ProfileCard';
 import { ThreadPanel } from '@/components/thread'
@@ -3537,7 +3539,9 @@ export function MultiColumnClient() {
     return (
       <div className="fixed inset-0 bg-background flex items-center justify-center z-50">
         <div className="text-center space-y-4 max-w-md px-4 w-full">
-          <div className={`text-5xl ${isDone ? '' : 'animate-bounce'}`}>📌</div>
+          <div className={`flex justify-center ${isDone ? '' : 'animate-bounce'}`}>
+            <BrandLogo className="h-10 w-auto" />
+          </div>
           <h2 className="text-xl font-bold text-purple-600 dark:text-purple-400">
             {isDone ? 'Signed out' : 'Logging out'}
           </h2>
@@ -3634,7 +3638,7 @@ export function MultiColumnClient() {
             {/* Mobile: single row — pin, theme, settings, backup, relay | post, avatar */}
             <div className="flex items-center justify-between gap-1">
               <div className="flex items-center gap-1">
-                <span className="text-base leading-none px-0.5">📌</span>
+                <BrandIcon className="h-5 w-5 shrink-0 px-0.5" />
                 <Button variant="ghost" size="sm" onClick={toggleTheme} className="h-7 w-7 p-0" title={theme === 'dark' ? 'Light mode' : 'Dark mode'}>
                   {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
                 </Button>
@@ -3791,7 +3795,7 @@ export function MultiColumnClient() {
         <div className="flex justify-between items-center mb-2">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
-              <span className="text-2xl">📌</span>
+              <BrandIcon className="h-7 w-7" />
               <h1 className="text-2xl font-bold text-purple-600 dark:text-purple-400">corkboards.me</h1>
               <Button
                 variant="ghost"

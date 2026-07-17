@@ -6,7 +6,9 @@
 export function BrandLogo({ className = 'h-10 w-auto' }: { className?: string }) {
   return (
     <img
-      src="/Corkboards-Logo-Corky.png"
+      // ?v= busts the service-worker/browser cache for the stable filename —
+      // bump this whenever the logo art changes so users get the new version.
+      src="/Corkboards-Logo-Corky.png?v=2"
       alt="Corkboards"
       className={className}
       draggable={false}

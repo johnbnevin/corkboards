@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { BrandLogo } from '@/components/BrandLogo';
 
 interface RelayInfo {
   url: string;
@@ -35,10 +36,9 @@ export function LoadingSplashScreen({ message, status, detail, relays }: Loading
   return (
     <div className="fixed inset-0 bg-background flex items-center justify-center z-50">
       <div className="text-center space-y-4 max-w-md w-full px-6">
-        <div className="text-5xl">📌</div>
-        <h2 className="text-xl font-bold text-purple-600 dark:text-purple-400">
-          corkboards.me
-        </h2>
+        <div className="flex justify-center">
+          <BrandLogo className="h-10 w-auto" />
+        </div>
 
         <div className="flex items-center justify-center gap-2">
           <div className="animate-spin h-4 w-4 border-2 border-purple-500 border-t-transparent rounded-full shrink-0" />

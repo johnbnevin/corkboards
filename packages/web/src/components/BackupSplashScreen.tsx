@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { BrandLogo } from '@/components/BrandLogo';
 import type { BackupStatus } from '@/hooks/useNostrBackup';
 import { TIPS } from '@/lib/tips';
 
@@ -46,10 +47,9 @@ export function BackupSplashScreen({
   return (
     <div className="fixed inset-0 bg-background flex items-center justify-center z-50">
       <div className="text-center space-y-4 max-w-md px-4 w-full">
-        <div className={`text-5xl ${isDone ? '' : 'animate-bounce'}`}>📌</div>
-        <h2 className="text-xl font-bold text-purple-600 dark:text-purple-400">
-          corkboards.me
-        </h2>
+        <div className={`flex justify-center ${isDone ? '' : 'animate-bounce'}`}>
+          <BrandLogo className="h-10 w-auto" />
+        </div>
 
         {/* Checking / found / restoring — show spinner */}
         {!isDone && !isError && (

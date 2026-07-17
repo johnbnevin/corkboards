@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Eye, EyeOff, Copy, Check, ChevronLeft, Link2, ShieldCheck, KeyRound, QrCode, BookKey, Smartphone, ExternalLink } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { BrandLogo } from '@/components/BrandLogo';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/hooks/useToast';
@@ -637,9 +638,8 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
       <div className="w-full max-w-md space-y-6">
         {/* Branding */}
         <div className="text-center space-y-2">
-          <div className="flex items-center justify-center gap-2 mb-4">
-            <span className="text-3xl">📌</span>
-            <h1 className="text-3xl font-bold text-purple-600 dark:text-purple-400">corkboards.me</h1>
+          <div className="flex items-center justify-center mb-4">
+            <BrandLogo className="h-12 w-auto" />
           </div>
           <p className="text-muted-foreground">No email needed. Just pick a name and you're in.</p>
           {loginView === 'main' && (

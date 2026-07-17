@@ -11,6 +11,7 @@ import { useAuth } from '../lib/AuthContext';
 import { useZap } from '../hooks/useZap';
 import { useNoteEngagement } from '../hooks/useNoteEngagement';
 import { EmojiPickerModal } from './EmojiPicker';
+import { recordUserZap, hasUserZapped } from '../lib/userZapCache';
 
 interface NoteActionsProps {
   event: NostrEvent;
@@ -32,6 +33,10 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
   const [zapModalVisible, setZapModalVisible] = useState(false);
   const [zapAmount, setZapAmount] = useState('21');
   const [emojiPickerVisible, setEmojiPickerVisible] = useState(false);
+  // Optimistic zapped flag — seeded from the session cache so a note the user
+  // already zapped shows active immediately, before the zap receipt is fetched.
+  const [zappedOverride, setZappedOverride] = useState<boolean>(() => hasUserZapped(event.id));
+  const zapped = zappedOverride || (engagement?.zapCount ?? 0) > 0;
 
   // Real relay state wins once it confirms the action; the optimistic override
   // only fills the gap until the engagement query refetches (and is reverted in
@@ -90,6 +95,18 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     await publishReaction('+');
   };
 
+  // Tap a grouped reaction chip to add that reaction. If the user already
+  // reacted with it (or a like publish is mid-flight) this is a no-op, matching
+  // handleLike's duplicate-publish guard. `:shortcode:` custom emoji can't be
+  // re-published from the badge alone (no NIP-30 url), so they're display-only.
+  const handleChipPress = async (group: { emoji: string; reacted: boolean }) => {
+    if (!signer || group.reacted || likePending) return;
+    if (group.emoji === '❤️') return publishReaction('+');
+    if (group.emoji === '👎') return publishReaction('-');
+    if (/^:[^:]+:$/.test(group.emoji)) return; // custom emoji — display only
+    await publishReaction(group.emoji);
+  };
+
   const handleRepost = async () => {
     if (!signer || reposted || repostPending) return;
     setRepostPending(true);
@@ -114,6 +131,18 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     }
   };
 
+  // Fire a zap and, on success, record it optimistically so the zap icon
+  // lights up right away (mirrors web's recordUserZap in NoteCard).
+  const runZap = (sats: number) => {
+    zap(sats)
+      .then(() => {
+        recordUserZap(event.id);
+        setZappedOverride(true);
+        queryClient.invalidateQueries({ queryKey: ['note-engagement', event.id] });
+      })
+      .catch(() => { /* error shown via effect */ });
+  };
+
   const handleZapPress = () => {
     if (!nwcConnected) {
       Alert.alert('No wallet', 'Connect a Lightning wallet in Settings to send zaps.');
@@ -134,7 +163,7 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
             onPress: (value: string | undefined) => {
               const sats = parseInt(value || '21', 10);
               if (!isNaN(sats) && sats > 0) {
-                zap(sats).catch(() => { /* error shown via effect */ });
+                runZap(sats);
               }
             },
           },
@@ -152,12 +181,30 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     const sats = parseInt(zapAmount, 10);
     if (!isNaN(sats) && sats > 0) {
       setZapModalVisible(false);
-      zap(sats).catch(() => { /* error shown via effect */ });
+      runZap(sats);
     }
   };
 
+  const reactionGroups = engagement?.reactionGroups ?? [];
+
   return (
     <>
+      {reactionGroups.length > 0 && (
+        <View style={styles.reactionChips}>
+          {reactionGroups.map((g) => (
+            <TouchableOpacity
+              key={g.emoji}
+              style={[styles.chip, g.reacted && styles.chipActive]}
+              onPress={() => requireAuth(() => handleChipPress(g))}
+              disabled={likePending}
+            >
+              <Text style={styles.chipEmoji}>{g.emoji}</Text>
+              <Text style={[styles.chipCount, g.reacted && styles.chipCountActive]}>{g.count}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+
       <View style={styles.bar}>
         <TouchableOpacity
           style={styles.action}
@@ -207,9 +254,9 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
             {isZapping ? (
               <ActivityIndicator size="small" color="#f59e0b" />
             ) : (
-              <Text style={[styles.icon, styles.zapIcon]}>⚡</Text>
+              <Text style={[styles.icon, styles.zapIcon, zapped && styles.activeZap]}>⚡</Text>
             )}
-            {(engagement?.zapCount ?? 0) > 0 && <Text style={[styles.count, styles.zapIcon]}>{engagement?.zapCount}</Text>}
+            {(engagement?.zapCount ?? 0) > 0 && <Text style={[styles.count, styles.zapIcon, zapped && styles.activeZap]}>{engagement?.zapCount}</Text>}
           </TouchableOpacity>
         ) : null}
       </View>
@@ -257,7 +304,19 @@ const styles = StyleSheet.create({
   activeRepost: { color: '#22c55e' },
   activeBookmark: { color: '#f97316' },
   zapIcon: { color: '#f59e0b' },
+  activeZap: { color: '#f59e0b', fontWeight: '700' },
   count: { fontSize: 12, color: '#b3b3b3' },
+  // Grouped emoji reaction chips (mirrors web's ReactionBadges)
+  reactionChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  chip: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12,
+    backgroundColor: '#2a2a2a', borderWidth: 1, borderColor: '#404040',
+  },
+  chipActive: { backgroundColor: '#3a2a33', borderColor: '#ec4899' },
+  chipEmoji: { fontSize: 13, color: '#f2f2f2' },
+  chipCount: { fontSize: 11, color: '#b3b3b3' },
+  chipCountActive: { color: '#ec4899', fontWeight: '600' },
   // Android zap modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center' },
   modalCard: { backgroundColor: '#2a2a2a', borderRadius: 12, padding: 20, width: 260, gap: 12 },

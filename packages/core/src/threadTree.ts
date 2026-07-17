@@ -52,11 +52,6 @@ export function getParentId(event: NostrEvent): string | null {
   return isValidEventId(last) ? last : null
 }
 
-/** Check if event is a direct reply to the given eventId */
-export function isDirectReply(event: NostrEvent, eventId: string): boolean {
-  return getParentId(event) === eventId
-}
-
 /**
  * Parent reference for TREE ATTACHMENT: the NIP-10 `e` parent when present,
  * otherwise the NIP-22 addressable parent `a`-coordinate, otherwise the external
@@ -84,11 +79,6 @@ function threadCoordinate(e: NostrEvent): string | null {
     return `${e.kind}:${e.pubkey}`
   }
   return null
-}
-
-/** Get the root event ID from an event's thread tags */
-export function getRootId(event: NostrEvent): string | null {
-  return parseThreadTags(event).root ?? null
 }
 
 /**
@@ -177,35 +167,6 @@ export function buildThreadTree(
   }
 
   return buildNode(rootEvent)
-}
-
-/**
- * Extract the ancestor chain from target back to root.
- * Returns events in order: [root, ..., parent, target]
- */
-export function getAncestorChain(
-  events: NostrEvent[],
-  targetId: string,
-  rootId: string,
-): NostrEvent[] {
-  if (targetId === rootId) return []
-  const eventMap = new Map<string, NostrEvent>()
-  for (const e of events) eventMap.set(e.id, e)
-
-  const chain: NostrEvent[] = []
-  let currentId: string | null = targetId
-  const visited = new Set<string>()
-
-  while (currentId && currentId !== rootId && chain.length < 20) {
-    if (visited.has(currentId)) break
-    visited.add(currentId)
-    const event = eventMap.get(currentId)
-    if (!event) break
-    chain.unshift(event)
-    currentId = getParentId(event)
-  }
-
-  return chain
 }
 
 /**

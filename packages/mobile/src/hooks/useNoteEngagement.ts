@@ -12,6 +12,13 @@ import { useQuery } from '@tanstack/react-query';
 import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 
+/** One grouped emoji reaction: the display emoji, its count, and whether the current user reacted with it. */
+export interface ReactionGroup {
+  emoji: string;
+  count: number;
+  reacted: boolean;
+}
+
 export interface NoteEngagement {
   likeCount: number;
   repostCount: number;
@@ -20,9 +27,22 @@ export interface NoteEngagement {
   liked: boolean;
   /** True when the current user has an existing kind-6 repost of this note. */
   reposted: boolean;
+  /** Kind-7 reactions grouped by normalized emoji, sorted by count desc. */
+  reactionGroups: ReactionGroup[];
 }
 
-const EMPTY: NoteEngagement = { likeCount: 0, repostCount: 0, zapCount: 0, liked: false, reposted: false };
+const EMPTY: NoteEngagement = { likeCount: 0, repostCount: 0, zapCount: 0, liked: false, reposted: false, reactionGroups: [] };
+
+/**
+ * Normalize a kind-7 reaction content to a display emoji.
+ * "" or "+" → heart (like); "-" → thumbs-down (dislike); otherwise the
+ * emoji / :shortcode: as-is (mirrors web's resolveReactionEmoji intent).
+ */
+function normalizeReaction(content: string): string {
+  if (content === '' || content === '+') return '❤️';
+  if (content === '-') return '👎';
+  return content;
+}
 
 export function useNoteEngagement(eventId: string | undefined) {
   const { nostr } = useNostr();
@@ -40,6 +60,9 @@ export function useNoteEngagement(eventId: string | undefined) {
       );
 
       let likeCount = 0, repostCount = 0, zapCount = 0, liked = false, reposted = false;
+      // emoji → { count, reacted } — groups every kind-7 reaction (likes,
+      // dislikes, emoji) so the UI can render grouped badges like web.
+      const groupMap = new Map<string, { count: number; reacted: boolean }>();
       for (const e of events) {
         // Reactions/reposts target the LAST e-tag (NIP-25/NIP-18); ignore events
         // that merely reference this note in an earlier tag.
@@ -47,9 +70,15 @@ export function useNoteEngagement(eventId: string | undefined) {
         if (eTags[eTags.length - 1]?.[1] !== eventId) continue;
 
         if (e.kind === 7) {
+          const emoji = normalizeReaction(e.content);
+          const mine = !!pubkey && e.pubkey === pubkey;
+          const g = groupMap.get(emoji);
+          if (g) { g.count++; if (mine) g.reacted = true; }
+          else groupMap.set(emoji, { count: 1, reacted: mine });
+
           if (e.content === '-') continue; // explicit downvote — not a like
           likeCount++;
-          if (pubkey && e.pubkey === pubkey) liked = true;
+          if (mine) liked = true;
         } else if (e.kind === 6) {
           repostCount++;
           if (pubkey && e.pubkey === pubkey) reposted = true;
@@ -57,7 +86,10 @@ export function useNoteEngagement(eventId: string | undefined) {
           zapCount++;
         }
       }
-      return { likeCount, repostCount, zapCount, liked, reposted };
+      const reactionGroups: ReactionGroup[] = Array.from(groupMap.entries())
+        .map(([emoji, g]) => ({ emoji, count: g.count, reacted: g.reacted }))
+        .sort((a, b) => b.count - a.count);
+      return { likeCount, repostCount, zapCount, liked, reposted, reactionGroups };
     },
   });
 }

@@ -12,12 +12,18 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  Alert,
+  type NativeSyntheticEvent,
+  type TextInputSelectionChangeEventData,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { buildReplyTags } from '@core/noteClassifier';
 import { useNostrPublish } from '../../hooks/useNostrPublish';
 import { useAuthor } from '../../hooks/useAuthor';
+import { useUploadFile } from '../../hooks/useUploadFile';
 import { genUserName } from '@core/genUserName';
+import { CombinedEmojiPickerModal } from '../compose/CombinedEmojiPicker';
 
 interface InlineReplyComposerProps {
   replyTo: NostrEvent;
@@ -31,13 +37,78 @@ export function InlineReplyComposer({
   onPublished,
 }: InlineReplyComposerProps) {
   const [content, setContent] = useState('');
+  const [customEmojiTags, setCustomEmojiTags] = useState<string[][]>([]);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const { mutate: publish, isPending } = useNostrPublish();
+  const { mutateAsync: uploadFile, isPending: uploading } = useUploadFile();
   const inputRef = useRef<TextInput>(null);
   const { data: author } = useAuthor(replyTo.pubkey);
   const displayName =
     author?.metadata?.display_name ||
     author?.metadata?.name ||
     genUserName(replyTo.pubkey);
+
+  // Track cursor position for emoji insertion
+  const cursorPosRef = useRef({ start: 0, end: 0 });
+
+  const handleSelectionChange = useCallback(
+    (e: NativeSyntheticEvent<TextInputSelectionChangeEventData>) => {
+      cursorPosRef.current = e.nativeEvent.selection;
+    },
+    [],
+  );
+
+  /** Insert text at the current cursor position */
+  const insertAtCursor = useCallback((text: string) => {
+    const { start, end } = cursorPosRef.current;
+    setContent((prev) => {
+      const next = prev.slice(0, start) + text + prev.slice(end);
+      const newPos = start + text.length;
+      cursorPosRef.current = { start: newPos, end: newPos };
+      return next;
+    });
+  }, []);
+
+  const handleSelectEmoji = useCallback((emoji: string) => {
+    insertAtCursor(emoji);
+  }, [insertAtCursor]);
+
+  const handleSelectCustomEmoji = useCallback((shortcode: string, url: string) => {
+    insertAtCursor(`:${shortcode}:`);
+    setCustomEmojiTags((prev) => {
+      if (prev.some((t) => t[1] === shortcode)) return prev; // dedup
+      return [...prev, ['emoji', shortcode, url]];
+    });
+  }, [insertAtCursor]);
+
+  // Pick an image, upload via Blossom, and append the URL to the reply text —
+  // mirrors the compose screen's upload+append UX.
+  const handlePickImage = useCallback(async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.8,
+        allowsEditing: false,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+
+      const asset = result.assets[0];
+      const response = await fetch(asset.uri);
+      const blob = await response.blob();
+      const fileName = asset.fileName || `image-${Date.now()}.jpg`;
+      const file = new File([blob], fileName, { type: asset.mimeType || 'image/jpeg' });
+
+      const tags = await uploadFile(file);
+      const urlTag = tags.find((t: string[]) => t[0] === 'url');
+      const oxTag = tags.find((t: string[]) => t[0] === 'ox');
+      const uploadedUrl = urlTag?.[1] || oxTag?.[1];
+      if (uploadedUrl) {
+        setContent((prev) => (prev ? `${prev.trimEnd()}\n${uploadedUrl}` : uploadedUrl));
+      }
+    } catch (err) {
+      Alert.alert('Upload failed', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }, [uploadFile]);
 
   // Auto-focus input on mount
   useEffect(() => {
@@ -56,16 +127,24 @@ export function InlineReplyComposer({
       tags.push(['t', match[1].toLowerCase()]);
     }
 
+    // Custom emoji tags (NIP-30) — validate format before publishing
+    for (const tag of customEmojiTags) {
+      if (tag.length >= 3 && tag[0] === 'emoji' && /^[\w-]{1,64}$/.test(tag[1]) && tag[2].startsWith('https://')) {
+        tags.push(tag);
+      }
+    }
+
     publish(
       { kind: 1, content: text, tags, created_at: Math.floor(Date.now() / 1000) },
       {
         onSuccess: (event) => {
           setContent('');
+          setCustomEmojiTags([]);
           onPublished(event);
         },
       },
     );
-  }, [content, replyTo, publish, onPublished]);
+  }, [content, customEmojiTags, replyTo, publish, onPublished]);
 
   return (
     <View style={styles.container}>
@@ -89,16 +168,17 @@ export function InlineReplyComposer({
           placeholderTextColor="#666"
           value={content}
           onChangeText={setContent}
+          onSelectionChange={handleSelectionChange}
           multiline
           maxLength={2000}
         />
         <TouchableOpacity
           style={[
             styles.sendBtn,
-            (!content.trim() || isPending) && styles.sendBtnDisabled,
+            (!content.trim() || isPending || uploading) && styles.sendBtnDisabled,
           ]}
           onPress={handleSubmit}
-          disabled={!content.trim() || isPending}
+          disabled={!content.trim() || isPending || uploading}
         >
           {isPending ? (
             <ActivityIndicator color="#f97316" size="small" />
@@ -107,6 +187,38 @@ export function InlineReplyComposer({
           )}
         </TouchableOpacity>
       </View>
+
+      {/* Toolbar: emoji + image attach */}
+      <View style={styles.toolbar}>
+        <TouchableOpacity
+          style={styles.toolBtn}
+          onPress={() => setShowEmojiPicker(true)}
+          accessibilityLabel="Open emoji picker"
+        >
+          <Text style={styles.toolBtnText}>😀</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.toolBtn, uploading && styles.toolBtnDisabled]}
+          onPress={handlePickImage}
+          disabled={uploading}
+          accessibilityLabel="Attach image"
+        >
+          {uploading ? (
+            <ActivityIndicator color="#f97316" size="small" />
+          ) : (
+            <Text style={styles.toolBtnText}>📷</Text>
+          )}
+        </TouchableOpacity>
+        {uploading && <Text style={styles.uploadingLabel}>Uploading…</Text>}
+      </View>
+
+      {/* Emoji picker modal (combined standard + custom) */}
+      <CombinedEmojiPickerModal
+        visible={showEmojiPicker}
+        onClose={() => setShowEmojiPicker(false)}
+        onSelectEmoji={handleSelectEmoji}
+        onSelectCustomEmoji={handleSelectCustomEmoji}
+      />
     </View>
   );
 }
@@ -164,4 +276,23 @@ const styles = StyleSheet.create({
   },
   sendBtnDisabled: { opacity: 0.4 },
   sendText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  toolbar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  toolBtn: {
+    padding: 4,
+    borderRadius: 6,
+  },
+  toolBtnDisabled: { opacity: 0.5 },
+  toolBtnText: {
+    fontSize: 22,
+    lineHeight: 26,
+  },
+  uploadingLabel: {
+    color: '#b3b3b3',
+    fontSize: 12,
+    marginLeft: 4,
+  },
 });

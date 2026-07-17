@@ -52,24 +52,6 @@ export function dedupBatch(raw: NostrEvent[], existingIds: ReadonlySet<string>):
   return { trulyNew, oldestReturned: oldest };
 }
 
-/**
- * Decide whether to keep paginating in the iterative-undismissed loop.
- * Returns true when more iterations are warranted; false to stop.
- */
-export function shouldContinuePagination(opts: {
-  iter: number;
-  undismissedAdded: number;
-  requestedCount: number;
-  rawCount: number;
-  cursorProgressed: boolean;
-}): boolean {
-  if (opts.undismissedAdded >= opts.requestedCount) return false;
-  if (opts.iter >= PAGINATION_MAX_ITERATIONS) return false;
-  if (opts.rawCount === 0) return false;
-  if (!opts.cursorProgressed) return false;
-  return true;
-}
-
 /** Initial `until` cursor: oldest cached event minus one, or now if cache empty. */
 export function initialUntilCursor(existing: NostrEvent[]): number {
   if (existing.length === 0) return Math.floor(Date.now() / 1000);

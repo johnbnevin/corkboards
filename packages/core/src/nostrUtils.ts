@@ -34,17 +34,6 @@ export function getTag(
 }
 
 /**
- * Get all tags matching a given name.
- *
- * @param tags - The event's tags array
- * @param name - Tag name to look for
- * @returns Array of matching tags (may be empty)
- */
-export function getAllTags(tags: NostrTag[], name: string): NostrTag[] {
-  return tags.filter(t => t[0] === name);
-}
-
-/**
  * Get a value from a specific tag match by both name AND a predicate on the tag array.
  *
  * @param tags - The event's tags array

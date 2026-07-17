@@ -14,6 +14,8 @@ import {
   Linking,
   Dimensions,
   StyleSheet,
+  Modal,
+  Image,
 } from 'react-native';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { getBlossomFallbackUrls } from '@core/blossom';
@@ -146,6 +148,8 @@ interface MediaLinkProps {
 
 export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: forceVideo }: MediaLinkProps) {
   const [revealed, setRevealed] = useState(false);
+  // Whether the in-app fullscreen image viewer is open.
+  const [lightboxOpen, setLightboxOpen] = useState(false);
   // Index into [url, ...blossom mirror URLs]; advanced when the current source
   // fails to load so we retry the same hash on another Blossom server.
   const [srcIndex, setSrcIndex] = useState(0);
@@ -187,24 +191,57 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
       );
     }
     return (
-      <TouchableOpacity
-        activeOpacity={0.9}
-        onPress={() => Linking.openURL(currentImageUrl)}
-        style={styles.mediaContainer}
-      >
-        <SizeGuardedImage
-          key={currentImageUrl}
-          uri={currentImageUrl}
-          style={styles.mediaImage}
-          type="image"
-          resizeMode="cover"
-          onError={() => {
-            // The blob might still exist on another Blossom server — retry the
-            // same hash there before giving up.
-            if (srcIndex < imageSources.length - 1) setSrcIndex(i => i + 1);
-          }}
-        />
-      </TouchableOpacity>
+      <>
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onPress={() => setLightboxOpen(true)}
+          onLongPress={() => Linking.openURL(currentImageUrl)}
+          style={styles.mediaContainer}
+        >
+          <SizeGuardedImage
+            key={currentImageUrl}
+            uri={currentImageUrl}
+            style={styles.mediaImage}
+            type="image"
+            resizeMode="cover"
+            onError={() => {
+              // The blob might still exist on another Blossom server — retry the
+              // same hash there before giving up.
+              if (srcIndex < imageSources.length - 1) setSrcIndex(i => i + 1);
+            }}
+          />
+        </TouchableOpacity>
+
+        {/* In-app fullscreen viewer — tap image/backdrop or the close button to
+            dismiss. Long-press the thumbnail still opens the browser. */}
+        <Modal
+          visible={lightboxOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setLightboxOpen(false)}
+          statusBarTranslucent
+        >
+          <TouchableOpacity
+            style={styles.lightboxBackdrop}
+            activeOpacity={1}
+            onPress={() => setLightboxOpen(false)}
+          >
+            <Image
+              source={{ uri: currentImageUrl }}
+              style={styles.lightboxImage}
+              resizeMode="contain"
+            />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.lightboxClose}
+            onPress={() => setLightboxOpen(false)}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            accessibilityLabel="Close image viewer"
+          >
+            <Text style={styles.lightboxCloseText}>X</Text>
+          </TouchableOpacity>
+        </Modal>
+      </>
     );
   }
 
@@ -285,6 +322,32 @@ const styles = StyleSheet.create({
     width: MEDIA_WIDTH,
     height: MEDIA_WIDTH * 0.56,
     borderRadius: 10,
+  },
+  lightboxBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.95)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lightboxImage: {
+    width: '100%',
+    height: '100%',
+  },
+  lightboxClose: {
+    position: 'absolute',
+    top: 48,
+    right: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lightboxCloseText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
   },
   videoPlaceholder: {
     width: MEDIA_WIDTH,

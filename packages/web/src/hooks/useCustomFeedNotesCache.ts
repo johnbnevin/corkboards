@@ -40,9 +40,14 @@ export function useCustomFeedNotesCache({
   const queryClient = useQueryClient();
   const hasInitialized = useRef(false);
 
-  // Calculate base window in seconds (1 hour for 0-500 authors)
+  // Base look-back window. Small corkboards (few authors) look back FAR further:
+  // a handful of people may post only a few times a day, so a 1-hour window
+  // misses their recent notes entirely (the "npub notes don't show" bug). Larger
+  // feeds use a tighter window since many authors make it dense.
   const baseWindowSeconds = useMemo(() => {
-    if (pubkeys.length <= 500) return 3600;
+    if (pubkeys.length <= 25) return 3600 * 24 * 3; // ≤25 authors → 3 days
+    if (pubkeys.length <= 100) return 3600 * 12;    // ≤100 → 12h
+    if (pubkeys.length <= 500) return 3600;         // 1h
     if (pubkeys.length <= 1000) return 1800;
     return 600;
   }, [pubkeys.length]);
@@ -83,7 +88,7 @@ export function useCustomFeedNotesCache({
       debugLog(`  since: ${since} (${new Date(since * 1000).toISOString()})`);
       debugLog(`  fetching from ${new Date(since * 1000).toLocaleString()} to ${new Date(now * 1000).toLocaleString()}`);
       
-      const events = await batchFetchByAuthors({
+      let events = await batchFetchByAuthors({
         nostr,
         authors: pubkeys,
         limit,
@@ -91,7 +96,27 @@ export function useCustomFeedNotesCache({
         multiplier,
         onProgress: onProgress ?? (() => {}),
       });
-      
+
+      // Nothing in the window? These authors just post rarely — anchor to their
+      // most recent note and fetch around it, so a corkboard never shows empty
+      // for people who haven't posted in the last window. (Parity with mobile.)
+      if (events.length === 0) {
+        debugLog(`[customFeedCache] No events in window for ${feedId}; anchoring to most recent`);
+        const recent = await nostr.query(
+          [{ authors: pubkeys, limit: 1 }],
+          { signal: AbortSignal.timeout(8000) },
+        ).catch(() => [] as NostrEvent[]);
+        if (recent.length > 0) {
+          const anchor = recent[0].created_at;
+          const older = await batchFetchByAuthors({
+            nostr, authors: pubkeys, limit,
+            since: anchor - timeWindowSeconds, until: anchor + 1,
+            onProgress: onProgress ?? (() => {}),
+          });
+          events = older.length > 0 ? older : recent;
+        }
+      }
+
       debugLog(`[customFeedCache] Got ${events.length} events for feed ${feedId}`);
       if (events.length > 0) {
         const oldest = events.reduce((min, e) => e.created_at < min ? e.created_at : min, events[0].created_at);

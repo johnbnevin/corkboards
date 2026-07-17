@@ -62,7 +62,14 @@ export function useCustomFeedNotes({
   const hoursLoadedRef = useRef(0);
   const hasSeededRef = useRef(false);
 
-  const baseWindowSeconds = 3600; // 1 hour base
+  // Small corkboards look back far further (sparse posters); larger feeds stay
+  // tight. Keep in sync with web useCustomFeedNotesCache.
+  const baseWindowSeconds = (() => {
+    const n = feed?.pubkeys.length ?? 0;
+    if (n <= 25) return 3600 * 24 * 3; // ≤25 authors → 3 days
+    if (n <= 100) return 3600 * 12;    // ≤100 → 12h
+    return 3600;                        // 1h
+  })();
 
   // Stable query key: feed id + pubkeys join (pubkeys changing = new feed)
   const queryKey = useMemo(

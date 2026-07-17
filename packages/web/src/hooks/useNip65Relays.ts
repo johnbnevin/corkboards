@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { useNostr } from '@nostrify/react';
 import { updateRelayCache, getRelayCache } from '@/components/NostrProvider';
+import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 
 /** Validate a relay URL: must be a well-formed wss:// URL ≤256 chars. */
 function isValidRelayUrl(url: unknown): url is string {
@@ -32,10 +33,26 @@ export function useNip65Relays() {
       const signal = externalSignal
         ? AbortSignal.any([externalSignal, AbortSignal.timeout(5000)])
         : AbortSignal.timeout(5000);
-      const events = await nostr.query(
+      let events = await nostr.query(
         [{ kinds: [10002], authors: [pubkey], limit: 1 }],
         { signal }
       );
+
+      // Not on the default relays? Ask the profile indexers (purplepag.es etc.),
+      // which hold kind-10002 for ~everyone. Without this, an author we don't
+      // already know has no discoverable outbox and their notes get missed.
+      if (events.length === 0) {
+        events = await Promise.any(
+          PROFILE_INDEXER_RELAYS.map(async (url) => {
+            const evs = await nostr.relay(url).query(
+              [{ kinds: [10002], authors: [pubkey], limit: 1 }],
+              { signal: AbortSignal.timeout(4000) },
+            );
+            if (evs.length === 0) throw new Error('none');
+            return evs;
+          }),
+        ).catch(() => [] as typeof events);
+      }
 
       if (events.length === 0) {
         return [];

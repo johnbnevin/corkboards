@@ -37,6 +37,8 @@ export interface UseCustomFeedNotesOptions {
   limit: number;
   multiplier: number;
   onProgress?: (loaded: number, total: number) => void;
+  /** Outbox pass: discover the authors' NIP-65 relays before fetching notes. */
+  ensureRelays?: (pubkeys: string[]) => Promise<unknown>;
 }
 
 export interface UseCustomFeedNotesResult {
@@ -56,6 +58,7 @@ export function useCustomFeedNotes({
   limit,
   multiplier,
   onProgress,
+  ensureRelays,
 }: UseCustomFeedNotesOptions): UseCustomFeedNotesResult {
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
@@ -111,6 +114,11 @@ export function useCustomFeedNotes({
       const since = now - timeWindowSeconds;
 
       if (__DEV__) console.log('[customFeedNotes] Fetching from relay, window:', timeWindowSeconds / 3600, 'hr');
+
+      // Outbox pass: discover the authors' own write relays before fetching.
+      if (ensureRelays) {
+        try { await ensureRelays(feed.pubkeys); } catch { /* best-effort */ }
+      }
 
       const events = await batchFetchByAuthors({
         nostr,

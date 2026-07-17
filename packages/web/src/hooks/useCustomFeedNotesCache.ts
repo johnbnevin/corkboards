@@ -26,15 +26,18 @@ export interface UseCustomFeedNotesCacheOptions {
   limit: number;
   multiplier?: number; // 1x, 2x, 3x for initial time window
   onProgress?: (loaded: number, total: number) => void;
+  /** Outbox pass: discover the authors' NIP-65 relays before fetching notes. */
+  ensureRelays?: (pubkeys: string[]) => Promise<unknown>;
 }
 
-export function useCustomFeedNotesCache({ 
-  feedId, 
-  pubkeys, 
-  enabled = true, 
-  limit, 
-  multiplier = 1, 
-  onProgress 
+export function useCustomFeedNotesCache({
+  feedId,
+  pubkeys,
+  enabled = true,
+  limit,
+  multiplier = 1,
+  onProgress,
+  ensureRelays,
 }: UseCustomFeedNotesCacheOptions) {
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
@@ -88,6 +91,13 @@ export function useCustomFeedNotesCache({
       debugLog(`  since: ${since} (${new Date(since * 1000).toISOString()})`);
       debugLog(`  fetching from ${new Date(since * 1000).toLocaleString()} to ${new Date(now * 1000).toLocaleString()}`);
       
+      // Outbox pass: make sure we know these authors' own write relays before
+      // fetching, so the pool routes to them (an npub you don't follow otherwise
+      // has no discoverable outbox and their notes get missed entirely).
+      if (ensureRelays) {
+        try { await ensureRelays(pubkeys); } catch { /* best-effort */ }
+      }
+
       let events = await batchFetchByAuthors({
         nostr,
         authors: pubkeys,

@@ -269,6 +269,7 @@ export function HomeScreen() {
     isActive: !!activeFeedId,
     limit,
     multiplier: 1,
+    ensureRelays: fetchRelaysForMultiple, // outbox pass: discover corkboard authors' relays first
   });
 
   // ── Pick the right data for the active tab ──────────────────────────────────

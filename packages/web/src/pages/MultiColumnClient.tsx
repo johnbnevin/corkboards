@@ -2170,6 +2170,7 @@ export function MultiColumnClient() {
     enabled: canLoadNotes && isCustomFeedTab && activeCustomFeed !== null && (activeCustomFeed?.pubkeys?.length ?? 0) > 0,
     limit: feedLimit,
     multiplier: feedLimitMultiplier,
+    ensureRelays: fetchRelaysForMultiple, // outbox pass: discover corkboard authors' relays first
     onProgress: (loaded, total) => paginationSetBatchProgress({ loaded, total }),
   });
   const isLookingFurtherCustomFeed = false;

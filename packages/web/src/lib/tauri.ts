@@ -70,16 +70,9 @@ export async function keychainStore(key: string, value: string): Promise<boolean
   }
 }
 
-/** Retrieve a secret from the OS keychain. */
-export async function keychainGet(key: string): Promise<string | null> {
-  if (!isTauri) return null;
-  try {
-    return await invoke<string | null>('keychain_get', { key }) ?? null;
-  } catch (e) {
-    console.warn('[tauri] keychain_get failed:', e);
-    return null;
-  }
-}
+// keychainGet was removed: the `keychain_get` IPC command is no longer exposed to
+// the webview (it could exfiltrate the nsec via XSS). Secrets stay in Rust —
+// signing/encryption use sign_event / nip04_* / nip44_* which never return the key.
 
 /** Delete a secret from the OS keychain. */
 export async function keychainDelete(key: string): Promise<boolean> {
@@ -165,6 +158,13 @@ export async function tauriQuery(
   const allEvents: unknown[] = [];
   const seen = new Set<string>();
 
+  // The native (Rust) relay bridge forwards raw relay JSON without validating it,
+  // so — unlike the web/mobile NRelay1 path, which runs verifyEvent — desktop
+  // would otherwise render forged events (a hostile relay could inject notes,
+  // profiles, even a fake kind-3) attributed to any pubkey. Verify id-hash +
+  // schnorr signature here before trusting anything. (C1)
+  const { verifyEvent } = await import('nostr-tools/pure');
+
   return new Promise<unknown[]>((resolve) => {
     let unlistenFn: (() => void) | null = null;
     const cleanup = () => { unlistenFn?.(); };
@@ -175,6 +175,9 @@ export async function tauriQuery(
         const e = ev as { id?: string };
         if (e.id && !seen.has(e.id)) {
           seen.add(e.id);
+          try {
+            if (!verifyEvent(ev as Parameters<typeof verifyEvent>[0])) continue;
+          } catch { continue; }
           allEvents.push(ev);
         }
       }

@@ -33,7 +33,10 @@ const MEDIA_WIDTH = SCREEN_WIDTH - 56; // card padding
 // Patterns
 // ============================================================================
 
-const NOSTR_URI = /nostr:(npub1|note1|nprofile1|nevent1|naddr1)[a-z0-9]+/gi;
+// `nostr:` prefix is OPTIONAL (bare npub1…/note1… mentions are valid) and the
+// bech32 body is matched case-insensitively. A leading boundary stops it from
+// matching an identifier embedded in a URL path or word. Parity with web. (B1)
+const NOSTR_URI = /(?<![\w/:])(?:nostr:)?(npub1|note1|nprofile1|nevent1|naddr1)[a-zA-Z0-9]+/gi;
 const HASHTAG = /(?<!\w)#(\w{1,64})(?!\w)/g;
 const URL_PATTERN = /https?:\/\/[^\s<>)\]]+/gi;
 const IMAGE_EXT = /\.(jpe?g|png|gif|webp|svg|avif)(\?[^\s]*)?$/i;
@@ -299,9 +302,11 @@ function parseContent(content: string): ContentPart[] {
       parts.push({ type: 'text', value: content.slice(lastIndex, index) });
     }
 
-    if (token.startsWith('nostr:')) {
+    const bech32Token = token.startsWith('nostr:') ? token.slice(6) : token;
+    const isNostrEntity = /^(npub1|note1|nprofile1|nevent1|naddr1)/i.test(bech32Token);
+    if (isNostrEntity) {
       try {
-        const bech32 = token.slice(6);
+        const bech32 = bech32Token;
         const decoded = nip19.decode(bech32);
         if (decoded.type === 'npub') {
           parts.push({ type: 'profile', value: token, pubkey: decoded.data as string });
@@ -324,7 +329,13 @@ function parseContent(content: string): ContentPart[] {
     } else if (IMAGE_EXT.test(token) || IMAGE_DOMAINS.test(token)) {
       parts.push({ type: 'image', value: token });
     } else {
-      parts.push({ type: 'url', value: token });
+      // Strip trailing punctuation the greedy URL regex grabbed (e.g. "url).")
+      // and re-emit it as text so links aren't broken. Parity with web. (B1)
+      const cleaned = token.replace(/[),.;:!]+$/, '');
+      parts.push({ type: 'url', value: cleaned });
+      if (cleaned.length < token.length) {
+        parts.push({ type: 'text', value: token.slice(cleaned.length) });
+      }
     }
 
     lastIndex = index + token.length;

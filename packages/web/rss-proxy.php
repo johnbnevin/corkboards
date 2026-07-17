@@ -131,57 +131,154 @@ if (!$host) {
 
 // ─── SSRF protection: block private/internal IPs ────────────────────────────
 
-$resolvedIps = gethostbynamel($host);
-if (!$resolvedIps) {
-    echo json_encode(['error' => 'Could not resolve hostname']);
+/**
+ * Validate a URL against the SSRF policy: must be a well-formed https URL whose
+ * host resolves ONLY to public IP addresses. Returns an error string on failure,
+ * or null when the URL is safe to fetch. Applied to the initial URL AND re-run on
+ * every redirect hop so a feed can't 302 to a private/metadata address (or use
+ * DNS rebinding between hops).
+ */
+function ssrfValidateUrl(string $url): ?string {
+    $parsed = parse_url($url);
+    if ($parsed === false) {
+        return 'Invalid URL';
+    }
+
+    $scheme = strtolower($parsed['scheme'] ?? '');
+    if ($scheme !== 'https') {
+        return 'Only HTTPS URLs are allowed';
+    }
+
+    $host = $parsed['host'] ?? '';
+    if (!$host) {
+        return 'Invalid URL';
+    }
+
+    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+        return 'Invalid URL format';
+    }
+
+    $resolvedIps = gethostbynamel($host);
+    if (!$resolvedIps) {
+        return 'Could not resolve hostname';
+    }
+
+    foreach ($resolvedIps as $ip) {
+        // Block private ranges (RFC 1918), loopback, link-local, cloud metadata
+        if (
+            filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false ||
+            str_starts_with($ip, '169.254.') ||    // link-local (incl. cloud metadata 169.254.169.254)
+            str_starts_with($ip, '100.64.') ||     // CGNAT
+            $ip === '0.0.0.0' ||
+            $ip === '127.0.0.1' ||
+            $ip === '::1' ||                       // IPv6 loopback
+            str_starts_with($ip, '::ffff:127.') || // IPv4-mapped IPv6 loopback
+            str_starts_with($ip, '::ffff:10.') ||  // IPv4-mapped private
+            str_starts_with($ip, '::ffff:192.168.') || // IPv4-mapped private
+            str_starts_with($ip, 'fe80:') ||       // IPv6 link-local
+            str_starts_with($ip, 'fc00:') ||       // IPv6 unique local
+            str_starts_with($ip, 'fd')             // IPv6 unique local
+        ) {
+            return 'URL resolves to a restricted address';
+        }
+    }
+
+    return null;
+}
+
+if (($err = ssrfValidateUrl($url)) !== null) {
+    echo json_encode(['error' => $err]);
     exit;
 }
 
-foreach ($resolvedIps as $ip) {
-    // Block private ranges (RFC 1918), loopback, link-local, cloud metadata
-    if (
-        filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false ||
-        str_starts_with($ip, '169.254.') ||    // link-local
-        str_starts_with($ip, '100.64.') ||     // CGNAT
-        $ip === '0.0.0.0' ||
-        $ip === '127.0.0.1' ||
-        $ip === '::1' ||                       // IPv6 loopback
-        str_starts_with($ip, '::ffff:127.') || // IPv4-mapped IPv6 loopback
-        str_starts_with($ip, '::ffff:10.') ||  // IPv4-mapped private
-        str_starts_with($ip, '::ffff:192.168.') || // IPv4-mapped private
-        str_starts_with($ip, 'fe80:') ||       // IPv6 link-local
-        str_starts_with($ip, 'fc00:') ||       // IPv6 unique local
-        str_starts_with($ip, 'fd')             // IPv6 unique local
-    ) {
-        echo json_encode(['error' => 'URL resolves to a restricted address']);
+// ─── Fetch the feed (SSL verified, size-limited, per-hop SSRF-checked) ───────
+//
+// max_redirects => 0: do NOT let PHP auto-follow redirects. Instead we follow
+// them manually (max 3 hops) so each hop's URL is re-validated against the SSRF
+// policy above BEFORE it is fetched. Auto-following would let a malicious feed
+// 302 to http://169.254.169.254/ or an internal host, bypassing the pre-fetch
+// check (also mitigates DNS rebinding across hops).
+
+$makeContext = function () {
+    return stream_context_create([
+        'http' => [
+            'timeout' => 10,
+            'max_redirects' => 0,          // manual redirect handling below
+            'ignore_errors' => true,       // still read body/headers on 3xx/4xx
+            'follow_location' => 0,
+            'user_agent' => 'Mozilla/5.0 (compatible; CorkboardRSS/1.0)',
+            'header' => "Accept: application/rss+xml, application/atom+xml, application/xml, text/xml\r\n",
+        ],
+        'ssl' => [
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+        ],
+    ]);
+};
+
+/**
+ * Parse the HTTP status code and Location header out of the $http_response_header
+ * array that PHP populates after a stream fetch.
+ */
+function parseHttpResponse(array $headers): array {
+    $status = 0;
+    $location = null;
+    foreach ($headers as $h) {
+        if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
+            // Reset on each status line (handles proxied/continued responses)
+            $status = (int)$m[1];
+            $location = null;
+        } elseif (stripos($h, 'Location:') === 0) {
+            $location = trim(substr($h, strlen('Location:')));
+        }
+    }
+    return [$status, $location];
+}
+
+$fetchUrl = $url;
+$maxHops = 3;
+$xml = false;
+
+for ($hop = 0; ; $hop++) {
+    $body = @file_get_contents($fetchUrl, false, $makeContext(), 0, 2 * 1024 * 1024); // 2MB cap
+    $respHeaders = $http_response_header ?? [];
+    [$status, $location] = parseHttpResponse($respHeaders);
+
+    // Redirect?
+    if ($status >= 300 && $status < 400 && $location !== null && $location !== '') {
+        if ($hop >= $maxHops) {
+            echo json_encode(['error' => 'Too many redirects']);
+            exit;
+        }
+        // Resolve relative Location against the current URL, then re-validate.
+        $next = $location;
+        if (!parse_url($next, PHP_URL_SCHEME)) {
+            $base = parse_url($fetchUrl);
+            if (isset($base['scheme'], $base['host'])) {
+                if (str_starts_with($next, '/')) {
+                    $next = $base['scheme'] . '://' . $base['host'] . $next;
+                } else {
+                    $path = $base['path'] ?? '/';
+                    $dir = substr($path, 0, strrpos($path, '/') + 1);
+                    $next = $base['scheme'] . '://' . $base['host'] . $dir . $next;
+                }
+            }
+        }
+        if (($err = ssrfValidateUrl($next)) !== null) {
+            echo json_encode(['error' => $err]);
+            exit;
+        }
+        $fetchUrl = $next;
+        continue;
+    }
+
+    // Non-redirect: require a successful fetch with a body.
+    if ($body === false || $body === '' || $status >= 400) {
+        echo json_encode(['error' => 'Failed to fetch feed']);
         exit;
     }
-}
-
-if (!filter_var($url, FILTER_VALIDATE_URL)) {
-    echo json_encode(['error' => 'Invalid URL format']);
-    exit;
-}
-
-// ─── Fetch the feed (SSL verified, size-limited) ────────────────────────────
-
-$ctx = stream_context_create([
-    'http' => [
-        'timeout' => 10,
-        'max_redirects' => 3,
-        'user_agent' => 'Mozilla/5.0 (compatible; CorkboardRSS/1.0)',
-        'header' => "Accept: application/rss+xml, application/atom+xml, application/xml, text/xml\r\n",
-    ],
-    'ssl' => [
-        'verify_peer' => true,
-        'verify_peer_name' => true,
-    ],
-]);
-
-$xml = @file_get_contents($url, false, $ctx, 0, 2 * 1024 * 1024); // 2MB cap
-if (!$xml) {
-    echo json_encode(['error' => 'Failed to fetch feed']);
-    exit;
+    $xml = $body;
+    break;
 }
 
 // ─── Parse XML (XXE-safe) ───────────────────────────────────────────────────

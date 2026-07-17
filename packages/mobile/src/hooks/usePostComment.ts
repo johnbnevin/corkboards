@@ -35,7 +35,7 @@ export function usePostComment() {
         tags.push(['E', root.id]);
       }
       if (root instanceof URL) {
-        tags.push(['K', root.hostname]);
+        tags.push(['K', root.protocol.replace(/:$/, '')]); // NIP-73: URL kind = scheme, not hostname (H5)
       } else {
         tags.push(['K', root.kind.toString()]);
         tags.push(['P', root.pubkey]);
@@ -53,7 +53,7 @@ export function usePostComment() {
           tags.push(['e', reply.id]);
         }
         if (reply instanceof URL) {
-          tags.push(['k', reply.hostname]);
+          tags.push(['k', reply.protocol.replace(/:$/, '')]); // NIP-73: URL kind = scheme (H5)
         } else {
           tags.push(['k', reply.kind.toString()]);
           tags.push(['p', reply.pubkey]);
@@ -69,7 +69,7 @@ export function usePostComment() {
           tags.push(['e', root.id]);
         }
         if (root instanceof URL) {
-          tags.push(['k', root.hostname]);
+          tags.push(['k', root.protocol.replace(/:$/, '')]); // NIP-73: URL kind = scheme (H5)
         } else {
           tags.push(['k', root.kind.toString()]);
           tags.push(['p', root.pubkey]);

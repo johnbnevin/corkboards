@@ -22,6 +22,10 @@ import { useQueryClient } from '@tanstack/react-query';
 import { batchFetchByAuthors, FEED_KINDS } from '../lib/feedUtils';
 import { dedupBatch, initialUntilCursor, PAGINATION_MAX_ITERATIONS } from '@core/paginationCore';
 
+// Stable empty-array reference so tabs with no newer notes don't hand out a fresh
+// [] every render (which would churn the feed pipeline). Parity with web. (P3)
+const EMPTY_NOTES: NostrEvent[] = [];
+
 export interface CustomFeedDef {
   id: string;
   pubkeys: string[];
@@ -114,7 +118,7 @@ export function useFeedPagination({
   // doesn't fit. The v7 react-hooks/refs rule flags this pattern; the
   // suppressions below acknowledge the intentional design.
   /* eslint-disable react-hooks/refs */
-  const newerNotes = newerNotesMap.current.get(activeTab) || [];
+  const newerNotes = newerNotesMap.current.get(activeTab) || EMPTY_NOTES;
   const newestTimestamp = newestTimestampMap.current.get(activeTab) ?? null;
   const lastFetchTime = lastFetchTimeMap.current.get(activeTab) ?? null;
   const hoursLoadedRef = useRef(hoursLoadedMap.current.get(activeTab) || 0);
@@ -511,7 +515,8 @@ export function useFeedPagination({
             }
 
             if (gapEvents.length > 0) {
-              const gapNew = gapEvents.filter(e => !existingIds.has(e.id) && !sortedNew.some(n => n.id === e.id));
+              const sortedNewIds = new Set(sortedNew.map(n => n.id)); // O(1) lookup vs O(n) .some (P5)
+              const gapNew = gapEvents.filter(e => !existingIds.has(e.id) && !sortedNewIds.has(e.id));
               if (gapNew.length > 0) {
                 sortedNew.push(...gapNew);
                 sortedNew.sort((a, b) => b.created_at - a.created_at);

@@ -181,7 +181,11 @@ export function usePinnedNotes() {
   const publishPinList = useCallback(async (newIds: string[]) => {
     if (!signer) return;
 
-    const tags = newIds.map(id => ['e', id]);
+    // Preserve each pin's relay hint (["e", id, relay-hint]). The read path
+    // relies on these hints to locate notes pinned from other authors; rebuilding
+    // bare ["e", id] tags on every pin/unpin would strip them all. (H3)
+    const hints = pinListResult?.relayHints ?? {};
+    const tags = newIds.map(id => (hints[id] ? ['e', id, hints[id]] : ['e', id]));
     const event = await signer.signEvent({
       kind: 10001,
       content: '',
@@ -208,7 +212,7 @@ export function usePinnedNotes() {
     if (published === 0) {
       console.error('[pinnedNotes] No relays accepted the pin list update');
     }
-  }, [signer]);
+  }, [signer, pinListResult]);
 
   // Toggle pin: add or remove, publish, update local + set optimistic cache.
   const togglePin = useCallback(async (noteId: string) => {

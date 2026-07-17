@@ -47,16 +47,40 @@ export function useMuteList(fetchEnabled = true) {
     [mutedPubkeys],
   );
 
-  // Publish updated mute list
-  const mute = useCallback(
-    async (pk: string) => {
+  // Re-fetch the authoritative kind-10000 at action time. The cached query can be
+  // undefined/stale after a transient relay miss; publishing off that would
+  // republish a truncated list and WIPE the user's real mutes. Mirror the kind-3
+  // contact-list safety pattern: confirm the current list before mutating it. (C2)
+  const resolveMuteBase = useCallback(
+    async (): Promise<{ tags: string[][]; content: string } | null> => {
+      if (!pubkey) return null;
+      let authoritative = muteEvent ?? null;
+      try {
+        const events = await nostr.query(
+          [{ kinds: [10000], authors: [pubkey], limit: 1 }],
+          { signal: AbortSignal.timeout(8000) },
+        );
+        const newest = events.length > 0
+          ? events.reduce((best, e) => (e.created_at > best.created_at ? e : best))
+          : null;
+        if (newest && (!authoritative || newest.created_at >= authoritative.created_at)) {
+          authoritative = newest;
+        }
+      } catch {
+        // Network failure — fall back to whatever we have cached below.
+      }
+      if (!authoritative) return null;
+      return { tags: authoritative.tags, content: authoritative.content };
+    },
+    [pubkey, muteEvent, nostr],
+  );
+
+  const publishMuteList = useCallback(
+    async (newTags: string[][], content?: string) => {
       if (!signer || !pubkey) return;
-      const existing = muteEvent?.tags ?? [];
-      if (existing.some(t => t[0] === 'p' && t[1] === pk)) return;
-      const newTags = [...existing, ['p', pk]];
       const event = await signer.signEvent({
         kind: 10000,
-        content: muteEvent?.content ?? '', // preserve encrypted private section
+        content: content ?? muteEvent?.content ?? '', // preserve encrypted private section
         tags: newTags,
         created_at: Math.floor(Date.now() / 1000),
       });
@@ -66,21 +90,32 @@ export function useMuteList(fetchEnabled = true) {
     [pubkey, signer, nostr, muteEvent, queryClient, queryKey],
   );
 
+  const mute = useCallback(
+    async (pk: string) => {
+      if (!signer || !pubkey) return;
+      const base = await resolveMuteBase();
+      const existing = base?.tags ?? muteEvent?.tags ?? [];
+      if (existing.some(t => t[0] === 'p' && t[1] === pk)) return;
+      await publishMuteList([...existing, ['p', pk]], base?.content);
+    },
+    [pubkey, signer, resolveMuteBase, muteEvent, publishMuteList],
+  );
+
   const unmute = useCallback(
     async (pk: string) => {
       if (!signer || !pubkey) return;
-      const existing = muteEvent?.tags ?? [];
-      const newTags = existing.filter(t => !(t[0] === 'p' && t[1] === pk));
-      const event = await signer.signEvent({
-        kind: 10000,
-        content: muteEvent?.content ?? '',
-        tags: newTags,
-        created_at: Math.floor(Date.now() / 1000),
-      });
-      await nostr.event(event);
-      queryClient.setQueryData(queryKey, event);
+      const base = await resolveMuteBase();
+      if (!base) {
+        // Couldn't confirm the current list — refuse the removal rather than
+        // republish an empty list and lose every mute we just failed to fetch.
+        throw new Error('Could not confirm mute list; unmute aborted to avoid data loss');
+      }
+      await publishMuteList(
+        base.tags.filter(t => !(t[0] === 'p' && t[1] === pk)),
+        base.content,
+      );
     },
-    [pubkey, signer, nostr, muteEvent, queryClient, queryKey],
+    [pubkey, signer, resolveMuteBase, publishMuteList],
   );
 
   return { mutedPubkeys, isMuted, mute, unmute };

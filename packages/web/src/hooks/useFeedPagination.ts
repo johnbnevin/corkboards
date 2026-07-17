@@ -18,6 +18,11 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { RSS_PUBKEY } from '@core/rss';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { createRelay } from '@/components/NostrProvider';
+
+// Stable empty-array reference. `.get(tab) || []` would hand out a fresh []
+// every render for tabs with no newer notes, changing `newerNotes`' identity and
+// re-running the entire dedup/classify pipeline memo each render. (P3)
+const EMPTY_NOTES: NostrEvent[] = [];
 import { useNostr } from '@/hooks/useNostr';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -144,7 +149,7 @@ export function useFeedPagination({
   const hoursLoadedMap = useRef(new Map<string, number>());
 
   // Derive current tab's values from maps
-  const newerNotes = newerNotesMap.current.get(activeTab) || [];
+  const newerNotes = newerNotesMap.current.get(activeTab) || EMPTY_NOTES;
   const newestTimestamp = newestTimestampMap.current.get(activeTab) ?? null;
   const lastFetchTime = lastFetchTimeMap.current.get(activeTab) ?? null;
   const hoursLoadedRef = useRef(hoursLoadedMap.current.get(activeTab) || 0);
@@ -625,7 +630,8 @@ export function useFeedPagination({
             }
 
             if (gapEvents.length > 0) {
-              const gapNew = gapEvents.filter(e => !existingIds.has(e.id) && !sortedNew.some(n => n.id === e.id));
+              const sortedNewIds = new Set(sortedNew.map(n => n.id)); // O(1) lookup vs O(n) .some (P5)
+              const gapNew = gapEvents.filter(e => !existingIds.has(e.id) && !sortedNewIds.has(e.id));
               if (gapNew.length > 0) {
                 sortedNew.push(...gapNew);
                 sortedNew.sort((a, b) => b.created_at - a.created_at);

@@ -184,9 +184,12 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
             }], { signal: controller.signal })) {
               if (settled) return;
               if (msg[0] === 'EVENT') {
-                // Verify this response is for our request via e-tag
+                // Verify this response is for our request via e-tag. NIP-47
+                // responses always carry the request's `e` tag; requiring it to
+                // match (rather than only rejecting a mismatch) stops a stale or
+                // unrelated wallet reply from resolving THIS payment's promise (H1).
                 const eTag = msg[2].tags?.find((t: string[]) => t[0] === 'e');
-                if (eTag && eTag[1] !== requestEvent.id) continue;
+                if (!eTag || eTag[1] !== requestEvent.id) continue;
 
                 settled = true;
                 clearTimeout(timeout);

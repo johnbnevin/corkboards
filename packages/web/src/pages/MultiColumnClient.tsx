@@ -3063,15 +3063,26 @@ export function MultiColumnClient() {
     if (!lazyEngagement || lazyEngagement.length === 0) return engagementByTarget;
     // Clone the map so we don't mutate the original
     const merged = new Map(engagementByTarget);
+    // Per-target Set of seen ids for O(1) dedup instead of O(n) .some per event (P5).
+    const seenByTarget = new Map<string, Set<string>>();
     for (const ev of lazyEngagement) {
       const targetId = ev.tags.find(t => t[0] === 'e')?.[1];
       if (!targetId) continue;
       let entry = merged.get(targetId);
       if (!entry) { entry = { reactions: [], reposts: [], zaps: [] }; merged.set(targetId, entry); }
-      // Deduplicate by event ID
-      if (ev.kind === 7 && !entry.reactions.some(r => r.id === ev.id)) entry.reactions.push(ev);
-      else if (ev.kind === 9735 && !entry.zaps.some(z => z.id === ev.id)) entry.zaps.push(ev);
-      else if ((ev.kind === 6 || ev.kind === 16) && !entry.reposts.some(r => r.id === ev.id)) entry.reposts.push(ev);
+      let seen = seenByTarget.get(targetId);
+      if (!seen) {
+        seen = new Set<string>();
+        for (const r of entry.reactions) seen.add(r.id);
+        for (const r of entry.reposts) seen.add(r.id);
+        for (const z of entry.zaps) seen.add(z.id);
+        seenByTarget.set(targetId, seen);
+      }
+      if (seen.has(ev.id)) continue;
+      seen.add(ev.id);
+      if (ev.kind === 7) entry.reactions.push(ev);
+      else if (ev.kind === 9735) entry.zaps.push(ev);
+      else if (ev.kind === 6 || ev.kind === 16) entry.reposts.push(ev);
     }
     return merged;
   }, [engagementByTarget, lazyEngagement]);
@@ -3199,10 +3210,11 @@ export function MultiColumnClient() {
       });
     }
 
-    // Sort: pinned first, then by time descending
-    const pinned = filteredNotes.filter(note => pinnedIds.includes(note.id));
+    // Sort: pinned first, then by time descending. Use the Set (O(1)) not
+    // pinnedIds.includes (O(n)) — this runs twice per note in the hot path. (P4)
+    const pinned = filteredNotes.filter(note => pinnedIdSet.has(note.id));
     const regular = filteredNotes
-      .filter(note => !pinnedIds.includes(note.id))
+      .filter(note => !pinnedIdSet.has(note.id))
       .sort((a, b) => b.created_at - a.created_at);
     const finalNotes = [...pinned, ...regular];
 
@@ -3221,7 +3233,7 @@ export function MultiColumnClient() {
     const allDismissed = deduplicatedNotes.length > 0 && finalNotes.length === 0 && !hasFiltersActive;
 
     return { notes: finalNotes, filteredHashtags: computedHashtags, hasFilteredNotes, allDismissed };
-  }, [deduplicatedNotes, eventLookup, noteClassifications, isDismissed, isOnboarding, isDiscoverTab, kindFilters, filterMode, hashtagFilters, hasActiveContentFilters, hideMinChars, hideOnlyEmoji, allowPV, allowGM, allowGN, allowEyes, allow100, hideOnlyMedia, hideOnlyLinks, hideHtml, hideMarkdown, hideExactText, pinnedIds, pinnedIdSet, showOwnNotes, showPinned, showUnpinned, activeTab, user?.pubkey]);
+  }, [deduplicatedNotes, eventLookup, noteClassifications, isDismissed, isOnboarding, isDiscoverTab, kindFilters, filterMode, hashtagFilters, hasActiveContentFilters, hideMinChars, hideOnlyEmoji, allowPV, allowGM, allowGN, allowEyes, allow100, hideOnlyMedia, hideOnlyLinks, hideHtml, hideMarkdown, hideExactText, pinnedIdSet, showOwnNotes, showPinned, showUnpinned, activeTab, user?.pubkey]);
 
   // Keep allDismissed ref in sync for handleLoadMoreByCount callback
   allDismissedRef.current = allDismissed;

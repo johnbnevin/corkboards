@@ -4,7 +4,7 @@ mod proxy;
 mod relay;
 mod signer;
 
-use keychain::{keychain_store, keychain_get, keychain_delete};
+use keychain::{keychain_store, keychain_delete};
 use logger::{write_log, clear_log};
 use proxy::{get_proxy, set_proxy, get_proxy_required, set_proxy_required, proxy_load_failed};
 use relay::{relay_query, relay_subscribe};
@@ -49,7 +49,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             keychain_store,
-            keychain_get,
             keychain_delete,
             write_log,
             clear_log,

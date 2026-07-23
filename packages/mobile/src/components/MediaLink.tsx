@@ -19,8 +19,8 @@ import {
 } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { SizeGuardedImage } from './SizeGuardedImage';
-import { getBlossomFallbackUrls } from '@core/blossom';
-import { shouldRejectUrl, optimizeMediaUrl } from '@core/imageUtils';
+import { resolveMediaSources } from '@core/blossom';
+import { optimizeMediaUrl } from '@core/imageUtils';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56;
@@ -260,9 +260,13 @@ interface MediaLinkProps {
   blurMedia?: boolean;
   poster?: string;
   isVideo?: boolean;
+  /** sha256 of the blob (NIP-92 `x`) — enables cross-server fallback. */
+  sha256?: string;
+  /** Author-declared NIP-92 `fallback` URLs for the same blob. */
+  fallbacks?: string[];
 }
 
-export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: forceVideo }: MediaLinkProps) {
+export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: forceVideo, sha256, fallbacks }: MediaLinkProps) {
   const [revealed, setRevealed] = useState(false);
   // Whether the in-app fullscreen image viewer is open.
   const [lightboxOpen, setLightboxOpen] = useState(false);
@@ -279,7 +283,13 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
   }
 
   const embed = useMemo(() => getEmbedInfo(url, forceVideo), [url, forceVideo]);
-  const imageSources = useMemo(() => [url, ...getBlossomFallbackUrls(url)], [url]);
+  // Ordered, deduped, SSRF-gated candidates: primary URL, author fallbacks, then
+  // the blob rebuilt on every known Blossom server from its sha256. Single source
+  // of truth shared with web + avatars.
+  const imageSources = useMemo(
+    () => resolveMediaSources({ url, sha256, fallbacks }),
+    [url, sha256, fallbacks],
+  );
   const currentImageUrl = imageSources[srcIndex] ?? url;
 
   if (!embed) {
@@ -375,11 +385,11 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
       );
     }
     // Inline player (native controls) instead of kicking out to the browser.
-    // Pass the canonical URL + Blossom mirrors so a dead mirror doesn't produce
-    // a spurious "Failed to load video". Run every source through the same
-    // unsafe-host/SSRF gate images get — drop private/localhost/credentialed
-    // URLs before they reach the <VideoView>. Nothing safe left → render nothing.
-    const videoSources = [embed.url, ...getBlossomFallbackUrls(embed.url)].filter(s => !shouldRejectUrl(s, 'media'));
+    // Pass the canonical URL + author fallbacks + Blossom mirrors so a dead
+    // mirror doesn't produce a spurious "Failed to load video". resolveMediaSources
+    // already SSRF-gates every candidate (drops private/localhost/credentialed
+    // URLs) before they reach the <VideoView>. Nothing safe left → render nothing.
+    const videoSources = resolveMediaSources({ url: embed.url, sha256, fallbacks });
     if (videoSources.length === 0) return null;
     return <InlineVideo sources={videoSources} />;
   }

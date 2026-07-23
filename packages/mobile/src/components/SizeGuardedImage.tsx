@@ -5,7 +5,7 @@
  * Shows a placeholder when over the limit, with a tap-to-load option.
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Image,
   View,
@@ -20,6 +20,7 @@ import { STORAGE_KEYS } from '../lib/storageKeys';
 import { supportsCorsHead, learnCorsHost } from '../lib/mediaUtils';
 import { applyImageProxy } from '@core/imageProxy';
 import { shouldRejectUrl } from '@core/imageUtils';
+import { resolveMediaSources } from '@core/blossom';
 
 type SizeLimitOption = 'small' | 'default' | 'large' | 'none';
 
@@ -127,7 +128,30 @@ interface SizeGuardedImageProps {
   onError?: () => void;
 }
 
-export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMode = 'cover', onError }: SizeGuardedImageProps) {
+export function SizeGuardedImage({ uri: propUri, style, type = 'image', resizeMode = 'cover', onError }: SizeGuardedImageProps) {
+  // Avatars get transparent cross-server fallback here (one place → all ~10
+  // avatar call sites benefit): the same blob rebuilt on every known Blossom
+  // server from a flat/hash URL, SSRF-gated. Content images (type='image') get
+  // their fallback via MediaLink/InlineImage, so leave that path single-source.
+  const avatarSources = useMemo(
+    () => (type === 'avatar' ? resolveMediaSources({ url: propUri, rejectType: 'avatar' }) : []),
+    [propUri, type],
+  );
+  // Index into avatarSources; reset (in render) when the incoming uri changes.
+  const [srcIndex, setSrcIndex] = useState(0);
+  // Set once every avatar candidate has failed to load → show the placeholder.
+  const [avatarErrored, setAvatarErrored] = useState(false);
+  const [prevPropUri, setPrevPropUri] = useState(propUri);
+  if (propUri !== prevPropUri) {
+    setPrevPropUri(propUri);
+    setSrcIndex(0);
+    setAvatarErrored(false);
+  }
+  // The candidate we're currently attempting. For non-avatars this is just the
+  // incoming uri; for avatars it walks the fallback list on load errors.
+  const rawUri = type === 'avatar' ? (avatarSources[srcIndex] ?? propUri) : propUri;
+  const avatarExhausted = type === 'avatar' && srcIndex >= avatarSources.length - 1;
+
   // SSRF gate: reject private/loopback/link-local/credentialed hosts (in any IP
   // encoding), non-https avatars, and executable extensions before the URL ever
   // reaches <Image> or the HEAD probe — mirrors web's optimizeAvatarUrl /
@@ -142,6 +166,20 @@ export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMod
   const [status, setStatus] = useState<'checking' | 'allowed' | 'blocked' | 'unknown' | 'override'>('checking');
   const [fileSize, setFileSize] = useState<number | null>(null);
   const mountedRef = useRef(true);
+
+  // Advance to the next avatar candidate on load error; when the list is
+  // exhausted, fall through to the neutral avatar placeholder below.
+  const handleImageError = () => {
+    if (type === 'avatar') {
+      if (!avatarExhausted) {
+        setSrcIndex(i => i + 1);
+      } else {
+        setAvatarErrored(true);
+      }
+      return;
+    }
+    onError?.();
+  };
 
   useEffect(() => {
     mountedRef.current = true;
@@ -177,9 +215,10 @@ export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMod
   }, [uri, limitBytes]);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 
-  if (rejected) {
-    // Unsafe/blocked host: render a neutral placeholder for avatars, nothing
-    // for inline media. Never expose a tap-to-load override for these.
+  if (rejected || avatarErrored) {
+    // Unsafe/blocked host, or every avatar candidate failed to load: render a
+    // neutral placeholder for avatars, nothing for inline media. Never expose a
+    // tap-to-load override for these.
     if (type === 'avatar') {
       return <View style={[style as object, localStyles.avatarPlaceholder]} />;
     }
@@ -193,7 +232,7 @@ export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMod
   }
 
   if (status === 'allowed' || status === 'override') {
-    return <Image source={{ uri }} style={style} resizeMode={resizeMode} onError={onError} />;
+    return <Image key={uri} source={{ uri }} style={style} resizeMode={resizeMode} onError={handleImageError} />;
   }
 
   // Blocked or unknown

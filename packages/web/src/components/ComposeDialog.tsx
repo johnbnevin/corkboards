@@ -45,6 +45,14 @@ import { CombinedEmojiPicker } from '@/components/compose/CombinedEmojiPicker'
 import { insertAtCursor } from '@/lib/textareaUtils'
 import { STORAGE_KEYS, CURRENT_PLATFORM, platformKey } from '@/lib/storageKeys'
 
+/** A successfully uploaded media item with its cross-server fallback info. */
+interface UploadedMedia {
+  url: string
+  sha256?: string
+  mime?: string
+  fallbacks: string[]
+}
+
 interface ComposeDialogProps {
   isOpen: boolean
   onClose: () => void
@@ -80,7 +88,7 @@ export function ComposeDialog({
   const [content, setContent] = useState('')
   const [title, setTitle] = useState('') // For long-form
   const [isLongForm, setIsLongForm] = useState(false)
-  const [images, setImages] = useState<string[]>([])
+  const [images, setImages] = useState<UploadedMedia[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [customEmojiTags, setCustomEmojiTags] = useState<string[][]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -118,10 +126,17 @@ export function ComposeDialog({
       for (const file of Array.from(files)) {
         // Upload using Blossom protocol with NIP-98 auth
         const tags = await uploadFile(file)
-        // Find the URL tag from the response
-        const urlTag = tags.find(t => t[0] === 'url')
-        if (urlTag?.[1]) {
-          setImages(prev => [...prev, urlTag[1]])
+        // Build a media descriptor from the response tags (url + blob metadata
+        // + any confirmed cross-server fallback URLs).
+        const url = tags.find(t => t[0] === 'url')?.[1]
+        if (url) {
+          const descriptor: UploadedMedia = {
+            url,
+            sha256: tags.find(t => t[0] === 'x')?.[1],
+            mime: tags.find(t => t[0] === 'm')?.[1],
+            fallbacks: tags.filter(t => t[0] === 'fallback').map(t => t[1]),
+          }
+          setImages(prev => [...prev, descriptor])
         }
       }
       toast({ title: 'Image uploaded' })
@@ -140,7 +155,7 @@ export function ComposeDialog({
   }, [toast, user, uploadFile])
 
   const removeImage = useCallback((url: string) => {
-    setImages(prev => prev.filter(u => u !== url))
+    setImages(prev => prev.filter(i => i.url !== url))
   }, [])
 
   const handleSubmit = useCallback(() => {
@@ -152,7 +167,7 @@ export function ComposeDialog({
     // Build content with images
     let finalContent = content.trim()
     if (images.length > 0) {
-      finalContent += '\n\n' + images.join('\n')
+      finalContent += '\n\n' + images.map(i => i.url).join('\n')
     }
 
     // Add quote reference if quoting — NIP-21 requires a bech32 entity
@@ -200,6 +215,17 @@ export function ComposeDialog({
       if (tag.length >= 3 && tag[0] === 'emoji' && /^[\w-]{1,64}$/.test(tag[1]) && tag[2].startsWith('https://')) {
         tags.push(tag)
       }
+    }
+
+    // Emit one NIP-92 imeta tag per uploaded image so readers can rebuild the
+    // blob across Blossom servers (sha256 + confirmed fallback URLs) when the
+    // primary URL's server prunes the file.
+    for (const img of images) {
+      const imeta = ['imeta', 'url ' + img.url]
+      if (img.sha256) imeta.push('x ' + img.sha256)
+      if (img.mime) imeta.push('m ' + img.mime)
+      for (const fb of img.fallbacks) imeta.push('fallback ' + fb)
+      tags.push(imeta)
     }
 
     const kind = isLongForm ? 30023 : 1
@@ -393,11 +419,11 @@ export function ComposeDialog({
           {/* Image previews */}
           {images.length > 0 && (
             <div className="flex flex-wrap gap-2">
-              {images.map((url) => (
-                <div key={url} className="relative group">
-                  <img src={url} alt="" className="h-20 w-20 object-cover rounded" referrerPolicy="no-referrer" />
+              {images.map((img) => (
+                <div key={img.url} className="relative group">
+                  <img src={img.url} alt="" className="h-20 w-20 object-cover rounded" referrerPolicy="no-referrer" />
                   <button
-                    onClick={() => removeImage(url)}
+                    onClick={() => removeImage(img.url)}
                     className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
                   >
                     <X className="h-3 w-3" />

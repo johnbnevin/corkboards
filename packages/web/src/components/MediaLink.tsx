@@ -5,7 +5,7 @@ import { SizeGuardedImage } from '@/components/SizeGuardedImage'
 import { ExternalLink, UtensilsCrossed, Film, AlertCircle } from 'lucide-react'
 import { optimizeMediaUrl, shouldRejectUrl } from '@/lib/imageUtils'
 import { isImageUrl, isCdnHost } from '@/lib/mediaUtils'
-import { getBlossomFallbackUrls } from '@core/blossom'
+import { resolveMediaSources } from '@core/blossom'
 
 /** Video player with loading indicator. Accepts multiple sources (the canonical
  *  URL + Blossom mirrors) and tries the next on error before declaring failure —
@@ -215,7 +215,7 @@ function getEmbedProviderName(embedUrl: string): string {
   return 'embed'
 }
 
-export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo }: { url: string; blurMedia?: boolean; poster?: string; isVideo?: boolean }) {
+export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo, sha256, fallbacks }: { url: string; blurMedia?: boolean; poster?: string; isVideo?: boolean; sha256?: string; fallbacks?: string[] }) {
   const [imageError, setImageError] = useState(false)
   // When a CDN-hosted "image" fails to load, try rendering as video instead
   const [tryVideoFallback, setTryVideoFallback] = useState(false)
@@ -225,8 +225,10 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
   const [revealed, setRevealed] = useState(false)
   const [embedRevealed, setEmbedRevealed] = useState(false)
 
-  // Same blob, alternate servers — only non-empty for content-addressed Blossom URLs.
-  const imageSources = useMemo(() => [url, ...getBlossomFallbackUrls(url)], [url])
+  // Ordered, deduped, SSRF-gated candidate list: [primary, ...author fallbacks,
+  // ...blob rebuilt across every known server from its sha256]. Non-Blossom URLs
+  // collapse to just the primary.
+  const imageSources = useMemo(() => resolveMediaSources({ url, sha256, fallbacks }), [url, sha256, fallbacks])
   const currentImageUrl = imageSources[srcIndex] ?? url
 
   // Reset per-URL image state when the media URL changes (the embed itself is
@@ -570,7 +572,7 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo 
   // Direct video or forceVideo (imeta) — always render inline player, never blur
   const isDirectVideo = isVideoUrl(url) || forceVideo
   if (isDirectVideo) {
-    return <VideoPlayer sources={[embed.url, ...getBlossomFallbackUrls(embed.url)]} poster={poster} />
+    return <VideoPlayer sources={resolveMediaSources({ url: embed.url, sha256, fallbacks })} poster={poster} />
   }
 
   // Cypherpunk opt-in: EVERY third-party iframe embed (YouTube, Twitch, Spotify,

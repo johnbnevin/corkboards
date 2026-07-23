@@ -26,6 +26,7 @@ import { useAuthor } from '../hooks/useAuthor';
 import { useNostr } from '../lib/NostrProvider';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { optimizeMediaUrl } from '@core/imageUtils';
+import { parseImetaTag, resolveMediaSources, type ImetaData } from '@core/blossom';
 import { MediaLink } from './MediaLink';
 import { TrackerWarningDialog } from './TrackerWarningDialog';
 
@@ -124,14 +125,35 @@ function WebLink({ url, onTrackerPress }: { url: string; onTrackerPress: (info: 
   );
 }
 
-function InlineImage({ url }: { url: string }) {
+function InlineImage({ url, sha256, fallbacks }: { url: string; sha256?: string; fallbacks?: string[] }) {
+  // Ordered, deduped, SSRF-gated candidate list: primary URL, author-declared
+  // NIP-92 fallbacks, then the same blob rebuilt on every known Blossom server
+  // from its sha256. Advance the index on load error so a pruned/dead primary
+  // falls back to a peer server. Parity with MediaLink's image branch + web.
+  const sources = useMemo(
+    () => resolveMediaSources({ url, sha256, fallbacks }),
+    [url, sha256, fallbacks],
+  );
+  const [srcIndex, setSrcIndex] = useState(0);
+  const [prevUrl, setPrevUrl] = useState(url);
+  if (url !== prevUrl) {
+    setPrevUrl(url);
+    setSrcIndex(0);
+  }
+  const currentUrl = sources[srcIndex] ?? sources[0] ?? url;
   return (
-    <TouchableOpacity activeOpacity={0.9} onPress={() => Linking.openURL(url)}>
+    <TouchableOpacity activeOpacity={0.9} onPress={() => Linking.openURL(currentUrl)}>
       <SizeGuardedImage
-        uri={url}
+        key={currentUrl}
+        uri={currentUrl}
         style={styles.mediaImage}
         type="image"
         resizeMode="cover"
+        onError={() => {
+          // The blob might still exist on another Blossom server — retry the
+          // same hash there before giving up.
+          if (srcIndex < sources.length - 1) setSrcIndex(i => i + 1);
+        }}
       />
     </TouchableOpacity>
   );
@@ -252,11 +274,16 @@ function QuotedNote({ noteId, onViewThread }: { noteId: string; onViewThread?: (
 // video events (kinds 21/22/34235/34236) carry their media here rather than in
 // the content field. Keep in sync with web's getImetaData.
 const IMAGE_EXT_IMETA = /\.(jpg|jpeg|png|gif|webp|avif)(\?|$)/i;
-function getImetaMedia(event: import('@nostrify/nostrify').NostrEvent): { videoUrls: string[]; imageUrls: string[] } {
+function getImetaMedia(event: import('@nostrify/nostrify').NostrEvent): { videoUrls: string[]; imageUrls: string[]; imetaMeta: Map<string, ImetaData> } {
   const videoUrls: string[] = [];
   const imageUrls: string[] = [];
+  // Parsed imeta keyed by url — threads sha256 + author fallbacks into the media
+  // renderers so a pruned primary can be recovered from a peer Blossom server.
+  const imetaMeta = new Map<string, ImetaData>();
   for (const tag of event.tags) {
     if (tag[0] !== 'imeta') continue;
+    const parsed = parseImetaTag(tag);
+    if (parsed && !imetaMeta.has(parsed.url)) imetaMeta.set(parsed.url, parsed);
     let url = '';
     let mime = '';
     for (let i = 1; i < tag.length; i++) {
@@ -269,7 +296,7 @@ function getImetaMedia(event: import('@nostrify/nostrify').NostrEvent): { videoU
     if (mime.startsWith('video/') || VIDEO_EXT.test(url)) videoUrls.push(url);
     else if (mime.startsWith('image/') || IMAGE_EXT_IMETA.test(url)) imageUrls.push(url);
   }
-  return { videoUrls, imageUrls };
+  return { videoUrls, imageUrls, imetaMeta };
 }
 
 // ============================================================================
@@ -570,7 +597,7 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
 
   // Extract imeta media (NIP-92) for all kinds — picture (20) and video
   // (21/22/34235/34236) events carry media here with empty/caption content.
-  const { videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls } = useMemo(() => getImetaMedia(event), [event]);
+  const { videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls, imetaMeta } = useMemo(() => getImetaMedia(event), [event]);
 
   // Long-form (kind 30023) / listing (kind 30402) — branch AFTER all hooks.
   if (event.kind === 30023) {
@@ -638,17 +665,20 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
       </Text>
 
       {/* Block-level media (images, videos, YouTube embeds) */}
-      {mediaParts.map((part, i) => (
-        <View key={`media-${i}`} style={styles.mediaContainer}>
-          {part.type === 'image' ? (
-            <InlineImage url={part.value} />
-          ) : part.type === 'youtube' ? (
-            <MediaLink url={part.value} />
-          ) : (
-            <InlineVideo url={part.value} />
-          )}
-        </View>
-      ))}
+      {mediaParts.map((part, i) => {
+        const m = imetaMeta.get(part.value);
+        return (
+          <View key={`media-${i}`} style={styles.mediaContainer}>
+            {part.type === 'image' ? (
+              <InlineImage url={part.value} sha256={m?.sha256} fallbacks={m?.fallbacks} />
+            ) : part.type === 'youtube' ? (
+              <MediaLink url={part.value} sha256={m?.sha256} fallbacks={m?.fallbacks} />
+            ) : (
+              <InlineVideo url={part.value} />
+            )}
+          </View>
+        );
+      })}
 
       {/* Render imeta media (NIP-92) not already shown inline. Picture (kind 20)
           and video (kinds 21/22/34235/34236) events keep media in imeta with an
@@ -657,11 +687,14 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
         const contentUrls = new Set(mediaParts.map(p => p.value));
         return (
           <>
-            {imetaImageUrls.filter(url => !contentUrls.has(url)).map(url => (
-              <View key={`imeta-img-${url}`} style={styles.mediaContainer}>
-                <InlineImage url={url} />
-              </View>
-            ))}
+            {imetaImageUrls.filter(url => !contentUrls.has(url)).map(url => {
+              const m = imetaMeta.get(url);
+              return (
+                <View key={`imeta-img-${url}`} style={styles.mediaContainer}>
+                  <InlineImage url={url} sha256={m?.sha256} fallbacks={m?.fallbacks} />
+                </View>
+              );
+            })}
             {imetaVideoUrls.filter(url => !contentUrls.has(url)).map(url => (
               <View key={`imeta-vid-${url}`} style={styles.mediaContainer}>
                 <InlineVideo url={url} />

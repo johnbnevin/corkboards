@@ -10,7 +10,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { BlossomUploader } from '@nostrify/nostrify/uploaders';
 import type { NostrSigner } from '@nostrify/nostrify';
-import { KNOWN_BLOSSOM_SERVERS } from '@core/blossom';
+import { KNOWN_BLOSSOM_SERVERS, extractBlossomRef, getBlossomUrlsForHash } from '@core/blossom';
 import { useAuth } from '../lib/AuthContext';
 import { useNostr } from '../lib/NostrProvider';
 
@@ -24,6 +24,11 @@ const UPLOAD_TIMEOUT_MS = 10000;
 // returned immediately; the rest are mirrored in the background.
 const MIRROR_COPIES = 3;
 
+// How long we wait for background mirrors to confirm before returning the note.
+// Slow mirrors keep running past this — they just won't be listed as confirmed
+// fallbacks (render-time sha256 reconstruction covers them anyway).
+const MIRROR_GRACE_MS = 4000;
+
 function withTimeout<T>(promise: Promise<T>, ms: number, server: string): Promise<T> {
   return Promise.race([
     promise,
@@ -33,20 +38,28 @@ function withTimeout<T>(promise: Promise<T>, ms: number, server: string): Promis
   ]);
 }
 
-// Mirror a file to additional servers in the background (best effort). Stops
-// once `count` copies succeed. Never throws — failures are silently ignored.
-async function mirrorToServers(file: File, servers: string[], count: number, signer: NostrSigner): Promise<void> {
+// Mirror a file to additional servers IN PARALLEL (best effort). Every upload is
+// wrapped in the same per-server timeout and launched at once; we stop counting
+// once `count` succeed but let the rest settle. Never throws. Returns the base
+// origins that confirmed the blob (the servers whose upload fulfilled).
+async function mirrorToServers(file: File, servers: string[], count: number, signer: NostrSigner): Promise<string[]> {
   let landed = 0;
-  for (const server of servers) {
-    if (landed >= count) break;
-    try {
+  const confirmed: string[] = [];
+  const results = await Promise.allSettled(
+    servers.map(async (server) => {
       const uploader = new BlossomUploader({ servers: [server], signer });
       await withTimeout(uploader.upload(file), UPLOAD_TIMEOUT_MS, server);
+      return server;
+    })
+  );
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      if (landed >= count) continue;
       landed++;
-    } catch {
-      // best effort — try the next server
+      confirmed.push(result.value);
     }
   }
+  return confirmed;
 }
 
 export function useUploadFile() {
@@ -117,8 +130,34 @@ export function useUploadFile() {
 
           const tags = await withTimeout(uploader.upload(file), UPLOAD_TIMEOUT_MS, server);
 
+          // Pull the blob descriptor from the returned tags so we can record
+          // cross-server fallback URLs on the note (NIP-92).
+          const url = tags.find((t: string[]) => t[0] === 'url')?.[1] ?? '';
+          const sha256 = tags.find((t: string[]) => t[0] === 'x')?.[1];
+          const ext = extractBlossomRef(url)?.ext ?? '';
+
+          // Mirror to the remaining servers, but only wait up to MIRROR_GRACE_MS
+          // for confirmations — slow mirrors keep running in the background and
+          // are covered by render-time sha256 reconstruction.
           const others = serverList.filter((_, idx) => idx !== i);
-          void mirrorToServers(file, others, MIRROR_COPIES - 1, signer);
+          const confirmed = await Promise.race([
+            mirrorToServers(file, others, MIRROR_COPIES - 1, signer),
+            new Promise<string[]>(r => setTimeout(() => r([]), MIRROR_GRACE_MS)),
+          ]);
+
+          // Append one ['fallback', url] tag per confirmed mirror so the note
+          // carries explicit alternate URLs for the same content-addressed blob.
+          if (sha256) {
+            for (const base of confirmed) {
+              const fallbackUrl = getBlossomUrlsForHash(sha256, ext, [base])[0];
+              if (fallbackUrl) tags.push(['fallback', fallbackUrl]);
+            }
+            // Redundancy check: the primary landing + confirmed mirrors should be
+            // at least 2 servers, or the blob survives no single-server pruning.
+            if ((1 + confirmed.length) < 2) {
+              console.warn('[blossom] blob landed on only 1 server; redundancy not guaranteed', { sha256 });
+            }
+          }
 
           return tags;
         } catch (err) {

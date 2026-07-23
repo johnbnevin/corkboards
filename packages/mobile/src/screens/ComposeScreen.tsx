@@ -43,6 +43,14 @@ interface ComposeScreenProps {
   quotedEvent?: { id: string; pubkey: string; tags: string[][]; content?: string; kind?: number };
 }
 
+/** A successfully uploaded media item with its cross-server fallback info. */
+interface UploadedMedia {
+  url: string;
+  sha256?: string;
+  mime?: string;
+  fallbacks: string[];
+}
+
 /** Character count color thresholds */
 const CHAR_GREEN_MAX = 280;
 const CHAR_YELLOW_MAX = 4500;
@@ -61,7 +69,7 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
   const [content, setContent] = useState('');
   const [title, setTitle] = useState('');
   const [isLongForm, setIsLongForm] = useState(false);
-  const [images, setImages] = useState<string[]>([]);
+  const [images, setImages] = useState<UploadedMedia[]>([]);
   const [customEmojiTags, setCustomEmojiTags] = useState<string[][]>([]);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
@@ -118,7 +126,15 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
       const oxTag = tags.find((t: string[]) => t[0] === 'ox');
       const uploadedUrl = urlTag?.[1] || oxTag?.[1];
       if (uploadedUrl) {
-        setImages(prev => [...prev, uploadedUrl]);
+        // Build a media descriptor from the response tags (url + blob metadata
+        // + any confirmed cross-server fallback URLs).
+        const descriptor: UploadedMedia = {
+          url: uploadedUrl,
+          sha256: tags.find((t: string[]) => t[0] === 'x')?.[1],
+          mime: tags.find((t: string[]) => t[0] === 'm')?.[1],
+          fallbacks: tags.filter((t: string[]) => t[0] === 'fallback').map((t: string[]) => t[1]),
+        };
+        setImages(prev => [...prev, descriptor]);
       }
     } catch (err) {
       Alert.alert('Upload failed', err instanceof Error ? err.message : 'Unknown error');
@@ -126,7 +142,7 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
   }, [uploadFile]);
 
   const removeImage = useCallback((url: string) => {
-    setImages(prev => prev.filter(u => u !== url));
+    setImages(prev => prev.filter(i => i.url !== url));
   }, []);
 
   const handlePublish = async () => {
@@ -138,7 +154,7 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
       // Build final content: text + images + quote reference
       let finalContent = text;
       if (images.length > 0) {
-        finalContent += '\n\n' + images.join('\n');
+        finalContent += '\n\n' + images.map(i => i.url).join('\n');
       }
       // Quote reference — NIP-21 requires a bech32 entity (nostr:nevent1…),
       // not a raw hex id, or other clients won't render it. (Mirrors web
@@ -189,6 +205,18 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
         if (tag.length >= 3 && tag[0] === 'emoji' && /^[\w-]{1,64}$/.test(tag[1]) && tag[2].startsWith('https://')) {
           tags.push(tag);
         }
+      }
+
+      // NIP-92 imeta: record each image's blob metadata + cross-server fallback
+      // URLs so clients can recover the media if the primary server prunes it.
+      for (const img of images) {
+        tags.push([
+          'imeta',
+          'url ' + img.url,
+          ...(img.sha256 ? ['x ' + img.sha256] : []),
+          ...(img.mime ? ['m ' + img.mime] : []),
+          ...img.fallbacks.map(fb => 'fallback ' + fb),
+        ]);
       }
 
       const kind = isLongForm ? 30023 : 1;
@@ -330,12 +358,12 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
         {/* Image previews */}
         {images.length > 0 && (
           <View style={styles.imageRow}>
-            {images.map((url) => (
-              <View key={url} style={styles.imageThumbWrapper}>
-                <Image source={{ uri: applyImageProxy(url) }} style={styles.imageThumb} />
+            {images.map((img) => (
+              <View key={img.url} style={styles.imageThumbWrapper}>
+                <Image source={{ uri: applyImageProxy(img.url) }} style={styles.imageThumb} />
                 <TouchableOpacity
                   style={styles.imageRemoveBtn}
-                  onPress={() => removeImage(url)}
+                  onPress={() => removeImage(img.url)}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 >
                   <Text style={styles.imageRemoveText}>X</Text>

@@ -4,6 +4,7 @@ import * as AvatarPrimitive from "@radix-ui/react-avatar"
 import { cn } from "@/lib/utils"
 import { useAvatarSizeLimit } from "@/hooks/useImageSizeLimit"
 import { supportsCorsHead, learnCorsHost } from "@/lib/mediaUtils"
+import { resolveMediaSources } from "@core/blossom"
 
 const Avatar = React.forwardRef<
   React.ElementRef<typeof AvatarPrimitive.Root>,
@@ -79,10 +80,20 @@ function formatBytes(bytes: number): string {
 const AvatarImage = React.forwardRef<
   React.ElementRef<typeof AvatarPrimitive.Image>,
   React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Image>
->(({ className, src, ...props }, ref) => {
+>(({ className, src, onError, ...props }, ref) => {
   const limitBytes = useAvatarSizeLimit()
   const [status, setStatus] = React.useState<'checking' | 'allowed' | 'blocked' | 'unknown' | 'override'>('checking')
   const [sizeBytes, setSizeBytes] = React.useState<number | null>(null)
+
+  // Cross-server fallback: for content-addressed Blossom avatars, rebuild the
+  // blob URL on every known server so a pruned/dead server falls through to a
+  // peer before Radix shows AvatarFallback. Non-Blossom avatars → 1 candidate.
+  const candidates = React.useMemo(
+    () => resolveMediaSources({ url: typeof src === 'string' ? src : '', rejectType: 'avatar' }),
+    [src]
+  )
+  const [srcIndex, setSrcIndex] = React.useState(0)
+  React.useEffect(() => { setSrcIndex(0) }, [src])
 
   React.useEffect(() => {
     if (!src || limitBytes === 0 || avatarOverrides.has(src)) {
@@ -137,7 +148,16 @@ const AvatarImage = React.forwardRef<
       className={cn("aspect-square h-full w-full object-cover", className)}
       loading="lazy"
       decoding="async"
-      src={src}
+      src={candidates[srcIndex] ?? src}
+      onError={(e) => {
+        // Same blob may live on another Blossom server — retry there before
+        // giving up. Once every candidate fails, let Radix show AvatarFallback.
+        if (srcIndex < candidates.length - 1) {
+          setSrcIndex(i => i + 1)
+          return
+        }
+        onError?.(e)
+      }}
       {...props}
     />
   )

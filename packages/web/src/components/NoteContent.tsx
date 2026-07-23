@@ -7,6 +7,7 @@ import { ProfileLink } from './ProfileLink'
 import { MediaLink } from './MediaLink'
 import { isImageUrl } from '@/lib/mediaUtils'
 import { optimizeMediaUrl } from '@/lib/imageUtils'
+import { parseImetaTag, type ImetaData } from '@core/blossom'
 import { InlineLink } from './InlineLink'
 import { useHashtagAction } from '@/contexts/hashtagAction'
 import { WebLink } from './WebLink'
@@ -171,32 +172,28 @@ const MarkdownText = memo(function MarkdownText({ text, emojiMap }: { text: stri
 // video events (kinds 21/22/34235/34236) carry their media here rather than in
 // the content field, so we classify each imeta entry as a video (with optional
 // poster) or a standalone image.
-function getImetaData(event: NostrEvent): { posters: Map<string, string>; videoUrls: string[]; imageUrls: string[] } {
+function getImetaData(event: NostrEvent): { posters: Map<string, string>; videoUrls: string[]; imageUrls: string[]; imetaMeta: Map<string, ImetaData> } {
   const posters = new Map<string, string>()
   const videoUrls: string[] = []
   const imageUrls: string[] = []
+  // Parsed imeta keyed by url — threads sha256 + author fallbacks into MediaLink
+  // so it can rebuild the blob across Blossom servers on load failure (NIP-92).
+  const imetaMeta = new Map<string, ImetaData>()
   for (const tag of event.tags) {
     if (tag[0] !== 'imeta') continue
-    let url = ''
-    let image = ''
-    let mime = ''
-    for (let i = 1; i < tag.length; i++) {
-      const entry = tag[i]
-      if (typeof entry !== 'string') continue
-      if (entry.startsWith('url ')) url = entry.slice(4)
-      else if (entry.startsWith('image ') && !image) image = entry.slice(6)
-      else if (entry.startsWith('m ')) mime = entry.slice(2)
-    }
-    if (!url) continue
-    const isVideo = mime.startsWith('video/') || /\.(mp4|webm|mov|m3u8)(\?|$)/i.test(url)
+    const parsed = parseImetaTag(tag)
+    if (!parsed) continue
+    const { url, image, mime } = parsed
+    if (!imetaMeta.has(url)) imetaMeta.set(url, parsed)
+    const isVideo = (mime?.startsWith('video/') ?? false) || /\.(mp4|webm|mov|m3u8)(\?|$)/i.test(url)
     if (isVideo) {
       if (image) posters.set(url, image)
       videoUrls.push(url)
-    } else if (mime.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|avif)(\?|$)/i.test(url)) {
+    } else if ((mime?.startsWith('image/') ?? false) || /\.(jpg|jpeg|png|gif|webp|avif)(\?|$)/i.test(url)) {
       imageUrls.push(url)
     }
   }
-  return { posters, videoUrls, imageUrls }
+  return { posters, videoUrls, imageUrls, imetaMeta }
 }
 
 export function NoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, depth = 0 }: NoteContentProps) {
@@ -242,7 +239,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
   }, [event.content, emojiMap])
 
   // Build poster map and media URL sets from imeta tags (NIP-92)
-  const { posters: imetaPosters, videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls } = useMemo(() => getImetaData(event), [event])
+  const { posters: imetaPosters, videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls, imetaMeta } = useMemo(() => getImetaData(event), [event])
   const imetaVideoUrlSet = useMemo(() => new Set(imetaVideoUrls), [imetaVideoUrls])
 
   // (P7) Derive imeta media not already shown inline — memoized so the Set +
@@ -310,8 +307,10 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
         )
       case 'profile':
         return <ProfileLink key={i} pubkey={part.value} />
-      case 'media':
-        return <MediaLink key={i} url={part.value} blurMedia={blurMedia} poster={imetaPosters.get(part.value)} isVideo={imetaVideoUrlSet.has(part.value)} />
+      case 'media': {
+        const m = imetaMeta.get(part.value)
+        return <MediaLink key={i} url={part.value} blurMedia={blurMedia} poster={imetaPosters.get(part.value)} isVideo={imetaVideoUrlSet.has(part.value)} sha256={m?.sha256} fallbacks={m?.fallbacks} />
+      }
       case 'web':
         return <WebLink key={i} url={part.value} />
       case 'hashtag': {
@@ -361,11 +360,14 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
         if (group.type === 'image-row') {
           return (
             <div key={`row-${group.indices[0]}`} className="flex gap-1 my-2 overflow-x-auto">
-              {group.parts.map((part, j) => (
-                <div key={group.indices[j]} className="flex-shrink-0 max-w-[50%] min-w-0">
-                  <MediaLink url={part.value} blurMedia={blurMedia} poster={imetaPosters.get(part.value)} />
-                </div>
-              ))}
+              {group.parts.map((part, j) => {
+                const m = imetaMeta.get(part.value)
+                return (
+                  <div key={group.indices[j]} className="flex-shrink-0 max-w-[50%] min-w-0">
+                    <MediaLink url={part.value} blurMedia={blurMedia} poster={imetaPosters.get(part.value)} sha256={m?.sha256} fallbacks={m?.fallbacks} />
+                  </div>
+                )
+              })}
             </div>
           )
         }
@@ -378,12 +380,14 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
           already present in the content text. Applies to ALL kinds so quoted
           media of any kind embeds correctly. */}
       {/* (P7) missingImages/missingVideos are memoized above */}
-      {missingImages.map(imageUrl => (
-        <MediaLink key={`imeta-img-${imageUrl}`} url={imageUrl} blurMedia={blurMedia} />
-      ))}
-      {missingVideos.map(videoUrl => (
-        <MediaLink key={`imeta-vid-${videoUrl}`} url={videoUrl} blurMedia={blurMedia} poster={imetaPosters.get(videoUrl)} isVideo />
-      ))}
+      {missingImages.map(imageUrl => {
+        const m = imetaMeta.get(imageUrl)
+        return <MediaLink key={`imeta-img-${imageUrl}`} url={imageUrl} blurMedia={blurMedia} sha256={m?.sha256} fallbacks={m?.fallbacks} />
+      })}
+      {missingVideos.map(videoUrl => {
+        const m = imetaMeta.get(videoUrl)
+        return <MediaLink key={`imeta-vid-${videoUrl}`} url={videoUrl} blurMedia={blurMedia} poster={imetaPosters.get(videoUrl)} isVideo sha256={m?.sha256} fallbacks={m?.fallbacks} />
+      })}
     </div>
   )
 }

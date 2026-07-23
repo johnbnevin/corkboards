@@ -2574,12 +2574,16 @@ export function MultiColumnClient() {
       if (!feedStillLoading) {
         // Mix in self notes from follow cache AND userNotes (me-tab source) for reliability.
         // followNotesCache may not always include self notes (relay timing, batch ordering).
-        const selfFromCache = followNotesCache?.filter(e => e.pubkey === user.pubkey && !pinnedIdSet.has(e.id)) ?? [];
-        const selfFromUserNotes = userNotes?.filter(e => !pinnedIdSet.has(e.id)) ?? [];
-        // Merge both sources, dedup by id
+        // Own PINNED notes stay eligible here — pinning must not remove a note
+        // from "include my notes" feeds. userNotes drops fetched pins (they're
+        // added separately on 'me'), so own pinned events are a third source.
+        const selfFromCache = followNotesCache?.filter(e => e.pubkey === user.pubkey) ?? [];
+        const selfFromUserNotes = userNotes ?? [];
+        const selfFromPinned = pinnedNoteEvents?.filter(e => e.pubkey === user.pubkey) ?? [];
+        // Merge all sources, dedup by id
         const selfIds = new Set<string>();
         const allSelfNotes: NostrEvent[] = [];
-        for (const n of [...selfFromCache, ...selfFromUserNotes]) {
+        for (const n of [...selfFromCache, ...selfFromUserNotes, ...selfFromPinned]) {
           if (!selfIds.has(n.id)) {
             selfIds.add(n.id);
             allSelfNotes.push(n);
@@ -2608,7 +2612,9 @@ export function MultiColumnClient() {
       }
     }
 
-    // Only include pinned notes on 'me' tab; exclude them from all other tabs.
+    // Only include pinned notes on 'me' tab; exclude them from all other tabs —
+    // EXCEPT the user's own pinned notes when "include my notes" is on: pinning
+    // one of your own notes must not make it vanish from those feeds.
     // Pinned notes come FIRST so the dedup below keeps the pinned version and
     // drops any duplicate that also appears in the regular feed.
     let allNotes: NostrEvent[];
@@ -2616,7 +2622,7 @@ export function MultiColumnClient() {
       allNotes = [...(pinnedNoteEvents || []), ...baseNotes];
     } else {
       allNotes = pinnedIdSet.size > 0
-        ? baseNotes.filter(n => !pinnedIdSet.has(n.id))
+        ? baseNotes.filter(n => !pinnedIdSet.has(n.id) || (showOwnNotes && n.pubkey === user?.pubkey))
         : baseNotes;
     }
 
@@ -3008,11 +3014,15 @@ export function MultiColumnClient() {
       });
     }
 
-    // Sort: pinned first, then by time descending. Use the Set (O(1)) not
-    // pinnedIds.includes (O(n)) — this runs twice per note in the hot path. (P4)
-    const pinned = filteredNotes.filter(note => pinnedIdSet.has(note.id));
-    const regular = filteredNotes
-      .filter(note => !pinnedIdSet.has(note.id))
+    // Sort: pinned first, then by time descending — 'me' tab only. On other
+    // tabs the only pinned notes that can reach here are the user's own (via
+    // "include my notes"), and those flow chronologically like any other note.
+    // Use the Set (O(1)) not pinnedIds.includes (O(n)) — this runs twice per
+    // note in the hot path. (P4)
+    const pinned = activeTab === 'me' ? filteredNotes.filter(note => pinnedIdSet.has(note.id)) : [];
+    // Copy before sorting — filteredNotes can alias the deduplicatedNotes memo
+    // output when no filter branch ran, and .sort() mutates in place.
+    const regular = (activeTab === 'me' ? filteredNotes.filter(note => !pinnedIdSet.has(note.id)) : [...filteredNotes])
       .sort((a, b) => b.created_at - a.created_at);
     const finalNotes = [...pinned, ...regular];
 

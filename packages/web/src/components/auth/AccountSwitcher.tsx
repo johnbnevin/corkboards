@@ -12,6 +12,7 @@ import {
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar.tsx';
 import { useLoggedInAccounts, type Account } from '@/hooks/useLoggedInAccounts';
 import { genUserName } from '@/lib/genUserName';
+import { optimizeAvatarUrl } from '@/lib/imageUtils';
 
 interface AccountSwitcherProps {
   onAddAccountClick: () => void;
@@ -35,7 +36,7 @@ export function AccountSwitcher({ onAddAccountClick, onLogout, onDeleteAccount, 
       <DropdownMenuTrigger asChild>
         <button type="button" className='flex items-center gap-2 p-1.5 rounded-full hover:bg-accent transition-all w-full text-foreground'>
           <Avatar className='w-7 h-7'>
-            <AvatarImage src={currentUser.metadata.picture} alt={getDisplayName(currentUser)} />
+            <AvatarImage src={optimizeAvatarUrl(currentUser.metadata.picture)} alt={getDisplayName(currentUser)} />
             <AvatarFallback>{getDisplayName(currentUser).charAt(0)}</AvatarFallback>
           </Avatar>
           <div className='flex-1 text-left hidden md:block truncate'>
@@ -65,7 +66,7 @@ export function AccountSwitcher({ onAddAccountClick, onLogout, onDeleteAccount, 
             className='flex items-center gap-2 cursor-pointer p-2 rounded-md'
           >
             <Avatar className='w-8 h-8'>
-              <AvatarImage src={user.metadata.picture} alt={getDisplayName(user)} />
+              <AvatarImage src={optimizeAvatarUrl(user.metadata.picture)} alt={getDisplayName(user)} />
               <AvatarFallback>{getDisplayName(user)?.charAt(0) || <UserIcon />}</AvatarFallback>
             </Avatar>
             <div className='flex-1 truncate'>

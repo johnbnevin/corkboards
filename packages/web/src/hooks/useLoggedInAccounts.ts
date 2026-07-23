@@ -4,6 +4,8 @@ import { useNostrLogin } from '@nostrify/react/login';
 import { useQuery } from '@tanstack/react-query';
 import { NSchema as n, NostrEvent, NostrMetadata } from '@nostrify/nostrify';
 import { switchActiveUser, getActiveUserPubkey } from '@/lib/storageKeys';
+import { isTauri, keychainDelete } from '@/lib/tauri';
+import { deleteNsec } from '@/lib/webKeyStore';
 
 export interface Account {
   id: string;
@@ -14,7 +16,7 @@ export interface Account {
 
 export function useLoggedInAccounts() {
   const { nostr } = useNostr();
-  const { logins, setLogin: rawSetLogin, removeLogin } = useNostrLogin();
+  const { logins, setLogin: rawSetLogin, removeLogin: rawRemoveLogin } = useNostrLogin();
 
   const { data: authors = [] } = useQuery({
     queryKey: ['nostr', 'logins', logins.map((l) => l.id).join(';')],
@@ -47,6 +49,19 @@ export function useLoggedInAccounts() {
 
   // Other users are all logins except the current one
   const otherUsers = (authors || []).slice(1) as Account[];
+
+  // Wrap removeLogin so removing an nsec account also deletes its stored key
+  // material (OS keychain on Tauri, encrypted IndexedDB entry on web). The
+  // AccountSwitcher logout fallback calls this directly, bypassing
+  // useLoginActions.logoutAccount which does the same cleanup.
+  const removeLogin = useCallback((loginId: string) => {
+    const login = logins.find((l) => l.id === loginId);
+    if (login?.type === 'nsec') {
+      if (isTauri) void keychainDelete(`nsec:${login.pubkey}`);
+      else void deleteNsec(login.pubkey).catch(() => {});
+    }
+    rawRemoveLogin(loginId);
+  }, [logins, rawRemoveLogin]);
 
   // Wrap setLogin to handle per-user localStorage isolation
   const setLogin = useCallback((loginId: string) => {

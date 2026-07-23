@@ -6,7 +6,7 @@
  *
  * Mobile equivalent of packages/web/src/components/MediaLink.tsx.
  */
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -20,6 +20,7 @@ import {
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { getBlossomFallbackUrls } from '@core/blossom';
+import { shouldRejectUrl, optimizeMediaUrl } from '@core/imageUtils';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56;
@@ -28,11 +29,72 @@ const MEDIA_WIDTH = SCREEN_WIDTH - 56;
  * InlineVideo — plays a video in-place with native controls (expo-video). Kept a
  * separate component so its useVideoPlayer hook stays out of MediaLink's
  * conditional render branches (Rules of Hooks). Does not autoplay.
+ *
+ * Accepts multiple sources (the canonical URL + Blossom mirrors) and tries the
+ * next on error before declaring failure — so a dead mirror doesn't produce a
+ * spurious "Failed to load video". Parity with web's VideoPlayer.
  */
-function InlineVideo({ url }: { url: string }) {
-  const player = useVideoPlayer(url, (p) => {
+function InlineVideo({ sources }: { sources: string[] }) {
+  // Index into [canonical url, ...blossom mirror URLs]; advanced when the
+  // current source errors so we retry the same hash on another Blossom server.
+  const [srcIdx, setSrcIdx] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const srcIdxRef = useRef(0);
+  const sourcesRef = useRef(sources);
+  useEffect(() => {
+    sourcesRef.current = sources;
+  }, [sources]);
+  const src = sources[srcIdx] ?? sources[0] ?? '';
+  const player = useVideoPlayer(src, (p) => {
     p.loop = false;
   });
+
+  useEffect(() => {
+    const sub = player.addListener('statusChange', ({ status }) => {
+      if (status !== 'error') return;
+      // Try the next mirror (same blob, different Blossom server) before giving
+      // up — only show the error once every source has failed.
+      if (srcIdxRef.current < sourcesRef.current.length - 1) {
+        srcIdxRef.current += 1;
+        setSrcIdx(srcIdxRef.current);
+      } else {
+        setFailed(true);
+      }
+    });
+    return () => sub.remove();
+  }, [player]);
+
+  const retry = () => {
+    // User-initiated retry: start over from the canonical URL. Transient
+    // network/CDN failures (cold Blossom cache, flaky relay CDN) often
+    // succeed on a second pass.
+    setFailed(false);
+    if (srcIdxRef.current === 0) {
+      // Same source string won't recreate the player — force a reload.
+      player.replaceAsync(sourcesRef.current[0] ?? '').catch(() => { /* error surfaces via statusChange */ });
+    } else {
+      srcIdxRef.current = 0;
+      setSrcIdx(0);
+    }
+  };
+
+  if (failed) {
+    return (
+      <View style={[styles.videoContainer, styles.videoErrorBox]}>
+        <Text style={styles.videoErrorText}>Failed to load video</Text>
+        <View style={styles.videoErrorActions}>
+          <TouchableOpacity onPress={retry}>
+            <Text style={styles.videoErrorAction}>Retry</Text>
+          </TouchableOpacity>
+          {/* Link the CANONICAL url (sources[0]), not the last failed mirror */}
+          <TouchableOpacity onPress={() => Linking.openURL(sources[0] ?? src)}>
+            <Text style={styles.videoErrorAction}>Open in browser</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.videoContainer}>
       <VideoView
@@ -75,11 +137,20 @@ function isSafeUrl(u: string): boolean {
   return /^https?:\/\//i.test(u.trim());
 }
 
+// IDs pulled from user-supplied URLs are interpolated into embed URLs.
+// Validate each against a strict charset before use so a crafted URL can't
+// inject query params or path segments. Parity with web's safeId (M3).
+const EMBED_ID_RE = /^[A-Za-z0-9_-]+$/;
+function safeId(id: string | null | undefined): string | null {
+  if (!id) return null;
+  return EMBED_ID_RE.test(id) ? id : null;
+}
+
 // ─── Embed info ──────────────────────────────────────────────────────────────
 
 interface EmbedInfo {
   url: string;
-  type?: 'image' | 'video' | 'link-preview' | 'embed';
+  type?: 'image' | 'video' | 'link-preview' | 'embed' | 'youtube';
   title?: string;
   description?: string;
   icon?: 'recipe' | 'movie';
@@ -127,8 +198,30 @@ function getEmbedInfo(url: string, forceVideo?: boolean): EmbedInfo | null {
       }
     }
 
-    // YouTube — show as link preview on mobile (no iframe)
-    if (u.hostname.includes('youtube.com') || u.hostname.includes('youtu.be')) {
+    // YouTube (youtube.com, music.youtube.com, m.youtube.com, youtu.be) —
+    // resolved to a youtube-nocookie.com embed URL and gated behind
+    // tap-to-load so no request reaches Google until the user opts in.
+    if (/(^|\.)youtube\.com$/.test(u.hostname) || u.hostname === 'youtu.be') {
+      let videoId: string | null = null;
+      if (u.hostname === 'youtu.be') {
+        videoId = u.pathname.split('/').filter(Boolean)[0] || null;
+      } else if (u.pathname === '/watch') {
+        videoId = u.searchParams.get('v');
+      } else {
+        // /shorts/<id>, /live/<id>, /embed/<id>
+        const m = u.pathname.match(/^\/(?:shorts|live|embed)\/([^/]+)/);
+        if (m) videoId = m[1];
+      }
+      const safeVideoId = safeId(videoId);
+      if (safeVideoId) {
+        return { url: `https://www.youtube-nocookie.com/embed/${encodeURIComponent(safeVideoId)}`, type: 'youtube' };
+      }
+      // Playlist-only links (music.youtube.com/playlist?list=…)
+      const listId = safeId(u.searchParams.get('list'));
+      if (listId) {
+        return { url: `https://www.youtube-nocookie.com/embed/videoseries?list=${encodeURIComponent(listId)}`, type: 'youtube' };
+      }
+      // Unparseable YouTube link — keep the old preview card behavior.
       return { url, type: 'link-preview', title: 'YouTube Video' };
     }
 
@@ -250,7 +343,7 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
             onPress={() => setLightboxOpen(false)}
           >
             <Image
-              source={{ uri: currentImageUrl }}
+              source={{ uri: optimizeMediaUrl(currentImageUrl, true) }}
               style={styles.lightboxImage}
               resizeMode="contain"
             />
@@ -282,7 +375,28 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
       );
     }
     // Inline player (native controls) instead of kicking out to the browser.
-    return <InlineVideo url={embed.url} />;
+    // Pass the canonical URL + Blossom mirrors so a dead mirror doesn't produce
+    // a spurious "Failed to load video". Run every source through the same
+    // unsafe-host/SSRF gate images get — drop private/localhost/credentialed
+    // URLs before they reach the <VideoView>. Nothing safe left → render nothing.
+    const videoSources = [embed.url, ...getBlossomFallbackUrls(embed.url)].filter(s => !shouldRejectUrl(s, 'media'));
+    if (videoSources.length === 0) return null;
+    return <InlineVideo sources={videoSources} />;
+  }
+
+  // YouTube — always gated behind tap-to-load so no request reaches Google
+  // until the user opts in. Mobile has no WebView dependency for inline
+  // iframes, so the opt-in tap opens the privacy-friendly youtube-nocookie
+  // embed in the browser instead.
+  if (embed.type === 'youtube') {
+    return (
+      <TouchableOpacity
+        style={styles.blurPlaceholder}
+        onPress={() => Linking.openURL(embed.url)}
+      >
+        <Text style={styles.blurText}>Tap to load YouTube video</Text>
+      </TouchableOpacity>
+    );
   }
 
   // Render link preview
@@ -376,6 +490,25 @@ const styles = StyleSheet.create({
     width: MEDIA_WIDTH,
     height: Math.round((MEDIA_WIDTH * 9) / 16),
     backgroundColor: '#000',
+  },
+  videoErrorBox: {
+    height: Math.round((MEDIA_WIDTH * 9) / 16),
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  videoErrorText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 13,
+  },
+  videoErrorActions: {
+    flexDirection: 'row',
+    gap: 16,
+  },
+  videoErrorAction: {
+    color: '#60a5fa',
+    fontSize: 12,
+    textDecorationLine: 'underline',
   },
   blurPlaceholder: {
     width: MEDIA_WIDTH,

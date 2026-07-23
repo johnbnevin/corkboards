@@ -17,7 +17,8 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { RSS_PUBKEY } from '@core/rss';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { createRelay } from '@/components/NostrProvider';
+import { createRelayFresh } from '@/components/NostrProvider';
+import { followNotesCacheKey } from '@/hooks/useFollowNotesCache';
 
 // Stable empty-array reference. `.get(tab) || []` would hand out a fresh []
 // every render for tabs with no newer notes, changing `newerNotes`' identity and
@@ -113,6 +114,10 @@ export function useFeedPagination({
 
   const [hasMore, setHasMore] = useState<Record<string, boolean>>({});
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  // Ref mirror of isLoadingMore for the in-flight guard: state lags a render,
+  // so a rapid double-click passes a state-based guard twice. The ref updates
+  // synchronously and cannot double-fire.
+  const isLoadingMoreRef = useRef(false);
   const [isLoadingNewer, setIsLoadingNewer] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
   const [freshNoteIds, setFreshNoteIds] = useState<Set<string>>(new Set());
@@ -312,7 +317,7 @@ export function useFeedPagination({
 
   const loadMoreNotes = useCallback(async (hours: number) => {
     debugLog('[loadMore] hours:', hours, 'tab:', activeTab);
-    if (isLoadingMore) return;
+    if (isLoadingMoreRef.current) return;
     const requestTab = activeTab;
 
     // Determine which cached data / query key to use
@@ -331,7 +336,7 @@ export function useFeedPagination({
     // Match useFollowNotesCache allAuthors calculation
     const userInContacts = contacts?.includes(userPubkey ?? '') ?? false;
     const allAuthorsCount = (contacts?.length ?? 0) + (userPubkey && !userInContacts ? 1 : 0);
-    const followCacheKey: unknown[] = ['follow-notes-cache', allAuthorsCount > 0];
+    const followCacheKey = followNotesCacheKey(allAuthorsCount > 0);
     const userNotesKey = ['user-notes', userPubkey] as const;
 
     // Use currentNotes (actual visible notes) for oldest timestamp
@@ -373,6 +378,7 @@ export function useFeedPagination({
     }
     
     // hours already includes multiplier from StatusBar, don't multiply again
+    isLoadingMoreRef.current = true;
     setIsLoadingMore(true);
     if (visibleNotes.length === 0) {
       // No cached notes — tell the user we're fetching
@@ -505,12 +511,18 @@ export function useFeedPagination({
       }
     } catch (e) {
       debugLog('[loadMore] failed:', e instanceof Error ? e.message : e);
+      // Roll back the hours advance — the failed window wasn't actually
+      // loaded, so the next attempt should re-anchor at the same boundary.
+      const rolledBack = Math.max(0, (hoursLoadedMap.current.get(requestTab) || 0) - hours);
+      hoursLoadedMap.current.set(requestTab, rolledBack);
+      if (activeTabRef.current === requestTab) hoursLoadedRef.current = rolledBack;
       showBriefMessage('Load failed — try again');
     } finally {
+      isLoadingMoreRef.current = false;
       setIsLoadingMore(false);
     }
   }, [
-    isLoadingMore, activeTab, userPubkey, contacts, isFriendTab,
+    activeTab, userPubkey, contacts, isFriendTab,
     isAllFollowsTab, isCustomFeedTab, isRelayTab, isDiscoverTab, isRssTab,
     userNotes, allFollowsNotes, customFeedNotes, friendNotes,
     activeCustomFeed, nostr, queryClient, limit, currentNotes,
@@ -532,7 +544,7 @@ export function useFeedPagination({
 
     const userInContacts = contacts?.includes(userPubkey ?? '') ?? false;
     const allAuthorsCount = (contacts?.length ?? 0) + (userPubkey && !userInContacts ? 1 : 0);
-    const followCacheKey = ['follow-notes-cache', allAuthorsCount > 0] as const;
+    const followCacheKey = followNotesCacheKey(allAuthorsCount > 0);
     const userNotesKey = ['user-notes', userPubkey] as const;
     const customFeedKey = activeCustomFeed ? ['custom-feed-cache', activeCustomFeed.id, activeCustomFeed.pubkeys?.length ?? 0] as const : null;
     const cacheKey: readonly unknown[] = (activeTab === 'me' && userPubkey)
@@ -616,7 +628,9 @@ export function useFeedPagination({
         setBatchProgress({ loaded: 1, total: 1 });
 
       } else if (isRelayTab) {
-        const relay = createRelay(activeTab, { backoff: false });
+        // Fresh (uncached) instance — we close it below, and closing a shared
+        // cached relay would poison it for every other caller.
+        const relay = createRelayFresh(activeTab, { backoff: false });
         try {
           for await (const msg of relay.req([{
             kinds: [1, 30023],
@@ -767,12 +781,13 @@ export function useFeedPagination({
   // 3. If relay returns more than requested, slices to exactly count
 
   const loadMoreByCount = useCallback(async (count: number) => {
-    if (isLoadingMore || isLoadingNewer) {
+    if (isLoadingMoreRef.current || isLoadingNewer) {
       showBriefMessage('Loading in progress — try again shortly');
       return;
     }
     const requestTab = activeTab;
 
+    isLoadingMoreRef.current = true;
     setIsLoadingMore(true);
     setLoadingMessage(`Loading ~${count} notes…`);
 
@@ -863,7 +878,7 @@ export function useFeedPagination({
       // ── Determine cache key ───────────────────────────────────────────
       const userInContacts = contacts?.includes(userPubkey ?? '') ?? false;
       const allAuthorsCount = (contacts?.length ?? 0) + (userPubkey && !userInContacts ? 1 : 0);
-      const followCacheKey = ['follow-notes-cache', allAuthorsCount > 0] as const;
+      const followCacheKey = followNotesCacheKey(allAuthorsCount > 0);
       const userNotesKey = ['user-notes', userPubkey] as const;
       const customFeedKey = activeCustomFeed ? ['custom-feed-cache', activeCustomFeed.id, activeCustomFeed.pubkeys?.length ?? 0] as const : null;
       const cacheKey = (activeTab === 'me' && userPubkey) ? userNotesKey : (isCustomFeedTab && customFeedKey ? customFeedKey : followCacheKey);
@@ -963,10 +978,11 @@ export function useFeedPagination({
       debugError('[loadMoreByCount] error:', err);
       showBriefMessage('Load failed — try again');
     } finally {
+      isLoadingMoreRef.current = false;
       setIsLoadingMore(false);
     }
   }, [
-    isLoadingMore, isLoadingNewer,
+    isLoadingNewer,
     isAllFollowsTab, isCustomFeedTab,
     activeTab, contacts, activeCustomFeed, userPubkey, isFriendTab,
     nostr, queryClient, limit, _multiplier, currentNotes,

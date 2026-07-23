@@ -26,8 +26,10 @@ import {
   type TextInputSelectionChangeEventData,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { nip19 } from 'nostr-tools';
 import { buildReplyTags } from '@core/noteClassifier';
 import { applyImageProxy } from '@core/imageProxy';
+import { getRelayCache, FALLBACK_RELAYS } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 import { useNostrPublish } from '../hooks/useNostrPublish';
 import { useUploadFile } from '../hooks/useUploadFile';
@@ -138,8 +140,19 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
       if (images.length > 0) {
         finalContent += '\n\n' + images.join('\n');
       }
+      // Quote reference — NIP-21 requires a bech32 entity (nostr:nevent1…),
+      // not a raw hex id, or other clients won't render it. (Mirrors web
+      // ComposeDialog.)
+      const quoteRelayHint = quotedEvent
+        ? (getRelayCache(quotedEvent.pubkey)?.[0] || FALLBACK_RELAYS[0] || '')
+        : '';
       if (quotedEvent) {
-        finalContent += `\n\nnostr:${quotedEvent.id}`;
+        const nevent = nip19.neventEncode({
+          id: quotedEvent.id,
+          author: quotedEvent.pubkey,
+          relays: quoteRelayHint ? [quoteRelayHint] : [],
+        });
+        finalContent += `\n\nnostr:${nevent}`;
       }
 
       const tags: string[][] = [];
@@ -149,9 +162,9 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
         tags.push(...buildReplyTags(replyTo as import('@nostrify/nostrify').NostrEvent));
       }
 
-      // Quote tags
+      // Quote tags — NIP-18: ['q', id, relay hint, pubkey]
       if (quotedEvent) {
-        tags.push(['q', quotedEvent.id]);
+        tags.push(['q', quotedEvent.id, quoteRelayHint, quotedEvent.pubkey]);
         tags.push(['p', quotedEvent.pubkey]);
       }
 

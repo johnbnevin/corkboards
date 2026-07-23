@@ -1,11 +1,13 @@
 import { useState, useCallback, useMemo } from 'react'
-import { stripTrackingParams } from '@core/sanitizeUtils'
+import { stripTrackingParams, getTrackingParams } from '@core/sanitizeUtils'
 
 export interface UseLinkCopyResult {
-  /** Tracker-stripped URL (what we render/open/copy by default). */
+  /** Tracker-stripped URL (offered as the default choice when opening/copying). */
   cleanUrl: string
   /** True when stripping actually removed something (clean !== raw). */
   hasTracker: boolean
+  /** Names of the detected tracking params (for the warning dialog). */
+  trackingParams: string[]
   /** Brief "copied" flag (1.5s) for icon feedback. */
   copied: boolean
   /** Copy the cleaned URL to the clipboard. */
@@ -22,6 +24,7 @@ export interface UseLinkCopyResult {
 export function useLinkCopy(rawUrl: string): UseLinkCopyResult {
   const [copied, setCopied] = useState(false)
   const cleanUrl = useMemo(() => stripTrackingParams(rawUrl), [rawUrl])
+  const trackingParams = useMemo(() => getTrackingParams(rawUrl), [rawUrl])
   const hasTracker = cleanUrl !== rawUrl
 
   const copy = useCallback((text: string) => {
@@ -35,5 +38,5 @@ export function useLinkCopy(rawUrl: string): UseLinkCopyResult {
   const copyClean = useCallback(() => copy(cleanUrl), [copy, cleanUrl])
   const copyOriginal = useCallback(() => copy(rawUrl), [copy, rawUrl])
 
-  return { cleanUrl, hasTracker, copied, copyClean, copyOriginal }
+  return { cleanUrl, hasTracker, trackingParams, copied, copyClean, copyOriginal }
 }

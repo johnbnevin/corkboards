@@ -8,6 +8,7 @@ import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import { SmartNoteContent } from '@/components/SmartNoteContent'
 import { ClickableProfile } from '@/components/ProfileModal'
 import { genUserName } from '@/lib/genUserName'
+import { optimizeAvatarUrl } from '@/lib/imageUtils'
 import { EmojiName } from '@/components/EmojiName'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { CombinedEmojiPicker } from '@/components/compose/CombinedEmojiPicker'
@@ -113,9 +114,12 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
     return new Date(timestamp * 1000).toLocaleDateString()
   }
 
+  // Cap the visual indent so deeply-nested replies don't march off the right
+  // edge of a narrow panel — beyond 8 levels the border-l still conveys nesting.
+  const indentDepth = Math.min(depth, 8)
   return (
     <div
-      style={{ paddingLeft: depth > 0 ? `${depth * 12}px` : undefined }}
+      style={{ paddingLeft: indentDepth > 0 ? `${indentDepth * 12}px` : undefined }}
       data-thread-note-id={event.id}
     >
       <div className={cn(
@@ -129,7 +133,7 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
           <div className="flex items-center gap-1.5 text-xs">
             <ClickableProfile pubkey={event.pubkey} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
               <Avatar className={cn('h-4 w-4', isTarget && 'h-5 w-5')}>
-                {metadata?.picture && <AvatarImage src={metadata.picture} />}
+                {metadata?.picture && <AvatarImage src={optimizeAvatarUrl(metadata.picture) || ''} />}
                 <AvatarFallback className="text-[8px]">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
               </Avatar>
               <EmojiName name={displayName} event={author?.event} className="font-medium" />
@@ -158,9 +162,10 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
             </div>
           )}
 
-          {/* Action buttons */}
+          {/* Action buttons — wrap so they never overflow the (resizable /
+              narrow / deeply-nested) thread panel off the right edge */}
           <div className="flex items-center mt-1 pl-5">
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 flex-wrap">
               {onReply && (
                 <button type="button" onClick={(e) => { e.stopPropagation(); onReply(event) }} className="flex items-center gap-1 px-2 py-0.5 text-xs text-muted-foreground hover:text-primary hover:bg-primary/10 rounded transition-colors" title="Reply">
                   <Reply className="h-3 w-3" /><span>Reply</span>

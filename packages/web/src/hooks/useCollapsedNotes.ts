@@ -84,9 +84,15 @@ export function clearCollapsedNotesModuleState(): void {
  * Both states persist between sessions via localStorage.
  * Uses Sets for O(1) lookups.
  */
+const MAX_DISMISSED_THREAD_ROOTS = 2000
+
 export function useCollapsedNotes() {
   const [collapsedIds, setCollapsedIds] = useLocalStorage<string[]>('collapsed-notes', [])
   const [dismissedIds, setDismissedIds] = useLocalStorage<string[]>('dismissed-notes', [])
+  // Thread roots the user dismissed via "dismiss all associated". Persisted so
+  // that notes belonging to the thread which arrive LATER (autofetch, load-more,
+  // navigation) are also hidden — not just the ones visible at dismiss time.
+  const [dismissedThreadRoots, setDismissedThreadRoots] = useLocalStorage<string[]>('dismissed-thread-roots', [])
   const hasCleanedUp = useRef(false)
 
   // Soft-dismissed: shared module state, synced via custom event
@@ -112,6 +118,7 @@ export function useCollapsedNotes() {
   const collapsedSet = useMemo(() => new Set(collapsedIds), [collapsedIds])
   const dismissedSet = useMemo(() => new Set(dismissedIds), [dismissedIds])
   const softDismissedSet = useMemo(() => new Set(softDismissedIds), [softDismissedIds])
+  const dismissedThreadRootSet = useMemo(() => new Set(dismissedThreadRoots), [dismissedThreadRoots])
 
   // Auto-cleanup on mount if over limits
   useEffect(() => {
@@ -299,6 +306,23 @@ export function useCollapsedNotes() {
     notifyLastDismissedChange()
   }, [setCollapsedIds])
 
+  /** Record thread root ids as dismissed so future-loaded thread members are
+   *  also hidden by the feed filter. Idempotent + bounded. */
+  const dismissThreadRoots = useCallback((rootIds: string[]) => {
+    if (rootIds.length === 0) return
+    setDismissedThreadRoots(prev => {
+      const merged = new Set(prev)
+      for (const id of rootIds) merged.add(id)
+      if (merged.size === prev.length) return prev
+      const arr = [...merged]
+      return arr.length > MAX_DISMISSED_THREAD_ROOTS ? arr.slice(-MAX_DISMISSED_THREAD_ROOTS) : arr
+    })
+  }, [setDismissedThreadRoots])
+
+  const isDismissedThreadRoot = useCallback((id: string) => {
+    return dismissedThreadRootSet.has(id)
+  }, [dismissedThreadRootSet])
+
   /** Dismiss all currently collapsed notes at once */
   const dismissAllCollapsed = useCallback(() => {
     const next = new Set(_softDismissedSet)
@@ -318,11 +342,12 @@ export function useCollapsedNotes() {
   // Clear all dismissed notes (they'll reappear)
   const clearDismissed = useCallback(() => {
     setDismissedIds([])
+    setDismissedThreadRoots([])
     _softDismissedSet = new Set()
     _setSoftDismissedIds([])
     persistSoftDismissed()
     notifySoftDismissChange()
-  }, [setDismissedIds])
+  }, [setDismissedIds, setDismissedThreadRoots])
 
   // Restore a specific subset of dismissed notes (e.g. only the user's own).
   const undismissMany = useCallback((ids: string[]) => {
@@ -353,6 +378,9 @@ export function useCollapsedNotes() {
     isBatchTrigger,
     consolidate,
     dismissMultiple,
+    dismissThreadRoots,
+    isDismissedThreadRoot,
+    dismissedThreadRootSet,
     dismissAllCollapsed,
     clearAll,
     clearDismissed,

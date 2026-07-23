@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import './lib/polyfills.ts';
 
 import { isTauri, tauriLog, clearTauriLog } from '@/lib/tauri';
+import { prepareLoginStorage } from '@/lib/webKeyStore';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { setImageProxyTemplate } from '@core/imageProxy';
 import { IMAGE_PROXY_TEMPLATE_KEY } from '@/lib/imageProxySettings';
@@ -128,11 +129,33 @@ window.addEventListener('error', (event) => {
   })();
 }, true); // capture — resource-load errors don't bubble
 
-createRoot(document.getElementById("root")!).render(
-  <ErrorBoundary>
-    <App />
-  </ErrorBoundary>
-);
+const renderApp = () => {
+  createRoot(document.getElementById("root")!).render(
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+  );
+};
+
+// On plain web, migrate any plaintext nsec out of localStorage['corkboard:login']
+// into the encrypted IndexedDB key store and warm the decrypt cache for existing
+// logins BEFORE the first render (lib/webKeyStore). This must finish before
+// NostrLoginProvider mounts — its reducer snapshots localStorage at mount and
+// re-persists that snapshot on every state change, so a plaintext nsec seen at
+// mount would keep being rewritten. The plaintext is blanked synchronously at
+// call time; only the encrypt/decrypt work is awaited, bounded by a timeout so a
+// hung IndexedDB can never block boot. Tauri is untouched (nsec lives in the OS
+// keychain there).
+if (isTauri) {
+  renderApp();
+} else {
+  Promise.race([
+    prepareLoginStorage('corkboard:login').catch((err) => {
+      console.error('[keystore] Startup key migration/restore failed:', err);
+    }),
+    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+  ]).then(renderApp);
+}
 
 // Register service worker for offline app shell caching (prevents reload on mobile background return)
 if ('serviceWorker' in navigator) {

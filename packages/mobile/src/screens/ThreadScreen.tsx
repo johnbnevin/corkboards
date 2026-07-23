@@ -187,6 +187,7 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreen
           isTarget={row.node.event.id === eventId}
           isCollapsed={collapsedIds.has(row.node.event.id)}
           onToggleCollapse={toggleCollapse}
+          onViewThread={onNavigateThread}
           onReply={handleReply}
           onQuote={handleQuote}
           onZap={handleZap}
@@ -311,7 +312,9 @@ const styles = StyleSheet.create({
   replyCount: { fontSize: 13, color: '#b3b3b3' },
   refreshBtn: { paddingLeft: 8 },
   refreshText: { color: '#b3b3b3', fontSize: 13 },
-  list: { padding: 12, gap: 6 },
+  // paddingBottom gives the last reply room to scroll clear of the bottom edge
+  // (and above the inline reply composer when it's open) instead of being clipped.
+  list: { padding: 12, paddingBottom: 96, gap: 6 },
   loadingText: { color: '#b3b3b3', fontSize: 14 },
   errorText: { color: '#b3b3b3', fontSize: 14, textAlign: 'center', marginBottom: 8 },
   retryBtn: {

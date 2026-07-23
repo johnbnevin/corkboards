@@ -41,33 +41,31 @@ const _relayRequestLog = new Map<string, number[]>();
  * Returns a promise that resolves when the next request to this relay is allowed.
  * Uses a sliding window: max MAX_REQUESTS_PER_SECOND requests within the last RATE_WINDOW_MS.
  */
-function waitForRateLimit(url: string): Promise<void> {
-  const now = Date.now();
+async function waitForRateLimit(url: string): Promise<void> {
   const key = url.replace(/\/+$/, '');
   let timestamps = _relayRequestLog.get(key);
   if (!timestamps) {
     timestamps = [];
     _relayRequestLog.set(key, timestamps);
   }
-  // Prune old entries outside the window
-  while (timestamps.length > 0 && timestamps[0] <= now - RATE_WINDOW_MS) {
-    timestamps.shift();
+  // Loop: after waking, re-check the limit before proceeding. Multiple
+  // concurrent waiters can wake at (roughly) the same time — without the
+  // re-check they would all record + proceed at once, over-admitting.
+  for (;;) {
+    const now = Date.now();
+    // Prune old entries outside the window
+    while (timestamps.length > 0 && timestamps[0] <= now - RATE_WINDOW_MS) {
+      timestamps.shift();
+    }
+    if (timestamps.length < MAX_REQUESTS_PER_SECOND) {
+      // Under the limit — record and proceed
+      timestamps.push(now);
+      return;
+    }
+    // Over the limit — wait until the oldest request expires, then re-check
+    const waitMs = timestamps[0] + RATE_WINDOW_MS - now + 1;
+    await new Promise(resolve => setTimeout(resolve, waitMs));
   }
-  if (timestamps.length < MAX_REQUESTS_PER_SECOND) {
-    // Under the limit — proceed immediately
-    timestamps.push(now);
-    return Promise.resolve();
-  }
-  // Over the limit — wait until the oldest request expires
-  const waitMs = timestamps[0] + RATE_WINDOW_MS - now + 1;
-  return new Promise(resolve => setTimeout(() => {
-    // Re-prune and record after waiting
-    const ts = _relayRequestLog.get(key)!;
-    const n = Date.now();
-    while (ts.length > 0 && ts[0] <= n - RATE_WINDOW_MS) ts.shift();
-    ts.push(n);
-    resolve();
-  }, waitMs));
 }
 
 // ============================================================================
@@ -219,7 +217,11 @@ class BlockedRelay implements NRelay {
   async *req(): AsyncGenerator<NostrRelayEVENT | NostrRelayEOSE | NostrRelayCLOSED> {
     throw new Error(`Relay ${this.url} is temporarily blocked (backoff)`);
   }
-  async query(): Promise<NostrEvent[]> { return []; }
+  async query(): Promise<NostrEvent[]> {
+    // Throw (like req/event) so callers can distinguish "relay blocked" from
+    // "relay has no data" — they already handle network throws.
+    throw new Error(`Relay ${this.url} is temporarily blocked (backoff)`);
+  }
   async event(): Promise<void> {
     throw new Error(`Relay ${this.url} is temporarily blocked (backoff)`);
   }
@@ -243,17 +245,48 @@ export function setRelayAuthSigner(signer: AuthSigner | null): void {
   _authSigner = signer;
 }
 
+/** Relays outside the user's configured lists that are still allowed to receive
+ *  auto-AUTH — dynamic, deliberate connections (NIP-46 bunker signaling relays,
+ *  NWC wallet relays). Registered by the code paths that open them. */
+const _authAllowedRelays = new Set<string>();
+
+/** Allow a dynamically discovered relay (bunker/NWC) to receive NIP-42 auto-AUTH. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function registerAuthRelay(url: string): void {
+  _authAllowedRelays.add(url.replace(/\/+$/, ''));
+}
+
+/** True when a relay is part of the user's chosen relay set — their configured
+ *  NIP-65 read/write relays, their cached own outbox relays, our fallback and
+ *  indexer relays, or a dynamically registered relay (bunker/NWC). */
+function isAuthAllowedRelay(url: string): boolean {
+  const key = url.replace(/\/+$/, '');
+  if (_authAllowedRelays.has(key)) return true;
+  if (FALLBACK_RELAYS.some(r => normalizeRelayUrl(r) === key)) return true;
+  if (READ_ONLY_RELAYS.some(r => normalizeRelayUrl(r) === key)) return true;
+  const userRelays = getUserRelays();
+  if ([...userRelays.read, ...userRelays.write].some(r => normalizeRelayUrl(r) === key)) return true;
+  // The active user's own cached NIP-65 relay list (may predate app config)
+  const own = _currentUserPubkeyForRouter ? relayCache.get(_currentUserPubkeyForRouter) : undefined;
+  if (own && own.some(r => normalizeRelayUrl(r) === key)) return true;
+  return false;
+}
+
 async function handleRelayAuthChallenge(relayUrl: string, challenge: string): Promise<NostrEvent> {
   const signer = _authSigner;
   if (!signer) throw new Error('No active signer for NIP-42 relay AUTH');
-  // NOTE: a previous build gated this to an allowlist of "trusted" relays to
-  // avoid a NIP-42 de-anonymization vector (auto-binding the user's pubkey to
-  // their IP at arbitrary fan-out relays). In practice that broke every
-  // DELIBERATE relay connection that needs AUTH — NIP-46 login signaling relays
-  // AND NWC wallet relays (NIP-47) — because those are dynamic/per-user and not
-  // in any static allowlist, causing login hangs and zap/NWC timeouts. The
-  // operational cost outweighed the marginal privacy gain, so we answer AUTH for
-  // any relay we're actively talking to (the pre-v0.7.12 behavior).
+  // Privacy tradeoff: answering AUTH cryptographically binds the user's pubkey
+  // to their IP at that relay. So we only auto-AUTH relays the user has
+  // deliberately chosen — their NIP-65/configured relays, our fallback/indexer
+  // relays, and dynamically registered relays (NIP-46 bunker signaling, NWC
+  // wallet relays). A random fan-out relay reached via outbox routing gets no
+  // AUTH: it would gain a proven pubkey↔IP link while contributing little.
+  // NOTE: a previous build gated this with a *static* allowlist, which broke
+  // NIP-46 login and NWC (their relays are dynamic/per-user) — the
+  // registerAuthRelay() escape hatch is what keeps those flows working.
+  if (!isAuthAllowedRelay(relayUrl)) {
+    throw new Error(`NIP-42 AUTH declined for ${relayUrl} — not in the user's relay set`);
+  }
   return signer.signEvent({
     kind: 22242,
     created_at: Math.floor(Date.now() / 1000),
@@ -280,9 +313,18 @@ class RateLimitedRelay implements NRelay {
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<NostrRelayEVENT | NostrRelayEOSE | NostrRelayCLOSED> {
     await waitForRateLimit(this.url);
+    // Record success on the first EVENT/EOSE message rather than at generator
+    // completion — consumers that `break` on EOSE trigger generator return(),
+    // which would skip a post-loop recordRelaySuccess entirely.
+    let recorded = false;
     try {
-      yield* this.inner.req(filters, opts);
-      recordRelaySuccess(this.url);
+      for await (const msg of this.inner.req(filters, opts)) {
+        if (!recorded && (msg[0] === 'EVENT' || msg[0] === 'EOSE')) {
+          recorded = true;
+          recordRelaySuccess(this.url);
+        }
+        yield msg;
+      }
     } catch (e) {
       recordRelayFailure(this.url);
       throw e;
@@ -798,6 +840,11 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
     // Register the active account's signer for NIP-42 relay AUTH challenges
     // (reuses the cached NUser so bunker logins don't spawn a second signer).
     if (activeLogin) {
+      // NIP-46 bunker signaling relays are dynamic (per-user) — register them
+      // so the gated auto-AUTH handler will answer their challenges.
+      if (activeLogin.type === 'bunker') {
+        for (const r of activeLogin.data.relays) registerAuthRelay(r);
+      }
       try {
         setRelayAuthSigner(getOrCreateUser(activeLogin, pool).signer as AuthSigner);
       } catch {
@@ -852,10 +899,9 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
       }
       window.removeEventListener('beforeunload', handleFlush);
       document.removeEventListener('visibilitychange', handleVisibility);
-      if (relayCacheSaveTimer) {
-        clearTimeout(relayCacheSaveTimer);
-        relayCacheSaveTimer = undefined;
-      }
+      // Flush (not drop) any pending debounced write so cache updates
+      // accumulated in the last 2s aren't lost on unmount.
+      handleFlush();
     };
   }, []);
 
@@ -867,10 +913,40 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
     const tauriProxy = new Proxy(pool, {
       get(target, prop, receiver) {
         if (prop === 'query') {
-          return async (filters: unknown[], _opts?: unknown) => {
-            const filter = (filters[0] ?? {}) as Record<string, unknown>;
-            const relays = getTauriRelaysForFilter(filter);
-            return tauriQuery(relays, filter, 5000) as Promise<NostrEvent[]>;
+          return async (filters: unknown[], opts?: { signal?: AbortSignal }) => {
+            // The Rust relay_subscribe command takes a single filter — run one
+            // query per filter and merge, so multi-filter callers aren't
+            // silently truncated to filters[0].
+            const list = (filters.length > 0 ? filters : [{}]) as Record<string, unknown>[];
+            const queries = Promise.all(list.map(filter => {
+              const relays = getTauriRelaysForFilter(filter);
+              return tauriQuery(relays, filter, 5000) as Promise<NostrEvent[]>;
+            }));
+            // Honor the caller's abort signal by racing it — the Rust side has
+            // its own timeout, but callers expect AbortSignal.timeout to throw.
+            const signal = opts?.signal;
+            const results = signal
+              ? await Promise.race([
+                  queries,
+                  new Promise<never>((_, reject) => {
+                    const onAbort = () => reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+                    if (signal.aborted) onAbort();
+                    else signal.addEventListener('abort', onAbort, { once: true });
+                  }),
+                ])
+              : await queries;
+            // Merge + dedup by event id across per-filter result sets
+            const seen = new Set<string>();
+            const merged: NostrEvent[] = [];
+            for (const events of results) {
+              for (const e of events) {
+                if (!seen.has(e.id)) {
+                  seen.add(e.id);
+                  merged.push(e);
+                }
+              }
+            }
+            return merged;
           };
         }
         return Reflect.get(target, prop, receiver);

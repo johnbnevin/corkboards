@@ -19,6 +19,21 @@ export interface NoteClassification {
  * Uses NIP-10 conventions for e-tag parsing (root/reply markers).
  */
 export function classifyNote(event: NostrEvent): NoteClassification {
+  // NIP-22 comment (kind 1111): lowercase e = direct parent, uppercase E = root.
+  // Always a reply by definition.
+  if (event.kind === 1111) {
+    const parentId = event.tags.find(t => t[0] === 'e' && isValidEventId(t[1]))?.[1];
+    const rootId = event.tags.find(t => t[0] === 'E' && isValidEventId(t[1]))?.[1];
+    return {
+      isReply: true,
+      isQuote: false,
+      isOriginal: false,
+      parentEventId: parentId,
+      rootEventId: rootId ?? parentId,
+      quotedEventId: undefined,
+    };
+  }
+
   const eTags = event.tags.filter(t => t[0] === 'e');
   const qTags = event.tags.filter(t => t[0] === 'q');
 

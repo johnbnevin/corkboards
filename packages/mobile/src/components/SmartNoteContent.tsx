@@ -72,6 +72,14 @@ export function SmartNoteContent({
   }, [event, text]);
   const isLong = visLen > SPOILER_THRESHOLD * 1.5;
 
+  // NIP-94 file metadata (kind 1063), NIP-88 poll (kind 1068) and NIP-53 live
+  // event (kind 30311) keep their structured data in tags — NoteContent has
+  // dedicated renderers for them (parity with web SmartNoteContent). Delegate
+  // directly so the empty-content debug path and spoiler logic don't swallow them.
+  if (event.kind === 1063 || event.kind === 1068 || event.kind === 30311) {
+    return <NoteContent event={event} numberOfLines={numberOfLines} />;
+  }
+
   // Check for JSON-embedded Nostr event
   const embeddedEvent = _embedDepth < MAX_EMBED_DEPTH ? tryParseEmbeddedEvent(text) : null;
   if (embeddedEvent) {

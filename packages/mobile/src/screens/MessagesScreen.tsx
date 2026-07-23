@@ -20,7 +20,6 @@ export function MessagesScreen() {
   const handleClearCache = useCallback(async () => {
     if (!pubkey) return;
     deleteMessagesFromDB(pubkey);
-    await queryClient.invalidateQueries({ queryKey: ['dm-events'] });
     await queryClient.invalidateQueries({ queryKey: ['nip17-dm-events'] });
     await queryClient.invalidateQueries({ queryKey: ['dm-messages'] });
   }, [pubkey, queryClient]);

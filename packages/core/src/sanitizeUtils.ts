@@ -49,6 +49,21 @@ function isTrackingParam(key: string): boolean {
 }
 
 /**
+ * List the known tracking parameter names present in an http(s) URL.
+ * Returns [] when the URL can't be parsed, isn't http(s), or is clean.
+ * Used by the tracker-warning UI to show the user exactly what was detected.
+ */
+export function getTrackingParams(rawUrl: string): string[] {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return [];
+    return [...new Set([...u.searchParams.keys()].filter(isTrackingParam))];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Strip known tracking parameters from an http(s) URL. Returns the original
  * string unchanged if it can't be parsed, isn't http(s), or has no trackers.
  */

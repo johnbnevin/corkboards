@@ -1,0 +1,255 @@
+/**
+ * noteCategories — Pure note-category classification and hashtag extraction.
+ *
+ * Shared between web and mobile. No DOM, React, or relay dependencies.
+ * This is the canonical classifier used for feed filter chips and the
+ * per-corkboard note-kind statistics.
+ */
+
+import { type NostrEvent } from '@nostrify/nostrify'
+import { getReactionTargetId } from './threadTree'
+
+// Video URL patterns for content-based video detection
+const VIDEO_URL_PATTERNS = [
+  /youtube\.com\/watch/i,
+  /youtu\.be\//i,
+  /youtube\.com\/shorts\//i,
+  /youtube\.com\/embed\//i,
+  /youtube\.com\/live\//i,
+  /rumble\.com\/v[\w-]/i,
+  /rumble\.com\/embed\//i,
+  /tiktok\.com\/.+\/video\//i,
+  /vimeo\.com\/\d/i,
+  /dailymotion\.com\/video\//i,
+  /twitch\.tv\/videos\//i,
+  /twitch\.tv\/\w+\/clip\//i,
+  /clips\.twitch\.tv\//i,
+  /odysee\.com\/@/i,
+  /bitchute\.com\/video\//i,
+  /video\.nostr\.build\//i,
+  /\.mp4\b/i,     // .mp4 anywhere (before query, path segment, etc.)
+  /\.mp3\b/i,     // audio (treat as media)
+  /\.webm\b/i,
+  /\.mov\b/i,
+  /\.m4v\b/i,
+  /\.m3u8\b/i,
+];
+
+// Definitive image file extensions
+const IMAGE_EXT_PATTERN = /\.(jpg|jpeg|png|webp|svg|bmp|ico|gif)\b/i;
+
+// CDN domains that host images — only match when URL has an image extension
+// or when no video extension is present (ambiguous CDN URLs)
+const IMAGE_CDN_PATTERNS = [
+  /nostr\.build\/i\//i,
+  /image\.nostr\.build\//i,
+  /i\.nostr\.build\//i,
+  /imgprxy\.stacker\.news\//i,
+];
+
+// Video file extension pattern — used to exclude video URLs from image CDN matching
+const VIDEO_EXT_EXCLUDE = /\.(mp4|webm|mov|m4v|m3u8|mp3|ogg)\b/i;
+
+// Generic media CDNs — match only if the URL has an image extension (not ambiguous)
+const AMBIGUOUS_CDN_PATTERNS = [
+  /blossom\.band\//i,
+  /blossom\.yakihonne\.com\//i,
+  /blossom\.f7z\.io\//i,
+  /blossom\.ditto\.pub\//i,
+  /blossom\.primal\.net\//i,
+  /files\.primal\.net\//i,
+  /cdn\.satellite\.earth\//i,
+  /cdn\.sovbit\.host\//i,
+  /void\.cat\//i,
+  /media\.nostr\.band\//i,
+];
+
+// Check if a note contains video content (by kind or URL)
+export function hasVideoContent(note: NostrEvent): boolean {
+  if (note.kind === 34235 || note.kind === 34236) return true;
+  const content = note.content || '';
+  // Also check imeta tags for video
+  if (note.tags.some(t => t[0] === 'imeta' && t.some(v => /video/i.test(v)))) return true;
+  return VIDEO_URL_PATTERNS.some(pattern => pattern.test(content));
+}
+
+// Check if a note contains image content (by URL patterns in content or imeta tags).
+// Checks each URL individually to avoid false negatives when a note contains both
+// an image from an ambiguous CDN and a video URL from elsewhere.
+export function hasImageContent(note: NostrEvent): boolean {
+  const content = note.content || '';
+  // Check imeta tags for images
+  if (note.tags.some(t => t[0] === 'imeta' && t.some(v => /image/i.test(v)))) return true;
+  // Definitive image extension anywhere in content
+  if (IMAGE_EXT_PATTERN.test(content)) return true;
+  // Image-specific CDN paths (always images)
+  if (IMAGE_CDN_PATTERNS.some(p => p.test(content))) return true;
+  // Ambiguous CDNs: check each URL individually — only exclude if THAT URL has a video extension
+  const urls = content.match(/https?:\/\/\S+/g);
+  if (urls) {
+    for (const url of urls) {
+      if (AMBIGUOUS_CDN_PATTERNS.some(p => p.test(url)) && !VIDEO_EXT_EXCLUDE.test(url)) return true;
+    }
+  }
+  return false;
+}
+
+// Classify a note into ALL applicable categories (a note can be in multiple).
+// E.g. a reaction to a video counts as both a reaction and a video.
+export function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrEvent>): Set<string> {
+  const cats = new Set<string>();
+  const repostedKind = event.kind === 16 ? parseInt(event.tags.find(t => t[0] === 'k')?.[1] || '0', 10) : 0;
+
+  // For reactions/reposts, check the TARGET note's content too.
+  // Reactions (kind 7) use NIP-25 marked/last-positional e-tag semantics via
+  // the shared getReactionTargetId helper (same logic as thread-tree reactions).
+  const targetId = event.kind === 7
+    ? getReactionTargetId(event)
+    : (event.kind === 9735 || event.kind === 6 || event.kind === 16)
+      ? event.tags.find(t => t[0] === 'e')?.[1]
+      : null;
+  let targetEvent = targetId && lookup ? lookup.get(targetId) : null;
+  // For kind 6 reposts, the embedded JSON in content IS the target
+  if (!targetEvent && (event.kind === 6 || event.kind === 16) && event.content?.startsWith('{')) {
+    try { targetEvent = JSON.parse(event.content) as NostrEvent; } catch { /* not JSON */ }
+  }
+
+  // Video: kind 21/22 (NIP-71), 34235/34236, video URLs, repost of video, or reaction to video
+  if (event.kind === 21 || event.kind === 22 || hasVideoContent(event) || repostedKind === 34235 || repostedKind === 34236 || repostedKind === 21 || repostedKind === 22 || (targetEvent && hasVideoContent(targetEvent))) {
+    cats.add('videos');
+  }
+
+  // Image: kind 20 (NIP-68 picture), image URLs in content, or reaction/repost targeting an image
+  if (event.kind === 20 || hasImageContent(event) || (targetEvent && hasImageContent(targetEvent))) {
+    cats.add('images');
+  }
+
+  // Recipe: kind 30023 with recipe tag
+  if (event.kind === 30023 && event.tags.some(t =>
+    (t[0] === 'r' && t[1]?.includes('zap.cooking')) || (t[0] === 't' && t[1] === 'recipe')
+  )) {
+    cats.add('recipes');
+  }
+
+  // Repost (kind 6 or 16)
+  if (event.kind === 6 || event.kind === 16) cats.add('reposts');
+
+  // Reaction (kind 7) or zap receipt (kind 9735)
+  if (event.kind === 7 || event.kind === 9735) cats.add('reactions');
+
+  // Highlight
+  if (event.kind === 9802) cats.add('highlights');
+
+  // Article (kind 30023, not already a recipe)
+  if (event.kind === 30023 && !cats.has('recipes')) cats.add('longForm');
+
+  // Short note or reply (kind 1)
+  if (event.kind === 1) {
+    const hasETags = event.tags.some(t => t[0] === 'e');
+    cats.add(hasETags ? 'replies' : 'shortNotes');
+  }
+
+  // NIP-22 comment (kind 1111) is always a reply to something
+  if (event.kind === 1111) cats.add('replies');
+
+  // NIP-94 file metadata (kind 1063) — image or video by mime type
+  if (event.kind === 1063) {
+    const mime = event.tags.find(t => t[0] === 'm')?.[1] ?? '';
+    if (mime.startsWith('video/')) cats.add('videos');
+    else cats.add('images');
+  }
+
+  // NIP-88 poll (kind 1068) — grouped with short notes
+  if (event.kind === 1068) cats.add('shortNotes');
+
+  if (cats.size === 0) cats.add('other');
+  return cats;
+}
+
+// ─── Hashtag extraction helpers ──────────────────────────────────────────────
+// Used by both hashtag filtering and hashtag count computation.
+
+/** Extract hashtags from a note's tags and content. */
+export function getNoteHashtags(note: NostrEvent): Set<string> {
+  const tags = new Set<string>();
+  for (const t of note.tags) {
+    if (t[0] === 't' && t[1]) tags.add(t[1].toLowerCase());
+  }
+  for (const match of note.content.matchAll(/#([a-zA-Z]\w*)/g)) {
+    tags.add(match[1].toLowerCase());
+  }
+  return tags;
+}
+
+/** Extract hashtags from a repost's embedded JSON content. */
+export function getRepostHashtags(note: NostrEvent): Set<string> {
+  if ((note.kind !== 6 && note.kind !== 16) || !note.content) return new Set();
+  try {
+    const embedded = JSON.parse(note.content);
+    const tags = new Set<string>();
+    if (Array.isArray(embedded.tags)) {
+      for (const t of embedded.tags) {
+        if (Array.isArray(t) && t[0] === 't' && typeof t[1] === 'string') {
+          tags.add(t[1].toLowerCase());
+        }
+      }
+    }
+    if (typeof embedded.content === 'string') {
+      for (const match of embedded.content.matchAll(/#([a-zA-Z]\w*)/g)) {
+        tags.add(match[1].toLowerCase());
+      }
+    }
+    return tags;
+  } catch { return new Set(); }
+}
+
+/** Check if a note matches any of the selected hashtag filters. */
+export function noteMatchesHashtags(note: NostrEvent, selectedHashtags: Set<string>): boolean {
+  const hashtags = (note.kind === 6 || note.kind === 16)
+    ? getRepostHashtags(note)
+    : getNoteHashtags(note);
+  for (const tag of hashtags) {
+    if (selectedHashtags.has(tag)) return true;
+  }
+  return false;
+}
+
+/** Compute hashtag counts from a set of notes. */
+export function computeHashtagCounts(notes: NostrEvent[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const note of notes) {
+    const tags = (note.kind === 6 || note.kind === 16)
+      ? getRepostHashtags(note)
+      : getNoteHashtags(note);
+    for (const tag of tags) {
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/** Per-category note counts for a set of events. */
+export interface NoteKindStats {
+  total: number; shortNotes: number; replies: number; longForm: number;
+  reposts: number; reactions: number; videos: number; images: number;
+  highlights: number; recipes: number; other: number;
+}
+
+// Compute note kind statistics — notes count in ALL applicable categories.
+export function computeNoteKindStats(events: NostrEvent[] | undefined, lookup?: Map<string, NostrEvent>): NoteKindStats | undefined {
+  if (!events || events.length === 0) return undefined;
+
+  const stats: NoteKindStats = {
+    total: events.length, shortNotes: 0, replies: 0, longForm: 0,
+    reposts: 0, reactions: 0, videos: 0, images: 0, highlights: 0, recipes: 0, other: 0
+  };
+
+  for (const event of events) {
+    const cats = getNoteCategories(event, lookup);
+    for (const cat of cats) {
+      (stats as unknown as Record<string, number>)[cat]++;
+    }
+  }
+
+  return stats;
+}

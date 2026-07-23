@@ -4,6 +4,7 @@ import { useDMContext } from '@/hooks/useDMContext';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useAuthor } from '@/hooks/useAuthor';
 import { genUserName } from '@/lib/genUserName';
+import { optimizeAvatarUrl } from '@/lib/imageUtils';
 // DM_PROTOCOL / DMProtocol no longer needed: all sends are NIP-17.
 import { formatConversationTime, formatFullDateTime } from '@/lib/dmUtils';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -134,7 +135,7 @@ const ChatHeader = ({ pubkey, onBack }: { pubkey: string; onBack?: () => void })
   const metadata = author.data?.metadata;
 
   const displayName = metadata?.name || genUserName(pubkey);
-  const avatarUrl = metadata?.picture;
+  const avatarUrl = optimizeAvatarUrl(metadata?.picture);
   const initials = displayName.slice(0, 2).toUpperCase();
 
   return (

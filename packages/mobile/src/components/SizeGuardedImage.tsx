@@ -19,6 +19,7 @@ import { mobileStorage } from '../storage/MmkvStorage';
 import { STORAGE_KEYS } from '../lib/storageKeys';
 import { supportsCorsHead, learnCorsHost } from '../lib/mediaUtils';
 import { applyImageProxy } from '@core/imageProxy';
+import { shouldRejectUrl } from '@core/imageUtils';
 
 type SizeLimitOption = 'small' | 'default' | 'large' | 'none';
 
@@ -127,6 +128,13 @@ interface SizeGuardedImageProps {
 }
 
 export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMode = 'cover', onError }: SizeGuardedImageProps) {
+  // SSRF gate: reject private/loopback/link-local/credentialed hosts (in any IP
+  // encoding), non-https avatars, and executable extensions before the URL ever
+  // reaches <Image> or the HEAD probe — mirrors web's optimizeAvatarUrl /
+  // optimizeMediaUrl. Only remote http(s) URLs are gated; local file:/content:/
+  // data: URIs are the user's own picks and pass through.
+  const isRemote = /^https?:\/\//i.test(rawUri);
+  const rejected = isRemote && shouldRejectUrl(rawUri, type === 'avatar' ? 'avatar' : 'media');
   // Apply the user's image proxy here so HEAD probe + final render both hit
   // the proxied URL. Non-http(s) URLs (data:, blob:) pass through unchanged.
   const uri = applyImageProxy(rawUri);
@@ -152,6 +160,7 @@ export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMod
   // props; including it would force a useCallback for no benefit.
   /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   useEffect(() => {
+    if (rejected) return; // unsafe host — never probe or load it
     if (limitBytes === 0) { setStatus('allowed'); return; }
     if (sizeCache.has(uri)) {
       const cached = sizeCache.get(uri)!;
@@ -167,6 +176,15 @@ export function SizeGuardedImage({ uri: rawUri, style, type = 'image', resizeMod
     });
   }, [uri, limitBytes]);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+
+  if (rejected) {
+    // Unsafe/blocked host: render a neutral placeholder for avatars, nothing
+    // for inline media. Never expose a tap-to-load override for these.
+    if (type === 'avatar') {
+      return <View style={[style as object, localStyles.avatarPlaceholder]} />;
+    }
+    return null;
+  }
 
   if (status === 'checking') {
     // Show placeholder while HEAD request checks size — don't render <Image>

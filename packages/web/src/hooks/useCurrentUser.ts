@@ -6,6 +6,7 @@ import { useMemo } from 'react';
 import { useAuthor } from './useAuthor.ts';
 import { isTauri } from '@/lib/tauri';
 import { createTauriNsecSigner } from '@/lib/tauriSigner';
+import { createWebNsecSigner } from '@/lib/webNsecSigner';
 
 /**
  * Module-scoped NUser cache.
@@ -29,10 +30,10 @@ const USER_CACHE_MAX = 32;
 
 function buildUser(login: NLoginType, nostr: NPool): NUser {
   switch (login.type) {
-    case 'nsec':
+    case 'nsec': {
       // On Tauri desktop, sign + encrypt in Rust so the nsec never enters JS
       // (it lives only in the OS keychain). Duck-type an NUser — the app only
-      // consumes `.method`/`.pubkey`/`.signer`. Web/mobile keep the JS signer.
+      // consumes `.method`/`.pubkey`/`.signer`.
       if (isTauri) {
         return {
           method: 'nsec',
@@ -40,7 +41,21 @@ function buildUser(login: NLoginType, nostr: NPool): NUser {
           signer: createTauriNsecSigner(login.pubkey),
         } as unknown as NUser;
       }
+      // Plain web: the persisted login carries a BLANKED data.nsec — the real
+      // key lives AES-GCM-encrypted in IndexedDB (lib/webKeyStore). Duck-type
+      // an NUser whose signer decrypts lazily. A non-empty data.nsec means the
+      // encrypted store was unavailable at login time and we fell back to the
+      // legacy in-login key (handled by NUser.fromNsecLogin below).
+      const nsecData = (login.data ?? null) as { nsec?: string } | null;
+      if (!nsecData?.nsec) {
+        return {
+          method: 'nsec',
+          pubkey: login.pubkey,
+          signer: createWebNsecSigner(login.pubkey),
+        } as unknown as NUser;
+      }
       return NUser.fromNsecLogin(login);
+    }
     case 'bunker':
       return NUser.fromBunkerLogin(login, nostr);
     case 'extension':

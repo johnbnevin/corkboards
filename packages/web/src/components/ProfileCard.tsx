@@ -358,7 +358,7 @@ export function ProfileCard({
                 <span className="font-medium text-foreground">{stats.follows}</span> following
               </span>
             )}
-            {metadata?.website && (
+            {metadata?.website && /^https?:\/\//.test(metadata.website) && (
               <a
                 href={metadata.website}
                 target="_blank"

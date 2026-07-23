@@ -70,7 +70,9 @@ export function ThreadTree({
   const handleReply = useCallback((event: NostrEvent) => onReply?.(event), [onReply])
 
   return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto">
+    // pb-24 gives the last reply room to scroll clear of the bottom edge (and
+    // above the inline reply composer when it's open) instead of being clipped.
+    <div ref={scrollRef} className="flex-1 overflow-y-auto pb-24">
       <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
           const row = rows[virtualRow.index]

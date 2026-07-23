@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { type NostrEvent } from '@nostrify/nostrify'
 import { buildReplyTags } from '@core/noteClassifier'
+import { nip19 } from 'nostr-tools'
 import { useNostrPublish } from '@/hooks/useNostrPublish'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { useUploadFile } from '@/hooks/useUploadFile'
@@ -25,6 +26,7 @@ import { Label } from '@/components/ui/label'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import { SmartNoteContent } from '@/components/SmartNoteContent'
 import { genUserName } from '@/lib/genUserName'
+import { optimizeAvatarUrl } from '@/lib/imageUtils'
 import { useAuthor } from '@/hooks/useAuthor'
 import { getUserRelays, getRelayCache, FALLBACK_RELAYS } from '@/components/NostrProvider'
 import {
@@ -153,9 +155,16 @@ export function ComposeDialog({
       finalContent += '\n\n' + images.join('\n')
     }
 
-    // Add quote reference if quoting
+    // Add quote reference if quoting — NIP-21 requires a bech32 entity
+    // (nostr:nevent1…), not a raw hex id, or other clients won't render it.
+    const quoteRelayHint = quotedEvent ? (getRelayCache(quotedEvent.pubkey)?.[0] || FALLBACK_RELAYS[0] || '') : ''
     if (quotedEvent) {
-      finalContent += `\n\nnostr:${quotedEvent.id}`
+      const nevent = nip19.neventEncode({
+        id: quotedEvent.id,
+        author: quotedEvent.pubkey,
+        relays: quoteRelayHint ? [quoteRelayHint] : [],
+      })
+      finalContent += `\n\nnostr:${nevent}`
     }
 
     // Build tags
@@ -166,9 +175,9 @@ export function ComposeDialog({
       tags.push(...buildReplyTags(replyTo));
     }
 
-    // Quote tags
+    // Quote tags — NIP-18: ['q', id, relay hint, pubkey]
     if (quotedEvent) {
-      tags.push(['q', quotedEvent.id])
+      tags.push(['q', quotedEvent.id, quoteRelayHint, quotedEvent.pubkey])
       tags.push(['p', quotedEvent.pubkey])
     }
 
@@ -276,7 +285,7 @@ export function ComposeDialog({
           <div className="p-3 bg-muted/50 rounded-lg max-h-48 overflow-y-auto">
             <div className="flex items-center gap-2 text-sm text-muted-foreground mb-2">
               <Avatar className="h-5 w-5">
-                {repostAuthor?.metadata?.picture && <AvatarImage src={repostAuthor.metadata.picture} />}
+                {repostAuthor?.metadata?.picture && <AvatarImage src={optimizeAvatarUrl(repostAuthor.metadata.picture) || ''} />}
                 <AvatarFallback className="text-[8px]">{authorName.slice(0, 2).toUpperCase()}</AvatarFallback>
               </Avatar>
               <span className="font-medium">{authorName}</span>

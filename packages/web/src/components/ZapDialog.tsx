@@ -4,6 +4,7 @@ import { useAuthor } from '@/hooks/useAuthor';
 import { useZap } from '@/hooks/useZap';
 import { useToast } from '@/hooks/useToast';
 import { genUserName } from '@/lib/genUserName';
+import { optimizeAvatarUrl } from '@/lib/imageUtils';
 import { recordUserZap } from '@/components/NoteCard';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -68,7 +69,7 @@ export function ZapDialog({ note, open, onOpenChange, onOpenWalletSettings }: Za
         {/* Recipient */}
         <div className="flex items-center gap-3 py-2">
           <Avatar className="h-10 w-10">
-            {metadata?.picture && <AvatarImage src={metadata.picture} alt={displayName} />}
+            {metadata?.picture && <AvatarImage src={optimizeAvatarUrl(metadata.picture) || ''} alt={displayName} />}
             <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
           </Avatar>
           <div className="min-w-0">

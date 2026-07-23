@@ -6,7 +6,7 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { createRelay } from '@/components/NostrProvider';
+import { createRelayFresh } from '@/components/NostrProvider';
 
 interface UseRelayFeedOptions {
   relayUrl: string;
@@ -20,7 +20,7 @@ export function useRelayFeed({ relayUrl, enabled = true, limit }: UseRelayFeedOp
     queryFn: async () => {
       const events: NostrEvent[] = [];
       try {
-        const relay = createRelay(relayUrl, { backoff: false });
+        const relay = createRelayFresh(relayUrl, { backoff: false });
         const timeout = setTimeout(() => relay.close(), 10_000);
 
         try {

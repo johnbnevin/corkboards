@@ -13,6 +13,7 @@ import {
   buildThreadTree,
   flattenTree,
   deduplicateEvents,
+  getParentId,
   type ThreadNode,
   type FlatThreadRow,
 } from '@core/threadTree';
@@ -20,6 +21,9 @@ import { fetchEventWithOutbox, setCachedEvent, getCachedEvent, clearEventCache }
 
 const THREAD_STALE_TIME = 2 * 60 * 1000;
 const THREAD_GC_TIME = 10 * 60 * 1000;
+
+// Max levels to walk up when reconstructing the ancestor chain above the target.
+const MAX_ANCESTOR_HOPS = 24;
 
 // Second-pass (author-outbox) discovery tuning.
 // A cap on how many thread participants we re-query by outbox, and a chunk size
@@ -85,11 +89,50 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     retryDelay: (attempt) => Math.min(800 * 2 ** attempt, 4000),
   });
 
+  // Fall back to the immediate reply parent (not just self) when a note carries
+  // only a `reply` marker and no `root` marker — otherwise the thread would root
+  // at the reply itself and never show the note being replied to.
   const rootId = useMemo(() => {
     if (!targetEvent) return null;
     const tags = parseThreadTags(targetEvent);
-    return tags.root || targetEvent.id;
+    return tags.root || tags.reply || targetEvent.id;
   }, [targetEvent]);
+
+  // Reconstruct the ancestor chain above the target by walking parent refs
+  // upward and fetching each one, so opening a deep reply shows the notes it
+  // replied to — not just the reply and its descendants.
+  const { data: ancestorEvents } = useQuery({
+    queryKey: ['thread-ancestors', targetEvent?.id],
+    queryFn: async () => {
+      if (!targetEvent) return [] as NostrEvent[];
+      const chain: NostrEvent[] = [];
+      const seen = new Set<string>([targetEvent.id]);
+      let current = targetEvent;
+      for (let hop = 0; hop < MAX_ANCESTOR_HOPS; hop++) {
+        const parentId = getParentId(current);
+        if (!parentId || seen.has(parentId)) break;
+        seen.add(parentId);
+        const parent = getCachedEvent(parentId)
+          ?? await fetchEventWithOutbox(parentId, nostr).catch(() => null);
+        if (!parent) break;
+        setCachedEvent(parent.id, parent);
+        chain.push(parent);
+        current = parent;
+      }
+      return chain;
+    },
+    enabled: !!targetEvent,
+    staleTime: THREAD_STALE_TIME,
+    gcTime: THREAD_GC_TIME,
+    retry: 1,
+  });
+
+  const effectiveRootId = useMemo(() => {
+    if (ancestorEvents && ancestorEvents.length > 0) {
+      return ancestorEvents[ancestorEvents.length - 1].id;
+    }
+    return rootId;
+  }, [ancestorEvents, rootId]);
 
   // Query 2 (pass 1): Fetch the thread by reference.
   // This #e-tag query has no `authors`, so the pool routes it via the wide-net
@@ -168,14 +211,29 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
   });
 
   const allEvents = useMemo(
-    () => deduplicateEvents([...(threadEvents ?? []), ...(outboxEvents ?? [])]),
-    [threadEvents, outboxEvents],
+    () => deduplicateEvents([
+      ...(threadEvents ?? []),
+      ...(outboxEvents ?? []),
+      ...(ancestorEvents ?? []),
+    ]),
+    [threadEvents, outboxEvents, ancestorEvents],
   );
 
+  // Try the true (highest) root first, then the tag root, then the target
+  // itself — so we never show a blank thread when we do have the target, and we
+  // show as much ancestry as we've fetched.
   const tree = useMemo(() => {
-    if (!rootId || allEvents.length === 0) return null;
-    return buildThreadTree(allEvents, rootId, injectedReply);
-  }, [rootId, allEvents, injectedReply]);
+    if (allEvents.length === 0) return null;
+    const candidates = [effectiveRootId, rootId, targetEvent?.id];
+    const tried = new Set<string>();
+    for (const candidate of candidates) {
+      if (!candidate || tried.has(candidate)) continue;
+      tried.add(candidate);
+      const t = buildThreadTree(allEvents, candidate, injectedReply);
+      if (t) return t;
+    }
+    return null;
+  }, [effectiveRootId, rootId, targetEvent?.id, allEvents, injectedReply]);
 
   const rows = useMemo(() => {
     if (!tree || !eventId) return [];
@@ -190,6 +248,7 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     if (eventId) {
       clearEventCache(eventId);
       queryClient.resetQueries({ queryKey: ['thread-target', eventId] });
+      queryClient.resetQueries({ queryKey: ['thread-ancestors', eventId] });
     }
     if (rootId) {
       queryClient.resetQueries({ queryKey: ['thread-tree', rootId] });

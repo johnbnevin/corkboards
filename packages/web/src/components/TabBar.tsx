@@ -28,9 +28,10 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
-  PlusIcon, UserIcon, Layers, Radio, Rss, Compass, Users, Save, Bell,
+  PlusIcon, UserIcon, Layers, Radio, Rss, Compass, Users, Save, Bell, Mail,
   ChevronLeft, ChevronRight, HelpCircle, Pencil, Trash2, MoreVertical,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { genUserName } from '@/lib/genUserName';
 import { optimizeAvatarUrl } from '@/lib/imageUtils';
 
@@ -167,6 +168,7 @@ export function TabBar({
   onRefreshTab,
 }: TabBarProps) {
   const isMobile = useIsMobile();
+  const navigate = useNavigate();
   // Wrap setActiveTab to detect same-tab clicks and call onRefreshTab
   const handleTabClick = useCallback((tab: string) => {
     if (tab === activeTab) {
@@ -428,6 +430,12 @@ export function TabBar({
                   Notifications
                 </MobilePill>
               )}
+              {!isOnboarding && userPubkey && (
+                <MobilePill active={false} onClick={() => navigate('/messages')}>
+                  <Mail className="h-3.5 w-3.5" />
+                  Messages
+                </MobilePill>
+              )}
               {!isOnboarding && (userPubkey || activeTab === 'all-follows' || activeTab === 'discover') && (
                 <MobilePill active={activeTab === 'all-follows'} onClick={() => handleTabClick('all-follows')}>
                   <Users className="h-3.5 w-3.5" />
@@ -583,6 +591,17 @@ export function TabBar({
                   </span>
                 )}
               </TabsTrigger>
+            )}
+            {!isOnboarding && userPubkey && (
+              <button
+                type="button"
+                onClick={() => navigate('/messages')}
+                className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md hover:bg-accent"
+                title="Private messages (NIP-17)"
+              >
+                <Mail className="h-3 w-3 text-purple-500" />
+                <span>Messages</span>
+              </button>
             )}
             {!isOnboarding && (userPubkey || activeTab === 'all-follows') && (
               <TabsTrigger value="all-follows" className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600">

@@ -4,6 +4,8 @@ import { visibleLength } from '@core/textTruncation';
 import { hasHtmlContent, sanitizeHtml } from '@/lib/sanitize';
 import { NoteContent } from './NoteContent';
 import { ListingCard } from './ListingCard';
+import { MediaLink } from './MediaLink';
+import { BarChart3, Radio } from 'lucide-react';
 
 const SPOILER_THRESHOLD = 750;
 
@@ -59,6 +61,62 @@ const MAX_EMBED_DEPTH = 3;
 
 export function SmartNoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, forceExpand = false, _embedDepth = 0 }: SmartNoteContentProps) {
   const [expanded, setExpanded] = useState(false);
+
+  // NIP-94 file metadata (kind 1063) — the file lives in the `url` tag, not the
+  // content field; content is an optional caption/description.
+  if (event.kind === 1063) {
+    const fileUrl = event.tags.find(t => t[0] === 'url')?.[1];
+    const mime = event.tags.find(t => t[0] === 'm')?.[1] ?? '';
+    if (fileUrl) {
+      return (
+        <div className={className}>
+          <MediaLink url={fileUrl} blurMedia={blurMedia} isVideo={mime.startsWith('video/')} />
+          {event.content && <NoteContent event={event} inModalContext={inModalContext} onViewThread={onViewThread} blurMedia={blurMedia} />}
+        </div>
+      );
+    }
+    // No url tag — fall through to generic rendering below.
+  }
+
+  // NIP-88 poll (kind 1068) — content is the question, options live in tags.
+  if (event.kind === 1068) {
+    const options = event.tags.filter(t => t[0] === 'option' && t[1] && t[2]);
+    return (
+      <div className={className}>
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+          <BarChart3 className="h-3.5 w-3.5" />
+          <span>Poll</span>
+        </div>
+        {event.content && <NoteContent event={event} inModalContext={inModalContext} onViewThread={onViewThread} blurMedia={blurMedia} />}
+        <ul className="mt-2 space-y-1">
+          {options.map(([, id, label]) => (
+            <li key={id} className="rounded-md border border-border bg-muted/40 px-3 py-1.5 text-sm">{label}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+
+  // NIP-53 live event (kind 30311) — structured stream info lives in tags.
+  if (event.kind === 30311) {
+    const title = event.tags.find(t => t[0] === 'title')?.[1];
+    const summary = event.tags.find(t => t[0] === 'summary')?.[1];
+    const status = event.tags.find(t => t[0] === 'status')?.[1];
+    const streaming = event.tags.find(t => t[0] === 'streaming')?.[1];
+    const image = event.tags.find(t => t[0] === 'image')?.[1];
+    return (
+      <div className={className}>
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+          <Radio className={`h-3.5 w-3.5 ${status === 'live' ? 'text-red-500' : ''}`} />
+          <span>{status === 'live' ? 'Live now' : status === 'ended' ? 'Stream ended' : 'Live event'}</span>
+        </div>
+        {title && <div className="font-semibold text-sm">{title}</div>}
+        {summary && <div className="text-sm text-muted-foreground">{summary}</div>}
+        {image && <MediaLink url={image} blurMedia={blurMedia} />}
+        {streaming && status === 'live' && <MediaLink url={streaming} blurMedia={blurMedia} isVideo />}
+      </div>
+    );
+  }
 
   // NIP-99 classified listing (kind 30402) — structured fields live in tags, so
   // render the dedicated card instead of treating the body as a plain note.
@@ -122,11 +180,11 @@ export function SmartNoteContent({ event, className, inModalContext = false, onV
     );
   }
 
-  // Strip HTML if present — use DOMPurify (not regex) for reliable sanitisation, then
-  // render as plain text/markdown. DOMPurify with ALLOWED_TAGS=[] strips all tags safely,
-  // handling malformed HTML that simple regex misses.
+  // Strip HTML if present — sanitizeHtml uses DOMPurify with ALLOWED_TAGS=[] which
+  // removes all tags safely (handling malformed HTML that a regex would miss) and
+  // keeps only the text content, rendered as plain text/markdown.
   const hasHtml = hasHtmlContent(text);
-  const safeEvent = hasHtml ? { ...event, content: sanitizeHtml(text).replace(/<[^>]*>/g, '') } : event;
+  const safeEvent = hasHtml ? { ...event, content: sanitizeHtml(text) } : event;
 
   const content = (
     <NoteContent

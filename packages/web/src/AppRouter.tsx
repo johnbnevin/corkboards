@@ -5,6 +5,8 @@ import { ProfileModalProvider } from "./components/ProfileModal";
 import { MultiColumnClient } from "./pages/MultiColumnClient";
 import { NIP19Page } from "./pages/NIP19Page";
 import NotFound from "./pages/NotFound";
+import Messages from "./pages/Messages";
+import { DMProvider } from "./components/DMProvider";
 
 export function AppRouter() {
   // Use Vite's BASE_URL for subdirectory deployments
@@ -18,6 +20,9 @@ export function AppRouter() {
           <Route path="/" element={<MultiColumnClient />} />
           {/* Hashtag route - must be before NIP-19 catch-all */}
           <Route path="/t/:hashtag" element={<MultiColumnClient />} />
+          {/* NIP-17 private messages — provider mounts only on this route so the
+              gift-wrap subscription doesn't run while browsing feeds */}
+          <Route path="/messages" element={<DMProvider config={{ enabled: true }}><Messages /></DMProvider>} />
           {/* NIP-19 route for npub1, note1, naddr1, nevent1, nprofile1 */}
           <Route path="/:nip19" element={<NIP19Page />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}

@@ -42,6 +42,19 @@ export function parseThreadTags(event: NostrEvent): {
   return { hints }
 }
 
+/**
+ * NIP-25 reaction target: the event id a kind-7 reaction (or similar) points at.
+ * Prefers marked semantics when present — an e-tag marked 'reply' (most
+ * specific), then 'root' — and otherwise falls back to the last positional
+ * e-tag per NIP-25 ("the last e tag is the id of the note being reacted to").
+ */
+export function getReactionTargetId(event: NostrEvent): string | undefined {
+  const eTags = event.tags.filter(t => t[0] === 'e')
+  if (eTags.length === 0) return undefined
+  const marked = eTags.find(t => t[3] === 'reply') ?? eTags.find(t => t[3] === 'root')
+  return (marked ?? eTags[eTags.length - 1])?.[1]
+}
+
 /** Get the immediate parent event ID of a reply */
 export function getParentId(event: NostrEvent): string | null {
   const eTags = event.tags.filter(t => t[0] === 'e')
@@ -120,9 +133,9 @@ export function buildThreadTree(
   for (const e of events) {
     if (e.id === rootId) continue
     if (e.kind === 7) {
-      // Reaction — find which event it targets (last e-tag)
-      const eTags = e.tags.filter(t => t[0] === 'e')
-      const targetId = eTags[eTags.length - 1]?.[1]
+      // Reaction — find which event it targets (marked 'reply'/'root' e-tag,
+      // else last positional per NIP-25)
+      const targetId = getReactionTargetId(e)
       if (targetId) {
         const arr = reactionsByTarget.get(targetId) || []
         arr.push(e)

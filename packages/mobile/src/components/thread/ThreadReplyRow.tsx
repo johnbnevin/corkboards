@@ -21,6 +21,7 @@ export interface ThreadReplyRowProps {
   isTarget: boolean;
   isCollapsed: boolean;
   onToggleCollapse: (eventId: string) => void;
+  onViewThread?: (eventId: string) => void;
   onReply?: (event: NostrEvent) => void;
   onQuote?: (event: NostrEvent) => void;
   onRepost?: (event: NostrEvent) => void;
@@ -33,6 +34,7 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
   isTarget,
   isCollapsed,
   onToggleCollapse,
+  onViewThread,
   onReply,
   onQuote,
   onRepost,
@@ -46,7 +48,9 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
   const avatar = metadata?.picture;
   const hasReplies = childNodes.length > 0;
   const isReaction = event.kind === 7;
-  const indent = Math.min(depth, 4) * 12;
+  // Cap the visual indent so deeply-nested replies don't march off the right
+  // edge of a narrow panel — beyond 8 levels the border still conveys nesting.
+  const indent = Math.min(depth, 8) * 12;
 
   return (
     <View style={{ paddingLeft: depth > 0 ? indent : 0 }}>
@@ -91,7 +95,7 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
           {/* Content */}
           {!isReaction && !isCollapsed && (
             <View style={styles.contentArea}>
-              <ThreadContent event={event} isTarget={isTarget} />
+              <ThreadContent event={event} isTarget={isTarget} onViewThread={onViewThread} />
             </View>
           )}
 
@@ -191,6 +195,9 @@ const styles = StyleSheet.create({
   actionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    // Wrap so the action buttons never overflow the right edge on narrow /
+    // deeply-nested rows instead of being clipped off-screen.
+    flexWrap: 'wrap',
     gap: 4,
     marginTop: 4,
     paddingLeft: 22,

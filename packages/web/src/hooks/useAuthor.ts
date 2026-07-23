@@ -81,12 +81,10 @@ async function fetchAuthorFromNetwork(
     ),
   ];
 
-  let event: NostrEvent;
-  try {
-    event = await Promise.any(attempts);
-  } catch {
-    return {};
-  }
+  // Throw on total failure (instead of returning {}) so React Query's retry
+  // policy actually fires — returning {} caches "no profile" as a success and
+  // leaves the note showing user_xxxx until something remounts the query.
+  const event: NostrEvent = await Promise.any(attempts);
 
   try {
     const metadata = n.json().pipe(n.metadata()).parse(event.content);
@@ -152,6 +150,9 @@ export function useAuthor(pubkey: string | undefined, enabled = true) {
     // being stuck as "user_xxxx" for the whole TTL.
     staleTime: (query) => (query.state.data?.metadata ? STALE_TIME : 30_000),
     gcTime: CACHE_MAX_AGE,
-    retry: 2,
+    // Startup is congested (relay connects + feed queries + N profile fetches);
+    // spaced retries resolve most of the "shows npub/user_xxxx" cases.
+    retry: 3,
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 8000),
   });
 }

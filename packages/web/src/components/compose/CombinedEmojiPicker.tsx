@@ -4,7 +4,6 @@
  */
 import { useState, useMemo, useCallback } from 'react';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useCustomEmojiSets } from '@/hooks/useCustomEmojiSets';
 import { isValidMediaUrl } from '@/lib/textareaUtils';
@@ -153,10 +152,14 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
         </div>
       )}
 
-      {/* Content — min-h-0 is REQUIRED for a flex child to scroll: without it the
-          item's default min-height:auto lets it grow past the container and mobile
-          Chromium/Brave refuses to scroll (desktop browsers are more lenient). */}
-      <ScrollArea className="flex-1 min-h-0 overscroll-contain">
+      {/* Content — NATIVE scroll (not Radix ScrollArea): the picker is often
+          mounted inside a Popover that itself sits in a transformed/virtualized
+          container (the thread panel), where Radix's synthetic scrollbar
+          intermittently swallows wheel/touch and refuses to scroll. min-h-0 is
+          REQUIRED for a flex child to scroll — without it the content's default
+          min-height:auto lets it grow past the container. touch-action + overscroll
+          keep the gesture inside the picker. */}
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain [touch-action:pan-y]">
         {search && searchResults ? (
           <div className="p-2 space-y-2">
             {/* Standard results */}
@@ -255,7 +258,7 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
             ))}
           </div>
         )}
-      </ScrollArea>
+      </div>
 
       {/* Footer */}
       {onOpenSetBuilder && (

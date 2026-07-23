@@ -396,7 +396,7 @@ function ReplyParentContent({
   // For non-text kinds (reactions, reposts), show a descriptive label instead of raw content
   const isReaction = parentNote.kind === 7 || parentNote.kind === 9735
   const isRepostKind = parentNote.kind === 6 || parentNote.kind === 16
-  const isTextKind = parentNote.kind === 1 || parentNote.kind === 30023
+  const isTextKind = parentNote.kind === 1 || parentNote.kind === 1111 || parentNote.kind === 30023
 
   return (
     <div
@@ -602,6 +602,8 @@ export const NoteCard = React.memo(function NoteCard({
   const clientTag = useMemo(() => note.tags.find(t => t[0] === 'client')?.[1] || null, [note.tags])
 
   const isReply = useMemo(() => {
+    // Kind 1111 (NIP-22 comment) is by definition a reply to its parent (e/E tags)
+    if (note.kind === 1111) return note.tags.some(t => t[0] === 'e' || t[0] === 'E')
     if (note.kind !== 1) return false
     const hasQTags = note.tags.some(t => t[0] === 'q')
     if (hasQTags) return false

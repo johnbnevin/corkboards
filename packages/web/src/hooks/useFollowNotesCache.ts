@@ -22,6 +22,14 @@ import {
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useMemo, useCallback, useEffect, useRef } from 'react';
 
+/** Canonical React-Query key for the follow-notes cache. The key changes only
+ *  on 0→N authors (initial load), NOT on every +1 follow — see the queryKey
+ *  comment inside useFollowNotesCache. Use this everywhere the cache is read
+ *  or written (useFeedPagination) so the key can never drift. */
+export function followNotesCacheKey(hasAuthors: boolean) {
+  return ['follow-notes-cache', hasAuthors] as const;
+}
+
 export interface UseFollowNotesCacheOptions {
   contacts: string[];
   selfPubkey?: string;
@@ -55,7 +63,7 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
   // Key changes only when going from 0→N contacts (initial load) — NOT on every +1 follow,
   // which would cause a full feed refetch and scroll reset.
   const hasAuthors = allAuthors.length > 0;
-  const queryKey = useMemo(() => ['follow-notes-cache', hasAuthors] as const, [hasAuthors]);
+  const queryKey = useMemo(() => followNotesCacheKey(hasAuthors), [hasAuthors]);
 
   const query = useQuery<NostrEvent[]>({
     queryKey,

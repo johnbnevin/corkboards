@@ -6,6 +6,7 @@ import { NoteLink } from './NoteLink'
 import { ProfileLink } from './ProfileLink'
 import { MediaLink } from './MediaLink'
 import { isImageUrl } from '@/lib/mediaUtils'
+import { optimizeMediaUrl } from '@/lib/imageUtils'
 import { InlineLink } from './InlineLink'
 import { useHashtagAction } from '@/contexts/hashtagAction'
 import { WebLink } from './WebLink'
@@ -54,10 +55,13 @@ function replaceEmojis(text: string, emojiMap: Map<string, string>): React.React
       if (segments[j]) parts.push(segments[j])
     } else {
       const url = emojiMap.get(segments[j])
-      if (url) {
+      // Gate emoji URLs like images: reject unsafe hosts (SSRF) and route
+      // through the user's image proxy — unsafe URLs fall back to plain text.
+      const safeUrl = url ? optimizeMediaUrl(url) : ''
+      if (url && safeUrl) {
         const isAnimated = url.endsWith('.gif') || url.includes('.gif?')
         parts.push(
-          <img key={`e${j}`} src={url} alt={segments[j]} title={`:${segments[j]}:`}
+          <img key={`e${j}`} src={safeUrl} alt={segments[j]} title={`:${segments[j]}:`}
             className={`inline-block align-middle ${isAnimated ? 'h-20 w-20' : 'h-6 w-6'}`} loading="lazy" referrerPolicy="no-referrer" />
         )
       } else {
@@ -339,8 +343,12 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
       case 'markdown':
         return <MarkdownText key={i} text={part.value} emojiMap={emojiMap} />
       case 'emoji': {
+        // Gate emoji URLs like images: reject unsafe hosts (SSRF) and route
+        // through the user's image proxy — unsafe URLs fall back to plain text.
+        const safeUrl = optimizeMediaUrl(part.value)
+        if (!safeUrl) return <span className="whitespace-pre-wrap" key={i}>{`:${part.alt}:`}</span>
         const isAnimated = part.value.endsWith('.gif') || part.value.includes('.gif?')
-        return <img key={i} src={part.value} alt={part.alt ?? 'emoji'} title={`:${part.alt}:`} className={`inline-block align-middle ${isAnimated ? 'h-20 w-20' : 'h-6 w-6'}`} loading="lazy" referrerPolicy="no-referrer" />
+        return <img key={i} src={safeUrl} alt={part.alt ?? 'emoji'} title={`:${part.alt}:`} className={`inline-block align-middle ${isAnimated ? 'h-20 w-20' : 'h-6 w-6'}`} loading="lazy" referrerPolicy="no-referrer" />
       }
       default:
         return <span className="whitespace-pre-wrap" key={i}>{part.value}</span>
@@ -392,6 +400,8 @@ const hashtagPattern = /(?<!#)#([a-zA-Z]\w*)/g
 const mediaPattern = new RegExp(
   `(${[
     // Video platforms
+    'youtube.com',
+    'youtu.be',
     'rumble.com',
     'odysee.com',
     'vimeo.com',

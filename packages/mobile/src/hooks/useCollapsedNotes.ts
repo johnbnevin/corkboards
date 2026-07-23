@@ -17,9 +17,14 @@ const MAX_DISMISSED_NOTES = 10000;
 const MAX_SOFT_DISMISSED = 5000;
 const MAX_UNDO_MAP = 1000;
 const UNDO_WINDOW_MS = 20000;
+const MAX_DISMISSED_THREAD_ROOTS = 2000;
 
 const COLLAPSED_KEY = 'collapsed-notes';
 const DISMISSED_KEY = 'dismissed-notes';
+// Thread roots the user dismissed via "dismiss all associated". Persisted so
+// that notes belonging to the thread which arrive LATER (autofetch, load-more,
+// navigation) are also hidden — not just the ones visible at dismiss time.
+const DISMISSED_THREAD_ROOTS_KEY = 'dismissed-thread-roots';
 
 // Module-level shared state (mirrors web's module-level approach)
 let _softDismissedSet: Set<string> = new Set();
@@ -57,6 +62,7 @@ export function clearCollapsedNotesModuleState(): void {
 export function useCollapsedNotes() {
   const [collapsedIds, setCollapsedIdsState] = useState<string[]>(() => loadFromMmkv(COLLAPSED_KEY));
   const [dismissedIds, setDismissedIdsState] = useState<string[]>(() => loadFromMmkv(DISMISSED_KEY));
+  const [dismissedThreadRoots, setDismissedThreadRootsState] = useState<string[]>(() => loadFromMmkv(DISMISSED_THREAD_ROOTS_KEY));
   const [softDismissedIds, _setSoftDismissedIds] = useState<string[]>(() => [..._softDismissedSet]);
   const [undoMapVersion, setUndoMapVersion] = useState(0);
   const [sessionCollapsedCounter, setSessionCollapsedCounter] = useState(_sessionCollapsedCounter);
@@ -79,6 +85,14 @@ export function useCollapsedNotes() {
     });
   }, []);
 
+  const setDismissedThreadRoots = useCallback((updater: string[] | ((prev: string[]) => string[])) => {
+    setDismissedThreadRootsState(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      saveToMmkv(DISMISSED_THREAD_ROOTS_KEY, next);
+      return next;
+    });
+  }, []);
+
   // Listen for changes from other hook instances
   useEffect(() => {
     const fn = () => {
@@ -93,6 +107,7 @@ export function useCollapsedNotes() {
   const collapsedSet = useMemo(() => new Set(collapsedIds), [collapsedIds]);
   const dismissedSet = useMemo(() => new Set(dismissedIds), [dismissedIds]);
   const softDismissedSet = useMemo(() => new Set(softDismissedIds), [softDismissedIds]);
+  const dismissedThreadRootSet = useMemo(() => new Set(dismissedThreadRoots), [dismissedThreadRoots]);
 
   // Auto-cleanup on mount — one-shot via hasCleanedUp.current, so the v7
   // set-state-in-effect warning here is a false positive (no cascade possible).
@@ -224,6 +239,23 @@ export function useCollapsedNotes() {
     notifyListeners();
   }, [setCollapsedIds]);
 
+  /** Record thread root ids as dismissed so future-loaded thread members are
+   *  also hidden by the feed filter. Idempotent + bounded. */
+  const dismissThreadRoots = useCallback((rootIds: string[]) => {
+    if (rootIds.length === 0) return;
+    setDismissedThreadRoots(prev => {
+      const merged = new Set(prev);
+      for (const id of rootIds) merged.add(id);
+      if (merged.size === prev.length) return prev;
+      const arr = [...merged];
+      return arr.length > MAX_DISMISSED_THREAD_ROOTS ? arr.slice(-MAX_DISMISSED_THREAD_ROOTS) : arr;
+    });
+  }, [setDismissedThreadRoots]);
+
+  const isDismissedThreadRoot = useCallback((id: string) => {
+    return dismissedThreadRootSet.has(id);
+  }, [dismissedThreadRootSet]);
+
   const dismissAllCollapsed = useCallback(() => {
     const next = new Set(_softDismissedSet);
     for (const id of collapsedIds) next.add(id);
@@ -239,10 +271,11 @@ export function useCollapsedNotes() {
 
   const clearDismissed = useCallback(() => {
     setDismissedIds([]);
+    setDismissedThreadRoots([]);
     _softDismissedSet = new Set();
     _setSoftDismissedIds([]);
     notifyListeners();
-  }, [setDismissedIds]);
+  }, [setDismissedIds, setDismissedThreadRoots]);
 
   // Restore a specific subset of dismissed notes (e.g. only the user's own).
   const undismissMany = useCallback((ids: string[]) => {
@@ -270,6 +303,9 @@ export function useCollapsedNotes() {
     canUndoDismiss,
     consolidate,
     dismissMultiple,
+    dismissThreadRoots,
+    isDismissedThreadRoot,
+    dismissedThreadRootSet,
     dismissAllCollapsed,
     clearAll,
     clearDismissed,

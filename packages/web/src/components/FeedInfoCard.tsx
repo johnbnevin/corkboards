@@ -14,6 +14,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { useAuthor } from '@/hooks/useAuthor';
 import { genUserName } from '@/lib/genUserName';
+import { optimizeAvatarUrl } from '@/lib/imageUtils';
 import { nip19 } from 'nostr-tools';
 import {
   Layers, Radio, Rss, Compass, Users,
@@ -253,7 +254,7 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
                 >
                   {isSingleAuthor ? (
                     <Avatar className="h-6 w-6 shrink-0">
-                      <AvatarImage src={metadata?.picture} />
+                      <AvatarImage src={optimizeAvatarUrl(metadata?.picture)} />
                       <AvatarFallback className="text-xs">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
                     </Avatar>
                   ) : (
@@ -300,7 +301,7 @@ export const FeedInfoCard = React.memo(function FeedInfoCard(props: FeedInfoCard
                   {isSingleAuthor ? (
                     <>
                       <Avatar className="h-12 w-12">
-                        <AvatarImage src={metadata?.picture} />
+                        <AvatarImage src={optimizeAvatarUrl(metadata?.picture)} />
                         <AvatarFallback className="text-lg">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
                       </Avatar>
                       <div className="flex-1 min-w-0">

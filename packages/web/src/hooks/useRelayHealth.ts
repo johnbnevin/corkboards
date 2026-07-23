@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { FALLBACK_RELAYS, READ_ONLY_RELAYS, getRelayCache, createRelay } from '@/components/NostrProvider';
+import { FALLBACK_RELAYS, READ_ONLY_RELAYS, getRelayCache, createRelayFresh } from '@/components/NostrProvider';
 import { idbGetSync } from '@/lib/idb';
 import { normalizeRelay } from '@/lib/normalizeRelay';
 
@@ -84,7 +84,7 @@ export function useRelayHealth() {
 
   const checkRelay = useCallback(async (url: string): Promise<RelayHealth> => {
     const existing = relayHealthMap.get(url);
-    const relay = createRelay(url, { backoff: false });
+    const relay = createRelayFresh(url, { backoff: false });
     const start = Date.now();
     
     try {

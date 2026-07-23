@@ -221,7 +221,7 @@ export function EmojiPicker({ onSelectEmoji, onSelectCustomEmoji }: EmojiPickerP
         </View>
       ) : search && searchResults ? (
         // Search results
-        <ScrollView style={styles.scrollArea} keyboardShouldPersistTaps="always">
+        <ScrollView style={styles.scrollArea} nestedScrollEnabled keyboardShouldPersistTaps="always">
           {searchResults.standardMatches.length > 0 && (
             <View style={styles.grid}>
               {searchResults.standardMatches.map((emoji, i) => (
@@ -278,6 +278,7 @@ export function EmojiPicker({ onSelectEmoji, onSelectCustomEmoji }: EmojiPickerP
             </TouchableOpacity>
           )}
           keyboardShouldPersistTaps="always"
+          nestedScrollEnabled
           style={styles.scrollArea}
         />
       ) : (
@@ -295,6 +296,7 @@ export function EmojiPicker({ onSelectEmoji, onSelectCustomEmoji }: EmojiPickerP
             </TouchableOpacity>
           )}
           keyboardShouldPersistTaps="always"
+          nestedScrollEnabled
           style={styles.scrollArea}
         />
       )}

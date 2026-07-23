@@ -17,8 +17,18 @@
  *   cookies, IndexedDB, Tauri keychain entries. Intended for "sign out and erase".
  *
  * ## Security notes
- * - The user's nsec is never stored in localStorage. On Tauri it goes to the OS
- *   keychain; on web it stays in @nostrify/react's in-memory login state only.
+ * - The user's nsec is never persisted in plaintext. On Tauri it goes to the
+ *   OS keychain (and is blanked from the login object; Rust signs). On plain
+ *   web it is encrypted under a non-extractable AES-GCM CryptoKey and stored
+ *   in IndexedDB (lib/webKeyStore); the login state persisted to
+ *   localStorage['corkboard:login'] carries a blanked `data.nsec`, and
+ *   useCurrentUser builds a signer that decrypts on demand
+ *   (lib/webNsecSigner). This protects the key at rest on disk and against
+ *   casual localStorage reads — but code with full JS execution in this
+ *   origin (XSS) could still invoke the decrypt path, so the strict CSP
+ *   (index.html) remains the primary XSS defense. A one-time startup
+ *   migration (webKeyStore.prepareLoginStorage, wired in main.tsx) moves any
+ *   legacy plaintext nsec out of localStorage into the encrypted store.
  * - NIP-46 bunker logins DO persist an *ephemeral client* nsec (`clientNsec`) via
  *   @nostrify/react's login store so the bunker session can reconnect after a
  *   reload. This key only authorizes the NIP-46 channel (revocable at the
@@ -40,6 +50,7 @@ import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
 import { clearNoteCardCache } from '@/components/NoteCard';
 import { handleLogoutStorageAsync } from '@/lib/storageKeys';
 import { isTauri, keychainStore, keychainDelete, tauriLog } from '@/lib/tauri';
+import { storeNsec, deleteNsec, wipeKeyStore } from '@/lib/webKeyStore';
 import { NOSTRCONNECT_RELAYS, NSEC_APP_RELAY } from '@/lib/relayConstants';
 
 const BACKUP_CHECKED_KEY = 'corkboard:backup-checked';
@@ -68,6 +79,21 @@ export function useLoginActions() {
           const stored = await keychainStore(`nsec:${pubkey}`, nsec);
           if (!stored) {
             console.error('[login] Failed to store nsec in OS keychain — key may not persist across restarts');
+          } else if (login.data && typeof login.data === 'object') {
+            (login.data as { nsec?: string }).nsec = '';
+          }
+        } else {
+          // Plain web: encrypt the nsec under a non-extractable AES-GCM
+          // CryptoKey and persist both in IndexedDB (lib/webKeyStore), then
+          // blank the copy inside the login object so @nostrify's login
+          // persistence (localStorage['corkboard:login']) never sees the
+          // plaintext. useCurrentUser builds a lazy decrypting signer for
+          // blanked logins (lib/webNsecSigner). Only blank once the encrypted
+          // write succeeds, so a storage failure doesn't lock the user out
+          // (fall back to the in-login key, mirroring the Tauri path).
+          const stored = await storeNsec(pubkey, nsec);
+          if (!stored) {
+            console.error('[login] Failed to store encrypted nsec in IndexedDB — falling back to login-state persistence');
           } else if (login.data && typeof login.data === 'object') {
             (login.data as { nsec?: string }).nsec = '';
           }
@@ -319,6 +345,7 @@ export function useLoginActions() {
       const login = logins.find(l => l.pubkey === pubkey);
       if (login) {
         if (isTauri) await keychainDelete(`nsec:${login.pubkey}`);
+        else await deleteNsec(login.pubkey).catch(() => {});
         removeLogin(login.id);
       }
 
@@ -359,6 +386,10 @@ export function useLoginActions() {
         for (const pk of pubkeysToWipe) {
           await keychainDelete(`nsec:${pk}`);
         }
+      } else {
+        // Web: destroy all encrypted nsec material + close its DB connection so
+        // the deleteAllDbs() sweep below isn't blocked.
+        await wipeKeyStore().catch(() => {});
       }
       for (const l of [...logins]) {
         removeLogin(l.id);

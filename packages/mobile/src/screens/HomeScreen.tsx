@@ -31,7 +31,6 @@ import { useFeedLimit } from '../hooks/useFeedLimit';
 import { NoteCard } from '../components/NoteCard';
 import { FeedFilters } from '../components/FeedFilters';
 import type { KindFilter, NoteKindStats } from '../components/NoteKindToggles';
-import { ZapDialog } from '../components/ZapDialog';
 import { ProfileModalProvider } from '../components/ProfileModal';
 import { DeepLinkHandler } from '../components/DeepLinkHandler';
 import { ComposeScreen } from './ComposeScreen';
@@ -87,6 +86,16 @@ function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrEvent>):
   if (event.kind === 1) {
     cats.add(event.tags.some(t => t[0] === 'e') ? 'replies' : 'shortNotes');
   }
+  // NIP-22 comment (kind 1111) is always a reply to something
+  if (event.kind === 1111) cats.add('replies');
+  // NIP-94 file metadata (kind 1063) — image or video by mime type
+  if (event.kind === 1063) {
+    const mime = event.tags.find(t => t[0] === 'm')?.[1] ?? '';
+    if (mime.startsWith('video/')) cats.add('videos');
+    else cats.add('images');
+  }
+  // NIP-88 poll (kind 1068) — grouped with short notes
+  if (event.kind === 1068) cats.add('shortNotes');
   if (cats.size === 0) cats.add('other');
   return cats;
 }
@@ -176,7 +185,7 @@ export function HomeScreen() {
   const { prefetchFromNotes } = useBulkAuthors();
   const { mutedPubkeys } = useMuteList();
   const { isBookmarked, toggleBookmark } = useBookmarks();
-  const { isDismissed } = useCollapsedNotes();
+  const { isDismissed, dismissedThreadRootSet } = useCollapsedNotes();
   const { limit } = useFeedLimit();
 
   // ── UI state ────────────────────────────────────────────────────────────────
@@ -185,7 +194,6 @@ export function HomeScreen() {
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<string | null>(null);
   const [viewingThread, setViewingThread] = useState<string | null>(null);
-  const [zapTarget, setZapTarget] = useState<NostrEvent | null>(null);
   const flatListRef = useRef<FlatListType<NostrEvent>>(null);
 
   // ── Tab / feed switching ────────────────────────────────────────────────────
@@ -234,7 +242,9 @@ export function HomeScreen() {
   const authors = pubkey && contacts && contacts.length > 0 ? contacts : [];
   const isFollowingTab = activeTab === 'following';
   const isGlobalTab = activeTab === 'global';
-  const feedAuthors = isFollowingTab || isGlobalTab ? authors : [];
+  // Following = the user's contacts; Global = unrestricted (no authors), which
+  // also gives the two tabs distinct react-query cache keys in useFeed.
+  const feedAuthors = isFollowingTab ? authors : [];
   const { data: rawFollowEvents, isLoading: followLoading, isError: followError, refetch: followRefetch, isFetching: followFetching } =
     useFeed(feedAuthors);
   // Pagination — fetches older notes when the list nears its end. The iteration
@@ -258,6 +268,7 @@ export function HomeScreen() {
       pubkeys: activeCustomFeed.pubkeys,
       relays: activeCustomFeed.relays,
       rssUrls: activeCustomFeed.rssUrls,
+      hashtags: activeCustomFeed.hashtags ?? [],
     };
   }, [activeCustomFeed]);
 
@@ -306,7 +317,7 @@ export function HomeScreen() {
     // Standalone "content" kinds — notes that render on their own. A reaction/zap
     // card is suppressed when the note it targets is already in the feed as one
     // of these.
-    const CONTENT_KINDS = new Set([1, 20, 21, 22, 30023, 34235, 34236, 9802]);
+    const CONTENT_KINDS = new Set([1, 20, 21, 22, 1063, 1068, 1111, 30023, 34235, 34236, 9802]);
     const originalNoteIds = new Set<string>();
     for (const e of filtered) {
       if (CONTENT_KINDS.has(e.kind)) originalNoteIds.add(e.id);
@@ -383,10 +394,22 @@ export function HomeScreen() {
     }
 
     // Filter dismissed notes
-    result = result.filter(note => !isDismissed(note.id));
+    result = result.filter(note => {
+      if (isDismissed(note.id)) return false;
+      // Belongs to a dismissed thread root (persisted via "dismiss all
+      // associated") — hide it even if it arrived after the dismissal, or if
+      // the root itself is no longer in view.
+      if (dismissedThreadRootSet.has(note.id)) return false;
+      // Auto-dismiss: if this note references a dismissed note OR a dismissed
+      // thread root via an e-tag, hide it too.
+      for (const tag of note.tags) {
+        if (tag[0] === 'e' && tag[1] && (isDismissed(tag[1]) || dismissedThreadRootSet.has(tag[1]))) return false;
+      }
+      return true;
+    });
 
     return result;
-  }, [events, kindFilters, filterMode, hashtagFilters, eventLookup, isDismissed]);
+  }, [events, kindFilters, filterMode, hashtagFilters, eventLookup, isDismissed, dismissedThreadRootSet]);
 
   // Count dismissed notes from the deduped set (before kind/hashtag filters)
   const dismissedCount = useMemo(
@@ -687,13 +710,6 @@ export function HomeScreen() {
             />
           )}
         </Modal>
-
-        {/* ── Zap dialog ─────────────────────────────────────────────── */}
-        <ZapDialog
-          note={zapTarget}
-          visible={!!zapTarget}
-          onClose={() => setZapTarget(null)}
-        />
       </View>
     </ProfileModalProvider>
     </DeletedAuthorsContext.Provider>

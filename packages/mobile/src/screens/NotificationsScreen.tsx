@@ -15,6 +15,7 @@ import {
   RefreshControl,
   TouchableOpacity,
 } from 'react-native';
+import { useIsFetching } from '@tanstack/react-query';
 import { useAuth } from '../lib/AuthContext';
 import { useNotifications, type NotificationType } from '../hooks/useNotifications';
 import { useMuteList } from '../hooks/useMuteList';
@@ -97,12 +98,16 @@ const filterStyles = StyleSheet.create({
 
 export function NotificationsScreen() {
   const { pubkey } = useAuth();
-  // loadNewer reserved for pull-to-refresh-from-top behavior not wired yet
-  const { notifications: rawNotifications, isLoading, refetch, loadMore, loadNewer: _loadNewer, hasMore } = useNotifications();
+  const { notifications: rawNotifications, isLoading, loadMore, loadNewer, hasMore } = useNotifications();
   const { mutedPubkeys } = useMuteList();
   const { isDismissed } = useCollapsedNotes();
   const [hiddenTypes, setHiddenTypes] = useState<Set<NotifFilter>>(new Set());
-  const [loadingMore, setLoadingMore] = useState(false);
+
+  // Real fetch state instead of a fake completion timeout: the footer spinner
+  // (and button disabling) tracks the actual notifications query, clearing
+  // only when the page fetch finishes.
+  const isFetchingNotifs = useIsFetching({ queryKey: ['notifications', pubkey] }) > 0;
+  const loadingMore = isFetchingNotifs && !isLoading;
 
   const toggleFilter = useCallback((kind: NotifFilter) => {
     setHiddenTypes(prev => {
@@ -146,12 +151,10 @@ export function NotificationsScreen() {
     [notifications, hiddenTypes, isDismissed],
   );
 
-  const handleLoadMore = useCallback(async () => {
-    setLoadingMore(true);
+  const handleLoadMore = useCallback(() => {
+    if (loadingMore) return;
     loadMore();
-    // Small delay for UI feedback
-    setTimeout(() => setLoadingMore(false), 500);
-  }, [loadMore]);
+  }, [loadMore, loadingMore]);
 
   if (!pubkey) {
     return (
@@ -223,7 +226,7 @@ export function NotificationsScreen() {
         refreshControl={
           <RefreshControl
             refreshing={false}
-            onRefresh={refetch}
+            onRefresh={loadNewer}
             tintColor="#b3b3b3"
           />
         }

@@ -16,6 +16,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { ProfileAbout } from '@/components/ProfileAbout'
 import { EmojiName } from '@/components/EmojiName'
 import { genUserName } from '@/lib/genUserName'
+import { optimizeAvatarUrl } from '@/lib/imageUtils'
 import { nip19 } from 'nostr-tools'
 import {
   Globe,
@@ -221,7 +222,7 @@ function ProfileModalDialog({ pubkey, isOpen, onClose }: ProfileModalDialogProps
               <Skeleton className="h-60 w-60 rounded-lg border-4 border-background" />
             ) : (
               <Avatar className="h-60 w-60 border-4 border-background">
-                {metadata?.picture && <AvatarImage src={metadata.picture} alt={displayName} />}
+                {metadata?.picture && <AvatarImage src={optimizeAvatarUrl(metadata.picture) || ''} alt={displayName} />}
                 <AvatarFallback className="text-5xl">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
               </Avatar>
             )}

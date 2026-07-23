@@ -406,18 +406,21 @@ async function sendNip17(
   const recipientSealContent = await signer.nip44.encrypt(recipientPubkey, rumorJson);
   const senderSealContent = await signer.nip44.encrypt(senderPubkey, rumorJson);
 
+  // Per NIP-59, the seal created_at is also randomized (past-only), not just
+  // the gift-wrap — otherwise the seal's real timestamp leaks send time. The
+  // inner rumor keeps the true `now`. Mirrors web's DMProvider.
   const [recipientSeal, senderSeal] = await Promise.all([
     signer.signEvent({
       kind: 13,
       content: recipientSealContent,
       tags: [],
-      created_at: now,
+      created_at: randomizeTimestamp(now),
     }),
     signer.signEvent({
       kind: 13,
       content: senderSealContent,
       tags: [],
-      created_at: now,
+      created_at: randomizeTimestamp(now),
     }),
   ]);
 

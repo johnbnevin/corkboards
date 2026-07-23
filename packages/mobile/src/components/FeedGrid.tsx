@@ -81,9 +81,12 @@ export const FeedGrid = React.memo(function FeedGrid({
   const renderNote = useCallback(
     ({ item }: { item: NostrEvent }) => {
       const parentNote = parentNotes?.[
-        // Find parent event ID from e-tags
+        // Find parent event ID from e-tags. Kind 1111 (NIP-22 comment) is by
+        // definition a reply to its parent — lowercase 'e' tag, falling back
+        // to the uppercase 'E' root tag. Parity with web NoteCard's isReply.
         item.tags.find(t => t[0] === 'e' && t[3] === 'reply')?.[1]
         || item.tags.find(t => t[0] === 'e')?.[1]
+        || (item.kind === 1111 ? item.tags.find(t => t[0] === 'E')?.[1] : undefined)
         || ''
       ];
 

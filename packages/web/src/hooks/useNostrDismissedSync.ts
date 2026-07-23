@@ -9,7 +9,7 @@
 import { useCallback, useRef } from 'react';
 import type { NostrEvent, NPool } from '@nostrify/nostrify';
 import type { NUser } from '@nostrify/react/login';
-import { FALLBACK_RELAYS, getUserRelays, getRelayCache, createRelay } from '@/components/NostrProvider';
+import { FALLBACK_RELAYS, getUserRelays, getRelayCache, createRelayFresh } from '@/components/NostrProvider';
 import { encryptForSelf, decryptFromSelf } from '@/lib/nostrEncrypt';
 
 const KIND = 35572;
@@ -59,7 +59,7 @@ export function useNostrDismissedSync(user: NUser | undefined, _nostr: NPool) {
       const relays = getPublishRelays(user.pubkey);
       let succeeded = 0;
       for (const url of relays) {
-        const relay = createRelay(url, { backoff: false });
+        const relay = createRelayFresh(url, { backoff: false });
         try {
           await relay.event(event, { signal: AbortSignal.timeout(8000) });
           succeeded++;
@@ -80,7 +80,7 @@ export function useNostrDismissedSync(user: NUser | undefined, _nostr: NPool) {
     let best: NostrEvent | null = null;
 
     for (const url of relays) {
-      const relay = createRelay(url, { backoff: false });
+      const relay = createRelayFresh(url, { backoff: false });
       try {
         const [event] = await relay.query(
           [{ kinds: [KIND], authors: [user.pubkey], '#d': [D_TAG], limit: 1 }],

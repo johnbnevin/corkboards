@@ -6,8 +6,9 @@ import { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, Platform, TextInput, Modal } from 'react-native';
 import { useQueryClient } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { useNostr } from '../lib/NostrProvider';
+import { useNostr, getRelayCache, getUserRelays, FALLBACK_RELAYS } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
+import { ComposeScreen } from '../screens/ComposeScreen';
 import { useZap } from '../hooks/useZap';
 import { useNoteEngagement } from '../hooks/useNoteEngagement';
 import { EmojiPickerModal } from './EmojiPicker';
@@ -33,6 +34,7 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
   const [zapModalVisible, setZapModalVisible] = useState(false);
   const [zapAmount, setZapAmount] = useState('21');
   const [emojiPickerVisible, setEmojiPickerVisible] = useState(false);
+  const [quoting, setQuoting] = useState(false);
   // Optimistic zapped flag — seeded from the session cache so a note the user
   // already zapped shows active immediately, before the zap receipt is fetched.
   const [zappedOverride, setZappedOverride] = useState<boolean>(() => hasUserZapped(event.id));
@@ -112,13 +114,25 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     setRepostPending(true);
     setRepostedOverride(true);
     try {
+      // NIP-18: kind 6 reposts kind-1 notes; anything else is a generic repost
+      // (kind 16) and must carry a ['k', kind] tag. The e tag carries a relay
+      // hint pointing at where the original can be found. (Mirrors web
+      // ComposeDialog handleRepost.)
+      const authorRelays = getRelayCache(event.pubkey);
+      const userRelays = getUserRelays();
+      const relayHint = authorRelays[0] || userRelays.write[0] || FALLBACK_RELAYS[0] || '';
+
+      const isKind1 = event.kind === 1;
+      const tags: string[][] = [
+        ['e', event.id, relayHint],
+        ['p', event.pubkey],
+      ];
+      if (!isKind1) tags.push(['k', String(event.kind)]);
+
       const template = {
-        kind: 6,
+        kind: isKind1 ? 6 : 16,
         content: JSON.stringify(event),
-        tags: [
-          ['e', event.id],
-          ['p', event.pubkey],
-        ],
+        tags,
         created_at: Math.floor(Date.now() / 1000),
       };
       const signed = await signer.signEvent(template);
@@ -129,6 +143,16 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     } finally {
       setRepostPending(false);
     }
+  };
+
+  // Repost button: offer plain repost or quote (compose with embedded note),
+  // mirroring web's repost dialog which has both options.
+  const handleRepostPress = () => {
+    Alert.alert('Repost', undefined, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Quote', onPress: () => setQuoting(true) },
+      { text: 'Repost', onPress: () => { handleRepost(); } },
+    ]);
   };
 
   // Fire a zap and, on success, record it optimistically so the zap icon
@@ -215,7 +239,7 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
 
         <TouchableOpacity
           style={styles.action}
-          onPress={() => requireAuth(handleRepost)}
+          onPress={() => requireAuth(handleRepostPress)}
           disabled={repostPending}
         >
           <Text style={[styles.icon, reposted && styles.activeRepost]}>↻</Text>
@@ -283,6 +307,14 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
             </View>
           </View>
         </View>
+      </Modal>
+
+      {/* Quote compose modal */}
+      <Modal visible={quoting} animationType="slide">
+        <ComposeScreen
+          onClose={() => setQuoting(false)}
+          quotedEvent={{ id: event.id, pubkey: event.pubkey, tags: event.tags, content: event.content, kind: event.kind }}
+        />
       </Modal>
 
       {/* Long-press the like button to react with a standard or custom (NIP-30) emoji */}

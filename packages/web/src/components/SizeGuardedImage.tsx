@@ -20,6 +20,7 @@ const MAX_SIZE_CACHE = 2000;
 const sizeCache = new Map<string, SizeCheckResult>();
 const pendingChecks = new Map<string, Promise<SizeCheckResult>>();
 /** Hosts where HEAD requests fail (CORS) — skip future checks for any URL on these hosts */
+const MAX_CORS_BLOCKED_HOSTS = 500;
 const corsBlockedHosts = new Set<string>();
 
 function getHost(url: string): string {
@@ -64,7 +65,13 @@ async function checkImageSize(url: string): Promise<SizeCheckResult> {
       return result;
     } catch {
       // Remember this host blocks CORS so we don't flood it with failed requests
-      if (host) corsBlockedHosts.add(host);
+      if (host) {
+        if (corsBlockedHosts.size >= MAX_CORS_BLOCKED_HOSTS) {
+          const oldest = corsBlockedHosts.values().next().value;
+          if (oldest !== undefined) corsBlockedHosts.delete(oldest);
+        }
+        corsBlockedHosts.add(host);
+      }
       const result: SizeCheckResult = { size: null, isVideo: false };
       if (sizeCache.size >= MAX_SIZE_CACHE) {
         const oldest = sizeCache.keys().next().value;

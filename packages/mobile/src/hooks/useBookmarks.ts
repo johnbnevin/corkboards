@@ -6,6 +6,7 @@
  *
  * - Reads the user's kind 10003 bookmark list from relays
  * - Stores bookmark IDs as encrypted private tags in the content field (NIP-44)
+ * - Mirrors bookmark IDs as public e-tags when the user opts into public bookmarks
  * - Publishes updated kind 10003 events on add/remove
  * - Caches bookmark IDs in MMKV for instant startup
  */
@@ -14,9 +15,17 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNostr, FALLBACK_RELAYS, getUserRelays } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 import { mobileStorage } from '../storage/MmkvStorage';
+import { STORAGE_KEYS } from '../lib/storageKeys';
 import type { NostrEvent } from '@nostrify/nostrify';
 
 const MMKV_KEY = 'nostr-bookmark-ids';
+
+/** Read the public-bookmarks preference (default: false = private) */
+function getPublicBookmarksPref(): boolean {
+  try {
+    return mobileStorage.getSync(STORAGE_KEYS.PUBLIC_BOOKMARKS) === 'true';
+  } catch { return false; }
+}
 
 export function useBookmarks(fetchEnabled = true) {
   const { pubkey, signer } = useAuth();
@@ -44,12 +53,14 @@ export function useBookmarks(fetchEnabled = true) {
 
   const isMountedRef = useRef(true);
   const publishTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const syncTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const needsPublish = useRef(false);
 
   useEffect(() => {
     return () => {
       isMountedRef.current = false;
       if (publishTimer.current) clearTimeout(publishTimer.current);
+      if (syncTimer.current) clearTimeout(syncTimer.current);
     };
   }, []);
 
@@ -65,8 +76,8 @@ export function useBookmarks(fetchEnabled = true) {
   // Fetch bookmark list (kind 10003) from relays
   const { data: relayResult, isLoading } = useQuery({
     queryKey: ['bookmarks', pubkey],
-    queryFn: async (): Promise<{ ids: string[]; found: boolean }> => {
-      if (!pubkey || !signer) return { ids: [], found: false };
+    queryFn: async (): Promise<{ ids: string[]; found: boolean; hasPublicTags: boolean }> => {
+      if (!pubkey || !signer) return { ids: [], found: false, hasPublicTags: false };
 
       const userRelays = getUserRelays();
       const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS;
@@ -85,7 +96,7 @@ export function useBookmarks(fetchEnabled = true) {
           }),
         );
       } catch {
-        return { ids: [], found: false };
+        return { ids: [], found: false, hasPublicTags: false };
       }
 
       // bookmarkEvent is guaranteed assigned at this point (Promise.any catch returns early)
@@ -107,7 +118,11 @@ export function useBookmarks(fetchEnabled = true) {
         }
       }
 
-      return { ids: [...new Set([...publicIds, ...privateIds])], found: true };
+      return {
+        ids: [...new Set([...publicIds, ...privateIds])],
+        found: true,
+        hasPublicTags: publicIds.length > 0,
+      };
     },
     enabled: !!pubkey && !!signer && fetchEnabled,
     staleTime: 5 * 60_000,
@@ -120,6 +135,10 @@ export function useBookmarks(fetchEnabled = true) {
     if (publishingRef.current) return;
     publishingRef.current = true;
 
+    // Public bookmarks mirror the ids as plaintext e-tags; private keeps them
+    // only in the NIP-44 encrypted content (parity with web's useBookmarks).
+    const isPublic = getPublicBookmarksPref();
+
     try {
       const eTags = newIds.map(id => ['e', id]);
       const payload = JSON.stringify(eTags);
@@ -128,7 +147,7 @@ export function useBookmarks(fetchEnabled = true) {
       const event = await current.signer.signEvent({
         kind: 10003,
         content: encrypted,
-        tags: [], // always private on mobile
+        tags: isPublic ? eTags : [], // public tags only when user opts in
         created_at: Math.floor(Date.now() / 1000),
       });
       await nostr.event(event, { signal: AbortSignal.timeout(8000) });
@@ -152,8 +171,17 @@ export function useBookmarks(fetchEnabled = true) {
         if (merged.length === prev.length && merged.every(id => prev.includes(id))) return prev;
         return merged;
       });
+
+      // Re-publish if the relay list's public/private state doesn't match the
+      // user's preference (parity with web's useBookmarks sync effect).
+      if (relayResult.hasPublicTags !== getPublicBookmarksPref()) {
+        if (syncTimer.current) clearTimeout(syncTimer.current);
+        syncTimer.current = setTimeout(() => {
+          if (isMountedRef.current && userRef.current.pubkey) publishBookmarkList(relayResult.ids);
+        }, 3000);
+      }
     }
-  }, [relayResult, pubkey]);
+  }, [relayResult, pubkey, publishBookmarkList]);
 
   // Schedule publish when bookmarkIds changes from user action.
   // Always resets the debounce timer so rapid toggles accumulate into one publish.

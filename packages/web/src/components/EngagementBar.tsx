@@ -10,7 +10,7 @@ import { useAuthor } from '@/hooks/useAuthor'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { genUserName } from '@/lib/genUserName'
-import { optimizeAvatarUrl } from '@/lib/imageUtils'
+import { optimizeAvatarUrl, optimizeMediaUrl } from '@/lib/imageUtils'
 import { Repeat2, Zap } from 'lucide-react'
 
 // ── Reactor avatar (used in tooltips) ─────────────────────────────────────
@@ -44,10 +44,13 @@ export function resolveReactionEmoji(r: NostrEvent): { key: string; render: Reac
   if (match) {
     const shortcode = match[1]
     const url = r.tags.find(t => t[0] === 'emoji' && t[1] === shortcode)?.[2]
-    if (url) {
+    // Gate emoji URLs like images: reject unsafe hosts (SSRF) and route
+    // through the user's image proxy — unsafe URLs fall back to plain text.
+    const safeUrl = url ? optimizeMediaUrl(url) : ''
+    if (safeUrl) {
       return {
         key: `:${shortcode}:`,
-        render: <img src={url} alt={`:${shortcode}:`} title={`:${shortcode}:`} className="inline-block h-5 w-5 object-contain align-middle" loading="lazy" referrerPolicy="no-referrer" />,
+        render: <img src={safeUrl} alt={`:${shortcode}:`} title={`:${shortcode}:`} className="inline-block h-5 w-5 object-contain align-middle" loading="lazy" referrerPolicy="no-referrer" />,
       }
     }
     return { key: content, render: <span className="text-xs text-muted-foreground px-0.5">:{shortcode}:</span> }

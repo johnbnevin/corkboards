@@ -28,7 +28,6 @@ const RSS_PROXY = 'https://corkboards.me/rss-proxy.php';
 export async function fetchRssFeed(feedUrl: string, maxItems = 20): Promise<RssFeedResult | null> {
   let feedDomain = '';
   try { feedDomain = new URL(feedUrl).hostname.replace('www.', ''); } catch { /* ignore */ }
-  const feedIcon = `https://icons.duckduckgo.com/ip3/${feedDomain}.ico`;
 
   try {
     const url = `${RSS_PROXY}?url=${encodeURIComponent(feedUrl)}&max=${maxItems}`;
@@ -44,7 +43,10 @@ export async function fetchRssFeed(feedUrl: string, maxItems = 20): Promise<RssF
         if (__DEV__) console.log('[rss] Loaded', (data.items as unknown[]).length, 'items from', feedUrl);
         return {
           title: (data.title as string) || feedDomain,
-          icon: (data.icon as string) || feedIcon,
+          // Icon is the proxy-inlined data: URI (feed origin's own favicon).
+          // No third-party favicon fallback — that would enumerate the user's
+          // RSS subscriptions to an external service. Empty = no icon.
+          icon: (data.icon as string) || '',
           items: data.items as RssFeedResult['items'],
         };
       }

@@ -10,6 +10,7 @@ import { setImageProxyTemplate } from '@core/imageProxy';
 import { dmStoreReady } from './src/lib/dmMessageStore';
 import { NostrProvider, WelshmanRouterBridge } from './src/lib/NostrProvider';
 import { AuthProvider } from './src/lib/AuthContext';
+import { useNotificationCount } from './src/hooks/useNotificationCount';
 import { NwcProvider } from './src/hooks/useNwc';
 import { AppProvider } from './src/lib/AppContext';
 import { ToastProvider } from './src/hooks/useToast';
@@ -24,6 +25,68 @@ import { NotificationsScreen } from './src/screens/NotificationsScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 
 const Tab = createBottomTabNavigator();
+
+/**
+ * Tab navigator — lives inside the provider tree so it can read the unseen-
+ * notification count for the Activity tab badge (parity with web's TabBar
+ * red count badge). Focusing the tab marks notifications seen, clearing it.
+ */
+function AppTabs() {
+  const { newCount, markSeen } = useNotificationCount();
+  return (
+    <NavigationContainer>
+      <Tab.Navigator
+        screenOptions={{
+          headerShown: false,
+          tabBarStyle: {
+            backgroundColor: '#1f1f1f',
+            borderTopColor: '#404040',
+          },
+          tabBarActiveTintColor: '#f2f2f2',
+          tabBarInactiveTintColor: '#b3b3b3',
+        }}
+      >
+        <Tab.Screen
+          name="Feed"
+          component={HomeScreen}
+          options={{ tabBarLabel: 'Feed' }}
+        />
+        <Tab.Screen
+          name="Discover"
+          component={DiscoverScreen}
+          options={{ tabBarLabel: 'Discover' }}
+        />
+        <Tab.Screen
+          name="Saved"
+          component={SavedScreen}
+          options={{ tabBarLabel: 'Saved' }}
+        />
+        <Tab.Screen
+          name="Notifications"
+          component={NotificationsScreen}
+          options={{
+            tabBarLabel: 'Activity',
+            tabBarBadge: newCount > 0 ? (newCount >= 50 ? '50+' : newCount) : undefined,
+            tabBarBadgeStyle: { backgroundColor: '#ef4444', color: '#fff', fontSize: 10 },
+          }}
+          listeners={{ focus: () => markSeen() }}
+        />
+        <Tab.Screen
+          name="Messages"
+          component={MessagesScreen}
+          options={{ tabBarLabel: 'DMs' }}
+        />
+        <Tab.Screen
+          name="Settings"
+          component={SettingsScreen}
+          options={{ tabBarLabel: 'Settings' }}
+        />
+      </Tab.Navigator>
+      <StatusBar style="light" />
+    </NavigationContainer>
+  );
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -110,51 +173,7 @@ export default function App() {
       <WelshmanRouterBridge />
       <NostrSync />
       <AutoSaveManager />
-      <NavigationContainer>
-        <Tab.Navigator
-          screenOptions={{
-            headerShown: false,
-            tabBarStyle: {
-              backgroundColor: '#1f1f1f',
-              borderTopColor: '#404040',
-            },
-            tabBarActiveTintColor: '#f2f2f2',
-            tabBarInactiveTintColor: '#b3b3b3',
-          }}
-        >
-          <Tab.Screen
-            name="Feed"
-            component={HomeScreen}
-            options={{ tabBarLabel: 'Feed' }}
-          />
-          <Tab.Screen
-            name="Discover"
-            component={DiscoverScreen}
-            options={{ tabBarLabel: 'Discover' }}
-          />
-          <Tab.Screen
-            name="Saved"
-            component={SavedScreen}
-            options={{ tabBarLabel: 'Saved' }}
-          />
-          <Tab.Screen
-            name="Notifications"
-            component={NotificationsScreen}
-            options={{ tabBarLabel: 'Activity' }}
-          />
-          <Tab.Screen
-            name="Messages"
-            component={MessagesScreen}
-            options={{ tabBarLabel: 'DMs' }}
-          />
-          <Tab.Screen
-            name="Settings"
-            component={SettingsScreen}
-            options={{ tabBarLabel: 'Settings' }}
-          />
-        </Tab.Navigator>
-        <StatusBar style="light" />
-      </NavigationContainer>
+      <AppTabs />
       </NwcProvider>
       </AuthProvider>
       </NostrProvider>

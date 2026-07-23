@@ -32,7 +32,7 @@ import { NoteActions } from '../components/NoteActions';
 import { ProfileAbout } from '../components/ProfileAbout';
 import { formatTimeAgo } from '@core/formatTimeAgo';
 import { SizeGuardedImage } from '../components/SizeGuardedImage';
-import { applyImageProxy } from '@core/imageProxy';
+import { optimizeMediaUrl } from '@core/imageUtils';
 
 interface ProfileScreenProps {
   pubkey: string;
@@ -237,9 +237,10 @@ export function ProfileScreen({ pubkey, onBack, onViewThread, onCreateCorkboard 
 
   const renderHeader = () => (
     <View>
-      {/* Banner */}
-      {meta?.banner && /^https?:\/\//.test(meta.banner) ? (
-        <Image source={{ uri: applyImageProxy(meta.banner) }} style={styles.banner} />
+      {/* Banner — route through optimizeMediaUrl so unsafe/SSRF hosts are
+          rejected (empty string) and the user's image proxy is applied. */}
+      {meta?.banner && optimizeMediaUrl(meta.banner, true) ? (
+        <Image source={{ uri: optimizeMediaUrl(meta.banner, true) }} style={styles.banner} />
       ) : (
         <View style={[styles.banner, styles.bannerPlaceholder]} />
       )}

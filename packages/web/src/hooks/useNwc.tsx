@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from 'react';
 import type { NRelay1 } from '@nostrify/nostrify';
-import { createRelay } from '@/components/NostrProvider';
+import { createRelayFresh, registerAuthRelay } from '@/components/NostrProvider';
 import { debugLog } from '@/lib/debug';
 import { getPublicKey } from 'nostr-tools';
 import { hexToBytes, bytesToHex } from 'nostr-tools/utils';
@@ -106,7 +106,12 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
       relayRef.current = null;
       return;
     }
-    relayRef.current = createRelay(parsed.relay, { backoff: false });
+    // NWC wallet relays commonly require NIP-42 AUTH — register this relay so
+    // the gated auto-AUTH handler will answer its challenge.
+    registerAuthRelay(parsed.relay);
+    // Fresh (uncached) instance — this effect closes the relay on cleanup, and
+    // closing a shared cached relay would poison it for every other caller.
+    relayRef.current = createRelayFresh(parsed.relay, { backoff: false });
     return () => {
       relayRef.current?.close();
       relayRef.current = null;

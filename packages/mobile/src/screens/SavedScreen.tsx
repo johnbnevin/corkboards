@@ -100,9 +100,11 @@ export function SavedScreen() {
     staleTime: 2 * 60_000,
   });
 
-  // Sort: pinned first, then by time
+  // Sort: pinned first, then by time. When the last saved note is removed the
+  // query disables (enabled: savedIds.length > 0) and its stale data would keep
+  // rendering — treat an empty savedIds list as an empty screen.
   const sortedEvents = useMemo(() => {
-    if (!events) return [];
+    if (!events || savedIds.length === 0) return [];
     return [...events].sort((a, b) => {
       const aPinned = pinnedIds.includes(a.id);
       const bPinned = pinnedIds.includes(b.id);
@@ -110,7 +112,7 @@ export function SavedScreen() {
       if (!aPinned && bPinned) return 1;
       return b.created_at - a.created_at;
     });
-  }, [events, pinnedIds]);
+  }, [events, pinnedIds, savedIds]);
 
   const handleRetryFailed = useCallback(async () => {
     setRetrying(true);

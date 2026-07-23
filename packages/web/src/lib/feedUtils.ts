@@ -23,7 +23,6 @@ export type { RssFeedResult } from '@core/rss';
 export async function fetchRssFeed(feedUrl: string, maxItems = 20): Promise<import('@core/rss').RssFeedResult | null> {
   let feedDomain = '';
   try { feedDomain = new URL(feedUrl).hostname.replace('www.', ''); } catch { /* ignore */ }
-  const feedIcon = `https://icons.duckduckgo.com/ip3/${feedDomain}.ico`;
 
   try {
     const url = `${RSS_PROXY}?url=${encodeURIComponent(feedUrl)}&max=${maxItems}`;
@@ -36,7 +35,10 @@ export async function fetchRssFeed(feedUrl: string, maxItems = 20): Promise<impo
     if (response.ok) {
       if (!data.error && (data.items as unknown[])?.length > 0) {
         debugLog('[rss] Loaded', (data.items as unknown[]).length, 'items from', feedUrl);
-        return { title: (data.title as string) || feedDomain, icon: (data.icon as string) || feedIcon, items: data.items as import('@core/rss').RssFeedResult['items'] };
+        // Icon comes inline from the proxy (data: URI fetched from the feed's own
+        // origin). No third-party favicon fallback — that would enumerate the
+        // user's subscriptions to an external service. Empty string = no icon.
+        return { title: (data.title as string) || feedDomain, icon: (data.icon as string) || '', items: data.items as import('@core/rss').RssFeedResult['items'] };
       }
       if (data.error) debugWarn('[rss] Error for', feedUrl, data.error);
     }

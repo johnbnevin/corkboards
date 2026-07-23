@@ -25,16 +25,14 @@ export function useFeed(authors: string[] = []) {
       const events: NostrEvent[] = [];
       const seenIds = new Set<string>();
 
-      // When no authors: query fallback relays directly
-      const relaysToQuery = authors.length > 0 ? undefined : FALLBACK_RELAYS;
-
-      if (relaysToQuery) {
-        // Direct relay queries for global mode
+      if (authors.length === 0) {
+        // Global mode: query each fallback relay directly (per-relay routing,
+        // same pattern as SavedScreen) instead of N identical pool queries.
         await Promise.allSettled(
-          relaysToQuery.slice(0, 3).map(async () => {
+          FALLBACK_RELAYS.slice(0, 3).map(async (url) => {
             try {
-              // Use nostr.query with a single-relay approach by temporarily routing
-              const relayEvents = await nostr.query([filter], { signal: AbortSignal.timeout(8000) });
+              const relay = nostr.relay(url);
+              const relayEvents = await relay.query([filter], { signal: AbortSignal.timeout(8000) });
               for (const ev of relayEvents) {
                 if (!seenIds.has(ev.id)) {
                   seenIds.add(ev.id);

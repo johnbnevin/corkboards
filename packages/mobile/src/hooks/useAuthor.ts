@@ -73,12 +73,10 @@ async function fetchAuthorFromNetwork(
     ),
   ];
 
-  let event: NostrEvent;
-  try {
-    event = await Promise.any(attempts);
-  } catch {
-    return {};
-  }
+  // Throw on total failure (instead of returning {}) so React Query's retry
+  // policy actually fires — returning {} caches "no profile" as a success and
+  // leaves the note showing user_xxxx until something remounts the query.
+  const event: NostrEvent = await Promise.any(attempts);
 
   try {
     const metadata = n.json().pipe(n.metadata()).parse(event.content);
@@ -132,10 +130,19 @@ export function useAuthor(pubkey: string | undefined) {
     // of sticking as "user_xxxx" for the whole TTL. Parity with web.
     staleTime: (query) => (query.state.data?.metadata ? STALE_TIME : 30_000),
     gcTime: CACHE_MAX_AGE,
-    retry: 2,
+    // Startup is congested (relay connects + feed queries + N profile fetches);
+    // spaced retries resolve most of the "shows npub/user_xxxx" cases.
+    retry: 3,
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 8000),
     enabled: !!pubkey,
   });
 }
+
+// Pubkeys currently being fetched by ANY prefetch call. Concurrent calls skip
+// these instead of dropping the whole call (which would silently leave every
+// author of a newly-loaded page unprefetched whenever a previous batch was in
+// flight). Parity with web's useBulkAuthors.
+const inFlightPubkeys = new Set<string>();
 
 /**
  * Batch-prefetch profiles for a set of notes and seed the query cache.
@@ -150,8 +157,11 @@ export function useBulkAuthors() {
       pubkeys.add(note.pubkey);
     }
 
-    // Only fetch pubkeys not already cached (check React Query + MMKV)
+    // Only fetch pubkeys not already cached (check React Query + MMKV). Skip
+    // pubkeys another prefetch call is already fetching, but still process the
+    // rest — dropping the whole call would leave new pages unresolved.
     const toFetch = [...pubkeys].filter(pk => {
+      if (inFlightPubkeys.has(pk)) return false;
       if (queryClient.getQueryData(['author', pk])) return false;
       const cached = getCachedProfile(pk, CACHE_MAX_AGE);
       if (cached?.metadata) {
@@ -165,6 +175,7 @@ export function useBulkAuthors() {
       return true;
     });
     if (toFetch.length === 0) return;
+    for (const pk of toFetch) inFlightPubkeys.add(pk);
 
     try {
       const events = await nostr.query(
@@ -184,6 +195,8 @@ export function useBulkAuthors() {
       if (__DEV__ && (err as Error)?.name !== 'AbortError') {
         console.warn('[useBulkAuthors] Bulk fetch failed:', (err as Error)?.message);
       }
+    } finally {
+      for (const pk of toFetch) inFlightPubkeys.delete(pk);
     }
   }
 

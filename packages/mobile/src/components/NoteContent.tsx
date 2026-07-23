@@ -2,7 +2,7 @@
  * Rich note content renderer — mirrors the web version's parsing logic.
  * Handles nostr: links, hashtags, URLs, images, and video embeds.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Text,
   Image,
@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { nip19 } from 'nostr-tools';
-import { stripTrackingParams } from '@core/sanitizeUtils';
+import { stripTrackingParams, getTrackingParams } from '@core/sanitizeUtils';
 import { parseListing } from '@core/nip99';
 import { useHashtagAction } from '../contexts/hashtagAction';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -25,6 +25,9 @@ import { genUserName } from '@core/genUserName';
 import { useAuthor } from '../hooks/useAuthor';
 import { useNostr } from '../lib/NostrProvider';
 import { SizeGuardedImage } from './SizeGuardedImage';
+import { optimizeMediaUrl } from '@core/imageUtils';
+import { MediaLink } from './MediaLink';
+import { TrackerWarningDialog } from './TrackerWarningDialog';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56; // card padding
@@ -46,6 +49,11 @@ const VIDEO_EXT = /\.(mp4|webm|mov|m3u8)(\?[^\s]*)?$/i;
 // Keep in sync with web's mediaPattern in packages/web/src/components/NoteContent.tsx.
 const IMAGE_DOMAINS = /nostr\.build|blossom\.band|blossom\.yakihonne\.com|blossom\.f7z\.io|blossom\.ditto\.pub|cdn\.sovbit\.host|blossom\.primal\.net|files\.primal\.net|cdn\.satellite\.earth|void\.cat|imgprxy\.stacker\.news|image\.nostr\.build|media\.nostr\.band|zap\.cooking|wav\.school/i;
 
+// YouTube links render as media (tap-to-load embed via MediaLink) — parity with
+// web's mediaPattern including 'youtube.com'/'youtu.be'. MediaLink does the
+// strict hostname + video-id validation.
+const YOUTUBE_URL = /(^|\.|\/\/)(youtube\.com|youtu\.be)\//i;
+
 // Split pattern for custom emoji shortcodes (:name:). No /g flag — split() ignores it.
 const CUSTOM_EMOJI_SPLIT = /:([a-zA-Z0-9_-]+):/;
 
@@ -59,7 +67,14 @@ function ProfileMention({ pubkey }: { pubkey: string }) {
   return <Text style={styles.mention}>@{name}</Text>;
 }
 
-function NoteMention({ id }: { id: string }) {
+function NoteMention({ id, onViewThread }: { id: string; onViewThread?: (eventId: string) => void }) {
+  if (onViewThread) {
+    return (
+      <Text style={styles.mention} onPress={() => onViewThread(id)}>
+        note:{id.slice(0, 8)}…
+      </Text>
+    );
+  }
   return <Text style={styles.mention}>note:{id.slice(0, 8)}…</Text>;
 }
 
@@ -71,31 +86,40 @@ function HashtagLink({ tag }: { tag: string }) {
   return <Text style={styles.hashtag}>#{tag}</Text>;
 }
 
-function WebLink({ url }: { url: string }) {
-  // Strip tracking params before opening/displaying (parity with web).
+interface TrackerPromptInfo {
+  url: string;
+  cleanUrl: string;
+  params: string[];
+}
+
+function WebLink({ url, onTrackerPress }: { url: string; onTrackerPress: (info: TrackerPromptInfo) => void }) {
+  // Render the URL exactly as the author wrote it — never rewrite the note.
+  // When known tracking params are detected, show an amber warning glyph and
+  // intercept the tap so the user chooses clean vs original (parity with web).
   const clean = stripTrackingParams(url);
+  const trackingParams = getTrackingParams(url);
   const hasTracker = clean !== url;
-  const display = clean.replace(/^https?:\/\/(www\.)?/, '').slice(0, 50);
+  const display = url.replace(/^https?:\/\/(www\.)?/, '').slice(0, 50);
   const copyText = async (text: string) => {
     try { await Clipboard.setStringAsync(text); } catch { /* clipboard unavailable */ }
   };
+  const showPrompt = () => onTrackerPress({ url, cleanUrl: clean, params: trackingParams });
+  const onPress = () => {
+    if (hasTracker) showPrompt();
+    else Linking.openURL(url);
+  };
   const onLongPress = () => {
-    // When a tracker was stripped, offer clean vs original (action sheet);
-    // otherwise just copy.
     if (hasTracker) {
-      Alert.alert('Copy link', clean, [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Copy link', onPress: () => copyText(clean) },
-        { text: 'Copy original (with trackers)', onPress: () => copyText(url) },
-      ]);
+      showPrompt();
     } else {
-      copyText(clean);
-      Alert.alert('Link copied', clean);
+      copyText(url);
+      Alert.alert('Link copied', url);
     }
   };
   return (
-    <Text style={styles.link} onPress={() => Linking.openURL(clean)} onLongPress={onLongPress}>
-      {display}{clean.length > 50 ? '…' : ''}
+    <Text style={styles.link} onPress={onPress} onLongPress={onLongPress}>
+      {display}{url.length > 50 ? '…' : ''}
+      {hasTracker ? <Text style={styles.trackerShield}> ⚠</Text> : null}
     </Text>
   );
 }
@@ -127,7 +151,7 @@ function InlineVideo({ url }: { url: string }) {
 // QuotedNote — inline preview for q-tag referenced notes
 // ============================================================================
 
-function QuotedNote({ noteId }: { noteId: string }) {
+function QuotedNote({ noteId, onViewThread }: { noteId: string; onViewThread?: (eventId: string) => void }) {
   const { nostr } = useNostr();
 
   const { data: event, isLoading } = useQuery<NostrEvent | null>({
@@ -158,6 +182,13 @@ function QuotedNote({ noteId }: { noteId: string }) {
   }
 
   if (!event) {
+    if (onViewThread) {
+      return (
+        <TouchableOpacity style={styles.quotedCard} onPress={() => onViewThread(noteId)} activeOpacity={0.7}>
+          <Text style={styles.quotedPlaceholder}>note:{noteId.slice(0, 12)}…</Text>
+        </TouchableOpacity>
+      );
+    }
     return (
       <View style={styles.quotedCard}>
         <Text style={styles.quotedPlaceholder}>note:{noteId.slice(0, 12)}…</Text>
@@ -181,8 +212,8 @@ function QuotedNote({ noteId }: { noteId: string }) {
     || event.tags.find(t => t[0] === 'alt')?.[1]
     || '';
 
-  return (
-    <View style={styles.quotedCard}>
+  const cardBody = (
+    <>
       <View style={styles.quotedHeader}>
         {avatar ? (
           <SizeGuardedImage uri={avatar} style={styles.quotedAvatar} type="avatar" />
@@ -203,8 +234,18 @@ function QuotedNote({ noteId }: { noteId: string }) {
           <InlineImage url={previewImage} />
         </View>
       )}
-    </View>
+    </>
   );
+
+  // Tapping a quoted note re-targets the thread (mirror web onViewThread).
+  if (onViewThread) {
+    return (
+      <TouchableOpacity style={styles.quotedCard} onPress={() => onViewThread(event.id)} activeOpacity={0.7}>
+        {cardBody}
+      </TouchableOpacity>
+    );
+  }
+  return <View style={styles.quotedCard}>{cardBody}</View>;
 }
 
 // Extract media URLs from imeta tags (NIP-92). Picture events (kind 20) and
@@ -236,7 +277,7 @@ function getImetaMedia(event: import('@nostrify/nostrify').NostrEvent): { videoU
 // ============================================================================
 
 interface ContentPart {
-  type: 'text' | 'profile' | 'note' | 'hashtag' | 'url' | 'image' | 'video' | 'emoji';
+  type: 'text' | 'profile' | 'note' | 'hashtag' | 'url' | 'image' | 'video' | 'youtube' | 'emoji';
   value: string;
   pubkey?: string;
   noteId?: string;
@@ -287,6 +328,8 @@ function parseContent(content: string): ContentPart[] {
         parts.push({ type: 'image', value: mdLink.url });
       } else if (content[mdLink.start] === '!' && VIDEO_EXT.test(mdLink.url)) {
         parts.push({ type: 'video', value: mdLink.url });
+      } else if (content[mdLink.start] === '!' && YOUTUBE_URL.test(mdLink.url)) {
+        parts.push({ type: 'youtube', value: mdLink.url });
       } else {
         // Keep full [text](url) as text — preserves the descriptive link text
         // instead of dropping it and showing only the bare URL
@@ -324,6 +367,14 @@ function parseContent(content: string): ContentPart[] {
       }
     } else if (token.startsWith('#')) {
       parts.push({ type: 'hashtag', value: token.slice(1) });
+    } else if (YOUTUBE_URL.test(token)) {
+      // YouTube links are media (tap-to-load embed) — parity with web. Strip
+      // trailing punctuation like the plain-url branch.
+      const cleaned = token.replace(/[),.;:!]+$/, '');
+      parts.push({ type: 'youtube', value: cleaned });
+      if (cleaned.length < token.length) {
+        parts.push({ type: 'text', value: token.slice(cleaned.length) });
+      }
     } else if (VIDEO_EXT.test(token)) {
       parts.push({ type: 'video', value: token });
     } else if (IMAGE_EXT.test(token) || IMAGE_DOMAINS.test(token)) {
@@ -356,6 +407,9 @@ function parseContent(content: string): ContentPart[] {
 interface NoteContentProps {
   event: NostrEvent;
   numberOfLines?: number;
+  /** When set, embedded note mentions and quoted notes become tappable and
+   *  navigate the thread to focus the referenced note (mirror web onViewThread). */
+  onViewThread?: (eventId: string) => void;
 }
 
 /** Pure long-form sub-component — keeps the parent's hook order stable. */
@@ -412,9 +466,67 @@ function ListingPreview({ event, numberOfLines }: NoteContentProps) {
   );
 }
 
-export function NoteContent({ event, numberOfLines }: NoteContentProps) {
+/** NIP-94 file metadata (kind 1063) — the file lives in the `url` tag, not the
+ *  content field; content is an optional caption/description. */
+function FileMetadataPreview({ event, numberOfLines }: NoteContentProps) {
+  const fileUrl = event.tags.find(t => t[0] === 'url')?.[1];
+  const mime = event.tags.find(t => t[0] === 'm')?.[1] ?? '';
+  const caption = event.content.replace(/<[^>]*>/g, '').trim();
+  return (
+    <View>
+      {fileUrl ? <MediaLink url={fileUrl} isVideo={mime.startsWith('video/')} /> : null}
+      {caption ? <Text style={styles.content} numberOfLines={numberOfLines}>{caption}</Text> : null}
+    </View>
+  );
+}
+
+/** NIP-88 poll (kind 1068) — content is the question, options live in tags. */
+function PollPreview({ event, numberOfLines }: NoteContentProps) {
+  const options = event.tags.filter(t => t[0] === 'option' && t[1] && t[2]);
+  const question = event.content.replace(/<[^>]*>/g, '').trim();
+  return (
+    <View>
+      <Text style={styles.kindHeader}>Poll</Text>
+      {question ? <Text style={styles.content} numberOfLines={numberOfLines}>{question}</Text> : null}
+      <View style={styles.pollOptions}>
+        {options.map(([, id, label]) => (
+          <View key={id} style={styles.pollOption}>
+            <Text style={styles.pollOptionText}>{label}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+/** NIP-53 live event (kind 30311) — structured stream info lives in tags. */
+function LiveEventPreview({ event }: NoteContentProps) {
+  const title = event.tags.find(t => t[0] === 'title')?.[1];
+  const summary = event.tags.find(t => t[0] === 'summary')?.[1];
+  const status = event.tags.find(t => t[0] === 'status')?.[1];
+  const streaming = event.tags.find(t => t[0] === 'streaming')?.[1];
+  const image = event.tags.find(t => t[0] === 'image')?.[1];
+  return (
+    <View>
+      <Text style={[styles.kindHeader, status === 'live' && styles.liveHeader]}>
+        {status === 'live' ? 'Live now' : status === 'ended' ? 'Stream ended' : 'Live event'}
+      </Text>
+      {title ? <Text style={styles.streamTitle}>{title}</Text> : null}
+      {summary ? <Text style={styles.streamSummary}>{summary}</Text> : null}
+      {image ? <MediaLink url={image} /> : null}
+      {streaming && status === 'live' ? <MediaLink url={streaming} isVideo /> : null}
+    </View>
+  );
+}
+
+export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentProps) {
   // Hooks must run unconditionally on every render (rules-of-hooks). The
-  // kind === 30023 / 30402 branches are taken AFTER all hooks have been called.
+  // kind-specific branches (30023 / 30402 / 1063 / 1068 / 30311) are taken
+  // AFTER all hooks have been called.
+
+  // Tracker-warning dialog state lives here (not inside WebLink) because
+  // WebLink renders inside a <Text> where a Modal child isn't valid.
+  const [trackerPrompt, setTrackerPrompt] = useState<TrackerPromptInfo | null>(null);
 
   // NIP-30 custom emoji map: shortcode → image URL
   const emojiMap = useMemo(() => {
@@ -467,13 +579,26 @@ export function NoteContent({ event, numberOfLines }: NoteContentProps) {
   if (event.kind === 30402) {
     return <ListingPreview event={event} numberOfLines={numberOfLines} />;
   }
+  // NIP-94 file metadata (kind 1063) — only when a url tag exists; otherwise
+  // fall through to generic rendering (parity with web SmartNoteContent).
+  if (event.kind === 1063 && event.tags.some(t => t[0] === 'url' && t[1])) {
+    return <FileMetadataPreview event={event} numberOfLines={numberOfLines} />;
+  }
+  // NIP-88 poll (kind 1068)
+  if (event.kind === 1068) {
+    return <PollPreview event={event} numberOfLines={numberOfLines} />;
+  }
+  // NIP-53 live event (kind 30311)
+  if (event.kind === 30311) {
+    return <LiveEventPreview event={event} />;
+  }
 
   // Separate inline parts from block-level media
   const inlineParts: ContentPart[] = [];
   const mediaParts: ContentPart[] = [];
 
   for (const part of parts) {
-    if (part.type === 'image' || part.type === 'video') {
+    if (part.type === 'image' || part.type === 'video' || part.type === 'youtube') {
       mediaParts.push(part);
     } else {
       inlineParts.push(part);
@@ -491,15 +616,20 @@ export function NoteContent({ event, numberOfLines }: NoteContentProps) {
             case 'profile':
               return <ProfileMention key={i} pubkey={part.pubkey!} />;
             case 'note':
-              return <NoteMention key={i} id={part.noteId!} />;
+              return <NoteMention key={i} id={part.noteId!} onViewThread={onViewThread} />;
             case 'hashtag':
               return <HashtagLink key={i} tag={part.value} />;
             case 'url':
-              return <WebLink key={i} url={part.value} />;
+              return <WebLink key={i} url={part.value} onTrackerPress={setTrackerPrompt} />;
             case 'emoji': {
+              // Gate custom-emoji (NIP-30) URLs like images: reject unsafe hosts
+              // (SSRF) and route through the user's image proxy. Unsafe host →
+              // fall back to plain :shortcode: text. Parity with web.
+              const safeUrl = optimizeMediaUrl(part.value);
+              if (!safeUrl) return <Text key={i}>:{part.alt}:</Text>;
               const isAnimated = part.value.endsWith('.gif') || part.value.includes('.gif?');
               const size = isAnimated ? 64 : 20;
-              return <Image key={i} source={{ uri: part.value }} style={{ width: size, height: size }} resizeMode="contain" />;
+              return <Image key={i} source={{ uri: safeUrl }} style={{ width: size, height: size }} resizeMode="contain" />;
             }
             default:
               return <Text key={i}>{part.value}</Text>;
@@ -507,11 +637,13 @@ export function NoteContent({ event, numberOfLines }: NoteContentProps) {
         })}
       </Text>
 
-      {/* Block-level media (images, videos) */}
+      {/* Block-level media (images, videos, YouTube embeds) */}
       {mediaParts.map((part, i) => (
         <View key={`media-${i}`} style={styles.mediaContainer}>
           {part.type === 'image' ? (
             <InlineImage url={part.value} />
+          ) : part.type === 'youtube' ? (
+            <MediaLink url={part.value} />
           ) : (
             <InlineVideo url={part.value} />
           )}
@@ -544,9 +676,20 @@ export function NoteContent({ event, numberOfLines }: NoteContentProps) {
         .filter(t => t[0] === 'q' && t[1])
         .map(t => (
           <View key={`quote-${t[1]}`} style={styles.mediaContainer}>
-            <QuotedNote noteId={t[1]} />
+            <QuotedNote noteId={t[1]} onViewThread={onViewThread} />
           </View>
         ))}
+
+      {/* Tracker-warning dialog for links carrying known tracking params */}
+      {trackerPrompt && (
+        <TrackerWarningDialog
+          visible
+          onClose={() => setTrackerPrompt(null)}
+          rawUrl={trackerPrompt.url}
+          cleanUrl={trackerPrompt.cleanUrl}
+          trackingParams={trackerPrompt.params}
+        />
+      )}
     </View>
   );
 }
@@ -560,6 +703,7 @@ const styles = StyleSheet.create({
   mention: { color: '#a855f7', fontWeight: '500' },
   hashtag: { color: '#a855f7' },
   link: { color: '#a855f7', textDecorationLine: 'underline' },
+  trackerShield: { color: '#f59e0b', fontSize: 12 },
   mediaContainer: { marginTop: 10, borderRadius: 10, overflow: 'hidden' },
   mediaImage: { width: MEDIA_WIDTH, height: MEDIA_WIDTH * 0.56, borderRadius: 10 },
   videoPlaceholder: {
@@ -585,6 +729,23 @@ const styles = StyleSheet.create({
   listingPrice: { fontSize: 13, fontWeight: '700', color: '#22c55e' },
   listingMeta: { fontSize: 12, color: '#8a8a8a', marginTop: 2 },
   listingSold: { fontSize: 12, fontWeight: '700', color: '#ef4444', marginTop: 4 },
+  // Kind headers (poll / live event)
+  kindHeader: { fontSize: 11, color: '#999', marginBottom: 4 },
+  liveHeader: { color: '#ef4444', fontWeight: '600' },
+  // NIP-88 poll (kind 1068)
+  pollOptions: { marginTop: 8, gap: 4 },
+  pollOption: {
+    borderWidth: 1,
+    borderColor: '#404040',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  pollOptionText: { color: '#f2f2f2', fontSize: 13 },
+  // NIP-53 live event (kind 30311)
+  streamTitle: { fontSize: 15, fontWeight: '600', color: '#f2f2f2' },
+  streamSummary: { fontSize: 13, color: '#999', marginTop: 2 },
   // Quoted notes
   quotedCard: { borderWidth: 1, borderColor: '#404040', borderRadius: 10, padding: 10, backgroundColor: '#1f1f1f' },
   quotedHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },

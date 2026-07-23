@@ -224,10 +224,12 @@ export function DMProvider({ children, config }: DMProviderProps) {
       };
 
       // Step 2: Create TWO Kind 13 Seal events (one for recipient, one for myself)
+      // Per NIP-59, seal created_at is also randomized (past-only) so the true
+      // send time only lives in the innermost kind 14/15 event.
       const recipientSeal: Omit<NostrEvent, 'id' | 'sig'> = {
         kind: 13,
         pubkey: user.pubkey,
-        created_at: now,
+        created_at: randomizeTimestamp(now),
         tags: [],
         content: await user.signer.nip44.encrypt(recipientPubkey, JSON.stringify(privateMessage)),
       };
@@ -235,7 +237,7 @@ export function DMProvider({ children, config }: DMProviderProps) {
       const senderSeal: Omit<NostrEvent, 'id' | 'sig'> = {
         kind: 13,
         pubkey: user.pubkey,
-        created_at: now,
+        created_at: randomizeTimestamp(now),
         tags: [],
         content: await user.signer.nip44.encrypt(user.pubkey, JSON.stringify(privateMessage)),
       };

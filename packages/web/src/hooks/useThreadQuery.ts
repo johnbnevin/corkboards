@@ -19,6 +19,7 @@ import {
   buildThreadTree,
   flattenTree,
   deduplicateEvents,
+  getParentId,
   type ThreadNode,
   type FlatThreadRow,
 } from '@core/threadTree'
@@ -26,6 +27,11 @@ import { fetchEventWithOutbox, setCachedEvent, getCachedEvent, clearEventCache }
 
 const THREAD_STALE_TIME = 2 * 60 * 1000 // 2 minutes
 const THREAD_GC_TIME = 10 * 60 * 1000   // 10 minutes
+
+// Max levels to walk up when reconstructing the ancestor chain above the target.
+// Bounds sequential fetches on pathological threads; real threads rarely nest
+// this deep.
+const MAX_ANCESTOR_HOPS = 24
 
 // Second-pass (author-outbox) discovery tuning.
 // A cap on how many thread participants we re-query by outbox, and a chunk size
@@ -107,12 +113,57 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     retryDelay: (attempt) => Math.min(800 * 2 ** attempt, 4000),
   })
 
-  // Derive root ID from target event's thread tags
+  // Derive root ID from target event's thread tags. Fall back to the immediate
+  // reply parent (not just self) when a note carries only a `reply` marker and
+  // no `root` marker — otherwise the thread would root at the reply itself and
+  // never show the note being replied to.
   const rootId = useMemo(() => {
     if (!targetEvent) return null
     const tags = parseThreadTags(targetEvent)
-    return tags.root || targetEvent.id
+    return tags.root || tags.reply || targetEvent.id
   }, [targetEvent])
+
+  // Reconstruct the ancestor chain above the target by walking parent refs
+  // upward and fetching each one. Without this, opening a deep reply shows only
+  // that reply (and its descendants) because the intermediate ancestors were
+  // never fetched — the reported "thread only shows the reply, not the note it
+  // replied to" bug. Runs in the background; the UI renders the target-rooted
+  // tree first, then re-roots higher as ancestors arrive.
+  const { data: ancestorEvents } = useQuery({
+    queryKey: ['thread-ancestors', targetEvent?.id],
+    queryFn: async () => {
+      if (!targetEvent) return [] as NostrEvent[]
+      const chain: NostrEvent[] = []
+      const seen = new Set<string>([targetEvent.id])
+      let current = targetEvent
+      for (let hop = 0; hop < MAX_ANCESTOR_HOPS; hop++) {
+        const parentId = getParentId(current)
+        if (!parentId || seen.has(parentId)) break
+        seen.add(parentId)
+        const parent = getCachedEvent(parentId)
+          ?? await fetchEventWithOutbox(parentId, nostr).catch(() => null)
+        if (!parent) break
+        setCachedEvent(parent.id, parent)
+        chain.push(parent)
+        current = parent
+      }
+      return chain
+    },
+    enabled: !!targetEvent,
+    staleTime: THREAD_STALE_TIME,
+    gcTime: THREAD_GC_TIME,
+    retry: 1,
+  })
+
+  // The best available root: the topmost ancestor we actually fetched (walking
+  // stopped either at the true root or where discovery failed), else the
+  // tag-derived rootId.
+  const effectiveRootId = useMemo(() => {
+    if (ancestorEvents && ancestorEvents.length > 0) {
+      return ancestorEvents[ancestorEvents.length - 1].id
+    }
+    return rootId
+  }, [ancestorEvents, rootId])
 
   // (M2) When the thread root is an ADDRESSABLE event (e.g. long-form kind 30023),
   // replies reference it by its `a`-coordinate (kind:pubkey:d), not by an `e`-tag.
@@ -222,15 +273,29 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
   })
 
   const allEvents = useMemo(
-    () => deduplicateEvents([...(threadEvents ?? []), ...(outboxEvents ?? [])]),
-    [threadEvents, outboxEvents],
+    () => deduplicateEvents([
+      ...(threadEvents ?? []),
+      ...(outboxEvents ?? []),
+      ...(ancestorEvents ?? []),
+    ]),
+    [threadEvents, outboxEvents, ancestorEvents],
   )
 
-  // Build tree from flat events
+  // Build tree from flat events. Try the true (highest) root first, then the
+  // tag root, then the target itself — so we never show a blank modal when we
+  // do have the target event, and we show as much ancestry as we've fetched.
   const tree = useMemo(() => {
-    if (!rootId || allEvents.length === 0) return null
-    return buildThreadTree(allEvents, rootId, injectedReply)
-  }, [rootId, allEvents, injectedReply])
+    if (allEvents.length === 0) return null
+    const candidates = [effectiveRootId, rootId, targetEvent?.id]
+    const tried = new Set<string>()
+    for (const candidate of candidates) {
+      if (!candidate || tried.has(candidate)) continue
+      tried.add(candidate)
+      const t = buildThreadTree(allEvents, candidate, injectedReply)
+      if (t) return t
+    }
+    return null
+  }, [effectiveRootId, rootId, targetEvent?.id, allEvents, injectedReply])
 
   // Flatten for virtualized rendering
   const rows = useMemo(() => {
@@ -247,6 +312,7 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     if (eventId) {
       clearEventCache(eventId)
       queryClient.resetQueries({ queryKey: ['thread-target', eventId] })
+      queryClient.resetQueries({ queryKey: ['thread-ancestors', eventId] })
     }
     if (rootId) {
       queryClient.resetQueries({ queryKey: ['thread-tree', rootId] })

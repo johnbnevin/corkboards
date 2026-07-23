@@ -37,6 +37,7 @@ function ThreadNoteCard({
   onToggleBookmark,
   onToggleCollapse,
   onReply,
+  onViewThread,
 }: {
   event: NostrEvent;
   depth: number;
@@ -46,6 +47,7 @@ function ThreadNoteCard({
   onToggleBookmark: () => void;
   onToggleCollapse: () => void;
   onReply: () => void;
+  onViewThread?: (eventId: string) => void;
 }) {
   const { data } = useAuthor(event.pubkey);
   const displayName =
@@ -83,7 +85,7 @@ function ThreadNoteCard({
         {/* Content */}
         {!isCollapsed && (
           <>
-            <NoteContent event={event} numberOfLines={isTarget ? undefined : 8} />
+            <NoteContent event={event} numberOfLines={isTarget ? undefined : 8} onViewThread={onViewThread} />
             <NoteActions
               event={event}
               onReply={onReply}
@@ -114,6 +116,7 @@ interface ThreadTreeProps {
   scrollToReplyId?: string | null;
   collapsedIds: Set<string>;
   onToggleCollapse: (eventId: string) => void;
+  onViewThread?: (eventId: string) => void;
   onReply?: (event: NostrEvent) => void;
 }
 
@@ -123,6 +126,7 @@ export function ThreadTree({
   scrollToReplyId,
   collapsedIds,
   onToggleCollapse,
+  onViewThread,
   onReply,
 }: ThreadTreeProps) {
   const { isBookmarked, toggleBookmark } = useBookmarks();
@@ -168,9 +172,10 @@ export function ThreadTree({
         onToggleBookmark={() => toggleBookmark(item.node.event.id)}
         onToggleCollapse={() => onToggleCollapse(item.node.event.id)}
         onReply={() => onReply?.(item.node.event)}
+        onViewThread={onViewThread}
       />
     ),
-    [targetId, collapsedIds, isBookmarked, toggleBookmark, onToggleCollapse, onReply],
+    [targetId, collapsedIds, isBookmarked, toggleBookmark, onToggleCollapse, onReply, onViewThread],
   );
 
   const onScrollToIndexFailed = useCallback(
@@ -207,7 +212,9 @@ export function ThreadTree({
 // ============================================================================
 
 const styles = StyleSheet.create({
-  list: { padding: 12, gap: 6 },
+  // paddingBottom gives the last reply room to scroll clear of the bottom edge
+  // (and above the inline reply composer when it's open) instead of being clipped.
+  list: { padding: 12, paddingBottom: 96, gap: 6 },
   card: {
     flexDirection: 'row',
     backgroundColor: '#2a2a2a',

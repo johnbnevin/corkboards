@@ -14,9 +14,11 @@ const COLLAPSE_THRESHOLD = 280;
 interface ThreadContentProps {
   event: NostrEvent;
   isTarget?: boolean;
+  /** Tapping an embedded/quoted note re-targets the thread (mirror web). */
+  onViewThread?: (eventId: string) => void;
 }
 
-export function ThreadContent({ event, isTarget }: ThreadContentProps) {
+export function ThreadContent({ event, isTarget, onViewThread }: ThreadContentProps) {
   const [expanded, setExpanded] = useState(false);
   const isLong = event.content.length > COLLAPSE_THRESHOLD;
 
@@ -25,6 +27,7 @@ export function ThreadContent({ event, isTarget }: ThreadContentProps) {
       <NoteContent
         event={event}
         numberOfLines={!expanded && isLong ? 4 : (isTarget ? undefined : 8)}
+        onViewThread={onViewThread}
       />
       {isLong && (
         <TouchableOpacity onPress={() => setExpanded(v => !v)}>

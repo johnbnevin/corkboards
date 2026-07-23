@@ -10,6 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { ClickableProfile } from '@/components/ProfileModal'
 import { genUserName } from '@/lib/genUserName'
+import { optimizeAvatarUrl } from '@/lib/imageUtils'
 import { ExternalLink, RotateCw } from 'lucide-react'
 
 import { NoteContent } from '@/components/NoteContent'
@@ -77,7 +78,7 @@ function InlineNoteLinkContent({
   const [isExpanded, setIsExpanded] = useState(false)
   const { data: author } = useAuthor(event.pubkey)
   const displayName = author?.metadata?.display_name || author?.metadata?.name || genUserName(event.pubkey)
-  const avatar = author?.metadata?.picture
+  const avatar = optimizeAvatarUrl(author?.metadata?.picture)
 
   // Measure visible text length (excludes nostr refs but keeps URLs)
   const visLen = useMemo(() => visibleLength(event.content), [event.content])

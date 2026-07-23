@@ -413,17 +413,18 @@ export function ProfileCard({
             )}
           </div>
 
-          {/* Notes loaded */}
+          {/* Actionable feed warnings only — the showing/loaded/dismissed counts
+              live in the footer status bar, not here. */}
           {stats?.noteKinds && (
-            <div className="mt-3 pt-2 border-t flex items-center gap-2 text-xs text-muted-foreground">
-              {(!stats.noteKinds.total || stats.noteKinds.total === 0) ? (
+            (!stats.noteKinds.total || stats.noteKinds.total === 0) ? (
+              <div className="mt-3 pt-2 border-t flex items-center gap-2 text-xs">
                 <span className="text-orange-600 dark:text-orange-400">No notes in past {hoursLoaded || multiplier || 1} hour{(hoursLoaded || multiplier || 1) > 1 ? 's' : ''}. Click Load more below.</span>
-              ) : (visibleNotesCount !== undefined && visibleNotesCount === 0 && (dismissedCount ?? 0) > 0) ? (
+              </div>
+            ) : (visibleNotesCount !== undefined && visibleNotesCount === 0 && (dismissedCount ?? 0) > 0) ? (
+              <div className="mt-3 pt-2 border-t flex items-center gap-2 text-xs">
                 <span className="text-orange-600 dark:text-orange-400">All {stats.noteKinds.total} notes are dismissed ({dismissedCount} total dismissed). Use gear → Bring back to restore.</span>
-              ) : (
-                <span><span className="font-medium text-foreground">{visibleNotesCount !== undefined ? visibleNotesCount : stats.noteKinds.total}</span> notes showing{visibleNotesCount !== undefined && visibleNotesCount < stats.noteKinds.total ? ` (${stats.noteKinds.total} loaded)` : ''}</span>
-              )}
-            </div>
+              </div>
+            ) : null
           )}
         </CardContent>
 

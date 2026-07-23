@@ -44,6 +44,14 @@ function InlineVideo({ sources }: { sources: string[] }) {
   useEffect(() => {
     sourcesRef.current = sources;
   }, [sources]);
+  // Reset the mirror cursor when the media itself changes — a stale high index
+  // from the previous URL would make the new video's first error terminal.
+  const primarySrc = sources[0] ?? '';
+  useEffect(() => {
+    srcIdxRef.current = 0;
+    setSrcIdx(0);
+    setFailed(false);
+  }, [primarySrc]);
   const src = sources[srcIdx] ?? sources[0] ?? '';
   const player = useVideoPlayer(src, (p) => {
     p.loop = false;

@@ -53,6 +53,11 @@ export interface UseFeedPaginationOptions {
   addCustomFeedNotes?: (events: NostrEvent[]) => void;
   /** Called when loadMoreByCount fetches notes for the 'me' tab */
   onMeTabNotesLoaded?: (notes: NostrEvent[]) => void;
+  /** Called whenever fetchAndMergeUserNotes pulls the user's own notes (for
+   *  "include my notes"). The caller must merge these into the state it derives
+   *  the visible feed from — the ['user-notes'] React-Query cache this hook
+   *  also writes is only a pagination anchor, nothing renders from it. */
+  onUserNotesFetched?: (notes: NostrEvent[]) => void;
   /** Whether "include my notes" is enabled for the current tab */
   showOwnNotes?: boolean;
   /** Lookup for dismissed note IDs — loadMoreByCount iterates until it has
@@ -92,11 +97,17 @@ export function useFeedPagination({
   friendNotes,
   addCustomFeedNotes,
   onMeTabNotesLoaded,
+  onUserNotesFetched,
   showOwnNotes,
   isDismissed,
 }: UseFeedPaginationOptions): UseFeedPaginationResult {
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
+
+  // Ref so fetchAndMergeUserNotes' identity doesn't churn when the caller
+  // re-creates the callback.
+  const onUserNotesFetchedRef = useRef(onUserNotesFetched);
+  onUserNotesFetchedRef.current = onUserNotesFetched;
 
   const [hasMore, setHasMore] = useState<Record<string, boolean>>({});
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -229,6 +240,11 @@ export function useFeedPagination({
         if (trulyNew.length > 0) {
           queryClient.setQueryData(userNotesKey, [...cached, ...trulyNew].sort((a, b) => b.created_at - a.created_at));
         }
+        // Hand the fetched notes to the caller's render state — without this
+        // they'd sit invisible in the query cache and "include my notes"
+        // would show nothing for users who haven't posted within the
+        // follow-cache window.
+        onUserNotesFetchedRef.current?.(myEvents);
       }
     } catch {
       // Non-critical
@@ -250,8 +266,9 @@ export function useFeedPagination({
       if (notesFromOthers.length > 0) {
         const oldest = notesFromOthers.reduce((min, n) => n.created_at < min ? n.created_at : min, notesFromOthers[0].created_at);
         fetchAndMergeUserNotes({ since: oldest, limit: 200 });
-      } else if (switchedTab) {
-        // Tab just switched and has no notes yet — fetch recent user notes
+      } else {
+        // No other-author notes visible (tab still loading, or empty) — fetch
+        // recent user notes so they're available as soon as the feed loads.
         const now = Math.floor(Date.now() / 1000);
         fetchAndMergeUserNotes({ since: now - 3600 * 24, limit: 200 });
       }

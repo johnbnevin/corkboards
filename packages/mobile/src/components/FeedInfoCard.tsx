@@ -66,9 +66,6 @@ export const FeedInfoCard = memo(function FeedInfoCard({
   isDiscoverTab = false,
   activeCustomFeed,
   contactsCount = 0,
-  notesCount,
-  totalLoaded,
-  dismissedCount,
   isLoading = false,
   onEditFeed,
   onDeleteFeed,
@@ -108,7 +105,6 @@ export const FeedInfoCard = memo(function FeedInfoCard({
           </TouchableOpacity>
         </View>
         <View style={styles.statsRow}>
-          <Text style={styles.statText}><Text style={styles.statBold}>{notesCount}</Text> showing{totalLoaded && totalLoaded > notesCount ? ` (${totalLoaded} loaded)` : ''}{(dismissedCount ?? 0) > 0 ? ` · ${dismissedCount} dismissed` : ''}</Text>
           {onRemoveRelay && (
             <TouchableOpacity onPress={() => onRemoveRelay(activeTab)}>
               <Text style={styles.removeText}>Remove relay</Text>
@@ -180,7 +176,6 @@ export const FeedInfoCard = memo(function FeedInfoCard({
           </TouchableOpacity>
         </View>
         <View style={styles.statsRow}>
-          <Text style={styles.statText}><Text style={styles.statBold}>{notesCount}</Text> showing{totalLoaded && totalLoaded > notesCount ? ` (${totalLoaded} loaded)` : ''}{(dismissedCount ?? 0) > 0 ? ` · ${dismissedCount} dismissed` : ''}</Text>
           <View style={styles.actionsRow}>
             {onEditFeed && (
               <TouchableOpacity style={styles.actionBtn} onPress={() => onEditFeed(activeCustomFeed.id)}>
@@ -224,8 +219,6 @@ export const FeedInfoCard = memo(function FeedInfoCard({
         </View>
         <View style={styles.statsRow}>
           <Text style={styles.statText}><Text style={styles.statBold}>{contactsCount}</Text> followed</Text>
-          <Text style={styles.statText}><Text style={styles.statBold}>{notesCount}</Text> showing{totalLoaded && totalLoaded > notesCount ? ` (${totalLoaded} loaded)` : ''}</Text>
-          {(dismissedCount ?? 0) > 0 && <Text style={styles.statText}>· {dismissedCount} dismissed</Text>}
           {isLoading && <Text style={styles.loadingText}>Loading...</Text>}
         </View>
       </View>
@@ -257,8 +250,6 @@ export const FeedInfoCard = memo(function FeedInfoCard({
           </TouchableOpacity>
         </View>
         <View style={styles.statsRow}>
-          <Text style={styles.statText}><Text style={styles.statBold}>{notesCount}</Text> showing{totalLoaded && totalLoaded > notesCount ? ` (${totalLoaded} discovered)` : ' discovered'}</Text>
-          {(dismissedCount ?? 0) > 0 && <Text style={styles.statText}>· {dismissedCount} dismissed</Text>}
           {isLoading && <Text style={styles.loadingText}>Searching...</Text>}
           {onRefreshDiscover && (
             <TouchableOpacity onPress={onRefreshDiscover}>

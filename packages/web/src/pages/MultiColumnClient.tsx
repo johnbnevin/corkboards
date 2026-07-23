@@ -1884,6 +1884,18 @@ export function MultiColumnClient() {
     setExtraUserNotes(notes);
   }, []);
 
+  // Called by fetchAndMergeUserNotes (pagination hook) whenever it pulls the
+  // user's own notes for "include my notes". Merging into extraUserNotes is
+  // what actually makes them render — the ['user-notes'] query cache the hook
+  // also writes is only a pagination anchor; nothing displays from it.
+  const handleUserNotesFetched = useCallback((notes: NostrEvent[]) => {
+    setExtraUserNotes(prev => {
+      const seen = new Set(prev.map(n => n.id));
+      const fresh = notes.filter(n => !seen.has(n.id));
+      return fresh.length > 0 ? [...prev, ...fresh] : prev;
+    });
+  }, []);
+
   // Derive userNotes for "me" tab: own notes only (no pinned — those are added separately)
   const pinnedIdSet = useMemo(() => new Set(pinnedIds), [pinnedIds]);
   // Only exclude a note from userNotes if it's both in pinnedIds AND already
@@ -2264,6 +2276,7 @@ export function MultiColumnClient() {
     customFeedNotes: corkboardNotes, // follow-cache subset for timestamp calculations
     friendNotes,
     onMeTabNotesLoaded: handleMeTabNotesLoaded,
+    onUserNotesFetched: handleUserNotesFetched,
     showOwnNotes,
     isDismissed,
   });

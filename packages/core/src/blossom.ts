@@ -46,10 +46,13 @@ export interface BlossomRef {
 
 /**
  * Parse a URL as a Blossom blob reference. Returns the sha256 hash + extension
- * when the URL is a flat `https://host/<sha256>[.ext]` path, else null.
+ * when the URL's LAST path segment is a bare `<sha256>[.ext]`, else null.
  *
- * Hosts with non-flat paths (e.g. nostr.build's nested paths) return null —
- * those aren't content-addressed in a way we can remap across servers.
+ * Flat paths (`https://host/<sha256>.ext`) are classic Blossom. Nested
+ * content-addressed paths (e.g. nostrmedia's `/p/<pubkey>/<sha256>.mp4`) also
+ * carry the blob hash in their final segment, so the same blob can be rebuilt
+ * on other servers from that hash — it's the hash that's content-addressed,
+ * not the path shape.
  */
 export function extractBlossomRef(url: string): BlossomRef | null {
   let u: URL;
@@ -60,8 +63,8 @@ export function extractBlossomRef(url: string): BlossomRef | null {
   }
   if (u.protocol !== 'https:') return null;
   const segments = u.pathname.split('/').filter(Boolean);
-  if (segments.length !== 1) return null;
-  const m = segments[0].match(BLOSSOM_HASH_RE);
+  if (segments.length === 0) return null;
+  const m = segments[segments.length - 1].match(BLOSSOM_HASH_RE);
   if (!m) return null;
   return { hash: m[1].toLowerCase(), ext: m[2] ? m[2].toLowerCase() : '' };
 }

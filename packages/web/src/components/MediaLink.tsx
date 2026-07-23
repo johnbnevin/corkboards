@@ -97,6 +97,15 @@ function VideoPlayer({ sources: rawSources, poster: rawPoster }: { sources: stri
     }
   }, [])
 
+  // Reset the mirror cursor when the media itself changes — a stale high index
+  // from the previous URL would make the new video's first error terminal.
+  const primarySrc = sources[0] ?? ''
+  useEffect(() => {
+    srcIdxRef.current = 0
+    setSrcIdx(0)
+    setLoadState('loading')
+  }, [primarySrc])
+
   // Every source was rejected by the unsafe-host gate — render nothing.
   if (sources.length === 0) return null
 
@@ -611,11 +620,19 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
         silently did nothing (the reported Tidal bug). frame-src in the CSP
         (index.html) is the allowlist of who may be framed.
       */}
+      {/*
+        referrerPolicy: YouTube now REQUIRES a referrer on embeds — with the
+        Iframe default of "no-referrer" the player dies with error 153
+        ("Video player configuration error"). strict-origin-when-cross-origin
+        sends only our origin (no path), which is the privacy-acceptable
+        minimum that keeps every provider's embed working.
+      */}
       <Iframe
         src={embed.url}
         className={`w-full ${aspectClass}`}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
         sandbox="allow-scripts allow-presentation allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+        referrerPolicy="strict-origin-when-cross-origin"
       />
     </div>
   )

@@ -9,6 +9,7 @@ const CORS_HEAD_HOSTS = new Set([
   'blossom.primal.net', 'blossom.nostr.build', 'nostr.download',
   'cdn.sovbit.host', 'files.primal.net', 'cdn.satellite.earth',
   'void.cat', 'imgprxy.stacker.news', 'media.nostr.band',
+  'file.nostrmedia.com',
 ])
 
 /** Hosts that responded successfully to a HEAD during this session */
@@ -71,6 +72,6 @@ export function isImageUrl(url: string): boolean {
 export function isCdnHost(url: string): boolean {
   try {
     const h = new URL(url).hostname
-    return ['blossom.', 'nostr.build', 'cdn.sovbit', 'files.primal', 'cdn.satellite', 'void.cat', 'media.nostr.band'].some(p => h.includes(p))
+    return ['blossom.', 'nostr.build', 'cdn.sovbit', 'files.primal', 'cdn.satellite', 'void.cat', 'media.nostr.band', 'nostrmedia.com'].some(p => h.includes(p))
   } catch { return false }
 }

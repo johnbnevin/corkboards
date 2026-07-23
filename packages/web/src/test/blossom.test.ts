@@ -11,6 +11,15 @@ import {
 const HASH = 'a'.repeat(64);
 const HASH2 = 'b'.repeat(64);
 
+describe('extractBlossomRef', () => {
+  it('parses flat and nested content-addressed paths, rejects non-hash tails', () => {
+    expect(extractBlossomRef(`https://blossom.band/${HASH}.png`)).toEqual({ hash: HASH, ext: '.png' });
+    expect(extractBlossomRef(`https://file.nostrmedia.com/p/${HASH2}/${HASH}.mp4`)).toEqual({ hash: HASH, ext: '.mp4' });
+    expect(extractBlossomRef('https://cdn.host/photo.png')).toBeNull();
+    expect(extractBlossomRef(`http://blossom.band/${HASH}.png`)).toBeNull();
+  });
+});
+
 describe('getBlossomUrlsForHash', () => {
   it('builds one URL per server for a valid hash', () => {
     const urls = getBlossomUrlsForHash(HASH, '.png');
@@ -44,6 +53,17 @@ describe('getBlossomFallbackUrls (refactor regression guard)', () => {
   it('returns [] for a nested / non-content-addressed URL', () => {
     expect(getBlossomFallbackUrls('https://image.nostr.build/abc/def.png')).toEqual([]);
     expect(getBlossomFallbackUrls('https://cdn.host/photo.png')).toEqual([]);
+  });
+
+  it('remaps a NESTED content-addressed URL (nostrmedia-style) via its trailing hash', () => {
+    // file.nostrmedia.com serves blobs at /p/<pubkey>/<sha256>.<ext> — the final
+    // segment is the blob hash, so the same blob can be retried on Blossom servers.
+    const primary = `https://file.nostrmedia.com/p/${HASH2}/${HASH}.mp4`;
+    const fallbacks = getBlossomFallbackUrls(primary);
+    expect(fallbacks).toHaveLength(KNOWN_BLOSSOM_SERVERS.length);
+    expect(fallbacks).toContain(`https://blossom.band/${HASH}.mp4`);
+    // the hash comes from the LAST segment, not the pubkey segment
+    expect(fallbacks).not.toContain(`https://blossom.band/${HASH2}.mp4`);
   });
 });
 

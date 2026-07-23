@@ -1,6 +1,6 @@
 {
   "name": "@corkboards/core",
-  "version": "0.7.0",
+  "version": "0.7.62",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",

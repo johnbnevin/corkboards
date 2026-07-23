@@ -1,4 +1,6 @@
-# Security headers (applied to all responses).
+# Security headers + cache policy. EVERY Header directive is guarded by
+# <IfModule mod_headers.c> so a host without mod_headers serves the site
+# normally instead of returning 500 Internal Server Error.
 # NOTE: no full CSP here on purpose — the app ships a strict CSP via an
 # index.html <meta> tag; duplicating it as a header risks breaking the SPA.
 <IfModule mod_headers.c>
@@ -6,26 +8,38 @@
   Header always set Referrer-Policy "no-referrer"
   Header always set X-Frame-Options "DENY"
   Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+  # Never cache index.html or 404.html — these point to (unhashed) bundles.
+  <FilesMatch "^(index|404)\.html$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
+  </FilesMatch>
+
+  # Bundles are emitted UNHASHED (assets/[name].js — see vite.config.ts
+  # entryFileNames/chunkFileNames), so they must NOT be cached as immutable.
+  # A modest TTL keeps browsers without the service worker from running stale
+  # bundles after a deploy while still absorbing bursts of repeat requests.
+  <FilesMatch "\.(js|css)$">
+    Header set Cache-Control "public, max-age=300, must-revalidate"
+  </FilesMatch>
 </IfModule>
 
-# SPA fallback — route all non-file requests to index.html
-RewriteEngine On
-RewriteBase /
-RewriteCond %{REQUEST_FILENAME} !-f
-RewriteCond %{REQUEST_FILENAME} !-d
-RewriteRule . /index.html [L]
+# SPA fallback — serve real files/dirs directly, never rewrite the PHP proxy,
+# otherwise hand off to index.html for client-side routing. Guarded so a host
+# without mod_rewrite doesn't 500. This mirrors the long-known-good ruleset.
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
 
-# Never cache index.html or 404.html — these point to hashed assets
-<FilesMatch "^(index|404)\.html$">
-  Header set Cache-Control "no-cache, no-store, must-revalidate"
-  Header set Pragma "no-cache"
-  Header set Expires "0"
-</FilesMatch>
+  # Existing files and directories are served as-is.
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
 
-# Bundles are emitted UNHASHED (assets/[name].js — see vite.config.ts
-# entryFileNames/chunkFileNames), so they must NOT be cached as immutable.
-# A modest TTL keeps browsers without the service worker from running stale
-# bundles after a deploy while still absorbing bursts of repeat requests.
-<FilesMatch "\.(js|css)$">
-  Header set Cache-Control "public, max-age=300, must-revalidate"
-</FilesMatch>
+  # Never rewrite the PHP proxy.
+  RewriteRule \.php$ - [L]
+
+  # Everything else → the SPA shell.
+  RewriteRule ^ index.html [L]
+</IfModule>

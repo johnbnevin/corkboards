@@ -7,6 +7,7 @@ import { ProfileLink } from './ProfileLink'
 import { MediaLink } from './MediaLink'
 import { isImageUrl } from '@/lib/mediaUtils'
 import { MARKDOWN_INDICATORS_PATTERN } from '@/lib/markdownDetect'
+import { canonicalMediaUrl } from '@core/sanitizeUtils'
 import { optimizeMediaUrl } from '@/lib/imageUtils'
 import { parseImetaTag, type ImetaData } from '@core/blossom'
 import { InlineLink } from './InlineLink'
@@ -198,7 +199,26 @@ function getImetaData(event: NostrEvent): { posters: Map<string, string>; videoU
       imageUrls.push(url)
     }
   }
-  return { posters, videoUrls, imageUrls, imetaMeta }
+  // Dedupe by canonical URL — a note may carry duplicate/near-duplicate imeta
+  // tags (some clients emit the same file twice), which would otherwise render
+  // the media multiple times.
+  return {
+    posters,
+    videoUrls: dedupeByCanonical(videoUrls),
+    imageUrls: dedupeByCanonical(imageUrls),
+    imetaMeta,
+  }
+}
+
+/** Keep the first occurrence of each canonical URL, preserving order. */
+function dedupeByCanonical(urls: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const url of urls) {
+    const key = canonicalMediaUrl(url)
+    if (!seen.has(key)) { seen.add(key); out.push(url) }
+  }
+  return out
 }
 
 export function NoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, depth = 0, renderMarkdown = true }: NoteContentProps) {
@@ -245,15 +265,21 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
 
   // Build poster map and media URL sets from imeta tags (NIP-92)
   const { posters: imetaPosters, videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls, imetaMeta } = useMemo(() => getImetaData(event), [event])
-  const imetaVideoUrlSet = useMemo(() => new Set(imetaVideoUrls), [imetaVideoUrls])
+  // Video set keyed by CANONICAL url so a content URL that differs only
+  // cosmetically from its imeta twin still renders as a video (not a blurred
+  // image spoiler).
+  const imetaVideoUrlSet = useMemo(() => new Set(imetaVideoUrls.map(canonicalMediaUrl)), [imetaVideoUrls])
 
   // (P7) Derive imeta media not already shown inline — memoized so the Set +
   // filters don't rebuild on every render (inputs are already memoized).
+  // Compare by CANONICAL url so the same file referenced in both the content and
+  // an imeta tag (differing by trailing slash, http/https, tracking params, …)
+  // isn't rendered twice.
   const { missingImages, missingVideos } = useMemo(() => {
-    const contentUrls = new Set(content.filter(p => p.type === 'media').map(p => p.value))
+    const contentUrls = new Set(content.filter(p => p.type === 'media').map(p => canonicalMediaUrl(p.value)))
     return {
-      missingImages: imetaImageUrls.filter(url => !contentUrls.has(url)),
-      missingVideos: imetaVideoUrls.filter(url => !contentUrls.has(url)),
+      missingImages: imetaImageUrls.filter(url => !contentUrls.has(canonicalMediaUrl(url))),
+      missingVideos: imetaVideoUrls.filter(url => !contentUrls.has(canonicalMediaUrl(url))),
     }
   }, [content, imetaImageUrls, imetaVideoUrls])
 
@@ -263,7 +289,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
     let i = 0
     while (i < content.length) {
       const part = content[i]
-      if (part.type === 'media' && !imetaVideoUrlSet.has(part.value) && isImageUrl(part.value)) {
+      if (part.type === 'media' && !imetaVideoUrlSet.has(canonicalMediaUrl(part.value)) && isImageUrl(part.value)) {
         // Collect consecutive image media parts
         const imageParts: { index: number; part: ContentPart }[] = [{ index: i, part }]
         let j = i + 1
@@ -271,7 +297,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
           const next = content[j]
           // Skip whitespace-only text between consecutive images
           if (next.type === 'text' && !next.value.trim()) { j++; continue }
-          if (next.type === 'media' && !imetaVideoUrlSet.has(next.value) && isImageUrl(next.value)) {
+          if (next.type === 'media' && !imetaVideoUrlSet.has(canonicalMediaUrl(next.value)) && isImageUrl(next.value)) {
             imageParts.push({ index: j, part: next })
             j++
           } else break
@@ -314,7 +340,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
         return <ProfileLink key={i} pubkey={part.value} />
       case 'media': {
         const m = imetaMeta.get(part.value)
-        return <MediaLink key={i} url={part.value} blurMedia={blurMedia} poster={imetaPosters.get(part.value)} isVideo={imetaVideoUrlSet.has(part.value)} sha256={m?.sha256} fallbacks={m?.fallbacks} />
+        return <MediaLink key={i} url={part.value} blurMedia={blurMedia} poster={imetaPosters.get(part.value)} isVideo={imetaVideoUrlSet.has(canonicalMediaUrl(part.value))} sha256={m?.sha256} fallbacks={m?.fallbacks} />
       }
       case 'web':
         return <WebLink key={i} url={part.value} />

@@ -41,56 +41,72 @@ export function ThreadTree({
     overscan: 5,
   })
 
-  // Scroll to target on mount
-  const hasScrolled = useRef(false)
-  useEffect(() => {
-    if (hasScrolled.current || !targetId || rows.length === 0) return
-    const idx = rows.findIndex(r => r.node.event.id === targetId)
-    if (idx >= 0) {
-      hasScrolled.current = true
-      // Delay to let virtualizer settle
-      requestAnimationFrame(() => {
-        virtualizer.scrollToIndex(idx, { align: 'center', behavior: 'smooth' })
-      })
-    }
-  }, [rows, targetId, virtualizer])
+  // ── Scroll anchoring ──────────────────────────────────────────────────────
+  // The thread streams in progressively: the target loads first, then ancestors
+  // (above it) and descendants (below). A one-shot scroll therefore fires before
+  // the tree is stable, and later insertions above the target shift it — and its
+  // inline composer — out of view. So instead of scrolling once, we KEEP the
+  // relevant note pinned in the centre across row updates until the user scrolls.
+  const keepCenteredRef = useRef(true)
 
-  // Reset scroll flag when target changes
+  // Any manual scroll hands control back to the user — stop auto-centering so we
+  // never yank them around.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const release = () => { keepCenteredRef.current = false }
+    el.addEventListener('wheel', release, { passive: true })
+    el.addEventListener('touchmove', release, { passive: true })
+    el.addEventListener('keydown', release)
+    return () => {
+      el.removeEventListener('wheel', release)
+      el.removeEventListener('touchmove', release)
+      el.removeEventListener('keydown', release)
+    }
+  }, [])
+
+  // Re-arm centering when we open a different thread, or when the composer opens
+  // on a new note (so it comes into view and stays put as the thread finishes
+  // loading). Computed during render so the effect below sees the fresh value.
   const prevTarget = useRef(targetId)
   if (targetId !== prevTarget.current) {
     prevTarget.current = targetId
-    hasScrolled.current = false
+    keepCenteredRef.current = true
   }
+  const prevReplyId = useRef<string | null>(replyingTo?.id ?? null)
+  const curReplyId = replyingTo?.id ?? null
+  if (curReplyId && curReplyId !== prevReplyId.current) {
+    keepCenteredRef.current = true
+  }
+  prevReplyId.current = curReplyId
 
-  // Auto-scroll to a just-posted reply so the user sees it immediately
+  // Keep the note being replied to (or the target) centred as rows stream in.
+  // Instant (not smooth) re-centres avoid animation thrash on rapid updates; the
+  // double rAF waits for the composer's measured height to settle first.
+  const anchorId = curReplyId ?? targetId
+  useEffect(() => {
+    if (!keepCenteredRef.current || !anchorId || rows.length === 0) return
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (!keepCenteredRef.current) return
+      const idx = rows.findIndex(r => r.node.event.id === anchorId)
+      if (idx >= 0) virtualizer.scrollToIndex(idx, { align: 'center', behavior: 'auto' })
+    }))
+  }, [anchorId, rows, virtualizer])
+
+  // Auto-scroll to a just-posted reply so the user sees it immediately. The new
+  // reply becomes the focus, so stop pinning the old anchor.
   const lastScrolledReply = useRef<string | null>(null)
   useEffect(() => {
     if (!scrollToReplyId || scrollToReplyId === lastScrolledReply.current) return
     const idx = rows.findIndex(r => r.node.event.id === scrollToReplyId)
     if (idx >= 0) {
       lastScrolledReply.current = scrollToReplyId
+      keepCenteredRef.current = false
       requestAnimationFrame(() => {
         virtualizer.scrollToIndex(idx, { align: 'center', behavior: 'smooth' })
       })
     }
   }, [scrollToReplyId, rows, virtualizer])
-
-  // When the inline composer opens (or moves to another note), scroll its row
-  // into view so the freshly-focused input is visible. Runs after the row grows
-  // to include the composer (measureElement reflow), hence the rAF.
-  const lastComposerTarget = useRef<string | null>(null)
-  useEffect(() => {
-    const id = replyingTo?.id ?? null
-    if (id === lastComposerTarget.current) return
-    lastComposerTarget.current = id
-    if (!id) return
-    const idx = rows.findIndex(r => r.node.event.id === id)
-    if (idx >= 0) {
-      requestAnimationFrame(() => {
-        virtualizer.scrollToIndex(idx, { align: 'center', behavior: 'smooth' })
-      })
-    }
-  }, [replyingTo, rows, virtualizer])
 
   const handleReply = useCallback((event: NostrEvent) => onReply?.(event), [onReply])
 

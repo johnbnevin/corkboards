@@ -119,6 +119,22 @@ export function setBlossomServers(servers: string[]): void {
   idbSetSync(BLOSSOM_SERVERS_KEY, JSON.stringify(servers));
 }
 
+// created_at of the kind-10063 event the stored blossom list was last synced
+// from (0 if it has only ever come from local edits / defaults / a backup). Used
+// for newer-wins reconciliation on login so a fresh relay list overrides a stale
+// cached/restored one, but a local edit isn't clobbered by an older relay event.
+const BLOSSOM_SERVERS_TS_KEY = 'corkboard:blossom-servers-updated-at';
+
+export function getBlossomServersUpdatedAt(): number {
+  const raw = idbGetSync(BLOSSOM_SERVERS_TS_KEY);
+  const n = raw ? parseInt(raw, 10) : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
+export function setBlossomServersUpdatedAt(ts: number): void {
+  idbSetSync(BLOSSOM_SERVERS_TS_KEY, String(ts));
+}
+
 /**
  * Servers that have rejected the backup-blob content type (HTTP 415). These
  * still work for image/media uploads (that path is separate — see useUploadFile),

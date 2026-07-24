@@ -7,11 +7,18 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
+import type { NostrEvent } from '@nostrify/nostrify';
+import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 import { useAppContext } from '../hooks/useAppContext';
 import { useNostrCustomFeedsSync } from '../hooks/useNostrCustomFeedsSync';
 import { useNostrDismissedSync } from '../hooks/useNostrDismissedSync';
+import {
+  getBlossomServers, setBlossomServers,
+  getBlossomServersUpdatedAt, setBlossomServersUpdatedAt,
+  DEFAULT_BLOSSOM_SERVERS,
+} from '../hooks/useNostrBackup';
 
 type SyncState = 'idle' | 'syncing' | 'done' | 'error';
 
@@ -37,40 +44,56 @@ export function NostrSync({ showStatus = false }: NostrSyncProps) {
   const [feedsSyncState, _setFeedsSyncState] = useState<SyncState>('idle');
   const [dismissedSyncState, _setDismissedSyncState] = useState<SyncState>('idle');
 
-  // Sync NIP-65 relay list
+  // Sync the user's own Nostr lists from relays (newer-wins): NIP-65 relay list
+  // (kind 10002) and Blossom server list (kind 10063). Both fall back to the
+  // profile indexers so a fresh device still finds them. Keep in sync with web's
+  // MultiColumnClient login sync.
   useEffect(() => {
     if (!pubkey) return;
     if (config.relayMetadata.updatedAt === lastQueriedUpdatedAt.current) return;
     lastQueriedUpdatedAt.current = config.relayMetadata.updatedAt;
 
-    const syncRelays = async () => {
-      setRelaySyncState('syncing');
+    // Fetch the newest replaceable event of `kind` — default pool, then indexers.
+    const fetchLatest = async (kind: number): Promise<NostrEvent | null> => {
       try {
-        const events = await nostr.query(
-          [{ kinds: [10002], authors: [pubkey], limit: 1 }],
+        let events = await nostr.query(
+          [{ kinds: [kind], authors: [pubkey], limit: 1 }],
           { signal: AbortSignal.timeout(5000) },
         );
+        if (events.length === 0) {
+          events = await Promise.any(
+            PROFILE_INDEXER_RELAYS.map(async (url) => {
+              const evs = await nostr.relay(url).query(
+                [{ kinds: [kind], authors: [pubkey], limit: 1 }],
+                { signal: AbortSignal.timeout(4000) },
+              );
+              if (evs.length === 0) throw new Error('none');
+              return evs;
+            }),
+          ).catch(() => [] as NostrEvent[]);
+        }
+        return events.length > 0 ? events[0] : null;
+      } catch { return null; }
+    };
 
-        if (events.length > 0) {
-          const event = events[0];
-          if (event.created_at > config.relayMetadata.updatedAt) {
-            const fetchedRelays = event.tags
-              .filter(([name]) => name === 'r')
-              .map(([_, url, marker]) => ({
-                url,
-                read: !marker || marker === 'read',
-                write: !marker || marker === 'write',
-              }));
-
-            if (fetchedRelays.length > 0) {
-              updateConfig((current) => ({
-                ...current,
-                relayMetadata: {
-                  relays: fetchedRelays,
-                  updatedAt: event.created_at,
-                },
-              }));
-            }
+    const syncLists = async () => {
+      setRelaySyncState('syncing');
+      // ── Relay list (kind 10002) ──
+      try {
+        const event = await fetchLatest(10002);
+        if (event && event.created_at > config.relayMetadata.updatedAt) {
+          const fetchedRelays = event.tags
+            .filter(([name]) => name === 'r')
+            .map(([_, url, marker]) => ({
+              url,
+              read: !marker || marker === 'read',
+              write: !marker || marker === 'write',
+            }));
+          if (fetchedRelays.length > 0) {
+            updateConfig((current) => ({
+              ...current,
+              relayMetadata: { relays: fetchedRelays, updatedAt: event.created_at },
+            }));
           }
         }
         setRelaySyncState('done');
@@ -78,9 +101,27 @@ export function NostrSync({ showStatus = false }: NostrSyncProps) {
         console.error('Failed to sync relays from Nostr:', error);
         setRelaySyncState('error');
       }
+
+      // ── Blossom server list (kind 10063) ──
+      try {
+        const event = await fetchLatest(10063);
+        if (event && event.created_at > getBlossomServersUpdatedAt()) {
+          const servers = event.tags
+            .filter((t) => t[0] === 'server' && t[1])
+            .map((t) => (t[1].endsWith('/') ? t[1] : t[1] + '/'))
+            .filter((url) => { try { return new URL(url).protocol === 'https:'; } catch { return false; } });
+          if (servers.length > 0) {
+            const merged = [...new Set([...servers, ...DEFAULT_BLOSSOM_SERVERS])];
+            if (JSON.stringify(merged) !== JSON.stringify(getBlossomServers())) {
+              setBlossomServers(merged);
+            }
+            setBlossomServersUpdatedAt(event.created_at);
+          }
+        }
+      } catch { /* best-effort */ }
     };
 
-    syncRelays();
+    syncLists();
   }, [pubkey, config.relayMetadata.updatedAt, nostr, updateConfig]);
 
   if (!showStatus) return null;

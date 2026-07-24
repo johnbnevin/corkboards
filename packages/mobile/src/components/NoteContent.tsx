@@ -13,7 +13,7 @@ import {
   Dimensions,
 } from 'react-native';
 import { nip19 } from 'nostr-tools';
-import { stripTrackingParams, getTrackingParams } from '@core/sanitizeUtils';
+import { stripTrackingParams, getTrackingParams, canonicalMediaUrl } from '@core/sanitizeUtils';
 import { parseListing } from '@core/nip99';
 import { useHashtagAction } from '../contexts/hashtagAction';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -290,7 +290,24 @@ function getImetaMedia(event: import('@nostrify/nostrify').NostrEvent): { videoU
     if (mime.startsWith('video/') || VIDEO_EXT.test(url)) videoUrls.push(url);
     else if (mime.startsWith('image/') || IMAGE_EXT_IMETA.test(url)) imageUrls.push(url);
   }
-  return { videoUrls, imageUrls, imetaMeta };
+  // Dedupe by canonical URL — duplicate/near-duplicate imeta tags (some clients
+  // emit the same file twice) would otherwise render the media multiple times.
+  return {
+    videoUrls: dedupeByCanonical(videoUrls),
+    imageUrls: dedupeByCanonical(imageUrls),
+    imetaMeta,
+  };
+}
+
+/** Keep the first occurrence of each canonical URL, preserving order. */
+function dedupeByCanonical(urls: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const url of urls) {
+    const key = canonicalMediaUrl(url);
+    if (!seen.has(key)) { seen.add(key); out.push(url); }
+  }
+  return out;
 }
 
 // ============================================================================
@@ -678,10 +695,13 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
           and video (kinds 21/22/34235/34236) events keep media in imeta with an
           empty/caption content field, so without this they'd render blank. */}
       {(imetaVideoUrls.length > 0 || imetaImageUrls.length > 0) && (() => {
-        const contentUrls = new Set(mediaParts.map(p => p.value));
+        // Compare by CANONICAL url so a file referenced both in the content and
+        // an imeta tag (differing by trailing slash, http/https, …) isn't
+        // rendered twice.
+        const contentUrls = new Set(mediaParts.map(p => canonicalMediaUrl(p.value)));
         return (
           <>
-            {imetaImageUrls.filter(url => !contentUrls.has(url)).map(url => {
+            {imetaImageUrls.filter(url => !contentUrls.has(canonicalMediaUrl(url))).map(url => {
               const m = imetaMeta.get(url);
               return (
                 <View key={`imeta-img-${url}`} style={styles.mediaContainer}>
@@ -689,7 +709,7 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
                 </View>
               );
             })}
-            {imetaVideoUrls.filter(url => !contentUrls.has(url)).map(url => (
+            {imetaVideoUrls.filter(url => !contentUrls.has(canonicalMediaUrl(url))).map(url => (
               <View key={`imeta-vid-${url}`} style={styles.mediaContainer}>
                 <InlineVideo url={url} />
               </View>

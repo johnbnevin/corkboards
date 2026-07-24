@@ -163,24 +163,43 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread, autoReplyTo }:
   }, [ancestors, rows]);
 
   // Auto-reply: when opened via a note's Comment button, open the composer
-  // targeting that note once the thread loads and scroll to it.
+  // targeting that note once the thread loads.
   const autoReplyFiredRef = useRef<string | null>(null);
   useEffect(() => {
     if (!autoReplyTo || rows.length === 0) return;
     if (autoReplyFiredRef.current === autoReplyTo.id) return;
     autoReplyFiredRef.current = autoReplyTo.id;
     setReplyTarget(autoReplyTo);
-    const idx = listData.findIndex(
-      (item) => item.type === 'row' && item.row.node.event.id === autoReplyTo.id,
-    );
-    if (idx >= 0) {
-      setTimeout(() => {
-        flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.3 });
-      }, 250);
-    }
-  }, [autoReplyTo, rows, listData]);
+  }, [autoReplyTo, rows]);
 
-  // Auto-scroll to a just-posted reply so the user sees it immediately
+  // Scroll anchoring: the thread streams in progressively (target first, then
+  // ancestors above and replies below), so a one-shot scroll fires before the
+  // list is stable and the target drifts. Keep the relevant note pinned across
+  // list updates until the user scrolls (parity with web ThreadTree).
+  const keepCenteredRef = useRef(true);
+  const prevEventId = useRef(eventId);
+  if (eventId !== prevEventId.current) {
+    prevEventId.current = eventId;
+    keepCenteredRef.current = true;
+    autoReplyFiredRef.current = null;
+  }
+
+  const anchorId = autoReplyTo?.id ?? eventId;
+  useEffect(() => {
+    if (!keepCenteredRef.current || !anchorId || listData.length === 0) return;
+    const idx = listData.findIndex(
+      (item) => item.type === 'row' && item.row.node.event.id === anchorId,
+    );
+    if (idx < 0) return;
+    const t = setTimeout(() => {
+      if (!keepCenteredRef.current) return;
+      flatListRef.current?.scrollToIndex({ index: idx, animated: false, viewPosition: 0.3 });
+    }, 80);
+    return () => clearTimeout(t);
+  }, [anchorId, listData]);
+
+  // Auto-scroll to a just-posted reply so the user sees it immediately. The new
+  // reply becomes the focus, so stop pinning the old anchor.
   const lastScrolledReply = useRef<string | null>(null);
   useEffect(() => {
     if (!scrollToReplyId || scrollToReplyId === lastScrolledReply.current) return;
@@ -189,6 +208,7 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread, autoReplyTo }:
     );
     if (idx >= 0) {
       lastScrolledReply.current = scrollToReplyId;
+      keepCenteredRef.current = false;
       setTimeout(() => {
         flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.3 });
       }, 200);
@@ -273,6 +293,7 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread, autoReplyTo }:
           renderItem={renderItem}
           contentContainerStyle={styles.list}
           removeClippedSubviews
+          onScrollBeginDrag={() => { keepCenteredRef.current = false; }}
           onScrollToIndexFailed={() => {}}
           ListEmptyComponent={
             <Text style={styles.emptyText}>No thread data found.</Text>

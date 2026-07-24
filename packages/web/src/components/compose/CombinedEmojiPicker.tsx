@@ -2,7 +2,7 @@
  * Combined emoji picker — standard emojis as the first tab, custom emoji sets as additional tabs.
  * Used in compose, inline reply, and note-level reaction.
  */
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useCustomEmojiSets } from '@/hooks/useCustomEmojiSets';
@@ -38,6 +38,30 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
   const { sets, isLoading } = useCustomEmojiSets();
   const [search, setSearch] = useState('');
   const [activeTab, setActiveTab] = useState<TabKind>({ type: 'favorites' });
+
+  // Drive the emoji list's scroll manually. When the picker is mounted inside a
+  // Popover that sits within a scroll-locked Dialog (the thread modal) and/or a
+  // virtualized/transformed container, ancestor scroll-lockers (react-remove-
+  // scroll) intermittently swallow the wheel event and the list won't scroll.
+  // Handling wheel here — adjusting scrollTop ourselves and stopping the event —
+  // makes it scroll reliably regardless of the surrounding scroll context.
+  const scrollBodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollBodyRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      const { scrollTop, scrollHeight, clientHeight } = el;
+      if (scrollHeight <= clientHeight) return; // nothing to scroll
+      const atTop = scrollTop <= 0 && e.deltaY < 0;
+      const atBottom = scrollTop + clientHeight >= scrollHeight - 1 && e.deltaY > 0;
+      if (atTop || atBottom) return; // let the edge pass through
+      el.scrollTop += e.deltaY;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
 
   const favorites = useMemo(() => getFavoriteEmojis(), []);
 
@@ -159,7 +183,7 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
           REQUIRED for a flex child to scroll — without it the content's default
           min-height:auto lets it grow past the container. touch-action + overscroll
           keep the gesture inside the picker. */}
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain [touch-action:pan-y]">
+      <div ref={scrollBodyRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain [touch-action:pan-y]">
         {search && searchResults ? (
           <div className="p-2 space-y-2">
             {/* Standard results */}

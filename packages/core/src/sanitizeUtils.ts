@@ -81,3 +81,29 @@ export function stripTrackingParams(rawUrl: string): string {
     return rawUrl;
   }
 }
+
+// ─── Media URL canonicalization (for dedup only) ─────────────────────────────
+//
+// Produces a comparison KEY for media URLs so the same file referenced two ways
+// (e.g. once in the note content and once in an imeta/NIP-92 tag) dedupes to a
+// single render. This is used ONLY for equality checks — never for display; we
+// always render the URL exactly as authored.
+//
+// Normalizes the differences that legitimately vary between a content URL and
+// its imeta twin: scheme (http/https), leading "www.", host case, a trailing
+// slash, the URL fragment, and trailing punctuation the content parser may have
+// grabbed. Query strings are preserved, since for media they can be significant
+// (signed/expiring URLs, Blossom hashes) and stripping them could over-merge
+// genuinely distinct files.
+export function canonicalMediaUrl(rawUrl: string): string {
+  const s = rawUrl.trim().replace(/[),.;:!]+$/, '');
+  try {
+    const u = new URL(s);
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    const path = u.pathname.replace(/\/+$/, '');
+    // Scheme-agnostic key: host + path + query (no fragment).
+    return `${host}${path}${u.search}`;
+  } catch {
+    return s.toLowerCase();
+  }
+}

@@ -86,7 +86,8 @@ import { ProfileCacheSettings } from '@/components/ProfileCacheSettings';
 import { ThroughputSettings } from '@/components/ThroughputSettings';
 import { AdvancedSettings } from '@/components/AdvancedSettings';
 import { EmojiSetEditor } from '@/components/EmojiSetEditor';
-import { useNostrBackup } from '@/hooks/useNostrBackup';
+import { useNostrBackup, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
+import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 import { STORAGE_KEYS } from '@/lib/storageKeys';
 import { useAccountIsolation } from '@/hooks/useAccountIsolation';
 import { useAutoRestoreGuard } from '@/hooks/useAutoRestoreGuard';
@@ -969,20 +970,49 @@ export function MultiColumnClient() {
   // App config (for settings like publishClientTag)
   const { config: appConfig, updateConfig } = useAppContext();
 
-  // Sync NIP-65 relay list from Nostr once after login settles.
-  // Populates config.relayMetadata.relays so the relay settings UI shows the user's relays.
+  // On login, refresh the user's own Nostr lists from relays and reconcile them
+  // into local state (newer-wins), so relay changes made on other clients show up
+  // instead of a stale cached/backup-restored copy:
+  //   • NIP-65 relay list (kind 10002) → config.relayMetadata
+  //   • Blossom server list (kind 10063) → stored blossom servers
+  // Both fall back to the profile indexers (purplepag.es, …) which hold these
+  // replaceable lists for ~everyone, so a fresh device still finds them.
   const nip65SyncDone = useRef(false);
   useEffect(() => {
     if (!canLoadNotes || !user || nip65SyncDone.current) return;
     nip65SyncDone.current = true;
-    (async () => {
+    const pubkey = user.pubkey;
+
+    // Fetch the newest replaceable event of `kind` for the user — default pool
+    // first, then the profile indexers. Returns null on miss/error.
+    const fetchLatest = async (kind: number): Promise<NostrEvent | null> => {
       try {
-        const events = await nostr.query(
-          [{ kinds: [10002], authors: [user.pubkey], limit: 1 }],
-          { signal: AbortSignal.timeout(5000) }
+        let events = await nostr.query(
+          [{ kinds: [kind], authors: [pubkey], limit: 1 }],
+          { signal: AbortSignal.timeout(5000) },
         );
-        if (events.length > 0 && events[0].created_at > appConfig.relayMetadata.updatedAt) {
-          const relays = events[0].tags
+        if (events.length === 0) {
+          events = await Promise.any(
+            PROFILE_INDEXER_RELAYS.map(async (url) => {
+              const evs = await nostr.relay(url).query(
+                [{ kinds: [kind], authors: [pubkey], limit: 1 }],
+                { signal: AbortSignal.timeout(4000) },
+              );
+              if (evs.length === 0) throw new Error('none');
+              return evs;
+            }),
+          ).catch(() => [] as NostrEvent[]);
+        }
+        return events.length > 0 ? events[0] : null;
+      } catch { return null; }
+    };
+
+    (async () => {
+      // ── Relay list (kind 10002) ──
+      try {
+        const ev = await fetchLatest(10002);
+        if (ev && ev.created_at > appConfig.relayMetadata.updatedAt) {
+          const relays = ev.tags
             .filter(([name]) => name === 'r')
             .map(([, url, marker]) => ({
               url,
@@ -992,8 +1022,30 @@ export function MultiColumnClient() {
           if (relays.length > 0) {
             updateConfig((current) => ({
               ...current,
-              relayMetadata: { relays, updatedAt: events[0].created_at },
+              relayMetadata: { relays, updatedAt: ev.created_at },
             }));
+          }
+        }
+      } catch { /* best-effort */ }
+
+      // ── Blossom server list (kind 10063) ──
+      try {
+        const ev = await fetchLatest(10063);
+        if (ev && ev.created_at > getBlossomServersUpdatedAt()) {
+          const servers = ev.tags
+            .filter((t) => t[0] === 'server' && t[1])
+            .map((t) => (t[1].endsWith('/') ? t[1] : t[1] + '/'))
+            .filter((url) => { try { return new URL(url).protocol === 'https:'; } catch { return false; } });
+          if (servers.length > 0) {
+            // User's servers first, then defaults as fallbacks (matches the
+            // Settings persistence model and keeps backup redundancy).
+            const merged = [...new Set([...servers, ...DEFAULT_BLOSSOM_SERVERS])];
+            // Only rewrite when the list actually differs, to avoid a spurious
+            // change event on every login.
+            if (JSON.stringify(merged) !== JSON.stringify(getBlossomServers())) {
+              setBlossomServers(merged);
+            }
+            setBlossomServersUpdatedAt(ev.created_at);
           }
         }
       } catch { /* best-effort */ }

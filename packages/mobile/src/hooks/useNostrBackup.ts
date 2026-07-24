@@ -119,6 +119,21 @@ export function setBlossomServers(servers: string[]): void {
   mobileStorage.setSync(BLOSSOM_SERVERS_KEY, JSON.stringify(servers));
 }
 
+// created_at of the kind-10063 event the stored blossom list was last synced
+// from (0 if only ever from local edits / defaults / a backup). Used for
+// newer-wins reconciliation on login. Keep in sync with web's useNostrBackup.
+const BLOSSOM_SERVERS_TS_KEY = 'corkboard:blossom-servers-updated-at';
+
+export function getBlossomServersUpdatedAt(): number {
+  const raw = mobileStorage.getSync(BLOSSOM_SERVERS_TS_KEY);
+  const n = raw ? parseInt(raw, 10) : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
+export function setBlossomServersUpdatedAt(ts: number): void {
+  mobileStorage.setSync(BLOSSOM_SERVERS_TS_KEY, String(ts));
+}
+
 /**
  * Servers that have rejected the backup-blob content type (HTTP 415). They still
  * work for image/media uploads (separate path), but are useless for the backup

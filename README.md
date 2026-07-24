@@ -76,14 +76,21 @@ npx expo run:android
 
 ## Features
 
-- **Feed builder** — create corkboards from one friend's posts, a group of friends, or combine news sources into a newspaper-style board
+- **Feed builder** — create corkboards from one friend's posts, a group of friends, hashtags, or combine news sources into a newspaper-style board
 - **Notecards** — posts displayed as tackable notecards on a corkboard
 - **Tacking** — tack notecards to keep them pinned at the top of a board
 - **Collapsible cards** — collapse notecards to scan feeds faster
 - **Multi-column layout** — 1 to 5 columns, responsive across screen sizes
 - **Dark and light mode** — automatic system detection or manual toggle
+- **Reactions & custom emoji** — react to any note with emoji, and manage your own custom emoji sets (NIP-30) shared across every picker
+- **Inline media** — inline video playback, image lightbox, and reply-level media and emoji
+- **Blossom media redundancy** — verified mirroring across Blossom servers with cross-server render fallback so images and video survive a dead host
+- **Link shields** — outbound links are stripped of trackers, with the original (tracked) URL still reachable via right-click / long-press
+- **Storefronts** — render NIP-99 (kind 30402) classified listings as shoppable cards
+- **Long-form & video** — NIP-23 articles and NIP-71 video events render natively alongside notes
+- **Graceful degradation** — posts from deleted or vanished authors still render; dismissed notes are restorable (only your own)
 - **Lightning zaps** — send payments via Nostr Wallet Connect (NIP-57)
-- **Encrypted blossom backup** — AES-256-GCM encrypted settings backup to Blossom servers
+- **Encrypted Blossom backup** — AES-256-GCM encrypted settings backup to Blossom servers
 - **Multi-account** — switch between accounts with per-user data isolation
 - **Cross-platform** — web PWA, desktop (Tauri), mobile (Expo)
 - **Censorship resistant** — built on Nostr, no central authority
@@ -139,11 +146,12 @@ All data is stored locally in IndexedDB (web) or MMKV (mobile). The only externa
 | 02 | Contact list / follows |
 | 05 | DNS-based identity verification |
 | 10 | Reply threading conventions |
-| 17 | Sealed sender direct messages (gift-wrapped) | Not implemented
 | 18 | Reposts |
 | 19 | Bech32-encoded entities (npub, note, nevent, nprofile, naddr) |
 | 23 | Long-form content (articles) |
 | 25 | Reactions |
+| 30 | Custom emoji / emoji sets (kind 30030, favorites kind 10030) |
+| 42 | Relay authentication (AUTH) |
 | 46 | Remote signing / Nostr Connect (QR code login, Amber) |
 | 50 | Full-text search (profile discovery) | Not implemented
 | 51 | Lists (bookmarks, mute list) | Importable into private custom corkboards
@@ -152,6 +160,7 @@ All data is stored locally in IndexedDB (web) or MMKV (mobile). The only externa
 | 71 | Video events |
 | 78 | App-specific data (backup metadata) |
 | 94 | File metadata (Blossom uploads) |
+| 99 | Classified listings (kind 30402 storefronts) |
 
 ## RSS Protocol Support
 

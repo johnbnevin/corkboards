@@ -44,3 +44,6 @@ session-*.md
 .env.*
 !.env.example
 screen.png
+
+# Backup/source archives
+*.zip

@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] - 2026-07-24
+
+### Changed
+- Version aligned to **0.8.0** across all packages (core, web, desktop, mobile), Tauri, and Cargo. Mobile keeps its `b` suffix (`0.8.0b`).
+
+### Notable since 0.7.x
+- Emoji pickers: touch side-scroll fixes, "Manage Sets" available in all pickers (including reactions), reaction button on all notes, mobile Manage Sets.
+- Thread scroll-race and inline-reply anchoring fixes, media dedup, login relay/blossom refresh.
+- Blossom media redundancy — verified mirroring + cross-server render fallback (all platforms).
+- DM subsystem removed entirely across web, mobile, desktop, and core.
+
 ## [Unreleased]
 
 ### Added

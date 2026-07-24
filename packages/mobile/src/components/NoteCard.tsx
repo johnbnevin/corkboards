@@ -89,6 +89,11 @@ interface NoteCardProps {
   isFresh?: boolean;
   /** When true, a media filter is active — auto-expand and unblur media */
   mediaFilterActive?: boolean;
+  /** True when this note carries the corkboard's hashtag as a `t` tag but never
+   *  mentions it in its content — shown as a badge. */
+  hashtagTaggedOnly?: boolean;
+  /** The specific hashtag the note is tagged-but-not-mentioned for. */
+  hashtagTaggedLabel?: string;
 }
 
 export function NoteCard({
@@ -101,6 +106,8 @@ export function NoteCard({
   parentNote,
   isFresh = false,
   mediaFilterActive = false,
+  hashtagTaggedOnly = false,
+  hashtagTaggedLabel,
 }: NoteCardProps) {
   const isRepost = event.kind === 6;
   const [expanded, setExpanded] = useState(false);
@@ -193,6 +200,15 @@ export function NoteCard({
       {/* Note content */}
       <NoteContent event={truncatedEvent} numberOfLines={isLong && !expanded && !mediaFilterActive ? 12 : undefined} />
 
+      {/* Tagged-but-not-mentioned flag for hashtag corkboards */}
+      {hashtagTaggedOnly && (
+        <View style={styles.taggedFlag}>
+          <Text style={styles.taggedFlagText}>
+            #{hashtagTaggedLabel ?? 'tag'} · tagged, not mentioned
+          </Text>
+        </View>
+      )}
+
       {/* Show more / show less */}
       {isLong && !mediaFilterActive && (
         <TouchableOpacity
@@ -225,6 +241,18 @@ const styles = StyleSheet.create({
     padding: 14,
     borderWidth: 1,
     borderColor: '#404040',
+  },
+  taggedFlag: {
+    alignSelf: 'flex-start',
+    marginTop: 6,
+    backgroundColor: '#333',
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  taggedFlagText: {
+    color: '#999',
+    fontSize: 10,
   },
   freshCard: {
     borderColor: '#a855f7',

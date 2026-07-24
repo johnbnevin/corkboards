@@ -85,6 +85,22 @@ export function useAutoFetch({
     return () => clearInterval(timer);
   }, [enabled, intervalSecs, queryClient]);
 
+  // Fire promptly when the tab becomes visible again (resume from idle) so the
+  // feed repopulates without waiting for the next interval tick. Without this, a
+  // post-idle empty (cold relays) lingers until the next tick — long enough for
+  // the "include my notes" fallback to briefly show only the user's own notes.
+  useEffect(() => {
+    if (!enabled) return;
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (!enabledRef.current || isLoadingRef.current) return;
+      loadNewerRef.current();
+      setLastAutofetchTime(Date.now());
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [enabled]);
+
   // Fire on tab switch (after small settle delay).
   const prevTabRef = useRef(activeTab);
   useEffect(() => {

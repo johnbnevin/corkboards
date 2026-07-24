@@ -130,7 +130,7 @@ export function InlineReplyComposer({ replyTo, onCancel, onPublished, onOpenEmoj
             <PopoverTrigger asChild>
               <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Emoji"><Smile className="h-3.5 w-3.5" /></Button>
             </PopoverTrigger>
-            <PopoverContent className="w-80 p-0" align="start" side="top">
+            <PopoverContent className="w-[min(20rem,calc(100vw-1rem))] p-0" align="start" side="top">
               <CombinedEmojiPicker
                 onSelectEmoji={(emoji) => {
                   if (textareaRef.current) insertAtCursor(textareaRef.current, emoji, setContent)

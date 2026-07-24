@@ -22,7 +22,7 @@ import { useIsDeletedAuthor } from '@/contexts/deletedAuthors'
 import { formatTimeAgoCompact } from '@/lib/formatTimeAgo'
 import { optimizeAvatarUrl } from '@/lib/imageUtils'
 import { nip19 } from 'nostr-tools'
-import { PinIcon, MessageSquare, Reply, Repeat2, Zap, Rss, Heart, Copy, Check, Pin, RotateCw, Globe, BadgeCheck, ChevronDown, Trash2, Highlighter, UserPlus, Smile } from 'lucide-react'
+import { PinIcon, MessageSquare, Reply, Repeat2, Zap, Rss, Heart, Copy, Check, Pin, RotateCw, Globe, BadgeCheck, ChevronDown, Trash2, Highlighter, UserPlus, Smile, Hash } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { CombinedEmojiPicker } from '@/components/compose/CombinedEmojiPicker'
 import { useNostrPublish } from '@/hooks/useNostrPublish'
@@ -257,6 +257,11 @@ interface NoteCardProps {
   isEngagementStub?: boolean;
   /** Dismiss this note and all associated notes (replies, parent, reactions) */
   onDismissThread?: () => void;
+  /** True when this note is in a hashtag corkboard because it carries the tag as
+   *  a `t` tag but never mentions the hashtag in its content — shown as a badge. */
+  hashtagTaggedOnly?: boolean;
+  /** The specific hashtag the note is tagged-but-not-mentioned for (for the badge). */
+  hashtagTaggedLabel?: string;
 }
 
 /** Compact display of the parent note for replies */
@@ -516,6 +521,8 @@ export const NoteCard = React.memo(function NoteCard({
   engagement,
   isEngagementStub: _isEngagementStub,
   onDismissThread,
+  hashtagTaggedOnly,
+  hashtagTaggedLabel,
 }: NoteCardProps) {
   // When a media filter is active, override blurMedia to show all media
   const effectiveBlurMedia = mediaFilterActive ? false : blurMedia;
@@ -1442,6 +1449,15 @@ export const NoteCard = React.memo(function NoteCard({
           ) : (
             <SmartNoteContent event={note} className="text-base" blurMedia={effectiveBlurMedia} inModalContext={!!onOpenThread} onViewThread={onOpenThread} forceExpand={mediaFilterActive} />
           )}
+          {hashtagTaggedOnly && (
+            <div
+              className="mt-2 inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 text-[10px] text-muted-foreground"
+              title={`This note is tagged #${hashtagTaggedLabel ?? ''} but doesn't mention it in its text.`}
+            >
+              <Hash className="h-2.5 w-2.5" />
+              tagged{hashtagTaggedLabel ? ` #${hashtagTaggedLabel}` : ''} · not mentioned
+            </div>
+          )}
         </CardContent>
       )}
 
@@ -1503,7 +1519,7 @@ export const NoteCard = React.memo(function NoteCard({
                     <Smile className="h-3.5 w-3.5" />
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-80 p-0" align="start" side="top" onClick={(e) => e.stopPropagation()}>
+                <PopoverContent className="w-[min(20rem,calc(100vw-1rem))] p-0" align="start" side="top" onClick={(e) => e.stopPropagation()}>
                   <CombinedEmojiPicker
                     onSelectEmoji={(emoji) => handleReact(emoji)}
                     onSelectCustomEmoji={(shortcode, url) => handleReact(`:${shortcode}:`, shortcode, url)}

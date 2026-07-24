@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { visibleLength } from '@core/textTruncation';
 import { hasHtmlContent, sanitizeHtml } from '@/lib/sanitize';
+import { useLocalStorage } from '@/hooks/useLocalStorage';
+import { contentHasAssumedMarkdown } from '@/lib/markdownDetect';
 import { NoteContent } from './NoteContent';
 import { ListingCard } from './ListingCard';
 import { MediaLink } from './MediaLink';
@@ -61,6 +63,11 @@ const MAX_EMBED_DEPTH = 3;
 
 export function SmartNoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, forceExpand = false, _embedDepth = 0 }: SmartNoteContentProps) {
   const [expanded, setExpanded] = useState(false);
+  // Global "Render markdown" setting (Advanced Settings), on by default, plus a
+  // per-note override so the user can see the raw text when the markdown
+  // heuristic misfires (kind-1 notes are plain text by protocol).
+  const [globalRenderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true);
+  const [showOriginal, setShowOriginal] = useState(false);
 
   // NIP-94 file metadata (kind 1063) — the file lives in the `url` tag, not the
   // content field; content is an optional caption/description.
@@ -186,6 +193,8 @@ export function SmartNoteContent({ event, className, inModalContext = false, onV
   const hasHtml = hasHtmlContent(text);
   const safeEvent = hasHtml ? { ...event, content: sanitizeHtml(text) } : event;
 
+  const effectiveRenderMarkdown = globalRenderMarkdown && !showOriginal;
+
   const content = (
     <NoteContent
       event={safeEvent}
@@ -193,8 +202,24 @@ export function SmartNoteContent({ event, className, inModalContext = false, onV
       inModalContext={inModalContext}
       onViewThread={onViewThread}
       blurMedia={blurMedia}
+      renderMarkdown={effectiveRenderMarkdown}
     />
   );
+
+  // Offer a per-note "show original" toggle only when the markdown heuristic
+  // would actually fire for this note (and the global setting is on) — so plain
+  // notes don't get a pointless control.
+  const canToggleMarkdown = globalRenderMarkdown && contentHasAssumedMarkdown(safeEvent.content);
+  const markdownToggle = canToggleMarkdown ? (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); setShowOriginal(v => !v); }}
+      className="mt-1 text-[11px] text-muted-foreground/70 hover:text-foreground"
+      title={showOriginal ? 'Show the formatted (markdown) version' : 'Show the original text exactly as written'}
+    >
+      {showOriginal ? 'show formatted' : 'show original'}
+    </button>
+  ) : null;
 
   // Wrap long posts in a spoiler (skip when forceExpand is on, e.g. media filter active)
   if (isLong && !expanded && !forceExpand) {
@@ -219,16 +244,19 @@ export function SmartNoteContent({ event, className, inModalContext = false, onV
     return (
       <div>
         {content}
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); setExpanded(false); }}
-          className="w-full text-xs text-muted-foreground hover:text-foreground py-1 font-medium"
-        >
-          Show less
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setExpanded(false); }}
+            className="text-xs text-muted-foreground hover:text-foreground py-1 font-medium"
+          >
+            Show less
+          </button>
+          {markdownToggle}
+        </div>
       </div>
     );
   }
 
-  return <>{content}</>;
+  return <>{content}{markdownToggle && <div>{markdownToggle}</div>}</>;
 }

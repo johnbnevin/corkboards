@@ -31,6 +31,7 @@ interface TrackerWarningDialogProps {
 
 export function TrackerWarningDialog({ visible, onClose, rawUrl, cleanUrl, trackingParams }: TrackerWarningDialogProps) {
   const [copiedWhich, setCopiedWhich] = useState<'clean' | 'original' | null>(null);
+  const hasTracker = cleanUrl !== rawUrl;
 
   const copy = async (text: string, which: 'clean' | 'original') => {
     try {
@@ -56,34 +57,40 @@ export function TrackerWarningDialog({ visible, onClose, rawUrl, cleanUrl, track
       <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={onClose}>
         <TouchableOpacity activeOpacity={1} style={styles.card} onPress={() => { /* swallow */ }}>
           <View style={styles.header}>
-            <Text style={styles.shield}>⚠</Text>
-            <Text style={styles.title}>This link contains trackers</Text>
+            <Text style={hasTracker ? styles.shield : styles.shieldClean}>{hasTracker ? '⚠' : '🛡'}</Text>
+            <Text style={styles.title}>{hasTracker ? 'This link contains trackers' : 'Link options'}</Text>
           </View>
-          <Text style={styles.description}>
-            Tracking parameter{trackingParams.length === 1 ? '' : 's'} detected:{' '}
-            <Text style={styles.mono}>{trackingParams.join(', ')}</Text>
-          </Text>
+          {hasTracker && (
+            <Text style={styles.description}>
+              Tracking parameter{trackingParams.length === 1 ? '' : 's'} detected:{' '}
+              <Text style={styles.mono}>{trackingParams.join(', ')}</Text>
+            </Text>
+          )}
           <View style={styles.urlBox}>
             <Text style={styles.urlText} numberOfLines={4}>{cleanUrl}</Text>
           </View>
 
           <TouchableOpacity style={styles.primaryButton} onPress={() => open(cleanUrl)}>
-            <Text style={styles.primaryButtonText}>Open without trackers</Text>
+            <Text style={styles.primaryButtonText}>{hasTracker ? 'Open without trackers' : 'Open link'}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.outlineButton} onPress={() => open(rawUrl)}>
-            <Text style={styles.outlineButtonText}>Open original (with trackers)</Text>
-          </TouchableOpacity>
+          {hasTracker && (
+            <TouchableOpacity style={styles.outlineButton} onPress={() => open(rawUrl)}>
+              <Text style={styles.outlineButtonText}>View full link (with trackers)</Text>
+            </TouchableOpacity>
+          )}
           <View style={styles.copyRow}>
             <TouchableOpacity style={styles.secondaryButton} onPress={() => copy(cleanUrl, 'clean')}>
               <Text style={styles.secondaryButtonText}>
-                {copiedWhich === 'clean' ? 'Copied' : 'Copy clean'}
+                {copiedWhich === 'clean' ? 'Copied' : hasTracker ? 'Copy clean' : 'Copy link'}
               </Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.secondaryButton} onPress={() => copy(rawUrl, 'original')}>
-              <Text style={styles.secondaryButtonText}>
-                {copiedWhich === 'original' ? 'Copied' : 'Copy original'}
-              </Text>
-            </TouchableOpacity>
+            {hasTracker && (
+              <TouchableOpacity style={styles.secondaryButton} onPress={() => copy(rawUrl, 'original')}>
+                <Text style={styles.secondaryButtonText}>
+                  {copiedWhich === 'original' ? 'Copied' : 'Copy as-is'}
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
           <TouchableOpacity style={styles.outlineButton} onPress={onClose}>
             <Text style={styles.outlineButtonText}>Cancel</Text>
@@ -119,6 +126,7 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   shield: { color: '#f59e0b', fontSize: 18 },
+  shieldClean: { color: '#999', fontSize: 18 },
   title: { color: '#f2f2f2', fontSize: 15, fontWeight: '600', flex: 1 },
   description: { color: '#b3b3b3', fontSize: 13, lineHeight: 18 },
   mono: { fontFamily: 'monospace', fontSize: 11, color: '#b3b3b3' },

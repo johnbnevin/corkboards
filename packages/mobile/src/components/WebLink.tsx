@@ -63,20 +63,27 @@ export function WebLink({ url }: WebLinkProps) {
         <View style={styles.info}>
           <View style={styles.hostnameRow}>
             <Text style={styles.hostname} numberOfLines={1}>{hostname}</Text>
-            {hasTracker && <Text style={styles.trackerShield}>⚠</Text>}
+            {/* Shield opens the link-options sheet on every link. Amber when
+                trackers are present, gray when clean. */}
+            <TouchableOpacity
+              onPress={() => setWarningOpen(true)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={hasTracker ? styles.trackerShield : styles.cleanShield}>
+                {hasTracker ? '⚠' : '🛡'}
+              </Text>
+            </TouchableOpacity>
           </View>
           <Text style={styles.url} numberOfLines={1}>{url}</Text>
         </View>
       </TouchableOpacity>
-      {hasTracker && (
-        <TrackerWarningDialog
-          visible={warningOpen}
-          onClose={() => setWarningOpen(false)}
-          rawUrl={url}
-          cleanUrl={cleanUrl}
-          trackingParams={trackingParams}
-        />
-      )}
+      <TrackerWarningDialog
+        visible={warningOpen}
+        onClose={() => setWarningOpen(false)}
+        rawUrl={url}
+        cleanUrl={cleanUrl}
+        trackingParams={trackingParams}
+      />
     </>
   );
 }
@@ -114,6 +121,10 @@ const styles = StyleSheet.create({
   },
   trackerShield: {
     color: '#f59e0b',
+    fontSize: 12,
+  },
+  cleanShield: {
+    color: '#999',
     fontSize: 12,
   },
   url: {

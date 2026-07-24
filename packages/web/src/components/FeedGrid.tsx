@@ -7,6 +7,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { RSS_PUBKEY } from '@core/rss';
+import { hashtagFeedVerdict } from '@core/noteCategories';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { type NoteClassification } from '@/lib/noteClassifier';
 import { NoteCard } from '@/components/NoteCard';
@@ -156,6 +157,9 @@ interface FeedGridProps {
   onFindMoreForMe?: () => void;
   /** True while the onboarding follow-activity fetch is in progress */
   isFindingMore?: boolean;
+  /** Active corkboard's hashtags (normalized, no '#') — used to flag notes that
+   *  are tagged with the hashtag but don't mention it in their content. */
+  activeHashtags?: string[];
 }
 
 export const FeedGrid = React.memo(function FeedGrid({
@@ -208,6 +212,7 @@ export const FeedGrid = React.memo(function FeedGrid({
   isOnboarding = false,
   onFindMoreForMe,
   isFindingMore = false,
+  activeHashtags,
 }: FeedGridProps) {
   // ── Incremental rendering: render a small batch first, add more on scroll ──
   const maxColLength = Math.max(...columns.map(c => c.length), 0);
@@ -420,9 +425,17 @@ export const FeedGrid = React.memo(function FeedGrid({
                     const parentNote = classification?.parentEventId
                       ? parentNotes?.[classification.parentEventId]
                       : null;
+                    // Flag notes present only because they carry the corkboard's
+                    // hashtag as a `t` tag without mentioning it in their text —
+                    // so users can tell a categorized note from an on-topic one.
+                    const hashtagTaggedOnly = !!activeHashtags && activeHashtags.length > 0
+                      && !activeHashtags.some(tag => hashtagFeedVerdict(note, tag) === 'match')
+                      && activeHashtags.some(tag => hashtagFeedVerdict(note, tag) === 'tagged-only');
                     return (
                       <NoteCard
                         key={note.id}
+                        hashtagTaggedOnly={hashtagTaggedOnly}
+                        hashtagTaggedLabel={hashtagTaggedOnly ? activeHashtags.find(tag => hashtagFeedVerdict(note, tag) === 'tagged-only') : undefined}
                         note={note}
                         isPinned={pinnedNoteIds.includes(note.id)}
                         showPinButton={activeTab === 'me'}

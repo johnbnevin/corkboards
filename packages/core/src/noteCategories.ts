@@ -214,6 +214,75 @@ export function noteMatchesHashtags(note: NostrEvent, selectedHashtags: Set<stri
   return false;
 }
 
+// ─── Hashtag-feed spam classification ────────────────────────────────────────
+
+/**
+ * How many `t` (topic) tags a note may carry and still be trusted in a
+ * single-hashtag feed when it does NOT mention that hashtag inline. Above this,
+ * an unmentioned match reads as tag-stuffing spam — one note tagged with several
+ * unrelated topics to inject itself into every topic feed.
+ *
+ * Per NIP-24 the `t` tag is the canonical hashtag mechanism, so a genuinely
+ * on-topic note may legitimately tag a single topic without writing it in the
+ * body. We trust only that single-tag case; any note carrying more than one
+ * topic tag while not mentioning this one is treated as stuffed.
+ */
+export const MAX_TTAGS_WITHOUT_CONTENT_MATCH = 1;
+
+export type HashtagFeedVerdict = 'match' | 'tagged-only' | 'spam' | 'unrelated';
+
+/**
+ * Classify a note against a single hashtag. `hashtag` may include a leading '#'
+ * and any case; it is normalized here.
+ * - `'match'`       — the note's content actually mentions the `#hashtag` inline.
+ * - `'tagged-only'` — carries this hashtag as a `t` tag but doesn't mention it
+ *                     inline, and isn't tag-stuffed (≤ {@link MAX_TTAGS_WITHOUT_CONTENT_MATCH}
+ *                     topic tags). Show it, but callers may flag it as
+ *                     "tagged, not mentioned".
+ * - `'spam'`        — carries this hashtag as a `t` tag, doesn't mention it, AND
+ *                     is stuffed with many `t` tags. Hide.
+ * - `'unrelated'`   — neither mentions the hashtag nor carries its `t` tag (e.g.
+ *                     an author note that landed in a mixed corkboard for other
+ *                     reasons). Not a hashtag match at all.
+ */
+export function hashtagFeedVerdict(note: NostrEvent, hashtag: string): HashtagFeedVerdict {
+  const norm = hashtag.replace(/^#/, '').toLowerCase();
+  const isRepost = note.kind === 6 || note.kind === 16;
+
+  // Content mention wins — clearly on-topic. Scan embedded content for reposts.
+  let content = note.content;
+  if (isRepost) {
+    try {
+      const embedded = JSON.parse(note.content);
+      if (typeof embedded?.content === 'string') content = embedded.content;
+    } catch { /* fall back to raw content */ }
+  }
+  for (const match of content.matchAll(/#([a-zA-Z]\w*)/g)) {
+    if (match[1].toLowerCase() === norm) return 'match';
+  }
+
+  // Count topic tags and check whether THIS hashtag is among them.
+  let tTagCount = 0;
+  let hasThisTag = false;
+  for (const t of note.tags) {
+    if (t[0] === 't' && t[1]) {
+      tTagCount++;
+      if (t[1].toLowerCase() === norm) hasThisTag = true;
+    }
+  }
+  // Reposts carry topic tags on the embedded event, not the wrapper.
+  if (isRepost && !hasThisTag) {
+    const embeddedTags = getRepostHashtags(note);
+    if (embeddedTags.has(norm)) {
+      hasThisTag = true;
+      tTagCount = Math.max(tTagCount, embeddedTags.size);
+    }
+  }
+
+  if (!hasThisTag) return 'unrelated';
+  return tTagCount > MAX_TTAGS_WITHOUT_CONTENT_MATCH ? 'spam' : 'tagged-only';
+}
+
 /** Compute hashtag counts from a set of notes. */
 export function computeHashtagCounts(notes: NostrEvent[]): Map<string, number> {
   const counts = new Map<string, number>();

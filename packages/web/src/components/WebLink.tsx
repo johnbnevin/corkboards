@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
-import { ExternalLink, Copy, Check, ShieldAlert } from 'lucide-react'
+import { ExternalLink, Copy, Check, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { useLinkCopy } from '@/hooks/useLinkCopy'
 import { LinkCopyContextMenu } from './LinkCopyContextMenu'
 import { TrackerWarningDialog } from './TrackerWarningDialog'
@@ -37,9 +37,18 @@ export function WebLink({ url }: { url: string }) {
     copyClean()
   }
 
+  const openClean = () => window.open(cleanUrl, '_blank', 'noopener,noreferrer')
+  const openOriginal = () => window.open(url, '_blank', 'noopener,noreferrer')
+
   return (
     <>
-    <LinkCopyContextMenu hasTracker={hasTracker} onCopyClean={copyClean} onCopyOriginal={copyOriginal}>
+    <LinkCopyContextMenu
+      hasTracker={hasTracker}
+      onCopyClean={copyClean}
+      onCopyOriginal={copyOriginal}
+      onOpenClean={openClean}
+      onOpenOriginal={openOriginal}
+    >
       <a
         href={url}
         target="_blank"
@@ -60,11 +69,19 @@ export function WebLink({ url }: { url: string }) {
             <div className="min-w-0 flex-1">
               <div className="font-medium text-sm truncate flex items-center gap-1.5">
                 {hostname}
-                {hasTracker && (
-                  <span title={`Contains tracking parameters: ${trackingParams.join(', ')}`}>
-                    <ShieldAlert className="h-3.5 w-3.5 text-amber-500" />
-                  </span>
-                )}
+                {/* Shield opens the link-options sheet on every link (touch has
+                    no right-click). Amber when trackers are present, gray when clean. */}
+                <button
+                  type="button"
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setWarningOpen(true) }}
+                  title={hasTracker ? `Contains tracking parameters: ${trackingParams.join(', ')}` : 'No known trackers — link options'}
+                  aria-label={hasTracker ? 'Link contains trackers' : 'Link options'}
+                  className="inline-flex items-center"
+                >
+                  {hasTracker
+                    ? <ShieldAlert className="h-3.5 w-3.5 text-amber-500" />
+                    : <ShieldCheck className="h-3.5 w-3.5 text-muted-foreground" />}
+                </button>
               </div>
               <div className="text-xs text-muted-foreground truncate">{url}</div>
             </div>
@@ -82,15 +99,13 @@ export function WebLink({ url }: { url: string }) {
         </Card>
       </a>
     </LinkCopyContextMenu>
-    {hasTracker && (
-      <TrackerWarningDialog
-        open={warningOpen}
-        onOpenChange={setWarningOpen}
-        rawUrl={url}
-        cleanUrl={cleanUrl}
-        trackingParams={trackingParams}
-      />
-    )}
+    <TrackerWarningDialog
+      open={warningOpen}
+      onOpenChange={setWarningOpen}
+      rawUrl={url}
+      cleanUrl={cleanUrl}
+      trackingParams={trackingParams}
+    />
     </>
   )
 }

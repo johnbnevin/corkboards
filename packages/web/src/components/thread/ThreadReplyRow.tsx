@@ -211,7 +211,7 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
                         <Smile className="h-3 w-3" />
                       </button>
                     </PopoverTrigger>
-                    <PopoverContent className="w-80 p-0" align="start" side="top" onClick={(e) => e.stopPropagation()}>
+                    <PopoverContent className="w-[min(20rem,calc(100vw-1rem))] p-0" align="start" side="top" onClick={(e) => e.stopPropagation()}>
                       <CombinedEmojiPicker
                         onSelectEmoji={(emoji) => handleReact(emoji)}
                         onSelectCustomEmoji={(shortcode, url) => handleReact(`:${shortcode}:`, shortcode, url)}

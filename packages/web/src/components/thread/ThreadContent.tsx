@@ -67,6 +67,11 @@ export function ThreadContent({
 
   const totalReplies = rows.length > 0 ? rows.length - 1 : 0
 
+  // When the note being replied to is present in the tree, the composer renders
+  // inline beneath its row (ThreadTree). Otherwise (e.g. a note not in the
+  // current tree) fall back to the bottom footer composer.
+  const replyTargetInTree = !!replyingTo && rows.some(r => r.node.event.id === replyingTo.id)
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -122,6 +127,10 @@ export function ThreadContent({
           onZap={onZap}
           onPinToBoard={onPinToBoard}
           onReactionPublished={onReactionPublished}
+          replyingTo={replyingTo}
+          onReplyCancel={() => setReplyingTo(null)}
+          onReplyPublished={handleReplyPublished}
+          onOpenEmojiSets={onOpenEmojiSets}
         />
       ) : (
         <div className="flex-1 flex items-center justify-center p-4">
@@ -132,8 +141,9 @@ export function ThreadContent({
         </div>
       )}
 
-      {/* Inline reply composer */}
-      {replyingTo && (
+      {/* Fallback footer composer — only when the reply target isn't a row in
+          the tree (otherwise the composer renders inline beneath its row). */}
+      {replyingTo && !replyTargetInTree && (
         <InlineReplyComposer
           replyTo={replyingTo}
           onCancel={() => setReplyingTo(null)}

@@ -11,9 +11,7 @@ import {
   StyleSheet,
   TouchableOpacity,
   Dimensions,
-  Alert,
 } from 'react-native';
-import * as Clipboard from 'expo-clipboard';
 import { nip19 } from 'nostr-tools';
 import { stripTrackingParams, getTrackingParams } from '@core/sanitizeUtils';
 import { parseListing } from '@core/nip99';
@@ -101,26 +99,22 @@ function WebLink({ url, onTrackerPress }: { url: string; onTrackerPress: (info: 
   const trackingParams = getTrackingParams(url);
   const hasTracker = clean !== url;
   const display = url.replace(/^https?:\/\/(www\.)?/, '').slice(0, 50);
-  const copyText = async (text: string) => {
-    try { await Clipboard.setStringAsync(text); } catch { /* clipboard unavailable */ }
-  };
   const showPrompt = () => onTrackerPress({ url, cleanUrl: clean, params: trackingParams });
   const onPress = () => {
     if (hasTracker) showPrompt();
     else Linking.openURL(url);
   };
-  const onLongPress = () => {
-    if (hasTracker) {
-      showPrompt();
-    } else {
-      copyText(url);
-      Alert.alert('Link copied', url);
-    }
-  };
+  // Long-press opens the options sheet on every link (same options everywhere).
+  const onLongPress = () => showPrompt();
   return (
     <Text style={styles.link} onPress={onPress} onLongPress={onLongPress}>
       {display}{url.length > 50 ? '…' : ''}
-      {hasTracker ? <Text style={styles.trackerShield}> ⚠</Text> : null}
+      {/* Shield opens the link-options sheet. Amber when trackers are present,
+          gray when clean. */}
+      <Text
+        style={hasTracker ? styles.trackerShield : styles.cleanShield}
+        onPress={showPrompt}
+      > {hasTracker ? '⚠' : '🛡'}</Text>
     </Text>
   );
 }
@@ -737,6 +731,7 @@ const styles = StyleSheet.create({
   hashtag: { color: '#a855f7' },
   link: { color: '#a855f7', textDecorationLine: 'underline' },
   trackerShield: { color: '#f59e0b', fontSize: 12 },
+  cleanShield: { color: '#999', fontSize: 12 },
   mediaContainer: { marginTop: 10, borderRadius: 10, overflow: 'hidden' },
   mediaImage: { width: MEDIA_WIDTH, height: MEDIA_WIDTH * 0.56, borderRadius: 10 },
   videoPlaceholder: {

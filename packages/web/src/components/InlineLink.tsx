@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Copy, Check, ShieldAlert } from 'lucide-react'
+import { Copy, Check, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { useLinkCopy } from '@/hooks/useLinkCopy'
 import { LinkCopyContextMenu } from './LinkCopyContextMenu'
 import { TrackerWarningDialog } from './TrackerWarningDialog'
@@ -21,8 +21,17 @@ export function InlineLink({ url, children }: { url: string; children: React.Rea
     copyClean()
   }
 
+  const openClean = () => window.open(cleanUrl, '_blank', 'noopener,noreferrer')
+  const openOriginal = () => window.open(url, '_blank', 'noopener,noreferrer')
+
   return (
-    <LinkCopyContextMenu hasTracker={hasTracker} onCopyClean={copyClean} onCopyOriginal={copyOriginal}>
+    <LinkCopyContextMenu
+      hasTracker={hasTracker}
+      onCopyClean={copyClean}
+      onCopyOriginal={copyOriginal}
+      onOpenClean={openClean}
+      onOpenOriginal={openOriginal}
+    >
       <span className="inline-flex items-baseline gap-0.5">
         <a
           href={url}
@@ -41,17 +50,19 @@ export function InlineLink({ url, children }: { url: string; children: React.Rea
         >
           {children}
         </a>
-        {hasTracker && (
-          <button
-            type="button"
-            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setWarningOpen(true) }}
-            title={`Contains tracking parameters: ${trackingParams.join(', ')}`}
-            aria-label="Link contains trackers"
-            className="inline-flex items-center align-middle text-amber-500 hover:text-amber-600"
-          >
-            <ShieldAlert className="h-3 w-3" />
-          </button>
-        )}
+        {/* Shield opens the link-options sheet on every link (touch has no
+            right-click). Amber when trackers are present, gray when clean. */}
+        <button
+          type="button"
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setWarningOpen(true) }}
+          title={hasTracker ? `Contains tracking parameters: ${trackingParams.join(', ')}` : 'No known trackers — link options'}
+          aria-label={hasTracker ? 'Link contains trackers' : 'Link options'}
+          className={hasTracker
+            ? 'inline-flex items-center align-middle text-amber-500 hover:text-amber-600'
+            : 'inline-flex items-center align-middle text-muted-foreground hover:text-foreground'}
+        >
+          {hasTracker ? <ShieldAlert className="h-3 w-3" /> : <ShieldCheck className="h-3 w-3" />}
+        </button>
         <button
           type="button"
           onClick={copy}
@@ -61,15 +72,13 @@ export function InlineLink({ url, children }: { url: string; children: React.Rea
         >
           {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
         </button>
-        {hasTracker && (
-          <TrackerWarningDialog
-            open={warningOpen}
-            onOpenChange={setWarningOpen}
-            rawUrl={url}
-            cleanUrl={cleanUrl}
-            trackingParams={trackingParams}
-          />
-        )}
+        <TrackerWarningDialog
+          open={warningOpen}
+          onOpenChange={setWarningOpen}
+          rawUrl={url}
+          cleanUrl={cleanUrl}
+          trackingParams={trackingParams}
+        />
       </span>
     </LinkCopyContextMenu>
   )

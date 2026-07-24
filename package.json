@@ -1,6 +1,6 @@
 {
   "name": "corkboards",
-  "version": "0.7.63",
+  "version": "0.7.64",
   "description": "A customizable multi-column pinned note social feed reader and profile creator built on nostr. Zap bitcoin to creators and receive bitcoin for posts others find valuable.",
   "license": "MIT",
   "repository": {

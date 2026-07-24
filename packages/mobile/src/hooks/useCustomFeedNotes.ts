@@ -19,6 +19,7 @@ import {
   isCustomFeedCacheLoaded,
 } from './useCustomFeedNotesCache';
 import { FEED_KINDS } from '@core/feedConstants';
+import { hashtagFeedVerdict } from '@core/noteCategories';
 import { dedupBatch, initialUntilCursor, PAGINATION_MAX_ITERATIONS } from '@core/paginationCore';
 import { fetchRssFeed, rssItemsToEvents, rssItemId } from '../lib/feedUtils';
 import { useEffect, useRef, useCallback, useMemo } from 'react';
@@ -171,8 +172,14 @@ export function useCustomFeedNotes({
 
         if (__DEV__) console.log('[customFeedNotes] Got', events.length, 'author events from relay');
 
-        // If nothing in time window, find most recent note and fetch around it
-        if (events.length === 0) {
+        // If nothing in time window, find most recent note and fetch around it.
+        // Skip this when we already have cached notes for these authors: an empty
+        // window on resume usually means cold relays after idle, and pulling a
+        // stale most-recent-per-author set on top of a good cached feed would
+        // show old, partial results (mobile analog of the web idle-resume bug).
+        const cachedForFeed = (queryClient.getQueryData(queryKey) as NostrEvent[] | undefined) ?? [];
+        const hasCachedAuthorNotes = cachedForFeed.some(e => feed.pubkeys.includes(e.pubkey));
+        if (events.length === 0 && !hasCachedAuthorNotes) {
           if (__DEV__) console.log('[customFeedNotes] No events in window, searching for most recent');
           const kinds = [...FEED_KINDS] as number[];
           const recent = await nostr.query([{
@@ -208,8 +215,12 @@ export function useCustomFeedNotes({
           limit,
           since: now - 3600 * 24 * 7 * multiplier,
         }], { signal: AbortSignal.timeout(15000) }).catch(() => [] as NostrEvent[]);
-        if (__DEV__) console.log('[customFeedNotes] Got', htEvents.length, 'hashtag events');
-        addEvents(htEvents);
+        // Drop tag-stuffing spam (see hashtagFeedVerdict / NIP-24): notes tagged
+        // with this topic but not mentioning it inline while carrying many
+        // unrelated topic tags. Keep genuine + lightly-tagged matches.
+        const htClean = htEvents.filter(note => hashtags.some(tag => hashtagFeedVerdict(note, tag) !== 'spam'));
+        if (__DEV__) console.log('[customFeedNotes] Got', htEvents.length, 'hashtag events,', htClean.length, 'after spam filter');
+        addEvents(htClean);
       }
 
       // 3. Custom relays — query each configured relay directly (per-relay,
@@ -305,7 +316,8 @@ export function useCustomFeedNotes({
         since: opts.since,
         ...(opts.until !== undefined ? { until: opts.until } : {}),
       }], { signal: AbortSignal.timeout(15000) }).catch(() => [] as NostrEvent[]);
-      add(raw);
+      // Same tag-stuffing spam filter as the initial load (see hashtagFeedVerdict).
+      add(raw.filter(note => hashtags.some(tag => hashtagFeedVerdict(note, tag) !== 'spam')));
     }
 
     if (feed.relays.length > 0) {

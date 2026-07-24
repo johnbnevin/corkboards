@@ -6,6 +6,7 @@ import { NoteLink } from './NoteLink'
 import { ProfileLink } from './ProfileLink'
 import { MediaLink } from './MediaLink'
 import { isImageUrl } from '@/lib/mediaUtils'
+import { MARKDOWN_INDICATORS_PATTERN } from '@/lib/markdownDetect'
 import { optimizeMediaUrl } from '@/lib/imageUtils'
 import { parseImetaTag, type ImetaData } from '@core/blossom'
 import { InlineLink } from './InlineLink'
@@ -27,6 +28,10 @@ interface NoteContentProps {
   blurMedia?: boolean
   /** Recursion depth for embedded NoteLinks — stops at MAX_EMBED_DEPTH to prevent circular references */
   depth?: number
+  /** When false, skip the assumed-markdown heuristic and render text raw (still
+   *  linkifies URLs/mentions/hashtags). Used by the global "Render markdown"
+   *  setting and the per-note "show original" toggle. Defaults to true. */
+  renderMarkdown?: boolean
 }
 
 const MAX_EMBED_DEPTH = 3
@@ -196,7 +201,7 @@ function getImetaData(event: NostrEvent): { posters: Map<string, string>; videoU
   return { posters, videoUrls, imageUrls, imetaMeta }
 }
 
-export function NoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, depth = 0 }: NoteContentProps) {
+export function NoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, depth = 0, renderMarkdown = true }: NoteContentProps) {
   // When present (inside the main client), hashtag taps prompt to open a new
   // corkboard instead of navigating away. Absent elsewhere → plain navigation.
   const hashtagAction = useHashtagAction()
@@ -212,7 +217,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
   }, [event.tags]);
 
   const content = useMemo(() => {
-    const parts = parseContent(event.content);
+    const parts = parseContent(event.content, renderMarkdown);
     if (emojiMap.size === 0) return parts;
     // Replace :shortcode: in text parts with emoji parts.
     // Markdown parts are left intact — MarkdownText handles emoji rendering
@@ -236,7 +241,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
       }
     }
     return expanded;
-  }, [event.content, emojiMap])
+  }, [event.content, emojiMap, renderMarkdown])
 
   // Build poster map and media URL sets from imeta tags (NIP-92)
   const { posters: imetaPosters, videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls, imetaMeta } = useMemo(() => getImetaData(event), [event])
@@ -443,9 +448,8 @@ const mediaPattern = new RegExp(
 
 // Regex patterns for parsing — instantiated fresh per call to avoid stateful /g issues
 const MD_LINK_PATTERN = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g
-const MARKDOWN_INDICATORS_PATTERN = /(?:^#{1,6}\s|^\s*[-*+]\s|^\s*\d+\.\s|^\s*>|`|^\s*---\s*$|^\s*\*\*\*\s*$|\*\*|__|\*[^*\s].*\*|_[^_\s].*_|~~.+~~|\|.+\||\[[^\]]+\]\(https?:|!\[|^\s*- \[[ x]\])/m
 
-function parseContent(content: string): ContentPart[] {
+function parseContent(content: string, renderMarkdown = true): ContentPart[] {
   const parts: ContentPart[] = []
   let lastIndex = 0
 
@@ -569,8 +573,10 @@ function parseContent(content: string): ContentPart[] {
       continue
     }
     // Test for markdown indicators — fresh regex per test to avoid stateful /g issues
-    // Guard: skip regex on very long segments to prevent ReDoS
-    if (part.value.length <= 10_000 && MARKDOWN_INDICATORS_PATTERN.test(part.value)) {
+    // Guard: skip regex on very long segments to prevent ReDoS. When markdown
+    // rendering is disabled (global setting off or per-note "show original"),
+    // leave the text raw.
+    if (renderMarkdown && part.value.length <= 10_000 && MARKDOWN_INDICATORS_PATTERN.test(part.value)) {
       final.push({ type: 'markdown', value: part.value })
     } else {
       final.push(part)

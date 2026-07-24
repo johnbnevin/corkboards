@@ -638,6 +638,7 @@ export function MultiColumnClient() {
   const [consolidateSound, setConsolidateSoundRaw] = useLocalStorage<string>('corkboard:consolidate-sound', 'solitaire');
   const [soundAccelerate, setSoundAccelerate] = useLocalStorage<boolean>('corkboard:sound-accelerate', false);
   const [collapseReactions, setCollapseReactions] = useLocalStorage<boolean>('corkboard:collapse-reactions', true);
+  const [renderMarkdown, setRenderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true);
   /** Play 3 sound previews — starts slow, graduates faster (like a consolidate ramping up) */
   const previewSound = useCallback((style: string) => {
     if (style === 'off') return;
@@ -1882,6 +1883,7 @@ export function MultiColumnClient() {
   // Reset extra notes when user changes (extraUserNotes state is defined earlier in the file)
   useEffect(() => {
     setExtraUserNotes([]);
+    otherAuthorsSeenRef.current = {};
   }, [user?.pubkey]);
 
   // Called by loadMoreByCount when it fetches notes for the 'me' tab
@@ -2246,6 +2248,11 @@ export function MultiColumnClient() {
   // dependency (notes → newerNotes → pagination). The ref is updated after each
   // render so load-newer deduplication always sees the latest displayed notes.
   const currentNotesRef = useRef<NostrEvent[]>([]);
+  // Tracks, per tab, whether we've ever displayed other-author notes. Guards the
+  // "include my notes" empty-feed fallback so a transient post-idle empty (cold
+  // relays on resume) doesn't collapse the feed to only the user's own (often
+  // stale) notes until they press "newer". Reset on user change.
+  const otherAuthorsSeenRef = useRef<Record<string, boolean>>({});
   // Alias for hook param — will always be the ref's current array.
   // This intentionally passes the same reference; React won't re-run the hook
   // when this changes (it's just for callback closures inside the hook).
@@ -2579,8 +2586,17 @@ export function MultiColumnClient() {
           );
           baseNotes = [...baseNotes, ...filteredUserNotes];
         } else if (windowNotes.length === 0 && allSelfNotes.length > 0) {
-          // Feed is empty but user has notes — show them unfiltered
-          baseNotes = [...allSelfNotes];
+          // Feed has no other-author notes right now. Only fall back to showing
+          // the user's own notes when this tab has NEVER shown other-author
+          // notes (a genuinely empty feed — e.g. a brand-new corkboard). If it
+          // has shown them before, this empty is transient (cold relays after
+          // idle/resume): leave the feed empty so autofetch / "load newer"
+          // repopulates it, rather than collapsing to the user's own (often
+          // stale, non-recent) notes until they manually press "newer".
+          if (!otherAuthorsSeenRef.current[activeTab]) {
+            baseNotes = [...allSelfNotes];
+          }
+          // else: keep baseNotes empty; the feed will refill on the next fetch.
         }
       }
     }
@@ -3022,6 +3038,12 @@ export function MultiColumnClient() {
   // Keep the pagination hook's currentNotes ref in sync after each render
   // (runs synchronously after the useMemo above resolves notes)
   currentNotesRef.current = notes;
+
+  // Record that this tab has shown other-author notes, so a later transient
+  // empty (cold relays on resume) won't collapse the feed to only own notes.
+  if (activeTab && notes.some(n => n.pubkey !== user?.pubkey)) {
+    otherAuthorsSeenRef.current[activeTab] = true;
+  }
 
   // Stats from deduped notes — these match the visible counts in the kind toggles
   const activeTabStats = useMemo(() => computeNoteKindStats(deduplicatedNotes, eventLookup), [deduplicatedNotes, eventLookup]);
@@ -4291,6 +4313,7 @@ export function MultiColumnClient() {
           onThreadClick={openThread}
           onComment={openThreadAndReply}
           onOpenThread={openThread}
+          activeHashtags={isCustomFeedTab ? activeHashtags : undefined}
           onPinClick={handlePinNote}
           onZapClick={(note) => setZapTargetNote(note)}
           onRepost={(note) => openRepost(note)}
@@ -4544,6 +4567,8 @@ export function MultiColumnClient() {
               onResetOnboarding={() => { setOnboardFollowTarget((contacts?.length ?? 0) + 10); setOnboardingSkipped(false); setAdvancedSettingsOpen(false); setActiveTab('discover'); }}
               collapseReactions={collapseReactions}
               onToggleCollapseReactions={() => setCollapseReactions(!collapseReactions)}
+              renderMarkdown={renderMarkdown}
+              onToggleRenderMarkdown={() => setRenderMarkdown(!renderMarkdown)}
             />
           </DialogContent>
         </Dialog>

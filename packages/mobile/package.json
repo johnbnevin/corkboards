@@ -1,6 +1,6 @@
 {
   "name": "@corkboards/mobile",
-  "version": "0.7.63",
+  "version": "0.7.64",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",

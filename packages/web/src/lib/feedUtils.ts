@@ -8,6 +8,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import type { useNostr } from '@nostrify/react';
 import { debugLog, debugWarn, debugError } from '@/lib/debug';
 import { deduplicateAndSort } from '@core/feedAlgorithms';
+import { hashtagFeedVerdict } from '@core/noteCategories';
 export { deduplicateAndSort, mergeEvents } from '@core/feedAlgorithms';
 
 // Re-export core constants and helpers
@@ -198,7 +199,12 @@ export async function fetchByHashtags(opts: HashtagFetchOpts): Promise<NostrEven
       { signal: AbortSignal.timeout(timeout) },
     );
 
-    return deduplicateAndSort(events);
+    // Drop tag-stuffing spam: notes injected into this feed via a `t` tag they
+    // don't mention inline while carrying many unrelated topic tags. A note that
+    // mentions — or is only lightly tagged with — at least one requested hashtag
+    // is kept (see hashtagFeedVerdict / NIP-24: `t` tags are canonical).
+    const sorted = deduplicateAndSort(events);
+    return sorted.filter(note => tags.some(tag => hashtagFeedVerdict(note, tag) !== 'spam'));
   } catch (err) {
     debugWarn('[hashtagFetch] Query failed:', err);
     return [];

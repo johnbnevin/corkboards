@@ -77,9 +77,12 @@ interface ThreadScreenProps {
   eventId: string;
   onBack: () => void;
   onNavigateThread?: (eventId: string) => void;
+  /** When set (e.g. opened via a note's Comment button), auto-open the reply
+   *  composer targeting this note once the thread loads, and scroll to it. */
+  autoReplyTo?: NostrEvent | null;
 }
 
-export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreenProps) {
+export function ThreadScreen({ eventId, onBack, onNavigateThread, autoReplyTo }: ThreadScreenProps) {
   const {
     rows,
     targetEvent,
@@ -158,6 +161,24 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread }: ThreadScreen
     for (const r of rows) items.push({ type: 'row', row: r });
     return items;
   }, [ancestors, rows]);
+
+  // Auto-reply: when opened via a note's Comment button, open the composer
+  // targeting that note once the thread loads and scroll to it.
+  const autoReplyFiredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoReplyTo || rows.length === 0) return;
+    if (autoReplyFiredRef.current === autoReplyTo.id) return;
+    autoReplyFiredRef.current = autoReplyTo.id;
+    setReplyTarget(autoReplyTo);
+    const idx = listData.findIndex(
+      (item) => item.type === 'row' && item.row.node.event.id === autoReplyTo.id,
+    );
+    if (idx >= 0) {
+      setTimeout(() => {
+        flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.3 });
+      }, 250);
+    }
+  }, [autoReplyTo, rows, listData]);
 
   // Auto-scroll to a just-posted reply so the user sees it immediately
   const lastScrolledReply = useRef<string | null>(null);

@@ -466,7 +466,7 @@ export function ComposeDialog({
                     <Smile className="h-4 w-4" />
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-80 p-0" align="start" side="top">
+                <PopoverContent className="w-[min(20rem,calc(100vw-1rem))] p-0" align="start" side="top">
                   <CombinedEmojiPicker
                     onSelectEmoji={(emoji) => {
                       if (textareaRef.current) insertAtCursor(textareaRef.current, emoji, setContent);

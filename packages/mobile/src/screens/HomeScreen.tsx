@@ -19,6 +19,7 @@ import type { FlatList as FlatListType } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useFeed, useContacts, useFeedLoadMore } from '../hooks/useFeed';
 import { FEED_PAGE_SIZE_MOBILE } from '@core/feedConstants';
+import { hashtagFeedVerdict } from '@core/noteCategories';
 import { useBulkAuthors } from '../hooks/useAuthor';
 import { useNip65Relays } from '../hooks/useNip65Relays';
 import { useMuteList } from '../hooks/useMuteList';
@@ -194,6 +195,8 @@ export function HomeScreen() {
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<string | null>(null);
   const [viewingThread, setViewingThread] = useState<string | null>(null);
+  // Note to auto-target the reply composer at when opening a thread via Comment.
+  const [threadAutoReply, setThreadAutoReply] = useState<NostrEvent | null>(null);
   const flatListRef = useRef<FlatListType<NostrEvent>>(null);
 
   // ── Tab / feed switching ────────────────────────────────────────────────────
@@ -467,9 +470,11 @@ export function HomeScreen() {
   }, [isCustomTab, isGlobalTab, activeCustomFeed, pubkey, contacts, filteredEvents, events, dismissedCount]);
 
   // ── Callbacks ───────────────────────────────────────────────────────────────
+  // Comment button → open the full thread with the reply composer targeting
+  // this note (parity with web), instead of jumping straight to compose.
   const handleReply = useCallback((event: NostrEvent) => {
-    setReplyTarget(event);
-    setComposing(true);
+    setThreadAutoReply(event);
+    setViewingThread(event.id);
   }, []);
 
   const handleFilterByKind = useCallback((kind: KindFilter | 'all' | 'none') => {
@@ -514,20 +519,37 @@ export function HomeScreen() {
     return enabledKinds.length > 0 && enabledKinds.every(k => k === 'images' || k === 'videos');
   }, [kindFilters]);
 
+  // Active corkboard hashtags — used to flag notes tagged with the hashtag but
+  // not mentioning it in their text (see hashtagFeedVerdict).
+  const activeHashtags = useMemo(
+    () => (isCustomTab ? (activeCustomFeed?.hashtags ?? []) : []),
+    [isCustomTab, activeCustomFeed?.hashtags],
+  );
+
   // ── renderNote ──────────────────────────────────────────────────────────────
   const renderNote = useCallback(
-    ({ item }: { item: NostrEvent }) => (
-      <NoteCard
-        event={item}
-        onReply={handleReply}
-        isBookmarked={isBookmarked(item.id)}
-        onToggleBookmark={() => toggleBookmark(item.id)}
-        onViewProfile={setViewingProfile}
-        onViewThread={setViewingThread}
-        mediaFilterActive={mediaFilterActive}
-      />
-    ),
-    [handleReply, isBookmarked, toggleBookmark, mediaFilterActive],
+    ({ item }: { item: NostrEvent }) => {
+      const hashtagTaggedOnly = activeHashtags.length > 0
+        && !activeHashtags.some(tag => hashtagFeedVerdict(item, tag) === 'match')
+        && activeHashtags.some(tag => hashtagFeedVerdict(item, tag) === 'tagged-only');
+      const hashtagTaggedLabel = hashtagTaggedOnly
+        ? activeHashtags.find(tag => hashtagFeedVerdict(item, tag) === 'tagged-only')
+        : undefined;
+      return (
+        <NoteCard
+          event={item}
+          onReply={handleReply}
+          isBookmarked={isBookmarked(item.id)}
+          onToggleBookmark={() => toggleBookmark(item.id)}
+          onViewProfile={setViewingProfile}
+          onViewThread={setViewingThread}
+          mediaFilterActive={mediaFilterActive}
+          hashtagTaggedOnly={hashtagTaggedOnly}
+          hashtagTaggedLabel={hashtagTaggedLabel}
+        />
+      );
+    },
+    [handleReply, isBookmarked, toggleBookmark, mediaFilterActive, activeHashtags],
   );
 
   // ── Loading state ───────────────────────────────────────────────────────────
@@ -706,8 +728,9 @@ export function HomeScreen() {
           {viewingThread && (
             <ThreadScreen
               eventId={viewingThread}
-              onBack={() => setViewingThread(null)}
-              onNavigateThread={(id: string) => setViewingThread(id)}
+              autoReplyTo={threadAutoReply}
+              onBack={() => { setViewingThread(null); setThreadAutoReply(null); }}
+              onNavigateThread={(id: string) => { setThreadAutoReply(null); setViewingThread(id); }}
             />
           )}
         </Modal>

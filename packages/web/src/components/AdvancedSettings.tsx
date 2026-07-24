@@ -24,7 +24,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import {
   Eye, Database, Settings, Bookmark, Trash2, Wifi, WifiOff, Compass,
-  Plus, X, CheckCircle, AlertTriangle, Server, Shield,
+  Plus, X, CheckCircle, AlertTriangle, Server, Shield, Type,
 } from 'lucide-react';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
@@ -55,6 +55,8 @@ interface AdvancedSettingsProps {
   onResetOnboarding: () => void;
   collapseReactions: boolean;
   onToggleCollapseReactions: () => void;
+  renderMarkdown: boolean;
+  onToggleRenderMarkdown: () => void;
 }
 
 type ConfirmAction = 'dismissed' | 'ownDismissed' | 'cache' | 'clientTag' | 'bookmarks' | 'delete' | null;
@@ -87,6 +89,8 @@ export function AdvancedSettings({
   onResetOnboarding,
   collapseReactions,
   onToggleCollapseReactions,
+  renderMarkdown,
+  onToggleRenderMarkdown,
 }: AdvancedSettingsProps) {
   const [confirm, setConfirm] = useState<ConfirmAction>(null);
   const [section, setSection] = useState<'main' | 'relays' | 'blossom' | 'network'>(initialSection);
@@ -217,6 +221,14 @@ export function AdvancedSettings({
             {collapseReactions ? '✓ ' : ''}Collapse Reactions
           </div>
           <p className="text-xs text-muted-foreground mt-0.5 pl-6">Group reactions, reposts, and zaps into badges on the original note</p>
+        </button>
+
+        <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={onToggleRenderMarkdown}>
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Type className="h-4 w-4 shrink-0" />
+            {renderMarkdown ? '✓ ' : ''}Render Markdown
+          </div>
+          <p className="text-xs text-muted-foreground mt-0.5 pl-6">Format notes with markdown (bold, lists, headings). Off shows raw text; you can also toggle a single note with "show original".</p>
         </button>
 
         <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setSection('network')}>

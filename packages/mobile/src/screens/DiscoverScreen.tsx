@@ -219,12 +219,22 @@ export function DiscoverScreen() {
   // Per-pubkey "has onboarded" flag — survives login so a user who skipped isn't
   // re-prompted every login (MMKV is synchronous, so no load-race guard needed).
   const [hasOnboardedFlag, setHasOnboardedFlag] = useState(() => (pubkey ? getOnboarded(pubkey) : true));
+  // Re-read the flag for the newly active account. `getOnboarded` reads MMKV,
+  // an external store, so this can't be derived during render; syncing it in an
+  // effect is the standard shape and the extra pass only occurs on account
+  // switch. (Left as an effect rather than useSyncExternalStore because MMKV
+  // exposes no subscribe hook for this key.)
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setHasOnboardedFlag(pubkey ? getOnboarded(pubkey) : true); }, [pubkey]);
   const markOnboarded = useCallback(() => {
     if (pubkey) { setOnboarded(pubkey); setHasOnboardedFlag(true); }
   }, [pubkey]);
-  // Persist completion so later unfollows don't drop the user back into onboarding.
+  // Persist completion so later unfollows don't drop the user back into
+  // onboarding. This writes to MMKV as well as setting state, so it belongs in
+  // an effect; it self-limits because markOnboarded is a no-op once the flag is
+  // already set.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (pubkey && contacts !== undefined && contacts.length >= onboardFollowTarget) markOnboarded();
   }, [pubkey, contacts, onboardFollowTarget, markOnboarded]);
   const isOnboarding = !hasOnboardedFlag && contacts !== undefined && (contacts.length ?? 0) < onboardFollowTarget && !onboardingSkipped;

@@ -37,6 +37,7 @@ import {
 } from '@/lib/feedUtils';
 import { debugLog, debugWarn, debugError } from '@/lib/debug';
 import { dedupBatch, initialUntilCursor, PAGINATION_MAX_ITERATIONS } from '@core/paginationCore';
+import { MAX_RETAINED_NOTES } from '@core/feedConstants';
 
 export interface CustomFeedDef {
   id: string;
@@ -175,7 +176,11 @@ export function useFeedPagination({
   const setNewerNotes = useCallback((updater: NostrEvent[] | ((prev: NostrEvent[]) => NostrEvent[])) => {
     const prev = newerNotesMap.current.get(activeTab) || [];
     const next = typeof updater === 'function' ? updater(prev) : updater;
-    newerNotesMap.current.set(activeTab, next);
+    // Bound per-tab retention: newer notes are prepended newest-first, so keep the
+    // newest MAX_RETAINED_NOTES and let older ones fall out of the live set. Without
+    // this, hours of autofetch accumulate notes without bound (heap + DOM growth).
+    const capped = next.length > MAX_RETAINED_NOTES ? next.slice(0, MAX_RETAINED_NOTES) : next;
+    newerNotesMap.current.set(activeTab, capped);
     forceUpdate(c => c + 1);
   }, [activeTab]);
   const setNewestTimestamp = useCallback((updater: number | null | ((prev: number | null) => number | null)) => {

@@ -47,8 +47,15 @@ function InlineVideo({ sources }: { sources: string[] }) {
   // Reset the mirror cursor when the media itself changes — a stale high index
   // from the previous URL would make the new video's first error terminal.
   const primarySrc = sources[0] ?? '';
+  // react-hooks/set-state-in-effect flags this, but an effect is the right tool:
+  // the reset must also clear `srcIdxRef`, which the error listener below reads,
+  // and the two must land together. Doing it during render would trade this
+  // warning for a render-phase ref write, and the cascading render it warns
+  // about is a single extra pass that only happens when the media URL actually
+  // changes — i.e. when the component is re-rendering anyway.
   useEffect(() => {
     srcIdxRef.current = 0;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSrcIdx(0);
     setFailed(false);
   }, [primarySrc]);

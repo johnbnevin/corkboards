@@ -19,6 +19,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { buildReplyTags } from '@core/noteClassifier';
+import { getRelayCache, FALLBACK_RELAYS } from '../../lib/NostrProvider';
 import { useNostrPublish } from '../../hooks/useNostrPublish';
 import { useAuthor } from '../../hooks/useAuthor';
 import { useUploadFile } from '../../hooks/useUploadFile';
@@ -119,7 +120,8 @@ export function InlineReplyComposer({
     const text = content.trim();
     if (!text) return;
 
-    const tags: string[][] = [...buildReplyTags(replyTo)];
+    const replyRelayHint = getRelayCache(replyTo.pubkey)?.[0] || FALLBACK_RELAYS[0] || '';
+    const tags: string[][] = [...buildReplyTags(replyTo, replyRelayHint)];
 
     // Extract hashtags
     const hashtagMatches = text.matchAll(/#([a-zA-Z]\w*)/g);

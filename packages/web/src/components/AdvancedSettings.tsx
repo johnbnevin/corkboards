@@ -36,8 +36,9 @@ import {
   getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS,
   getBlobRejectingServers, clearBlobRejectingServer,
 } from '@/hooks/useNostrBackup';
-import { isTauri, tauriGetProxy, tauriSetProxy, tauriGetProxyRequired, tauriSetProxyRequired, tauriProxyLoadFailed } from '@/lib/tauri';
+import { isTauri, tauriGetProxy, tauriSetProxy, tauriGetProxyRequired, tauriSetProxyRequired, tauriProxyLoadFailed, tauriProxyWebviewUnprotected } from '@/lib/tauri';
 import { getImageProxyTemplate, saveImageProxyTemplate } from '@/lib/imageProxySettings';
+import { validateImageProxyTemplate } from '@core/imageProxy';
 
 interface AdvancedSettingsProps {
   dismissedCount: number;
@@ -510,14 +511,18 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
   const [saving, setSaving] = useState(false);
   const [proxyRequired, setProxyRequired] = useState(false);
   const [proxyLoadFailed, setProxyLoadFailed] = useState(false);
+  const [webviewUnprotected, setWebviewUnprotected] = useState(false);
   const [imgProxy, setImgProxy] = useState(getImageProxyTemplate);
   const [savedImgProxy, setSavedImgProxy] = useState(getImageProxyTemplate);
   const desktop = isTauri;
 
   const handleSaveImgProxy = () => {
     const trimmed = imgProxy.trim();
-    if (trimmed && !trimmed.includes('{url}')) {
-      toast({ title: 'Template must include {url}', variant: 'destructive' });
+    // Shared validator so web and mobile accept/reject identically, and so the
+    // UI can never report "enabled" for a template core would silently drop.
+    const invalid = validateImageProxyTemplate(trimmed);
+    if (invalid) {
+      toast({ title: invalid, variant: 'destructive' });
       return;
     }
     saveImageProxyTemplate(trimmed);
@@ -534,6 +539,7 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     });
     tauriGetProxyRequired().then(setProxyRequired);
     tauriProxyLoadFailed().then(setProxyLoadFailed);
+    tauriProxyWebviewUnprotected().then(setWebviewUnprotected);
   }, [desktop]);
 
   const handleToggleRequired = async (next: boolean) => {
@@ -627,6 +633,14 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
           )}
           {proxyLoadFailed && (
             <p className="text-[10px] text-red-500">⚠ The saved proxy config failed to load — your proxy setting may not be active. Re-save it above.</p>
+          )}
+          {webviewUnprotected && (
+            <p className="text-[10px] text-red-500">
+              ⚠ Proxy is REQUIRED but this session&apos;s window is NOT proxied. Native relay
+              queries are still blocked from going direct, but images, embeds and any
+              browser-side connections are going out over clearnet. Set a valid proxy above
+              and restart the app.
+            </p>
           )}
           <button
             type="button"

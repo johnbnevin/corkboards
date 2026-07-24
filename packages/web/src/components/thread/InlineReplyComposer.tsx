@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import type { NostrEvent } from '@nostrify/nostrify'
 import { buildReplyTags } from '@core/noteClassifier'
+import { getRelayCache, FALLBACK_RELAYS } from '@/components/NostrProvider'
 import { useNostrPublish } from '@/hooks/useNostrPublish'
 import { useAuthor } from '@/hooks/useAuthor'
 import { useUploadFile } from '@/hooks/useUploadFile'
@@ -62,7 +63,8 @@ export function InlineReplyComposer({ replyTo, onCancel, onPublished, onOpenEmoj
     let finalContent = content.trim()
     if (images.length > 0) finalContent += '\n\n' + images.join('\n')
 
-    const tags: string[][] = [...buildReplyTags(replyTo)]
+    const replyRelayHint = getRelayCache(replyTo.pubkey)?.[0] || FALLBACK_RELAYS[0] || ''
+    const tags: string[][] = [...buildReplyTags(replyTo, replyRelayHint)]
     const hashtagMatches = finalContent.matchAll(/#([a-zA-Z]\w*)/g)
     for (const match of hashtagMatches) tags.push(['t', match[1].toLowerCase()])
     for (const tag of customEmojiTags) tags.push(tag)

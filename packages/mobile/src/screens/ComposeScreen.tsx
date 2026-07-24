@@ -175,7 +175,9 @@ export function ComposeScreen({ onClose, replyTo, quotedEvent }: ComposeScreenPr
 
       // NIP-10 reply tags (shared with web via @core)
       if (replyTo) {
-        tags.push(...buildReplyTags(replyTo as import('@nostrify/nostrify').NostrEvent));
+        const parent = replyTo as import('@nostrify/nostrify').NostrEvent;
+        const replyRelayHint = getRelayCache(parent.pubkey)?.[0] || FALLBACK_RELAYS[0] || '';
+        tags.push(...buildReplyTags(parent, replyRelayHint));
       }
 
       // Quote tags — NIP-18: ['q', id, relay hint, pubkey]

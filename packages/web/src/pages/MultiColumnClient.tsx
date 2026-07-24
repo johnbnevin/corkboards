@@ -3106,6 +3106,16 @@ export function MultiColumnClient() {
     // output when no filter branch ran, and .sort() mutates in place.
     const regular = (activeTab === 'me' ? filteredNotes.filter(note => !pinnedIdSet.has(note.id)) : [...filteredNotes])
       .sort((a, b) => b.created_at - a.created_at);
+    // No cap here, deliberately. Truncating this time-descending list to a fixed
+    // ceiling would silently defeat "load older": past the ceiling every newly
+    // fetched older page lands in the tail and is sliced straight back off, so
+    // the user pages and nothing appears. The two costs this was meant to bound
+    // are each bounded closer to their source instead —
+    //   * unbounded growth over time: autofetch PREPENDS, and that path is capped
+    //     at MAX_RETAINED_NOTES in useFeedPagination.setNewerNotes;
+    //   * live DOM/CPU cost: capped by MAX_RENDER_PER_COL in FeedGrid.
+    // What remains here is a plain array of event objects the user explicitly
+    // asked for, which is cheap and finite.
     const finalNotes = [...pinned, ...regular];
 
     // Compute hashtags from filtered notes using shared helper

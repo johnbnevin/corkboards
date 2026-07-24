@@ -494,6 +494,53 @@ function DiscoverMoreNotes({ pubkey, currentNoteId, onOpenThread }: { pubkey: st
   )
 }
 
+/**
+ * Custom memo comparator. FeedGrid hands every card fresh inline-arrow callback
+ * props on each render, which defeats the default shallow compare — so any parent
+ * re-render reconciles EVERY mounted card (O(cards), and it worsens as notes pile
+ * up: the measured cause of rising idle CPU). Here we compare the data/display
+ * props by value and callbacks by PRESENCE only. Their identity is allowed to
+ * churn because their behaviour is stable — each closes over this card's own
+ * immutable `note` plus stable parent handlers — so a card re-renders only when
+ * something it actually renders changes. Every destructured prop is covered; a
+ * new render-affecting prop must be added here too.
+ */
+function noteCardPropsEqual(prev: NoteCardProps, next: NoteCardProps): boolean {
+  return (
+    prev.note.id === next.note.id &&
+    prev.engagement === next.engagement &&
+    prev.parentNote?.id === next.parentNote?.id &&
+    prev.hashtagTaggedLabel === next.hashtagTaggedLabel &&
+    !!prev.isPinned === !!next.isPinned &&
+    !!prev.showPinButton === !!next.showPinButton &&
+    !!prev.isFresh === !!next.isFresh &&
+    !!prev.blurMedia === !!next.blurMedia &&
+    !!prev.forceExpanded === !!next.forceExpanded &&
+    !!prev.isOnSavedForLaterPage === !!next.isOnSavedForLaterPage &&
+    !!prev.isMinimized === !!next.isMinimized &&
+    !!prev.isOwnNote === !!next.isOwnNote &&
+    !!prev.isMeTab === !!next.isMeTab &&
+    !!prev.discoverMode === !!next.discoverMode &&
+    !!prev.mediaFilterActive === !!next.mediaFilterActive &&
+    !!prev.isEngagementStub === !!next.isEngagementStub &&
+    !!prev.hashtagTaggedOnly === !!next.hashtagTaggedOnly &&
+    !!prev.onPinClick === !!next.onPinClick &&
+    !!prev.onThreadClick === !!next.onThreadClick &&
+    !!prev.onComment === !!next.onComment &&
+    !!prev.onOpenThread === !!next.onOpenThread &&
+    !!prev.onZapClick === !!next.onZapClick &&
+    !!prev.onRepost === !!next.onRepost &&
+    !!prev.onPinToBoard === !!next.onPinToBoard &&
+    !!prev.onMinimize === !!next.onMinimize &&
+    !!prev.onExpand === !!next.onExpand &&
+    !!prev.onDismiss === !!next.onDismiss &&
+    !!prev.onDelete === !!next.onDelete &&
+    !!prev.onReactionPublished === !!next.onReactionPublished &&
+    !!prev.onDismissThread === !!next.onDismissThread &&
+    !!prev.onOpenEmojiSets === !!next.onOpenEmojiSets
+  );
+}
+
 export const NoteCard = React.memo(function NoteCard({
   note,
   isPinned,
@@ -1629,4 +1676,4 @@ export const NoteCard = React.memo(function NoteCard({
     </Card>
     </div>
   )
-})
+}, noteCardPropsEqual)

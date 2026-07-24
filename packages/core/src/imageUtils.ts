@@ -14,43 +14,28 @@ import { isUnsafeHost } from './ipUtils';
 const THUMBNAIL_SIZE = 64;
 const PREVIEW_SIZE = 400;
 
+/** Returns `url` with `param=size` set, or `url` unchanged if it won't parse. */
+function withSizeParam(param: string) {
+  return (url: string, size: number): string => {
+    try {
+      const u = new URL(url);
+      u.searchParams.set(param, String(size));
+      return u.toString();
+    } catch {
+      return url;
+    }
+  };
+}
+
+/**
+ * Hosts that accept a resize query param, keyed by registrable host. Lookup
+ * matches the host itself OR any subdomain of it (see the `.endsWith` below),
+ * so `nostr.build` already covers `i.nostr.build` / `image.nostr.build` —
+ * listing those separately was dead weight that could drift out of sync.
+ */
 const KNOWN_THUMBNAIL_HOSTS: Record<string, (url: string, size: number) => string> = {
-  'nostr.build': (url, size) => {
-    try {
-      const u = new URL(url);
-      u.searchParams.set('size', String(size));
-      return u.toString();
-    } catch {
-      return url;
-    }
-  },
-  'damus.app': (url, size) => {
-    try {
-      const u = new URL(url);
-      u.searchParams.set('s', String(size));
-      return u.toString();
-    } catch {
-      return url;
-    }
-  },
-  'image.nostr.build': (url, size) => {
-    try {
-      const u = new URL(url);
-      u.searchParams.set('size', String(size));
-      return u.toString();
-    } catch {
-      return url;
-    }
-  },
-  'i.nostr.build': (url, size) => {
-    try {
-      const u = new URL(url);
-      u.searchParams.set('size', String(size));
-      return u.toString();
-    } catch {
-      return url;
-    }
-  },
+  'nostr.build': withSizeParam('size'),
+  'damus.app': withSizeParam('s'),
 };
 
 const GOOGLE_FAVICON_HOSTS = ['www.google.com', 'google.com'];

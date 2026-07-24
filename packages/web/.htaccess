@@ -9,6 +9,16 @@
   Header always set X-Frame-Options "DENY"
   Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
 
+  # A Nostr feed reader needs none of these device/identity APIs. Denying them
+  # outright means an embedded third-party frame (video/audio players are
+  # allowed by the CSP frame-src list) can't prompt for the camera, mic, or
+  # location under our origin's name. `interest-cohort=()` opts out of
+  # cohort-based ad targeting.
+  Header always set Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=(), xr-spatial-tracking=(), interest-cohort=()"
+  # NOTE: Cross-Origin-Opener-Policy is deliberately NOT set — it severs
+  # window.opener for cross-origin popups, which would break the nostr-login
+  # remote-signer (NIP-46) popup flow.
+
   # Never cache index.html or 404.html — these point to (unhashed) bundles.
   <FilesMatch "^(index|404)\.html$">
     Header set Cache-Control "no-cache, no-store, must-revalidate"

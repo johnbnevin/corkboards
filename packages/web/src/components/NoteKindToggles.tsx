@@ -16,19 +16,11 @@ export const ALL_NOTE_KIND_FILTERS: readonly KindFilter[] = [
   'reposts', 'reactions', 'highlights', 'recipes',
 ] as const;
 
-export interface NoteKindStats {
-  total: number;
-  shortNotes: number;
-  replies: number;
-  longForm: number;
-  reposts: number;
-  reactions: number;
-  videos: number;
-  images: number;
-  highlights: number;
-  recipes: number;
-  other: number;
-}
+// The stats shape is defined by the classifier that produces it. Re-export
+// rather than redeclare, so adding a category in @core can't leave this row of
+// chips silently counting a field that no longer exists.
+export type { NoteKindStats } from '@core/noteCategories';
+import type { NoteKindStats } from '@core/noteCategories';
 
 // ─── Toggle config ────────────────────────────────────────────────────────────
 

@@ -126,9 +126,10 @@ export function useAuthor(pubkey: string | undefined) {
 
       return withConcurrencyLimit(() => fetchAuthorFromNetwork(pubkey, signal, nostr as NostrPool));
     },
-    // Unresolved profiles (no metadata) go stale fast so they re-check instead
-    // of sticking as "user_xxxx" for the whole TTL. Parity with web.
-    staleTime: (query) => (query.state.data?.metadata ? STALE_TIME : 30_000),
+    // Unresolved profiles (no metadata) go stale in 2 min so they re-check instead
+    // of sticking as "user_xxxx" for the whole TTL — was 30s, raised to cut the
+    // per-card refetch/re-render churn on long sessions. Parity with web.
+    staleTime: (query) => (query.state.data?.metadata ? STALE_TIME : 120_000),
     gcTime: CACHE_MAX_AGE,
     // Startup is congested (relay connects + feed queries + N profile fetches);
     // spaced retries resolve most of the "shows npub/user_xxxx" cases.

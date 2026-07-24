@@ -21,8 +21,11 @@ const REARRANGE_LOCKOUT_MS = 700;
 const INITIAL_RENDER_PER_COL = 8;
 /** How many notes per column to add when scrolling near the bottom */
 const RENDER_INCREMENT_PER_COL = 8;
-/** Hard cap on DOM notes per column before user must dismiss to load more */
-const MAX_RENDER_PER_COL = 1000;
+/** Hard cap on DOM notes per column before user must dismiss to load more.
+ *  Kept well below the old 1000 so a long session can't pile thousands of live
+ *  NoteCards into the webview DOM. With the per-tab MAX_RETAINED_NOTES cap this
+ *  is a secondary ceiling; 200/col across typical column counts stays generous. */
+const MAX_RENDER_PER_COL = 200;
 
 // ─── Discover loading experience ─────────────────────────────────────────────
 

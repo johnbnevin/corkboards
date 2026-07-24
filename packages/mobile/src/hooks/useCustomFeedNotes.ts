@@ -456,8 +456,8 @@ export function useCustomFeedNotes({
     loadMore,
     addNotes,
     refresh,
-    // Same per-tab Map pattern as useFeedPagination — reading the ref at return
-    // time is deliberate, see useFeedPagination's design comment.
+    // Same per-tab Map pattern web uses in useFeedPagination — reading the ref
+    // at return time is deliberate; see that hook's design comment.
     // eslint-disable-next-line react-hooks/refs
     hoursLoaded: hoursLoadedRef.current,
   };

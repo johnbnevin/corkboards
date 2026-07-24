@@ -19,7 +19,18 @@ import type { FlatList as FlatListType } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useFeed, useContacts, useFeedLoadMore } from '../hooks/useFeed';
 import { FEED_PAGE_SIZE_MOBILE } from '@core/feedConstants';
-import { hashtagFeedVerdict } from '@core/noteCategories';
+// Note classification comes from @core — these were re-implemented locally here,
+// and the copies had silently fallen behind: they missed a dozen video URL
+// patterns, the ambiguous-CDN image heuristic, and NIP-25 marked-e-tag reaction
+// targeting, so the same note could land in different filter chips on mobile
+// than on web. Import the canonical versions so there is one classifier.
+import {
+  hashtagFeedVerdict,
+  getNoteCategories,
+  computeNoteKindStats,
+  computeHashtagCounts,
+  noteMatchesHashtags,
+} from '@core/noteCategories';
 import { useBulkAuthors } from '../hooks/useAuthor';
 import { useNip65Relays } from '../hooks/useNip65Relays';
 import { useMuteList } from '../hooks/useMuteList';
@@ -27,126 +38,19 @@ import { useBookmarks } from '../hooks/useBookmarks';
 import { useCollapsedNotes } from '../hooks/useCollapsedNotes';
 import { useAuth } from '../lib/AuthContext';
 import { useLocalStorage } from '../hooks/useLocalStorage';
+import { usePlatformStorage } from '../hooks/usePlatformStorage';
+import { useAutoFetch } from '../hooks/useAutoFetch';
+import { STORAGE_KEYS } from '../lib/storageKeys';
 import { useCustomFeedNotes } from '../hooks/useCustomFeedNotes';
 import { useFeedLimit } from '../hooks/useFeedLimit';
 import { NoteCard } from '../components/NoteCard';
 import { FeedFilters } from '../components/FeedFilters';
-import type { KindFilter, NoteKindStats } from '../components/NoteKindToggles';
+import type { KindFilter } from '../components/NoteKindToggles';
 import { ProfileModalProvider } from '../components/ProfileModal';
 import { DeepLinkHandler } from '../components/DeepLinkHandler';
 import { ComposeScreen } from './ComposeScreen';
 import { ProfileScreen } from './ProfileScreen';
 import { ThreadScreen } from './ThreadScreen';
-
-// ============================================================================
-// Note classification helpers (ported from web MultiColumnClient)
-// ============================================================================
-
-const VIDEO_URL_PATTERNS = [
-  /youtube\.com\/watch/i, /youtu\.be\//i, /youtube\.com\/shorts\//i,
-  /youtube\.com\/embed\//i, /rumble\.com\/v[\w-]/i, /tiktok\.com\/.+\/video\//i,
-  /vimeo\.com\/\d/i, /\.mp4\b/i, /\.webm\b/i, /\.mov\b/i,
-];
-const IMAGE_EXT_PATTERN = /\.(jpg|jpeg|png|webp|svg|bmp|gif)\b/i;
-const IMAGE_CDN_PATTERNS = [
-  /nostr\.build\/i\//i, /image\.nostr\.build\//i, /i\.nostr\.build\//i,
-];
-
-function hasVideoContent(note: NostrEvent): boolean {
-  if (note.kind === 34235 || note.kind === 34236) return true;
-  if (note.tags.some(t => t[0] === 'imeta' && t.some(v => /video/i.test(v)))) return true;
-  return VIDEO_URL_PATTERNS.some(p => p.test(note.content || ''));
-}
-
-function hasImageContent(note: NostrEvent): boolean {
-  const content = note.content || '';
-  if (note.tags.some(t => t[0] === 'imeta' && t.some(v => /image/i.test(v)))) return true;
-  if (IMAGE_EXT_PATTERN.test(content)) return true;
-  if (IMAGE_CDN_PATTERNS.some(p => p.test(content))) return true;
-  return false;
-}
-
-function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrEvent>): Set<string> {
-  const cats = new Set<string>();
-  const repostedKind = event.kind === 16 ? parseInt(event.tags.find(t => t[0] === 'k')?.[1] || '0', 10) : 0;
-
-  const targetId = (event.kind === 7 || event.kind === 9735 || event.kind === 6 || event.kind === 16)
-    ? event.tags.find(t => t[0] === 'e')?.[1] : null;
-  let targetEvent = targetId && lookup ? lookup.get(targetId) : null;
-  if (!targetEvent && (event.kind === 6 || event.kind === 16) && event.content?.startsWith('{')) {
-    try { targetEvent = JSON.parse(event.content) as NostrEvent; } catch { /* not JSON */ }
-  }
-
-  if (event.kind === 21 || event.kind === 22 || hasVideoContent(event) || repostedKind === 34235 || repostedKind === 34236 || repostedKind === 21 || repostedKind === 22 || (targetEvent && hasVideoContent(targetEvent))) cats.add('videos');
-  if (event.kind === 20 || hasImageContent(event) || (targetEvent && hasImageContent(targetEvent))) cats.add('images');
-  if (event.kind === 30023 && event.tags.some(t => (t[0] === 'r' && t[1]?.includes('zap.cooking')) || (t[0] === 't' && t[1] === 'recipe'))) cats.add('recipes');
-  if (event.kind === 6 || event.kind === 16) cats.add('reposts');
-  if (event.kind === 7 || event.kind === 9735) cats.add('reactions');
-  if (event.kind === 9802) cats.add('highlights');
-  if (event.kind === 30023 && !cats.has('recipes')) cats.add('longForm');
-  if (event.kind === 1) {
-    cats.add(event.tags.some(t => t[0] === 'e') ? 'replies' : 'shortNotes');
-  }
-  // NIP-22 comment (kind 1111) is always a reply to something
-  if (event.kind === 1111) cats.add('replies');
-  // NIP-94 file metadata (kind 1063) — image or video by mime type
-  if (event.kind === 1063) {
-    const mime = event.tags.find(t => t[0] === 'm')?.[1] ?? '';
-    if (mime.startsWith('video/')) cats.add('videos');
-    else cats.add('images');
-  }
-  // NIP-88 poll (kind 1068) — grouped with short notes
-  if (event.kind === 1068) cats.add('shortNotes');
-  if (cats.size === 0) cats.add('other');
-  return cats;
-}
-
-function getNoteHashtags(note: NostrEvent): Set<string> {
-  const tags = new Set<string>();
-  for (const t of note.tags) { if (t[0] === 't' && t[1]) tags.add(t[1].toLowerCase()); }
-  for (const match of note.content.matchAll(/#([a-zA-Z]\w*)/g)) { tags.add(match[1].toLowerCase()); }
-  return tags;
-}
-
-function getRepostHashtags(note: NostrEvent): Set<string> {
-  if ((note.kind !== 6 && note.kind !== 16) || !note.content) return new Set();
-  try {
-    const embedded = JSON.parse(note.content);
-    const tags = new Set<string>();
-    if (Array.isArray(embedded.tags)) {
-      for (const t of embedded.tags) {
-        if (Array.isArray(t) && t[0] === 't' && typeof t[1] === 'string') tags.add(t[1].toLowerCase());
-      }
-    }
-    if (typeof embedded.content === 'string') {
-      for (const match of embedded.content.matchAll(/#([a-zA-Z]\w*)/g)) tags.add(match[1].toLowerCase());
-    }
-    return tags;
-  } catch { return new Set(); }
-}
-
-function computeNoteKindStats(events: NostrEvent[] | undefined, lookup?: Map<string, NostrEvent>): NoteKindStats | undefined {
-  if (!events || events.length === 0) return undefined;
-  const stats: NoteKindStats = {
-    total: events.length, shortNotes: 0, replies: 0, longForm: 0,
-    reposts: 0, reactions: 0, videos: 0, images: 0, highlights: 0, recipes: 0, other: 0,
-  };
-  for (const event of events) {
-    for (const cat of getNoteCategories(event, lookup)) {
-      (stats as unknown as Record<string, number>)[cat]++;
-    }
-  }
-  return stats;
-}
-
-function computeHashtagCounts(notes: NostrEvent[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const note of notes) {
-    const tags = (note.kind === 6 || note.kind === 16) ? getRepostHashtags(note) : getNoteHashtags(note);
-    for (const tag of tags) { counts.set(tag, (counts.get(tag) || 0) + 1); }
-  }
-  return counts;
-}
 
 // ============================================================================
 // Custom feed type (matches web's CustomFeed interface)
@@ -311,6 +215,21 @@ export function HomeScreen() {
   const isFetching = isCustomTab ? customLoading : followFetching;
   const refetch = isCustomTab ? customRefresh : followRefetch;
 
+  // ── Autofetch ───────────────────────────────────────────────────────────────
+  // Periodic background refresh, matching web. Reads the same two synced storage
+  // keys web does, so a user who turned autofetch on for small screens there
+  // gets it here too. Phones are always the "small screen" case, hence
+  // AUTOFETCH_SMALL. Foreground/in-flight gating lives in the hook.
+  const [autofetchEnabled] = usePlatformStorage<boolean>(STORAGE_KEYS.AUTOFETCH_SMALL, false);
+  const [autofetchIntervalSecs] = usePlatformStorage<number>(STORAGE_KEYS.AUTOFETCH_INTERVAL_SECS, 120);
+  useAutoFetch({
+    enabled: !!autofetchEnabled,
+    intervalSecs: autofetchIntervalSecs,
+    activeTab,
+    isLoadingAny: isFetching || isLoadingMore || customLoadingMore,
+    loadNewer: refetch,
+  });
+
   // ── Mute + deduplicate ──────────────────────────────────────────────────────
   const events = useMemo(() => {
     if (!rawEvents) return rawEvents;
@@ -388,12 +307,20 @@ export function HomeScreen() {
       });
     }
 
-    // Hashtag filters
+    // Hashtag filters — only show notes whose hashtags match the selection.
+    // Reactions/zaps check their target note's hashtags; if the target is unknown, hide them.
+    // Reposts check embedded content. Regular notes check tags + inline #hashtags.
+    // (Same rules as web — mobile previously ignored the reaction/zap target and
+    // so kept reactions that matched nothing the user had selected.)
     if (hashtagFilters.size > 0) {
       result = result.filter(note => {
-        const tags = (note.kind === 6 || note.kind === 16) ? getRepostHashtags(note) : getNoteHashtags(note);
-        for (const tag of tags) { if (hashtagFilters.has(tag)) return true; }
-        return false;
+        if (note.kind === 7 || note.kind === 9735) {
+          const targetId = note.tags.find(t => t[0] === 'e')?.[1];
+          const target = targetId ? eventLookup?.get(targetId) : null;
+          if (target) return noteMatchesHashtags(target, hashtagFilters);
+          return false; // Unknown target — hide to keep results deterministic
+        }
+        return noteMatchesHashtags(note, hashtagFilters);
       });
     }
 

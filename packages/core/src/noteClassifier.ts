@@ -128,19 +128,33 @@ export function getReferencedEventIds(event: NostrEvent): string[] {
  * Follows NIP-10 conventions:
  * - If `replyTo` has a root e-tag, that stays root and `replyTo.id` becomes the reply marker.
  * - If `replyTo` has no root e-tag (it's a top-level note), `replyTo.id` is both root.
- * - Always includes a p-tag for the author being replied to.
+ * - p-tags carry the immediate parent's author PLUS the parent's own p-tags. Because every
+ *   reply forwards its parent's p-tags, the parent already holds the full ancestor chain, so
+ *   this yields parent → grandparent → … → root author (never siblings) while reading only the
+ *   parent event we already hold. Matches NIP-10's example ([a1, p1, p2, p3]).
+ * - Relay hints: the reply (parent) e-tag uses the caller-supplied `replyRelayHint`; the root
+ *   e-tag reuses the relay hint the parent already carried on its own root tag.
  *
+ * @param replyTo - The event being replied to (the immediate parent).
+ * @param replyRelayHint - Optional relay hint for locating the parent event.
  * Returns an array of string[][] tags ready to be included in a new event.
  */
-export function buildReplyTags(replyTo: NostrEvent): string[][] {
+export function buildReplyTags(replyTo: NostrEvent, replyRelayHint = ''): string[][] {
   const tags: string[][] = [];
   const rootTag = replyTo.tags.find(t => t[0] === 'e' && t[3] === 'root');
   const rootId = (rootTag?.[1] && isValidEventId(rootTag[1])) ? rootTag[1] : replyTo.id;
 
   if (rootId !== replyTo.id) {
-    tags.push(['e', rootId, '', 'root']);
+    // Forward the root's relay hint from the parent's own root tag when available.
+    tags.push(['e', rootId, rootTag?.[2] || '', 'root']);
   }
-  tags.push(['e', replyTo.id, '', replyTo.id === rootId ? 'root' : 'reply']);
-  tags.push(['p', replyTo.pubkey]);
+  tags.push(['e', replyTo.id, replyRelayHint, replyTo.id === rootId ? 'root' : 'reply']);
+
+  // Ancestor chain: parent author first, then the parent's forwarded participants.
+  const pubkeys: string[] = [replyTo.pubkey];
+  for (const t of replyTo.tags) {
+    if (t[0] === 'p' && t[1] && !pubkeys.includes(t[1])) pubkeys.push(t[1]);
+  }
+  for (const pk of pubkeys) tags.push(['p', pk]);
   return tags;
 }

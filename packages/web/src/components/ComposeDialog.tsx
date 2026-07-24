@@ -187,7 +187,8 @@ export function ComposeDialog({
 
     // Reply tags (NIP-10)
     if (replyTo) {
-      tags.push(...buildReplyTags(replyTo));
+      const replyRelayHint = getRelayCache(replyTo.pubkey)?.[0] || FALLBACK_RELAYS[0] || ''
+      tags.push(...buildReplyTags(replyTo, replyRelayHint));
     }
 
     // Quote tags — NIP-18: ['q', id, relay hint, pubkey]

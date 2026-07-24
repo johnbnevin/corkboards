@@ -155,23 +155,86 @@ pub async fn relay_query(
     }
 }
 
-/// Open one WebSocket, send REQ, collect all events until EOSE/CLOSED.
+/// Reject a relay URL that this process must not dial.
+///
+/// Two checks, both of which matter because the URL arrives over the IPC
+/// boundary from the webview and is therefore only as trustworthy as the page:
+///
+///  1. Scheme must be ws/wss. Anything else could coerce the proxy path into a
+///     raw SOCKS/TCP connect to an arbitrary internal host:port.
+///  2. Host must not be loopback/private/link-local. This mirrors the JS-side
+///     `isSecureRelay` / `isUnsafeHost` gate (see `packages/core/src/ipUtils.ts`);
+///     without it the native path was strictly more permissive than the web path
+///     it exists to replace, so `ws://127.0.0.1:9050` or
+///     `ws://169.254.169.254/` would happily be dialled from Rust. Hostnames are
+///     not resolved here — this is the same lexical check the clients do, and
+///     DNS-level rebinding is out of scope for a relay socket that speaks only
+///     the Nostr wire protocol.
+fn validate_relay_url(url: &str) -> Result<(), String> {
+    let parsed =
+        url::Url::parse(url).map_err(|_| "invalid relay URL".to_string())?;
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return Err("unsupported relay scheme (ws/wss only)".to_string());
+    }
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            if ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || ip.is_documentation()
+                // 100.64.0.0/10 CGNAT and 198.18.0.0/15 benchmarking have no
+                // stable std predicate; check them by octet.
+                || (ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
+                || (ip.octets()[0] == 198 && (18..=19).contains(&ip.octets()[1]))
+                || ip.octets()[0] >= 240
+            {
+                return Err("refusing to connect to a private/reserved address".to_string());
+            }
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
+                return Err("refusing to connect to a private/reserved address".to_string());
+            }
+            let seg0 = ip.segments()[0];
+            // fe80::/10 link-local and fc00::/7 unique-local.
+            if (0xfe80..=0xfebf).contains(&seg0) || (0xfc00..=0xfdff).contains(&seg0) {
+                return Err("refusing to connect to a private/reserved address".to_string());
+            }
+        }
+        Some(url::Host::Domain(d)) => {
+            let d = d.to_ascii_lowercase();
+            if d == "localhost" || d.ends_with(".localhost") || d.is_empty() {
+                return Err("refusing to connect to a private/reserved address".to_string());
+            }
+        }
+        None => return Err("relay URL missing host".to_string()),
+    }
+    Ok(())
+}
+
+/// Hard cap on events accumulated from a single relay connection.
+///
+/// `run_query` reads until EOSE/CLOSED or the caller's timeout. A hostile or
+/// broken relay can stream EVENT frames indefinitely without ever sending EOSE,
+/// and every frame was being pushed into an unbounded `Vec` — the whole timeout
+/// window's worth of traffic held in memory at once. Stop reading at the cap and
+/// return what we have; a truncated page is strictly better than an OOM.
+const MAX_EVENTS_PER_QUERY: usize = 5000;
+
+/// Open one WebSocket, send REQ, collect events until EOSE/CLOSED or the cap.
 ///
 /// Routes through SOCKS5 (`proxy::current_proxy()`) if configured; otherwise
 /// uses `tokio_tungstenite::connect_async` directly. The proxy check happens
 /// per query so toggling the setting takes effect on the next connection
 /// without an app restart.
 async fn do_query(url: String, filter: Value) -> RelayQueryResult {
-    // Only ws/wss are valid relay schemes. Rejecting others stops a crafted URL
-    // from coercing the proxy path into a raw SOCKS/TCP connect to an arbitrary
-    // internal host:port (an SSRF-style primitive over the IPC boundary).
-    let scheme_ok = url::Url::parse(&url)
-        .map(|u| matches!(u.scheme(), "ws" | "wss"))
-        .unwrap_or(false);
-    if !scheme_ok {
+    if let Err(e) = validate_relay_url(&url) {
         return RelayQueryResult {
             events: vec![],
-            error: Some("unsupported relay scheme (ws/wss only)".to_string()),
+            error: Some(e),
         };
     }
 
@@ -356,6 +419,9 @@ where
         match arr.first().and_then(|v| v.as_str()) {
             Some("EVENT") if arr.len() >= 3 => {
                 events.push(arr[2].clone());
+                if events.len() >= MAX_EVENTS_PER_QUERY {
+                    break; // hostile/broken relay streaming without EOSE
+                }
             }
             Some("EOSE") | Some("CLOSED") => break,
             _ => {}

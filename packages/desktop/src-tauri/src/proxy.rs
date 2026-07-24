@@ -28,6 +28,14 @@ static INIT: Once = Once::new();
 /// Set when the on-disk config existed but could not be parsed — surfaced to the
 /// UI so a Tor user knows their proxy setting may not have loaded.
 static LOAD_FAILED: Mutex<bool> = Mutex::new(false);
+/// Set at startup when `proxy_required` was on but the WebView could NOT be
+/// routed through a proxy (none configured, or the URL failed to parse). The
+/// kill-switch in `relay.rs` only covers native Rust relay sockets; WebView
+/// traffic — images, embeds, and any relay socket opened from JS — would go out
+/// directly and deanonymize a Tor-only user without them noticing. We surface it
+/// so the UI can say so loudly rather than failing silently. Latched at window
+/// creation, since the WebView's proxy can't be changed without a restart.
+static WEBVIEW_UNPROTECTED: Mutex<bool> = Mutex::new(false);
 
 fn config_path() -> Option<PathBuf> {
     let base = dirs::data_local_dir()?;
@@ -137,4 +145,17 @@ pub fn get_proxy_required() -> bool {
 pub fn proxy_load_failed() -> bool {
     INIT.call_once(load_from_disk);
     *lock(&LOAD_FAILED)
+}
+
+/// Record (at window creation) whether the WebView ended up unproxied while the
+/// user had `proxy_required` on. See `WEBVIEW_UNPROTECTED`.
+pub fn set_webview_unprotected(unprotected: bool) {
+    *lock(&WEBVIEW_UNPROTECTED) = unprotected;
+}
+
+/// True when `proxy_required` is on but this session's WebView is NOT routed
+/// through a proxy — the UI must warn that non-relay traffic is going direct.
+#[tauri::command]
+pub fn proxy_webview_unprotected() -> bool {
+    *lock(&WEBVIEW_UNPROTECTED)
 }

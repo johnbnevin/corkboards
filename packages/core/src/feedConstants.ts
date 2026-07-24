@@ -5,6 +5,14 @@
 export const FEED_PAGE_SIZE_DESKTOP = 60;       // notes per query on desktop
 export const FEED_PAGE_SIZE_MOBILE = 25;        // notes per column on mobile
 export const FEED_LOAD_MORE_COUNT = 60;    // notes to fetch on "load older"
+/**
+ * Max notes retained per feed/tab in memory. Long sessions (autofetch every
+ * ~2 min for hours) otherwise accumulate notes without bound — the JS heap and
+ * DOM grow until the app slows and eventually thrashes. This caps the newest N
+ * notes kept per tab; older ones fall out of the live set (they can be
+ * re-fetched by scrolling back). Newest-first arrays are sliced to this length.
+ */
+export const MAX_RETAINED_NOTES = 500;
 export const AUTHOR_BATCH_SIZE = 500;  // max authors per relay query (single query)
 export const MAX_PARALLEL_BATCHES = 1;
 /** RSS proxy URL — relative by default so it works on any deployment (self-hosted, stage, prod) */

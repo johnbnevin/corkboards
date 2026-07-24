@@ -20,6 +20,9 @@ import type { FeedLimitMultiplier } from '../hooks/useFeedLimit';
 interface ThroughputSettingsProps {
   multiplier: FeedLimitMultiplier;
   onMultiplierChange: (v: FeedLimitMultiplier) => void;
+  /** Master on/off for periodic background refresh. */
+  autofetchEnabled: boolean;
+  onAutofetchEnabledChange: (v: boolean) => void;
   autofetchIntervalSecs: number;
   onAutofetchIntervalChange: (v: number) => void;
   avatarSizeLimit: SizeLimitOption;
@@ -60,6 +63,8 @@ function OptionRow({ label, options, value, onChange }: {
 export function ThroughputSettings({
   multiplier,
   onMultiplierChange,
+  autofetchEnabled,
+  onAutofetchEnabledChange,
   autofetchIntervalSecs,
   onAutofetchIntervalChange,
   avatarSizeLimit,
@@ -80,16 +85,30 @@ export function ThroughputSettings({
         onChange={(v) => onMultiplierChange(Number(v) as FeedLimitMultiplier)}
       />
 
+      {/* The interval was configurable before autofetch itself was — off by
+          default, and only ticking while the app is foregrounded. */}
       <OptionRow
-        label="Autofetch interval"
+        label="Autofetch new notes"
         options={[
-          { value: 180, label: '3 min' },
-          { value: 120, label: '2 min' },
-          { value: 60, label: '1 min' },
+          { value: 'off', label: 'Off' },
+          { value: 'on', label: 'On' },
         ]}
-        value={autofetchIntervalSecs}
-        onChange={(v) => onAutofetchIntervalChange(Number(v))}
+        value={autofetchEnabled ? 'on' : 'off'}
+        onChange={(v) => onAutofetchEnabledChange(v === 'on')}
       />
+
+      {autofetchEnabled && (
+        <OptionRow
+          label="Autofetch interval"
+          options={[
+            { value: 180, label: '3 min' },
+            { value: 120, label: '2 min' },
+            { value: 60, label: '1 min' },
+          ]}
+          value={autofetchIntervalSecs}
+          onChange={(v) => onAutofetchIntervalChange(Number(v))}
+        />
+      )}
 
       <OptionRow
         label="Avatar file size max"

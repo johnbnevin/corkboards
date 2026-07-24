@@ -128,6 +128,12 @@ export function useFeedLoadMore({ authors, isDismissed, onLoaded }: UseFeedLoadM
       }
 
       if (allTrulyNew.length > 0) {
+        // Merge and re-sort newest-first. Intentionally NOT truncated to
+        // MAX_RETAINED_NOTES: these are older notes the user explicitly paged
+        // for, and a newest-first cap would slice them straight back off. The
+        // growth-over-time source is autofetch (which replaces this cache
+        // wholesale rather than appending), and FlatList virtualizes rendering,
+        // so the live cost here stays bounded. Mirrors web's MultiColumnClient.
         const merged = [...existing, ...allTrulyNew].sort((a, b) => b.created_at - a.created_at);
         queryClient.setQueryData(cacheKey, merged);
       }

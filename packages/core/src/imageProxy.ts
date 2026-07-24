@@ -19,13 +19,38 @@
 let _imageProxyTemplate: string | null = null;
 
 /**
+ * Validate a proxy template for the settings UI. Returns a human-readable
+ * reason it can't be used, or `null` when it's fine (including when empty,
+ * which simply means "proxy disabled").
+ *
+ * Shared by web and mobile settings so both reject the same inputs with the
+ * same wording, and so `setImageProxyTemplate` below can't quietly drop a
+ * template the UI told the user it had saved.
+ */
+export function validateImageProxyTemplate(template: string): string | null {
+  const trimmed = template.trim();
+  if (trimmed.length === 0) return null; // empty = disabled
+  if (!trimmed.includes('{url}')) return 'Template must include {url}';
+  // Require https. The whole point of the proxy is to keep the user's IP away
+  // from arbitrary image hosts; an http:// template would instead hand every
+  // image URL they view to any observer on the path, in cleartext — strictly
+  // worse than the no-proxy default. Reject rather than silently downgrade.
+  if (!/^https:\/\//i.test(trimmed)) return 'Template must start with https://';
+  return null;
+}
+
+/**
  * Set the active proxy template. Use `null` or empty string to disable.
- * The template must contain `{url}` — at rewrite time we substitute
- * `encodeURIComponent(originalUrl)` for that placeholder.
+ * A template that fails `validateImageProxyTemplate` disables the proxy rather
+ * than being applied — URLs then pass through unrewritten (the safe default).
  */
 export function setImageProxyTemplate(template: string | null | undefined): void {
   const trimmed = template?.trim();
-  _imageProxyTemplate = trimmed && trimmed.includes('{url}') ? trimmed : null;
+  if (!trimmed || validateImageProxyTemplate(trimmed) !== null) {
+    _imageProxyTemplate = null;
+    return;
+  }
+  _imageProxyTemplate = trimmed;
 }
 
 export function getImageProxyTemplate(): string | null {

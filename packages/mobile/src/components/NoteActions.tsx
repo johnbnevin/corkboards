@@ -2,7 +2,7 @@
  * Note action bar — like, repost, reply, bookmark, zap.
  * Mirrors the web version's interaction patterns.
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, Platform, TextInput, Modal } from 'react-native';
 import { useQueryClient } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -69,7 +69,10 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
   // Publish a kind-7 reaction. `content` is '+' for a plain like or an emoji /
   // ':shortcode:' for an emoji reaction; `emojiTag` carries the NIP-30 custom
   // emoji definition when applicable.
-  const publishReaction = async (content: string, emojiTag?: string[]) => {
+  // useCallback so this reads as an event handler rather than a value computed
+  // during render — otherwise the `Date.now()` below trips
+  // react-hooks/purity, which can't see that the body only ever runs from a tap.
+  const publishReaction = useCallback(async (content: string, emojiTag?: string[]) => {
     if (!signer || likePending) return;
     setLikePending(true);
     setLikedOverride(true);
@@ -89,7 +92,7 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     } finally {
       setLikePending(false);
     }
-  };
+  }, [signer, likePending, nostr, queryClient, event.id, event.pubkey]);
 
   const handleLike = async () => {
     // Guard against double-publish: already liked, or a publish is in flight.

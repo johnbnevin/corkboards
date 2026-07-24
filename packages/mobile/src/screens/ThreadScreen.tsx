@@ -165,24 +165,30 @@ export function ThreadScreen({ eventId, onBack, onNavigateThread, autoReplyTo }:
   // Auto-reply: when opened via a note's Comment button, open the composer
   // targeting that note once the thread loads.
   const autoReplyFiredRef = useRef<string | null>(null);
+  // Scroll anchoring: the thread streams in progressively (target first, then
+  // ancestors above and replies below), so a one-shot scroll fires before the
+  // list is stable and the target drifts. Keep the relevant note pinned across
+  // list updates until the user scrolls (parity with web ThreadTree).
+  const keepCenteredRef = useRef(true);
+
+  // Re-arm the anchor and the one-shot auto-reply whenever the thread being
+  // viewed changes. This is an effect rather than a render-phase ref write
+  // (which is what `react-hooks/refs` flags), and it is declared FIRST on
+  // purpose: effects run in declaration order, so on an `eventId` change the
+  // re-arm lands before the auto-reply and scroll effects below read these refs
+  // in the same commit. Re-arming after them would let the auto-reply fire a
+  // second time on the next `rows` update, reopening the composer unbidden.
+  useEffect(() => {
+    keepCenteredRef.current = true;
+    autoReplyFiredRef.current = null;
+  }, [eventId]);
+
   useEffect(() => {
     if (!autoReplyTo || rows.length === 0) return;
     if (autoReplyFiredRef.current === autoReplyTo.id) return;
     autoReplyFiredRef.current = autoReplyTo.id;
     setReplyTarget(autoReplyTo);
   }, [autoReplyTo, rows]);
-
-  // Scroll anchoring: the thread streams in progressively (target first, then
-  // ancestors above and replies below), so a one-shot scroll fires before the
-  // list is stable and the target drifts. Keep the relevant note pinned across
-  // list updates until the user scrolls (parity with web ThreadTree).
-  const keepCenteredRef = useRef(true);
-  const prevEventId = useRef(eventId);
-  if (eventId !== prevEventId.current) {
-    prevEventId.current = eventId;
-    keepCenteredRef.current = true;
-    autoReplyFiredRef.current = null;
-  }
 
   const anchorId = autoReplyTo?.id ?? eventId;
   useEffect(() => {

@@ -56,29 +56,93 @@ export function ipv4ToInt(host: string): number | null {
   return result >>> 0;
 }
 
-/** True when the uint32 IPv4 address falls in a private / loopback / reserved range. */
+/**
+ * True when the uint32 IPv4 address is anything other than a public unicast
+ * address — private, loopback, link-local, shared/CGNAT, reserved, or multicast.
+ *
+ * The block list is kept deliberately in step with `isBlockedIp()` in
+ * `packages/web/rss-proxy.php`: the PHP proxy and this client-side gate defend
+ * the same class of attack (an attacker-supplied URL steering a fetch at an
+ * address the user didn't intend), and a range blocked on one side but not the
+ * other is exactly the kind of drift that reopens a hole.
+ */
 export function isPrivateIPv4(n: number): boolean {
   const a = (n >>> 24) & 0xff;
   const b = (n >>> 16) & 0xff;
-  if (a === 0 || a === 10 || a === 127 || a === 255) return true; // this-host, RFC1918, loopback, broadcast
-  if (a === 192 && b === 168) return true;                        // RFC1918
-  if (a === 172 && b >= 16 && b <= 31) return true;               // RFC1918
-  if (a === 169 && b === 254) return true;                        // link-local incl. cloud metadata 169.254.169.254
+  if (a === 0) return true;                                       // 0.0.0.0/8 "this network"
+  if (a === 10) return true;                                      // RFC1918 10/8
+  if (a === 127) return true;                                     // loopback 127/8
   if (a === 100 && b >= 64 && b <= 127) return true;              // CGNAT 100.64/10
+  if (a === 169 && b === 254) return true;                        // link-local incl. cloud metadata 169.254.169.254
+  if (a === 172 && b >= 16 && b <= 31) return true;               // RFC1918 172.16/12
+  if (a === 192 && b === 0) return true;                          // IETF protocol assignments 192.0.0/24 (+ TEST-NET-1 192.0.2/24)
+  if (a === 192 && b === 168) return true;                        // RFC1918 192.168/16
+  if (a === 198 && (b === 18 || b === 19)) return true;           // benchmarking 198.18/15
+  if (a >= 224) return true;                                      // multicast 224/4 + reserved/broadcast 240/4 (incl. 255.255.255.255)
   return false;
 }
 
-/** True when an IPv6 literal (without brackets) is loopback / link-local / unique-local / mapped. */
+/**
+ * True when an IPv6 literal (without brackets) is anything other than a public
+ * unicast address: unspecified, loopback, link-local, unique-local, multicast,
+ * or a v4-embedding form whose embedded IPv4 must itself be re-checked.
+ *
+ * Parsing is done on the first hextet rather than by string prefix, because a
+ * prefix test misses most of the range it claims to cover: `fe80::/10` spans
+ * `fe80`–`febf`, so `startsWith('fe80')` lets `fe90::`/`feb0::` through.
+ * Any address we cannot parse is treated as unsafe (fail closed).
+ */
 export function isPrivateIPv6(ipv6: string): boolean {
-  const ip = ipv6.toLowerCase();
-  if (ip === '::1') return true;                              // loopback
-  if (/^(0:){7}1$/.test(ip)) return true;                     // fully-expanded loopback
-  if (/^0*(:0*){0,6}:0*1$/.test(ip)) return true;             // other zero-compressed loopback forms
-  if (ip.startsWith('fe80')) return true;                     // link-local fe80::/10
-  if (ip.startsWith('fc') || ip.startsWith('fd')) return true; // unique-local fc00::/7
-  if (ip.startsWith('::ffff:')) return true;                  // IPv4-mapped (covers embedded private v4)
-  if (ip.startsWith('::') && ip.includes('.')) return true;   // IPv4-compatible
+  const ip = ipv6.toLowerCase().trim();
+  if (ip.length === 0) return true;
+  // Strip a zone index ("fe80::1%eth0") before parsing.
+  const bare = ip.split('%')[0];
+
+  // v4-embedding forms: ::ffff:a.b.c.d (mapped), ::a.b.c.d (compatible), and the
+  // NAT64 well-known prefix 64:ff9b::/96. Re-check the embedded IPv4 so
+  // ::ffff:169.254.169.254 is blocked exactly like 169.254.169.254 is.
+  if (bare.includes('.')) {
+    const embedded = bare.slice(bare.lastIndexOf(':') + 1);
+    const asInt = ipv4ToInt(embedded);
+    if (asInt === null) return true; // malformed → fail closed
+    const prefix = bare.slice(0, bare.lastIndexOf(':') + 1);
+    if (prefix === '::' || prefix === '::ffff:' || prefix.startsWith('64:ff9b:')) {
+      return isPrivateIPv4(asInt);
+    }
+    return true; // some other v4-in-v6 shape we don't model → fail closed
+  }
+
+  const first = firstHextet(bare);
+  if (first === null) return true;                    // unparseable → fail closed
+  if (first >= 0xfe80 && first <= 0xfebf) return true; // link-local fe80::/10
+  if (first >= 0xfc00 && first <= 0xfdff) return true; // unique-local fc00::/7
+  if (first >= 0xff00) return true;                    // multicast ff00::/8
+
+  // Unspecified (::) and loopback (::1) — every hextet zero except a trailing 1.
+  if (isAllZeroExceptLast(bare)) return true;
   return false;
+}
+
+/** Value of the leading hextet of an IPv6 literal, or null if unparseable. */
+function firstHextet(ip: string): number | null {
+  if (ip.startsWith('::')) return 0;
+  const head = ip.split(':', 1)[0];
+  if (!/^[0-9a-f]{1,4}$/.test(head)) return null;
+  return parseInt(head, 16);
+}
+
+/** True for `::` and `::1` in any zero-compressed or fully-expanded spelling. */
+function isAllZeroExceptLast(ip: string): boolean {
+  if (!/^[0-9a-f:]+$/.test(ip)) return false;
+  const parts = ip.split('::');
+  if (parts.length > 2) return false;
+  const groups = [...parts[0].split(':'), ...(parts[1] ?? '').split(':')].filter(Boolean);
+  if (groups.length === 0) return true; // "::" itself
+  for (let i = 0; i < groups.length - 1; i++) {
+    if (parseInt(groups[i], 16) !== 0) return false;
+  }
+  const last = parseInt(groups[groups.length - 1], 16);
+  return last === 0 || last === 1;
 }
 
 /**

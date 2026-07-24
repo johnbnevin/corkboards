@@ -146,9 +146,12 @@ export function useAuthor(pubkey: string | undefined, enabled = true) {
       return withConcurrencyLimit(() => fetchAuthorFromNetwork(pubkey, signal, nostr as NostrPool));
     },
     // Resolved profiles cache for the full TTL; a still-unresolved one (no
-    // metadata) goes stale in 30s so it re-checks on the next access instead of
-    // being stuck as "user_xxxx" for the whole TTL.
-    staleTime: (query) => (query.state.data?.metadata ? STALE_TIME : 30_000),
+    // metadata) goes stale in 2 min so it re-checks periodically instead of being
+    // stuck as "user_xxxx" for the whole TTL. Was 30s, but with many cards mounted
+    // that meant every unresolved author re-fetched twice a minute, each `isFetching`
+    // flip re-rendering its card — a measured idle-CPU drain. 2 min keeps eventual
+    // resolution while cutting that churn ~4×.
+    staleTime: (query) => (query.state.data?.metadata ? STALE_TIME : 120_000),
     gcTime: CACHE_MAX_AGE,
     // Startup is congested (relay connects + feed queries + N profile fetches);
     // spaced retries resolve most of the "shows npub/user_xxxx" cases.

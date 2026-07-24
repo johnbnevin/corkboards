@@ -264,6 +264,22 @@ export async function tauriProxyLoadFailed(): Promise<boolean> {
 }
 
 /**
+ * True when "require proxy" is ON but this session's WebView is NOT routed
+ * through a proxy. The Rust kill-switch only covers native relay sockets; when
+ * this is set, WebView traffic (images, embeds, JS-opened relay sockets) is
+ * going out directly, so a Tor-only user needs to be told loudly. Latched at
+ * window creation — the WebView proxy can only change on restart.
+ */
+export async function tauriProxyWebviewUnprotected(): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    return (await invoke<boolean>('proxy_webview_unprotected')) ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Query a relay via Rust tokio-tungstenite (bypasses WebKitGTK WebSocket).
  * Returns null if not in Tauri or on error.
  */

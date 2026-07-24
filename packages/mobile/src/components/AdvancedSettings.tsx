@@ -19,7 +19,7 @@ import {
 import { Platform } from 'react-native';
 import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS, getBlobRejectingServers, clearBlobRejectingServer } from '../hooks/useNostrBackup';
 import { mobileStorage } from '../storage/MmkvStorage';
-import { setImageProxyTemplate } from '@core/imageProxy';
+import { setImageProxyTemplate, validateImageProxyTemplate } from '@core/imageProxy';
 
 const LEGACY_PROXY_URL_KEY = '__proxy_url__';
 const IMAGE_PROXY_KEY = 'corkboard:image-proxy-template';
@@ -525,8 +525,11 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
 
   const handleSaveImgProxy = () => {
     const trimmed = imgProxy.trim();
-    if (trimmed && !trimmed.includes('{url}')) {
-      Alert.alert('Invalid template', 'Template must include {url} as the placeholder.');
+    // Shared validator so web and mobile accept/reject identically, and so the
+    // UI can never report "enabled" for a template core would silently drop.
+    const invalid = validateImageProxyTemplate(trimmed);
+    if (invalid) {
+      Alert.alert('Invalid template', invalid);
       return;
     }
     saveImageProxy(trimmed);

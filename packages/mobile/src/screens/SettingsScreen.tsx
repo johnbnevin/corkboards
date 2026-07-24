@@ -66,6 +66,12 @@ export function SettingsScreen() {
     STORAGE_KEYS.AUTOFETCH_INTERVAL_SECS,
     120,
   );
+  // Phones are the "small screen" case, so this shares web's small-screen
+  // autofetch key — a user who enabled it on mobile web gets it here too.
+  const [autofetchEnabled, setAutofetchEnabled] = usePlatformStorage<boolean>(
+    STORAGE_KEYS.AUTOFETCH_SMALL,
+    false,
+  );
 
   // Auth UI state
   const [nsecInput, setNsecInput] = useState('');
@@ -433,6 +439,8 @@ export function SettingsScreen() {
         <ThroughputSettings
           multiplier={multiplier}
           onMultiplierChange={setMultiplier}
+          autofetchEnabled={autofetchEnabled}
+          onAutofetchEnabledChange={setAutofetchEnabled}
           autofetchIntervalSecs={autofetchInterval}
           onAutofetchIntervalChange={setAutofetchInterval}
           avatarSizeLimit={avatarSizeLimit}

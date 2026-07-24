@@ -123,6 +123,13 @@ export function getRelayCache(pubkey: string): string[] {
 }
 
 // Get user's configured relays from MMKV (same format as web's APP_CONFIG_KEY in IDB).
+/** Normalize a relay URL for deduplication — strips trailing slashes.
+ *  Mirrors web's normalizeRelayUrl() so both platforms compare relay identity
+ *  the same way (`wss://a.example` and `wss://a.example/` are one relay). */
+function normalizeRelayUrl(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
 // Keep in sync with web's getUserRelays() in packages/web/src/components/NostrProvider.tsx.
 export function getUserRelays(): { read: string[]; write: string[] } {
   try {
@@ -208,9 +215,34 @@ function isRelayBlocked(url: string): boolean {
   return !!entry && Date.now() < entry.blockedUntil;
 }
 
-/** Dummy relay returned during backoff — returns empty results without opening a connection */
-const blockedQuery = async () => [] as NostrEvent[];
-const blockedEvent = async () => { /* noop */ };
+/**
+ * Relay returned while a URL is in failure backoff — fails fast without opening
+ * a WebSocket.
+ *
+ * Parity with web's `BlockedRelay` class, in two ways that both mattered:
+ *
+ *   - It THROWS rather than resolving to `[]`. Returning an empty array is
+ *     indistinguishable from "this relay genuinely has no matching events", so
+ *     callers that race several relays and fall back on failure (fetchEvent's
+ *     two-phase outbox lookup) treated a blocked relay as an authoritative
+ *     "not found" and gave up early. Callers already handle network throws.
+ *   - It stubs `req` too. The previous version only replaced `query`/`event` on
+ *     a real NRelay1, so `relay.req(...)` — the path fetchEvent, useRelayFeed,
+ *     useNwc and OnboardSearchWidget all use — still opened a socket to the very
+ *     relay we had just decided to stop contacting.
+ */
+class BlockedRelay {
+  constructor(private url: string) {}
+  private fail(): never {
+    throw new Error(`Relay ${this.url} is temporarily blocked (backoff)`);
+  }
+  // eslint-disable-next-line require-yield
+  async *req(): AsyncGenerator<never> { this.fail(); }
+  async query(): Promise<NostrEvent[]> { this.fail(); }
+  async event(): Promise<void> { this.fail(); }
+  async close(): Promise<void> { /* nothing was opened */ }
+  async [Symbol.asyncDispose](): Promise<void> { /* nothing was opened */ }
+}
 
 // ─── NIP-42 relay AUTH ──────────────────────────────────────────────────────
 // Parity with web's NostrProvider: answer relay AUTH challenges with a signed
@@ -224,14 +256,50 @@ export function setRelayAuthSigner(signer: AuthSigner | null): void {
   _authSigner = signer;
 }
 
+/** Relays outside the user's configured lists that are still allowed to receive
+ *  auto-AUTH — dynamic, deliberate connections (NIP-46 bunker signaling relays,
+ *  NWC wallet relays). Registered by the code paths that open them. */
+const _authAllowedRelays = new Set<string>();
+
+/** Allow a dynamically discovered relay (bunker/NWC) to receive NIP-42 auto-AUTH. */
+export function registerAuthRelay(url: string): void {
+  _authAllowedRelays.add(normalizeRelayUrl(url));
+}
+
+/** True when a relay is part of the user's chosen relay set — their configured
+ *  NIP-65 read/write relays, their cached own outbox relays, our fallback and
+ *  indexer relays, or a dynamically registered relay (bunker/NWC). */
+function isAuthAllowedRelay(url: string): boolean {
+  const key = normalizeRelayUrl(url);
+  if (_authAllowedRelays.has(key)) return true;
+  if (FALLBACK_RELAYS.some(r => normalizeRelayUrl(r) === key)) return true;
+  if (READ_ONLY_RELAYS.some(r => normalizeRelayUrl(r) === key)) return true;
+  const userRelays = getUserRelays();
+  if ([...userRelays.read, ...userRelays.write].some(r => normalizeRelayUrl(r) === key)) return true;
+  // The active user's own cached NIP-65 relay list (may predate app config)
+  const own = _currentUserPubkeyForRouter ? relayCache.get(_currentUserPubkeyForRouter) : undefined;
+  if (own && own.some(r => normalizeRelayUrl(r) === key)) return true;
+  return false;
+}
+
 async function handleRelayAuthChallenge(relayUrl: string, challenge: string): Promise<NostrEvent> {
   const signer = _authSigner;
   if (!signer) throw new Error('No active signer for NIP-42 relay AUTH');
-  // NOTE: a previous build gated this to an allowlist to avoid a NIP-42 de-anon
-  // vector, but it broke every DELIBERATE relay connection needing AUTH (NIP-46
-  // login signaling + NWC wallet relays), which are dynamic/per-user and not in
-  // any static allowlist — causing login hangs and zap/NWC timeouts. We answer
-  // AUTH for any relay we're actively talking to (pre-v0.7.12 behavior).
+  // Privacy tradeoff (parity with web): answering AUTH cryptographically binds
+  // the user's pubkey to their IP at that relay. So we only auto-AUTH relays the
+  // user deliberately chose — their NIP-65/configured relays, our fallback and
+  // indexer relays, and dynamically registered relays (NIP-46 bunker signaling,
+  // NWC wallet relays). A random fan-out relay reached through outbox routing
+  // gets no AUTH: it would gain a proven pubkey↔IP link while contributing
+  // little. Mobile previously answered EVERY challenge, which de-anonymized the
+  // user at any relay the router happened to reach.
+  //
+  // An earlier attempt at this used a STATIC allowlist and broke NIP-46 login
+  // and NWC (their relays are dynamic/per-user) — the registerAuthRelay()
+  // escape hatch above is what keeps those flows working.
+  if (!isAuthAllowedRelay(relayUrl)) {
+    throw new Error(`NIP-42 AUTH declined for ${relayUrl} — not in the user's relay set`);
+  }
   return signer.signEvent({
     kind: 22242,
     created_at: Math.floor(Date.now() / 1000),
@@ -251,13 +319,7 @@ function withAuth(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]):
  */
 export function createRelay(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
   if (isRelayBlocked(url)) {
-    // Return a stub that fails fast without opening a WebSocket
-    const stub = new NRelay1(url, { ...opts, backoff: false, idleTimeout: 1 });
-    // Immediately close to prevent connection, override methods
-    stub.close().catch(() => {});
-    stub.query = blockedQuery;
-    stub.event = blockedEvent;
-    return stub;
+    return new BlockedRelay(url) as unknown as NRelay1;
   }
 
   const cached = _relayCache.get(url);

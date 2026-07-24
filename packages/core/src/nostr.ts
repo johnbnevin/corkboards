@@ -21,8 +21,19 @@ export type Nip19Prefix = typeof NIP19_PREFIXES[number];
  * classic stateful-/g-flag bug where a module-level RegExp singleton shares
  * `.lastIndex` across unrelated callers.
  */
+/*
+ * Both branches carry a `(?<![\w/:])` boundary guard so an identifier embedded
+ * in a URL path or in the middle of a word is not treated as a mention —
+ * `https://njump.me/npub1…` should render as the link the author wrote, not
+ * silently become a profile chip. Mobile's NoteContent had this guard and the
+ * shared pattern did not, so the two parsers disagreed on the same note.
+ *
+ * The four capture groups (nostr:-prefixed prefix/data, then bare prefix/data)
+ * are load-bearing: ProfileAbout on both platforms destructures matches
+ * positionally. Keep the group structure if you touch this.
+ */
 export const NIP19_IDENTIFIER_PATTERN =
-  'nostr:(npub1|note1|nprofile1|nevent1|naddr1)([qpzry9x8gf2tvdw0s3jn54khce6mua7l]+)|(npub1|note1|nprofile1|nevent1|naddr1)([qpzry9x8gf2tvdw0s3jn54khce6mua7l]+)';
+  '(?<![\\w/:])nostr:(npub1|note1|nprofile1|nevent1|naddr1)([qpzry9x8gf2tvdw0s3jn54khce6mua7l]+)|(?<![\\w/:])(npub1|note1|nprofile1|nevent1|naddr1)([qpzry9x8gf2tvdw0s3jn54khce6mua7l]+)';
 
 /**
  * Creates a fresh RegExp instance for matching Nostr identifiers (with /g flag).

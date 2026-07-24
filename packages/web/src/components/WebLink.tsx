@@ -4,11 +4,10 @@ import { ExternalLink, Copy, Check, ShieldAlert, ShieldCheck } from 'lucide-reac
 import { useLinkCopy } from '@/hooks/useLinkCopy'
 import { LinkCopyContextMenu } from './LinkCopyContextMenu'
 import { TrackerWarningDialog } from './TrackerWarningDialog'
+import { isSafeExternalUrl } from '@core/sanitizeUtils'
 
-function isSafeUrl(url: string): boolean {
-  const lower = url.trim().toLowerCase()
-  return lower.startsWith('http://') || lower.startsWith('https://')
-}
+// Shared with mobile via @core/sanitizeUtils — see isSafeExternalUrl.
+const isSafeUrl = isSafeExternalUrl
 
 /**
  * Bare-URL link card. The URL renders exactly as the note's author wrote it —

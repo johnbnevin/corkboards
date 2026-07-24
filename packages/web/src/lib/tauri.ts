@@ -138,6 +138,24 @@ interface RelayBatch {
 }
 
 /**
+ * Monotonic counter for relay subscription ids.
+ *
+ * The id names the Tauri event channel (`relay-${subId}`) that Rust emits
+ * batches on. It used to be `Math.random().toString(36).slice(2, 10)` — with
+ * many concurrent feed queries in flight, two subscriptions drawing the same
+ * value would both listen on one channel and interleave each other's events,
+ * so one query would resolve with another's results. A counter cannot collide
+ * within a process; the random suffix keeps ids distinct across reloads so a
+ * listener that outlived its query can't catch the next session's traffic.
+ */
+let _subIdCounter = 0;
+const _subIdSalt = Math.random().toString(36).slice(2, 8);
+function nextSubId(): string {
+  _subIdCounter += 1;
+  return `${_subIdSalt}-${_subIdCounter.toString(36)}`;
+}
+
+/**
  * Query multiple relays via Rust, streaming results back via app.emit() batches.
  *
  * Uses app.emit() + listen() instead of Channel<T>. Channel<T> hangs silently when
@@ -154,7 +172,7 @@ export async function tauriQuery(
   const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
   const { listen: tauriListen } = await import('@tauri-apps/api/event');
 
-  const subId = Math.random().toString(36).slice(2, 10);
+  const subId = nextSubId();
   const allEvents: unknown[] = [];
   const seen = new Set<string>();
 
@@ -282,6 +300,14 @@ export async function tauriProxyWebviewUnprotected(): Promise<boolean> {
 /**
  * Query a relay via Rust tokio-tungstenite (bypasses WebKitGTK WebSocket).
  * Returns null if not in Tauri or on error.
+ *
+ * Like {@link tauriQuery}, every returned event is signature-verified here: the
+ * Rust bridge forwards raw relay JSON, so without this check desktop would
+ * accept forged events that the web/mobile NRelay1 path rejects. This one
+ * matters even more than the tauriQuery path, because `fetchEvent.ts` uses it to
+ * discover kind-10002 relay lists and feeds the result to `updateRelayCache()` —
+ * a forged relay list would be PERSISTED and would then route every future query
+ * for that author to a relay of the attacker's choosing.
  */
 export async function tauriRelayQuery(
   url: string,
@@ -290,11 +316,21 @@ export async function tauriRelayQuery(
 ): Promise<RelayQueryResult | null> {
   if (!isTauri) return null;
   try {
-    return await invoke<RelayQueryResult>('relay_query', {
+    const res = await invoke<RelayQueryResult>('relay_query', {
       url,
       filter,
       timeoutMs,
     });
+    if (!res) return null;
+    const { verifyEvent } = await import('nostr-tools/pure');
+    const events = (res.events ?? []).filter((ev) => {
+      try {
+        return verifyEvent(ev as Parameters<typeof verifyEvent>[0]);
+      } catch {
+        return false;
+      }
+    });
+    return { ...res, events };
   } catch (e) {
     console.warn('[tauri] relay_query failed:', e);
     return null;

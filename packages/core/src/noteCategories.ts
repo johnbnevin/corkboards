@@ -64,12 +64,46 @@ const AMBIGUOUS_CDN_PATTERNS = [
   /media\.nostr\.band\//i,
 ];
 
-// Check if a note contains video content (by kind or URL)
+/**
+ * Shape-validate the JSON embedded in a kind-6/16 repost's `content`.
+ *
+ * NIP-18 says this is "the stringified JSON of the reposted note" — i.e. fully
+ * attacker-controlled data that happens to arrive inside a signed envelope.
+ * Parsing it with a bare `JSON.parse(...) as NostrEvent` is a lie to the type
+ * system: `{"a":1}` parses fine and produces an object with no `tags`, and the
+ * first `note.tags.some(...)` downstream throws a TypeError inside a render-path
+ * `.filter()` callback with no error boundary between it and the feed — one
+ * malformed repost blanks the whole column.
+ *
+ * Returns null unless every field a NostrEvent consumer may touch is present
+ * and the right type. Signature verification is deliberately NOT done here
+ * (core carries no crypto dependency); callers that RENDER the result as an
+ * authored note must verify it — see the platform `verifyEmbeddedEvent`.
+ */
+export function parseEmbeddedRepost(content: string | undefined | null): NostrEvent | null {
+  if (!content || content[0] !== '{') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const e = parsed as Partial<NostrEvent>;
+  if (typeof e.id !== 'string' || typeof e.pubkey !== 'string' || typeof e.sig !== 'string') return null;
+  if (typeof e.content !== 'string' || typeof e.kind !== 'number' || typeof e.created_at !== 'number') return null;
+  if (!Array.isArray(e.tags) || !e.tags.every((t) => Array.isArray(t))) return null;
+  return e as NostrEvent;
+}
+
+// Check if a note contains video content (by kind or URL).
+// `tags` is defensively defaulted: these predicates are reachable from callers
+// that hand them an event reconstructed from untrusted JSON.
 export function hasVideoContent(note: NostrEvent): boolean {
   if (note.kind === 34235 || note.kind === 34236) return true;
   const content = note.content || '';
   // Also check imeta tags for video
-  if (note.tags.some(t => t[0] === 'imeta' && t.some(v => /video/i.test(v)))) return true;
+  if ((note.tags ?? []).some(t => Array.isArray(t) && t[0] === 'imeta' && t.some(v => /video/i.test(v)))) return true;
   return VIDEO_URL_PATTERNS.some(pattern => pattern.test(content));
 }
 
@@ -79,7 +113,7 @@ export function hasVideoContent(note: NostrEvent): boolean {
 export function hasImageContent(note: NostrEvent): boolean {
   const content = note.content || '';
   // Check imeta tags for images
-  if (note.tags.some(t => t[0] === 'imeta' && t.some(v => /image/i.test(v)))) return true;
+  if ((note.tags ?? []).some(t => Array.isArray(t) && t[0] === 'imeta' && t.some(v => /image/i.test(v)))) return true;
   // Definitive image extension anywhere in content
   if (IMAGE_EXT_PATTERN.test(content)) return true;
   // Image-specific CDN paths (always images)
@@ -110,8 +144,8 @@ export function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrE
       : null;
   let targetEvent = targetId && lookup ? lookup.get(targetId) : null;
   // For kind 6 reposts, the embedded JSON in content IS the target
-  if (!targetEvent && (event.kind === 6 || event.kind === 16) && event.content?.startsWith('{')) {
-    try { targetEvent = JSON.parse(event.content) as NostrEvent; } catch { /* not JSON */ }
+  if (!targetEvent && (event.kind === 6 || event.kind === 16)) {
+    targetEvent = parseEmbeddedRepost(event.content);
   }
 
   // Video: kind 21/22 (NIP-71), 34235/34236, video URLs, repost of video, or reaction to video

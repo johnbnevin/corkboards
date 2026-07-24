@@ -148,10 +148,10 @@ export function useFollowNotesCache({
       const since = now - timeWindowSeconds;
 
       if (__DEV__) {
-        console.log('[notesCache] Fetching notes:');
-        console.log('  baseWindowSeconds:', baseWindowSeconds, 'seconds');
-        console.log('  multiplier:', multiplier);
-        console.log('  timeWindowSeconds:', timeWindowSeconds, 'seconds =', timeWindowSeconds / 3600, 'hours');
+        if (__DEV__) console.log('[notesCache] Fetching notes:');
+        if (__DEV__) console.log('  baseWindowSeconds:', baseWindowSeconds, 'seconds');
+        if (__DEV__) console.log('  multiplier:', multiplier);
+        if (__DEV__) console.log('  timeWindowSeconds:', timeWindowSeconds, 'seconds =', timeWindowSeconds / 3600, 'hours');
       }
 
       const events = await batchFetchByAuthors({
@@ -164,12 +164,12 @@ export function useFollowNotesCache({
       });
 
       if (__DEV__) {
-        console.log('[notesCache] Got', events.length, 'events');
+        if (__DEV__) console.log('[notesCache] Got', events.length, 'events');
         if (events.length > 0) {
           const oldest = events.reduce((min, e) => e.created_at < min ? e.created_at : min, events[0].created_at);
           const newest = events.reduce((max, e) => e.created_at > max ? e.created_at : max, events[0].created_at);
           const timeSpan = (newest - oldest) / 3600;
-          console.log('[notesCache] Time span:', timeSpan.toFixed(2), 'hours');
+          if (__DEV__) console.log('[notesCache] Time span:', timeSpan.toFixed(2), 'hours');
         }
       }
 

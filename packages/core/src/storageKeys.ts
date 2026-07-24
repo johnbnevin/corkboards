@@ -269,14 +269,67 @@ function assertValidPubkey(pubkey: string): void {
  */
 export function stashUserData(storage: KVStorage, pubkey: string): void {
   assertValidPubkey(pubkey);
-  for (const key of PER_USER_KEYS) {
-    const value = storage.getSync(key);
+  // Snapshot EVERY value before writing anything.
+  //
+  // The interleaved read-modify-write this replaces was self-defeating on web
+  // and desktop: `getSync`/`setSync` are backed by an in-memory cache
+  // (packages/web/src/lib/idb.ts) that evicts an entry whenever a NEW key is
+  // added at capacity — and this loop adds ~90 new `user:<pubkey>:*` keys. So
+  // writes made early in the loop evicted keys the loop had not read yet,
+  // later `getSync` calls returned null for data that was sitting on disk, and
+  // the `else` branch below turned each of those misses into a `removeSync`
+  // that DELETED the user's stashed copy. Reading first makes the loop's own
+  // writes unable to perturb what it reads.
+  const snapshot: Array<[string, string | null]> = PER_USER_KEYS.map(
+    (key) => [key, storage.getSync(key)],
+  );
+  for (const [key, value] of snapshot) {
     if (value !== null) {
       storage.setSync(`user:${pubkey}:${key}`, value);
-    } else {
+    } else if (isConfirmedAbsent(storage, key)) {
+      // Only drop the stashed copy when the live key is genuinely gone — see
+      // isConfirmedAbsent. A cache miss must never be read as a deletion.
       storage.removeSync(`user:${pubkey}:${key}`);
+    } else {
+      // Present but unreadable synchronously. `corkboard:last-backup-data` is
+      // the standing example: it is in PER_USER_KEYS but deliberately kept out
+      // of web's sync cache (it duplicates every other key and is only read at
+      // backup time), so `getSync` returns null for it on EVERY switch. The old
+      // code took that null as "absent" and deleted the departing account's
+      // stashed backup snapshot every single time — not a race, a certainty.
+      // Copy it through the async API instead.
+      copyThroughAsync(storage, key, `user:${pubkey}:${key}`);
     }
   }
+}
+
+/**
+ * Mirror `from` → `to` using the async API, for keys the sync cache can't read.
+ *
+ * Fire-and-forget by design: the account swap must not block on it, and the
+ * value is never needed synchronously afterwards. Failures are swallowed
+ * because the alternative — deleting or clobbering the destination — is what
+ * this exists to avoid; leaving the previous stashed value in place is the safe
+ * outcome.
+ */
+function copyThroughAsync(storage: KVStorage, from: string, to: string): void {
+  void storage
+    .get(from)
+    .then((value) => (value === null ? undefined : storage.set(to, value)))
+    .catch(() => { /* keep the existing stashed value */ });
+}
+
+/**
+ * True only when `key` is known NOT to exist in the backing store.
+ *
+ * Returns false when we cannot tell — a `getSync` miss on a cache-backed
+ * store means "not cached", which is not the same as "not stored". Callers use
+ * this to decide whether a null read justifies a DELETE; when in doubt the
+ * answer must be "no", because leaving a stale value behind is recoverable and
+ * deleting the user's only copy is not.
+ */
+function isConfirmedAbsent(storage: KVStorage, key: string): boolean {
+  return typeof storage.hasSync === 'function' ? !storage.hasSync(key) : false;
 }
 
 /**
@@ -293,12 +346,24 @@ export function clearActiveUserData(storage: KVStorage): void {
  */
 export function restoreUserData(storage: KVStorage, pubkey: string): void {
   assertValidPubkey(pubkey);
-  for (const key of PER_USER_KEYS) {
-    const value = storage.getSync(`user:${pubkey}:${key}`);
+  // Snapshot before writing, for the same reason as stashUserData above: this
+  // loop's own writes must not be able to evict the entries it has yet to read.
+  const snapshot: Array<[string, string | null]> = PER_USER_KEYS.map(
+    (key) => [key, storage.getSync(`user:${pubkey}:${key}`)],
+  );
+  for (const [key, value] of snapshot) {
     if (value !== null) {
       storage.setSync(key, value);
-    } else {
+    } else if (isConfirmedAbsent(storage, `user:${pubkey}:${key}`)) {
+      // The incoming account genuinely has no value for this key, so the live
+      // key must be cleared rather than leaking the previous account's value.
       storage.removeSync(key);
+    } else {
+      // Stashed but not synchronously readable (see stashUserData). Clear the
+      // live key first so the previous account's value can't be read in the
+      // gap, then restore this account's copy asynchronously.
+      storage.removeSync(key);
+      copyThroughAsync(storage, `user:${pubkey}:${key}`, key);
     }
   }
 }

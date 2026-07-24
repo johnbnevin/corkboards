@@ -14,7 +14,6 @@ import {
   StyleSheet,
   ActivityIndicator,
   Clipboard,
-  Linking,
   Alert,
 } from 'react-native';
 import { nip19 } from 'nostr-tools';
@@ -34,6 +33,7 @@ import { formatTimeAgo } from '@core/formatTimeAgo';
 import { ProfileAbout } from './ProfileAbout';
 import { NoteContent } from './NoteContent';
 import { SizeGuardedImage } from './SizeGuardedImage';
+import { openExternal } from '../lib/openExternal';
 
 // ---------------------------------------------------------------------------
 // Context for opening profiles from anywhere in the app
@@ -347,7 +347,7 @@ function ProfileModalDialog({ pubkey, isOpen, onClose, onViewThread }: ProfileMo
                     <View style={styles.linksRow}>
                       {metadata?.website && /^https?:\/\//.test(metadata.website) && (
                         <TouchableOpacity
-                          onPress={() => Linking.openURL(metadata.website!)}
+                          onPress={() => openExternal(metadata.website!)}
                           style={styles.linkItem}
                         >
                           <Text style={styles.websiteText} numberOfLines={1}>

@@ -98,51 +98,107 @@ export function isPrivateIPv6(ipv6: string): boolean {
   // Strip a zone index ("fe80::1%eth0") before parsing.
   const bare = ip.split('%')[0];
 
-  // v4-embedding forms: ::ffff:a.b.c.d (mapped), ::a.b.c.d (compatible), and the
-  // NAT64 well-known prefix 64:ff9b::/96. Re-check the embedded IPv4 so
-  // ::ffff:169.254.169.254 is blocked exactly like 169.254.169.254 is.
-  if (bare.includes('.')) {
-    const embedded = bare.slice(bare.lastIndexOf(':') + 1);
-    const asInt = ipv4ToInt(embedded);
-    if (asInt === null) return true; // malformed → fail closed
-    const prefix = bare.slice(0, bare.lastIndexOf(':') + 1);
-    if (prefix === '::' || prefix === '::ffff:' || prefix.startsWith('64:ff9b:')) {
-      return isPrivateIPv4(asInt);
-    }
-    return true; // some other v4-in-v6 shape we don't model → fail closed
+  const h = expandIPv6(bare);
+  if (h === null) return true; // unparseable → fail closed
+
+  // Unspecified (::) and loopback (::1).
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 &&
+      h[4] === 0 && h[5] === 0 && h[6] === 0 && (h[7] === 0 || h[7] === 1)) {
+    return true;
   }
 
-  const first = firstHextet(bare);
-  if (first === null) return true;                    // unparseable → fail closed
-  if (first >= 0xfe80 && first <= 0xfebf) return true; // link-local fe80::/10
-  if (first >= 0xfc00 && first <= 0xfdff) return true; // unique-local fc00::/7
-  if (first >= 0xff00) return true;                    // multicast ff00::/8
+  // v4-embedding forms — re-check the embedded IPv4 so ::ffff:169.254.169.254
+  // is blocked exactly like 169.254.169.254 is. These are matched on the PARSED
+  // hextets, not on the text: `new URL()` re-serialises `[::ffff:127.0.0.1]`
+  // to `[::ffff:7f00:1]`, so a check for a literal dot (which is how this
+  // function used to detect them) never fires on a URL.hostname value and every
+  // v4-mapped loopback/metadata/RFC1918 address sailed straight through.
+  const embeddedV4 = ((h[6] << 16) >>> 0) + h[7];
 
-  // Unspecified (::) and loopback (::1) — every hextet zero except a trailing 1.
-  if (isAllZeroExceptLast(bare)) return true;
+  // IPv4-mapped ::ffff:0:0/96
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff) {
+    return isPrivateIPv4(embeddedV4);
+  }
+  // IPv4-compatible ::a.b.c.d (deprecated, still routable by some stacks)
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
+    return isPrivateIPv4(embeddedV4);
+  }
+  // NAT64 well-known prefix 64:ff9b::/96
+  if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
+    return isPrivateIPv4(embeddedV4);
+  }
+  // 6to4 2002::/16 embeds the v4 address in hextets 1–2.
+  if (h[0] === 0x2002) {
+    return isPrivateIPv4((((h[1] << 16) >>> 0) + h[2]) >>> 0);
+  }
+
+  if (h[0] >= 0xfe80 && h[0] <= 0xfebf) return true; // link-local fe80::/10
+  if (h[0] >= 0xfc00 && h[0] <= 0xfdff) return true; // unique-local fc00::/7
+  if (h[0] >= 0xff00) return true;                   // multicast ff00::/8
+  if (h[0] === 0x0100 && h[1] === 0) return true;    // discard-only 100::/64
+  if (h[0] === 0x2001 && h[1] === 0x0db8) return true; // documentation 2001:db8::/32
+
   return false;
 }
 
-/** Value of the leading hextet of an IPv6 literal, or null if unparseable. */
-function firstHextet(ip: string): number | null {
-  if (ip.startsWith('::')) return 0;
-  const head = ip.split(':', 1)[0];
-  if (!/^[0-9a-f]{1,4}$/.test(head)) return null;
-  return parseInt(head, 16);
-}
+/**
+ * Expand an IPv6 literal (no brackets, no zone) to its 8 numeric hextets, or
+ * null when it can't be parsed. Handles `::` zero-compression and a trailing
+ * dotted-quad (`::ffff:1.2.3.4`), folding the quad into the last two hextets.
+ *
+ * Working on numbers rather than on the text is the whole point: the same
+ * address has many spellings, and only the numeric form makes range checks
+ * reliable.
+ */
+export function expandIPv6(input: string): number[] | null {
+  let s = input;
+  if (s.length === 0 || s.length > 45) return null;
 
-/** True for `::` and `::1` in any zero-compressed or fully-expanded spelling. */
-function isAllZeroExceptLast(ip: string): boolean {
-  if (!/^[0-9a-f:]+$/.test(ip)) return false;
-  const parts = ip.split('::');
-  if (parts.length > 2) return false;
-  const groups = [...parts[0].split(':'), ...(parts[1] ?? '').split(':')].filter(Boolean);
-  if (groups.length === 0) return true; // "::" itself
-  for (let i = 0; i < groups.length - 1; i++) {
-    if (parseInt(groups[i], 16) !== 0) return false;
+  // Rewrite a trailing dotted-quad as the two hextets it encodes, in place, so
+  // the rest of this function only ever deals with hex groups. Slicing the quad
+  // off instead would eat one colon of an adjacent `::` and break compression.
+  const lastColon = s.lastIndexOf(':');
+  if (s.includes('.')) {
+    if (lastColon === -1) return null;
+    const quad = s.slice(lastColon + 1);
+    // Require a canonical dotted quad here — inet_aton short/hex/octal forms are
+    // not valid inside an IPv6 literal, and accepting them would let a
+    // non-canonical spelling parse differently here than in the resolver.
+    if (!/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(quad)) return null;
+    const octets = quad.split('.').map(Number);
+    if (octets.some((o) => o > 255)) return null;
+    const hi = ((octets[0] << 8) | octets[1]).toString(16);
+    const lo = ((octets[2] << 8) | octets[3]).toString(16);
+    s = `${s.slice(0, lastColon + 1)}${hi}:${lo}`;
   }
-  const last = parseInt(groups[groups.length - 1], 16);
-  return last === 0 || last === 1;
+
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+
+  const parseGroups = (part: string): number[] | null => {
+    if (part === '') return [];
+    const out: number[] = [];
+    for (const g of part.split(':')) {
+      if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+      out.push(parseInt(g, 16));
+    }
+    return out;
+  };
+
+  const head = parseGroups(halves[0]);
+  if (head === null) return null;
+
+  if (halves.length === 1) {
+    return head.length === 8 ? head : null;
+  }
+
+  const rest = parseGroups(halves[1]);
+  if (rest === null) return null;
+  const known = head.length + rest.length;
+  // `::` must stand for at least one zero group, so a fully-specified address
+  // written with a `::` in it is malformed.
+  if (known >= 8) return null;
+  return [...head, ...new Array<number>(8 - known).fill(0), ...rest];
 }
 
 /**
@@ -154,7 +210,12 @@ function isAllZeroExceptLast(ip: string): boolean {
  * `hostname` is expected to be a `URL.hostname` value (IPv6 retains brackets).
  */
 export function isUnsafeHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
+  // A fully-qualified name may carry a trailing root dot ("localhost."), which
+  // the WHATWG URL parser preserves for domains (it only strips it for IPv4
+  // literals). `new URL('http://localhost./').hostname` is therefore
+  // `localhost.` — which resolves to loopback but matched none of the checks
+  // below before the dot was stripped here. Same for `.localhost.` subdomains.
+  const host = hostname.toLowerCase().replace(/\.+$/, '');
   if (host.length === 0) return true;
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
 

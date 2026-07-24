@@ -7,7 +7,6 @@ import {
   Text,
   Image,
   View,
-  Linking,
   StyleSheet,
   TouchableOpacity,
   Dimensions,
@@ -19,6 +18,7 @@ import { useHashtagAction } from '../contexts/hashtagAction';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useQuery } from '@tanstack/react-query';
 import { hasHtmlContent } from '@core/sanitizeUtils';
+import { sanitizeHtml } from '../lib/sanitize';
 import { genUserName } from '@core/genUserName';
 import { useAuthor } from '../hooks/useAuthor';
 import { useNostr } from '../lib/NostrProvider';
@@ -27,6 +27,7 @@ import { optimizeMediaUrl } from '@core/imageUtils';
 import { parseImetaTag, resolveMediaSources, type ImetaData } from '@core/blossom';
 import { MediaLink } from './MediaLink';
 import { TrackerWarningDialog } from './TrackerWarningDialog';
+import { openExternal } from '../lib/openExternal';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56; // card padding
@@ -38,7 +39,13 @@ const MEDIA_WIDTH = SCREEN_WIDTH - 56; // card padding
 // `nostr:` prefix is OPTIONAL (bare npub1…/note1… mentions are valid) and the
 // bech32 body is matched case-insensitively. A leading boundary stops it from
 // matching an identifier embedded in a URL path or word. Parity with web. (B1)
-const NOSTR_URI = /(?<![\w/:])(?:nostr:)?(npub1|note1|nprofile1|nevent1|naddr1)[a-zA-Z0-9]+/gi;
+// The payload class is the BECH32 charset, not `[a-zA-Z0-9]`. Bech32 omits
+// `1`, `b`, `i` and `o` so they can't be confused with other characters; using
+// the full alphanumeric range swallows any of those letters that follow a real
+// identifier, and the over-long token then fails to decode — the mention
+// renders as inert junk instead of the author's name. Same fix as web's
+// NoteContent, which now sources the pattern from @core/nostr.
+const NOSTR_URI = /(?<![\w/:])(?:nostr:)?(npub1|note1|nprofile1|nevent1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+/gi;
 const HASHTAG = /(?<!\w)#(\w{1,64})(?!\w)/g;
 const URL_PATTERN = /https?:\/\/[^\s<>)\]]+/gi;
 const IMAGE_EXT = /\.(jpe?g|png|gif|webp|svg|avif)(\?[^\s]*)?$/i;
@@ -102,7 +109,7 @@ function WebLink({ url, onTrackerPress }: { url: string; onTrackerPress: (info: 
   const showPrompt = () => onTrackerPress({ url, cleanUrl: clean, params: trackingParams });
   const onPress = () => {
     if (hasTracker) showPrompt();
-    else Linking.openURL(url);
+    else openExternal(url);
   };
   // Long-press opens the options sheet on every link (same options everywhere).
   const onLongPress = () => showPrompt();
@@ -136,7 +143,7 @@ function InlineImage({ url, sha256, fallbacks }: { url: string; sha256?: string;
   }
   const currentUrl = sources[srcIndex] ?? sources[0] ?? url;
   return (
-    <TouchableOpacity activeOpacity={0.9} onPress={() => Linking.openURL(currentUrl)}>
+    <TouchableOpacity activeOpacity={0.9} onPress={() => openExternal(currentUrl)}>
       <SizeGuardedImage
         key={currentUrl}
         uri={currentUrl}
@@ -156,7 +163,7 @@ function InlineImage({ url, sha256, fallbacks }: { url: string; sha256?: string;
 function InlineVideo({ url }: { url: string }) {
   // RN doesn't have a built-in video player; show a thumbnail link
   return (
-    <TouchableOpacity style={styles.videoPlaceholder} onPress={() => Linking.openURL(url)}>
+    <TouchableOpacity style={styles.videoPlaceholder} onPress={() => openExternal(url)}>
       <Text style={styles.videoIcon}>▶</Text>
       <Text style={styles.videoLabel}>Play video</Text>
     </TouchableOpacity>
@@ -473,7 +480,7 @@ function LongFormPreview({ event, numberOfLines }: NoteContentProps) {
       </View>
       {preview ? <Text style={styles.content} numberOfLines={numberOfLines ?? 5}>{preview}</Text> : null}
       {readMoreUrl ? (
-        <TouchableOpacity onPress={() => Linking.openURL(readMoreUrl!)}>
+        <TouchableOpacity onPress={() => openExternal(readMoreUrl!)}>
           <Text style={styles.readMore}>Read more →</Text>
         </TouchableOpacity>
       ) : null}
@@ -581,7 +588,7 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
     // Strip HTML tags from content (parity with web SmartNoteContent DOMPurify path).
     // React Native doesn't render HTML, but stripped tags would show as ugly raw text.
     const content = hasHtmlContent(event.content)
-      ? event.content.replace(/<[^>]*>/g, '')
+      ? sanitizeHtml(event.content)
       : event.content;
     const raw = parseContent(content);
     if (emojiMap.size === 0) return raw;

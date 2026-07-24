@@ -3,7 +3,7 @@
  * URL guards in @core/imageUtils and @core/nostrUtils that depend on them.
  */
 import { describe, it, expect } from 'vitest';
-import { ipv4ToInt, isPrivateIPv4, isPrivateIPv6, isUnsafeHost } from '@core/ipUtils';
+import { ipv4ToInt, isPrivateIPv4, isPrivateIPv6, isUnsafeHost, expandIPv6 } from '@core/ipUtils';
 import { shouldRejectUrl, optimizeMediaUrl } from '@core/imageUtils';
 import { isSecureRelay } from '@core/nostrUtils';
 import { normalizeRelay } from '@core/normalizeRelay';
@@ -141,6 +141,99 @@ describe('isUnsafeHost — SSRF-encoding bypass coverage', () => {
   for (const h of safe) {
     it(`allows ${h}`, () => expect(isUnsafeHost(h)).toBe(false));
   }
+
+  // The WHATWG URL parser strips a trailing root dot from IPv4 literals but
+  // KEEPS it on domains, so `new URL('http://localhost./').hostname` is the
+  // string `localhost.` — which resolves to loopback but matched none of the
+  // checks above until the dot was normalized away.
+  const trailingDot = ['localhost.', 'LOCALHOST.', 'foo.localhost.', 'localhost..'];
+  for (const h of trailingDot) {
+    it(`flags trailing-dot form ${h}`, () => expect(isUnsafeHost(h)).toBe(true));
+  }
+  it('still allows a public FQDN written with a trailing root dot', () => {
+    expect(isUnsafeHost('example.com.')).toBe(false);
+  });
+  it('blocks the trailing-dot bypass end to end', () => {
+    expect(isSecureRelay('wss://localhost.')).toBe(false);
+    expect(shouldRejectUrl('http://localhost./x.png', 'media')).toBe(true);
+    // …and confirm the hostname really does keep its dot, so this is not a
+    // test that would pass vacuously if the parser changed.
+    expect(new URL('http://localhost./').hostname).toBe('localhost.');
+  });
+});
+
+describe('isUnsafeHost — IPv6 in the form URL.hostname actually produces', () => {
+  // These MUST be driven through `new URL()`. The WHATWG parser re-serialises
+  // every IPv6 literal into compressed hex hextets, so `[::ffff:127.0.0.1]`
+  // reaches the gate as `[::ffff:7f00:1]` — with no dot in it. Asserting on the
+  // hand-written dotted spelling (as this suite previously did) exercised a
+  // branch that no real input can reach, and passed while every v4-mapped
+  // loopback, RFC1918 and cloud-metadata address was being allowed through.
+  const mapped: Array<[string, string]> = [
+    ['http://[::ffff:127.0.0.1]/x.png', '[::ffff:7f00:1]'],
+    ['http://[::ffff:169.254.169.254]/x.png', '[::ffff:a9fe:a9fe]'],
+    ['http://[::ffff:10.0.0.1]/x.png', '[::ffff:a00:1]'],
+    ['http://[::ffff:192.168.1.1]/x.png', '[::ffff:c0a8:101]'],
+    ['http://[::127.0.0.1]/x.png', '[::7f00:1]'],
+    ['http://[64:ff9b::127.0.0.1]/x.png', '[64:ff9b::7f00:1]'],
+  ];
+  for (const [url, expectedHost] of mapped) {
+    it(`flags ${url}`, () => {
+      const host = new URL(url).hostname;
+      // Pin the canonical form so the test can't silently stop testing anything.
+      expect(host).toBe(expectedHost);
+      expect(isUnsafeHost(host)).toBe(true);
+      expect(shouldRejectUrl(url, 'media')).toBe(true);
+    });
+  }
+
+  it('flags v4-mapped relay hosts', () => {
+    expect(isSecureRelay('wss://[::ffff:127.0.0.1]')).toBe(false);
+    expect(isSecureRelay('wss://[::ffff:169.254.169.254]')).toBe(false);
+    expect(isSecureRelay('wss://[64:ff9b::10.0.0.1]')).toBe(false);
+  });
+
+  it('flags 6to4 wrapping a private v4', () => {
+    expect(isUnsafeHost('[2002:7f00:1::]')).toBe(true);   // 2002::/16 over 127.0.0.1
+    expect(isUnsafeHost('[2002:a9fe:a9fe::]')).toBe(true); // over 169.254.169.254
+  });
+
+  it('flags link-local, unique-local, multicast and documentation ranges', () => {
+    for (const h of ['[fe80::1]', '[febf::1]', '[fc00::1]', '[fd12:3456::1]', '[ff02::1]', '[2001:db8::1]', '[100::1]']) {
+      expect(isUnsafeHost(h)).toBe(true);
+    }
+  });
+
+  it('still allows genuine public IPv6', () => {
+    for (const h of ['[2606:4700:4700::1111]', '[2001:4860:4860::8888]', '[2a00:1450:4001:80f::200e]']) {
+      expect(isUnsafeHost(h)).toBe(false);
+    }
+    expect(isSecureRelay('wss://[2606:4700:4700::1111]')).toBe(true);
+  });
+
+  it('fails closed on malformed literals', () => {
+    for (const h of ['[]', '[:::1]', '[gggg::1]', '[1:2:3:4:5:6:7:8:9]', '[1::2::3]', '[::1.2.3]', '[::1.2.3.999]']) {
+      expect(isUnsafeHost(h)).toBe(true);
+    }
+  });
+});
+
+describe('expandIPv6', () => {
+  it('expands compressed forms to 8 hextets', () => {
+    expect(expandIPv6('::1')).toEqual([0, 0, 0, 0, 0, 0, 0, 1]);
+    expect(expandIPv6('::')).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(expandIPv6('fe80::1')).toEqual([0xfe80, 0, 0, 0, 0, 0, 0, 1]);
+    expect(expandIPv6('2001:db8:0:0:0:0:0:1')).toEqual([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
+  });
+  it('folds a trailing dotted quad into the last two hextets', () => {
+    expect(expandIPv6('::ffff:127.0.0.1')).toEqual([0, 0, 0, 0, 0, 0xffff, 0x7f00, 1]);
+    expect(expandIPv6('64:ff9b::10.0.0.1')).toEqual([0x64, 0xff9b, 0, 0, 0, 0, 0x0a00, 1]);
+  });
+  it('returns null for malformed input', () => {
+    for (const bad of ['', '1::2::3', 'gggg::', '1:2:3:4:5:6:7:8:9', '::1.2.3', '::1.2.3.999', '::0x7f.0.0.1']) {
+      expect(expandIPv6(bad)).toBeNull();
+    }
+  });
 });
 
 describe('shouldRejectUrl', () => {

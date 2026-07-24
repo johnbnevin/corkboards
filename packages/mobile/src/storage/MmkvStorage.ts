@@ -129,7 +129,7 @@ export function prepareSecureStorage(): Promise<void> {
           const legacy = createMMKV({ id: LEGACY_INSTANCE_ID });
           const legacyKeys = legacy.getAllKeys();
           if (legacyKeys.length > 0) {
-            console.log(`[MmkvStorage] Migrating ${legacyKeys.length} keys from legacy unencrypted MMKV...`);
+            if (__DEV__) console.log(`[MmkvStorage] Migrating ${legacyKeys.length} keys from legacy unencrypted MMKV...`);
             for (const k of legacyKeys) {
               const v = legacy.getString(k);
               if (v !== undefined) mmkv.set(k, v);
@@ -235,6 +235,14 @@ export const mobileStorage: KVStorage = {
   // Sync methods (direct MMKV access)
   getSync(key: string): string | null {
     return mmkv.getString(key) ?? null;
+  },
+  // MMKV reads hit the real store, so existence is always exactly known — no
+  // cache layer can make a present key look absent the way web's IndexedDB
+  // memCache can. Implemented anyway so the core helpers get the authoritative
+  // answer on every platform rather than falling back to their conservative
+  // "don't delete when unsure" path. See KVStorage.hasSync in @core/storage.
+  hasSync(key: string): boolean {
+    return mmkv.getString(key) !== undefined;
   },
   setSync(key: string, value: string): void {
     try {

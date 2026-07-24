@@ -13,10 +13,10 @@ import {
   View,
   Text,
   TouchableOpacity,
-  Linking,
   StyleSheet,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
+import { openExternal } from '../lib/openExternal';
 
 interface TrackerWarningDialogProps {
   visible: boolean;
@@ -43,7 +43,7 @@ export function TrackerWarningDialog({ visible, onClose, rawUrl, cleanUrl, track
 
   const open = (url: string) => {
     onClose();
-    Linking.openURL(url);
+    openExternal(url);
   };
 
   return (

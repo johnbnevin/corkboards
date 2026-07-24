@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { hasHtmlContent } from '@/lib/sanitize';
+import { hasHtmlContent, sanitizeHtml } from '@/lib/sanitize';
 import { Link } from 'react-router-dom';
 import { nip19 } from 'nostr-tools';
 import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr';
@@ -18,8 +18,10 @@ export function ProfileAbout({ about, className }: ProfileAboutProps) {
   const content = useMemo(() => {
     if (!about) return { type: 'empty' as const };
 
-    // Strip HTML tags if present — always render as plain text
-    const text = hasHtmlContent(about) ? about.replace(/<[^>]*>/g, '') : about;
+    // Strip HTML tags if present — always render as plain text. Use the shared
+    // sanitizer, not a bare `/<[^>]*>/` (which mis-splits any tag containing a
+    // `>` inside a quoted attribute and leaves the remainder as visible text).
+    const text = hasHtmlContent(about) ? sanitizeHtml(about) : about;
     if (!text.trim()) return { type: 'empty' as const };
 
     // Parse Nostr identifiers and hashtags.

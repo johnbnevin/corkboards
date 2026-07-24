@@ -14,16 +14,15 @@ import {
   View,
   Text,
   TouchableOpacity,
-  Linking,
   StyleSheet,
 } from 'react-native';
 import { stripTrackingParams, getTrackingParams } from '@core/sanitizeUtils';
 import { TrackerWarningDialog } from './TrackerWarningDialog';
+import { openExternal } from '../lib/openExternal';
+import { isSafeExternalUrl } from '@core/sanitizeUtils';
 
-function isSafeUrl(url: string): boolean {
-  const lower = url.trim().toLowerCase();
-  return lower.startsWith('http://') || lower.startsWith('https://');
-}
+// Shared with web via @core/sanitizeUtils — see isSafeExternalUrl.
+const isSafeUrl = isSafeExternalUrl;
 
 interface WebLinkProps {
   url: string;
@@ -49,7 +48,7 @@ export function WebLink({ url }: WebLinkProps) {
   const onPress = () => {
     // Intercept: let the user decide clean vs original before leaving.
     if (hasTracker) setWarningOpen(true);
-    else Linking.openURL(url);
+    else openExternal(url);
   };
 
   return (

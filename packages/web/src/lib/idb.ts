@@ -20,6 +20,55 @@ const BROADCAST_CHANNEL_NAME = 'corkboard-idb';
 const MAX_MEM_CACHE = 2000;
 const memCache = new Map<string, string>();
 
+/**
+ * Keys the cache is allowed to evict under pressure.
+ *
+ * `idbGetSync` is `memCache.get(key) ?? null` — it CANNOT tell "evicted" from
+ * "absent on disk". Any caller that treats a null as "absent" and acts on it
+ * destructively will delete live data. `stashUserData` (packages/core/src/
+ * storageKeys.ts) does exactly that: on a null read it removes the user's
+ * stashed copy of that key.
+ *
+ * So eviction is restricted to namespaces that are (a) unbounded in size, and
+ * (b) only ever read through the ASYNC API, where a miss falls through to disk
+ * and is harmless. `profile-cache:` is the one that actually grows without
+ * limit — one entry per profile seen, so a few hundred follows pushes the cache
+ * past MAX_MEM_CACHE within days.
+ *
+ * Everything else — app config, feeds, bookmarks, and every `user:<pubkey>:*`
+ * stash — is pinned. Letting the cache exceed its target is strictly better
+ * than silently reporting persisted user data as missing.
+ */
+const EVICTABLE_PREFIXES = ['profile-cache:', 'custom-feed-metadata:', 'relay-health:'];
+
+function isEvictable(key: string): boolean {
+  return EVICTABLE_PREFIXES.some((p) => key.startsWith(p));
+}
+
+let warnedCacheOverflow = false;
+
+/**
+ * Make room for `key` if the cache is at capacity, evicting only entries that
+ * are safe to lose. Returns without evicting anything when nothing qualifies.
+ */
+function evictForNewKey(key: string): void {
+  if (memCache.size < MAX_MEM_CACHE || memCache.has(key)) return;
+  for (const candidate of memCache.keys()) {
+    if (isEvictable(candidate)) {
+      memCache.delete(candidate);
+      return;
+    }
+  }
+  // Nothing evictable: grow rather than drop a key a sync reader depends on.
+  if (!warnedCacheOverflow) {
+    warnedCacheOverflow = true;
+    console.warn(
+      `[idb] memCache exceeded ${MAX_MEM_CACHE} entries with no evictable keys; ` +
+      'growing to keep synchronous reads correct.',
+    );
+  }
+}
+
 // ─── BroadcastChannel (cross-tab sync) ──────────────────────────────────────
 let bc: BroadcastChannel | null = null;
 
@@ -47,6 +96,11 @@ function broadcastChange(msg: BroadcastMessage): void {
 // ─── Custom event for same-tab sync ─────────────────────────────────────────
 // Mirrors the old 'local-storage-sync' event so useIdbStorage hooks update.
 function dispatchSyncEvent(key: string, value: unknown): void {
+  // Guarded: writes are scheduled asynchronously, so this can fire after the
+  // document is gone — during teardown, or in any non-DOM context that imports
+  // this module. An unhandled ReferenceError there would reject the write's
+  // promise chain and look like a persistence failure.
+  if (typeof window === 'undefined') return;
   window.dispatchEvent(
     new CustomEvent('idb-storage-sync', { detail: { key, value } })
   );
@@ -214,6 +268,31 @@ export function idbGetSync(key: string): string | null {
   return memCache.get(key) ?? null;
 }
 
+/**
+ * Whether `key` is known to exist, answered authoritatively for every key the
+ * sync cache is responsible for.
+ *
+ * `idbGetSync` returning null is NOT proof of absence, and callers that delete
+ * on a null read (see `stashUserData` in packages/core/src/storageKeys.ts) need
+ * proof. The cache is loaded with the complete key set at init and is only
+ * allowed to evict the namespaces in EVICTABLE_PREFIXES, so for anything else
+ * `memCache.has` is exact.
+ *
+ * Returns false — "cannot confirm absence" — for the two namespaces that are
+ * deliberately kept out of the cache and for evictable keys, so a caller can
+ * never turn a legitimate miss on those into a deletion.
+ */
+export function idbHasSync(key: string): boolean {
+  if (memCache.has(key)) return true;
+  const uncached =
+    key.startsWith('custom-feed-cache:') ||
+    key === 'corkboard:last-backup-data' ||
+    isEvictable(key);
+  // For uncached namespaces, claim existence so callers treat the key as
+  // "present, value unknown" and leave it alone rather than deleting it.
+  return uncached;
+}
+
 /** Synchronous write – updates cache immediately and schedules IDB write. */
 export function idbSetSync(key: string, value: string): void {
   // Only skip memCache for the same blacklist used at init. A size threshold
@@ -221,10 +300,7 @@ export function idbSetSync(key: string, value: string): void {
   // for a value that exists on disk, silently breaking every reader.
   const skipCache = key.startsWith('custom-feed-cache:') || key === 'corkboard:last-backup-data';
   if (!skipCache) {
-    if (memCache.size >= MAX_MEM_CACHE && !memCache.has(key)) {
-      // Evict oldest entry
-      memCache.delete(memCache.keys().next().value!);
-    }
+    evictForNewKey(key);
     memCache.set(key, value);
   }
   // Dispatch the sync event after IDB write (includes retry on failure).
@@ -241,9 +317,7 @@ export function idbSetSync(key: string, value: string): void {
 export function idbPrimeCache(key: string, value: string): void {
   const skipCache = key.startsWith('custom-feed-cache:') || key === 'corkboard:last-backup-data';
   if (!skipCache) {
-    if (memCache.size >= MAX_MEM_CACHE && !memCache.has(key)) {
-      memCache.delete(memCache.keys().next().value!);
-    }
+    evictForNewKey(key);
     memCache.set(key, value);
   }
   dispatchSyncEvent(key, tryParse(value));

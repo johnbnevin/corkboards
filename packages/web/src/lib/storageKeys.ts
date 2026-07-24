@@ -6,7 +6,7 @@
  *
  * Detects Tauri desktop vs browser to set the correct platform.
  */
-import { idbGetSync, idbSetSync, idbRemoveSync, idbGet, idbSet, idbRemove, idbClear, idbKeys, idbGetAll, idbReady } from '@/lib/idb';
+import { idbGetSync, idbSetSync, idbRemoveSync, idbHasSync, idbGet, idbSet, idbRemove, idbClear, idbKeys, idbGetAll, idbReady } from '@/lib/idb';
 import type { KVStorage } from '@core/storage';
 import type { Platform } from '@core/storageKeys';
 import {
@@ -51,6 +51,10 @@ const webStorage: KVStorage = {
   getSync: idbGetSync,
   setSync: idbSetSync,
   removeSync: idbRemoveSync,
+  // Lets the core helpers tell "absent" from "not cached" — without it they
+  // conservatively refuse to delete, which would leave stale per-account
+  // stashes behind. See KVStorage.hasSync in @core/storage.
+  hasSync: idbHasSync,
   get: idbGet,
   set: idbSet,
   remove: idbRemove,

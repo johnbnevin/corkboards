@@ -11,7 +11,6 @@ import {
   StyleSheet,
   ActivityIndicator,
   TouchableOpacity,
-  Linking,
   Alert,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
@@ -33,6 +32,7 @@ import { ProfileAbout } from '../components/ProfileAbout';
 import { formatTimeAgo } from '@core/formatTimeAgo';
 import { SizeGuardedImage } from '../components/SizeGuardedImage';
 import { optimizeMediaUrl } from '@core/imageUtils';
+import { openExternal } from '../lib/openExternal';
 
 interface ProfileScreenProps {
   pubkey: string;
@@ -269,7 +269,7 @@ export function ProfileScreen({ pubkey, onBack, onViewThread, onCreateCorkboard 
         )}
 
         {meta?.website && (
-          <TouchableOpacity onPress={() => Linking.openURL(meta.website!)}>
+          <TouchableOpacity onPress={() => openExternal(meta.website!)}>
             <Text style={styles.website}>{meta.website}</Text>
           </TouchableOpacity>
         )}

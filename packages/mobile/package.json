@@ -6,7 +6,10 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "test": "jest"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint",
+    "test": "tsc --noEmit && eslint && jest --silent && echo 'Mobile tests passed!'",
+    "test:unit": "jest"
   },
   "dependencies": {
     "@nostrify/nostrify": "^0.51.0",

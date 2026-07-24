@@ -120,6 +120,11 @@ if ($origin && !$originAllowed) {
 // Set CORS header to requesting origin (not wildcard)
 $corsOrigin = $originAllowed && $origin ? $origin : 'https://corkboards.me';
 header("Access-Control-Allow-Origin: $corsOrigin");
+// The ACAO value varies with the request's Origin, so any shared cache in front
+// of this must key on it — otherwise one origin's response gets replayed to
+// another. Responses are also per-URL and not worth caching.
+header('Vary: Origin');
+header('Cache-Control: no-store');
 header('Content-Type: application/json');
 header('X-Content-Type-Options: nosniff');
 
@@ -133,9 +138,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 // ─── Input validation ───────────────────────────────────────────────────────
 
 $url = $_GET['url'] ?? '';
-$max = min((int)($_GET['max'] ?? 20), 50);
+// Clamp BOTH ends: `?max=-5` previously made every `$i < $max` loop below false
+// on the first iteration, so the proxy returned `items: []` and the client
+// turned that into a silent "feed has no items" instead of an error.
+$max = max(1, min((int)($_GET['max'] ?? 20), 50));
 
 if (!$url) {
+    http_response_code(400);
     echo json_encode(['error' => 'Missing url parameter']);
     exit;
 }
@@ -144,12 +153,14 @@ if (!$url) {
 $parsed = parse_url($url);
 $scheme = strtolower($parsed['scheme'] ?? '');
 if ($scheme !== 'https') {
+    http_response_code(400);
     echo json_encode(['error' => 'Only HTTPS URLs are allowed']);
     exit;
 }
 
 $host = $parsed['host'] ?? '';
 if (!$host) {
+    http_response_code(400);
     echo json_encode(['error' => 'Invalid URL']);
     exit;
 }
@@ -211,6 +222,17 @@ function isBlockedIp(string $ip): bool {
         return isBlockedIp(implode('.', array_slice($b, 12, 4)));
     }
 
+    // IPv4-compatible ::a.b.c.d (deprecated, still routable by some stacks).
+    // Previously this was caught only incidentally by the filter_var() check
+    // above, which matches on the address STRING rather than the parsed bytes —
+    // too indirect to rely on. Mirrors the same branch in isPrivateIPv6()
+    // (packages/core/src/ipUtils.ts).
+    $zeroTo11 = true;
+    for ($i = 0; $i < 12; $i++) { if ($b[$i] !== 0) { $zeroTo11 = false; break; } }
+    if ($zeroTo11) {
+        return isBlockedIp(implode('.', array_slice($b, 12, 4)));
+    }
+
     // NAT64 well-known prefix 64:ff9b::/96 — re-check the embedded IPv4
     if ($b[0] === 0x00 && $b[1] === 0x64 && $b[2] === 0xff && $b[3] === 0x9b) {
         $mid = true;
@@ -218,9 +240,20 @@ function isBlockedIp(string $ip): bool {
         if ($mid) return isBlockedIp(implode('.', array_slice($b, 12, 4)));
     }
 
+    // 6to4 2002::/16 embeds the v4 address in bytes 2-5.
+    if ($b[0] === 0x20 && $b[1] === 0x02) {
+        return isBlockedIp(implode('.', array_slice($b, 2, 4)));
+    }
+
     if ($b[0] === 0xfe && ($b[1] & 0xc0) === 0x80) return true; // fe80::/10 link-local
     if (($b[0] & 0xfe) === 0xfc) return true;                   // fc00::/7 unique local
     if ($b[0] === 0xff) return true;                            // ff00::/8 multicast
+    // 100::/64 discard-only
+    $discard = ($b[0] === 0x01 && $b[1] === 0x00);
+    if ($discard) { for ($i = 2; $i < 8; $i++) { if ($b[$i] !== 0) { $discard = false; break; } } }
+    if ($discard) return true;
+    // 2001:db8::/32 documentation
+    if ($b[0] === 0x20 && $b[1] === 0x01 && $b[2] === 0x0d && $b[3] === 0xb8) return true;
 
     return false;
 }
@@ -303,6 +336,7 @@ function ssrfValidateUrl(string $url): array {
 
 // DNS pinning requires the cURL extension — fail clean JSON rather than a fatal.
 if (!function_exists('curl_init')) {
+    http_response_code(500);
     echo json_encode(['error' => 'Server misconfiguration: PHP cURL extension is required']);
     exit;
 }
@@ -366,6 +400,23 @@ function curlFetchPinned(string $url, array $pinnedIps, int $maxBytes, string $a
  * first) is SSRF-validated and DNS-pinned before it is contacted.
  * Returns [errorString|null, body, contentType, finalUrl].
  */
+/**
+ * Magic-byte sniff for the bitmap formats a favicon can legitimately be.
+ * Deliberately excludes SVG: it is markup, can carry script, and there is no
+ * reason for a favicon we inline as a data: URI to be one.
+ */
+function looksLikeImage(string $bytes): bool {
+    if (strlen($bytes) < 4) return false;
+    if (substr($bytes, 0, 8) === "\x89PNG\r\n\x1a\n") return true;         // PNG
+    if (substr($bytes, 0, 3) === "\xff\xd8\xff") return true;              // JPEG
+    if (substr($bytes, 0, 6) === 'GIF87a' || substr($bytes, 0, 6) === 'GIF89a') return true; // GIF
+    if (substr($bytes, 0, 4) === 'RIFF' && substr($bytes, 8, 4) === 'WEBP') return true;     // WebP
+    if (substr($bytes, 0, 2) === 'BM') return true;                        // BMP
+    if (substr($bytes, 0, 4) === "\x00\x00\x01\x00") return true;          // ICO
+    if (substr($bytes, 0, 4) === "\x00\x00\x02\x00") return true;          // CUR
+    return false;
+}
+
 function fetchValidated(string $url, int $maxBytes, string $accept, int $timeout = 10, int $maxHops = 3): array {
     $fetchUrl = $url;
     for ($hop = 0; ; $hop++) {
@@ -398,6 +449,7 @@ function fetchValidated(string $url, int $maxBytes, string $accept, int $timeout
     'application/rss+xml, application/atom+xml, application/xml, text/xml'
 );
 if ($fetchErr !== null) {
+    http_response_code(502);
     echo json_encode(['error' => $fetchErr]);
     exit;
 }
@@ -422,6 +474,7 @@ foreach (libxml_get_errors() as $xmlError) {
 libxml_clear_errors();
 
 if ($xmlFatal) {
+    http_response_code(502);
     echo json_encode(['error' => 'Invalid XML']);
     exit;
 }
@@ -435,19 +488,33 @@ $domain = preg_replace('/^www\./', '', $host);
 // SSRF-validated, DNS-pinned fetch path and inline it as a data: URI.
 // (Previously this pointed clients at Google's favicon service, which leaked
 // every subscribed feed's domain to a third party.) No icon on failure.
+// An IPv6 literal host must keep its brackets when rebuilt into a URL.
 $iconHost = parse_url($finalUrl, PHP_URL_HOST) ?: $host;
+$iconAuthority = (strpos($iconHost, ':') !== false && $iconHost[0] !== '[')
+    ? '[' . $iconHost . ']'
+    : $iconHost;
+// maxHops = 0: do NOT follow redirects for the icon. Each hop is still
+// SSRF-validated, but "public https" is not the same as "this feed's own
+// origin" — a feed could 302 its favicon to any third-party https URL and have
+// us fetch it and hand the bytes back base64-encoded, turning the proxy into a
+// content-laundering relay that also attributes the request to our server.
 [$iconErr, $iconBody, $iconType] = fetchValidated(
-    'https://' . $iconHost . '/favicon.ico',
+    'https://' . $iconAuthority . '/favicon.ico',
     64 * 1024,           // small cap — icons only
     'image/*,*/*;q=0.5',
-    5                    // shorter timeout; icons are best-effort
+    5,                   // shorter timeout; icons are best-effort
+    0                    // no redirects
 );
+// Require a real image content-type AND image magic bytes before inlining.
+// Without both, any body the origin chooses to return gets embedded in a
+// `data:` URI that the client then renders.
 if ($iconErr === null && $iconBody !== null && $iconBody !== '') {
     $iconMime = strtolower(trim(explode(';', $iconType)[0]));
-    if (!preg_match('#^image/[a-z0-9.+-]+$#', $iconMime)) {
-        $iconMime = 'image/x-icon';
+    if (preg_match('#^image/[a-z0-9.+-]+$#', $iconMime)
+        && $iconMime !== 'image/svg+xml'   // SVG is script-capable markup, not a bitmap
+        && looksLikeImage($iconBody)) {
+        $result['icon'] = 'data:' . $iconMime . ';base64,' . base64_encode($iconBody);
     }
-    $result['icon'] = 'data:' . $iconMime . ';base64,' . base64_encode($iconBody);
 }
 
 // Try RSS 2.0

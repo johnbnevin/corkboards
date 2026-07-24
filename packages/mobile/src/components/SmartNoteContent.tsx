@@ -13,6 +13,7 @@ import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { visibleLength } from '@core/textTruncation';
 import { hasHtmlContent } from '@core/sanitizeUtils';
+import { sanitizeHtml } from '../lib/sanitize';
 import { NoteContent } from './NoteContent';
 
 const SPOILER_THRESHOLD = 750;
@@ -66,7 +67,9 @@ export function SmartNoteContent({
   const visLen = useMemo(() => visibleLength(text), [text]);
   const safeEvent = useMemo(() => {
     if (hasHtmlContent(text)) {
-      return { ...event, content: text.replace(/<[^>]*>/g, '') };
+      // Shared sanitizer (parity with web's DOMPurify+decode path) — a bare
+      // `/<[^>]*>/` leaks the tail of any tag with a `>` in a quoted attribute.
+      return { ...event, content: sanitizeHtml(text) };
     }
     return event;
   }, [event, text]);

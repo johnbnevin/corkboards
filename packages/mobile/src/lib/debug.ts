@@ -12,3 +12,10 @@ export function debugWarn(...args: unknown[]) {
     console.warn('[corkboard]', ...args);
   }
 }
+
+/** Parity with web's lib/debug.ts, which exports the same three levels. */
+export function debugError(...args: unknown[]) {
+  if (DEBUG) {
+    console.error('[corkboard]', ...args);
+  }
+}

@@ -1,4 +1,5 @@
 {
+  "//": "Standalone type-check for @corkboards/core. Web and mobile each pull core in through their own tsconfig (web `include`s ../core/src; mobile resolves @core/* via paths), so core errors do surface there — but under WEB's settings, which are the loosest of the three (strict:false, noImplicitAny:false). Mobile compiles with strict:true, so core must satisfy strict regardless; checking it here means a violation is caught in core rather than showing up as a confusing error inside the mobile app.",
   "compilerOptions": {
     "target": "ES2020",
     "module": "ESNext",
@@ -7,13 +8,18 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "noEmit": true,
-    "strict": false,
+    "strict": true,
     "strictNullChecks": true,
-    "noImplicitAny": false,
+    "noImplicitAny": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "lib": ["ESNext"],
     "baseUrl": ".",
-    "paths": {}
+    "paths": {
+      "@core/*": ["./src/*"]
+    }
   },
   "include": ["src"]
 }

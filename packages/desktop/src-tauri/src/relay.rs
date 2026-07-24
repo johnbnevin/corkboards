@@ -155,57 +155,128 @@ pub async fn relay_query(
     }
 }
 
+/// True when an IPv4 address is anything other than public unicast.
+/// Kept in step with `isPrivateIPv4` in `packages/core/src/ipUtils.ts`.
+fn is_blocked_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+        // 100.64.0.0/10 CGNAT and 198.18.0.0/15 benchmarking have no
+        // stable std predicate; check them by octet.
+        || (o[0] == 100 && (64..=127).contains(&o[1]))
+        || (o[0] == 198 && (18..=19).contains(&o[1]))
+        || o[0] >= 240
+}
+
+/// True when an IPv6 address is anything other than public unicast.
+///
+/// The v4-embedding forms matter as much as the native ranges: `Ipv6Addr`'s own
+/// `is_loopback()` is true only for `::1`, so `::ffff:127.0.0.1` — which the OS
+/// resolves straight to loopback — passed every check here. Unwrap the embedded
+/// IPv4 and re-run the v4 predicate on it, mirroring `isPrivateIPv6` in
+/// `packages/core/src/ipUtils.ts`.
+fn is_blocked_ipv6(ip: std::net::Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
+        return true;
+    }
+    let s = ip.segments();
+
+    // IPv4-mapped ::ffff:a.b.c.d
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_blocked_ipv4(v4);
+    }
+    // IPv4-compatible ::a.b.c.d (deprecated but still routable by some stacks)
+    if s[0..6] == [0, 0, 0, 0, 0, 0] {
+        return is_blocked_ipv4(std::net::Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            (s[6] & 0xff) as u8,
+            (s[7] >> 8) as u8,
+            (s[7] & 0xff) as u8,
+        ));
+    }
+    // NAT64 well-known prefix 64:ff9b::/96
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+        return is_blocked_ipv4(std::net::Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            (s[6] & 0xff) as u8,
+            (s[7] >> 8) as u8,
+            (s[7] & 0xff) as u8,
+        ));
+    }
+    // 6to4 2002::/16 embeds the v4 address in segments 1–2.
+    if s[0] == 0x2002 {
+        return is_blocked_ipv4(std::net::Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            (s[1] & 0xff) as u8,
+            (s[2] >> 8) as u8,
+            (s[2] & 0xff) as u8,
+        ));
+    }
+
+    // fe80::/10 link-local, fc00::/7 unique-local, 100::/64 discard,
+    // 2001:db8::/32 documentation.
+    (0xfe80..=0xfebf).contains(&s[0])
+        || (0xfc00..=0xfdff).contains(&s[0])
+        || (s[0] == 0x0100 && s[1] == 0)
+        || (s[0] == 0x2001 && s[1] == 0x0db8)
+}
+
 /// Reject a relay URL that this process must not dial.
 ///
 /// Two checks, both of which matter because the URL arrives over the IPC
 /// boundary from the webview and is therefore only as trustworthy as the page:
 ///
-///  1. Scheme must be ws/wss. Anything else could coerce the proxy path into a
-///     raw SOCKS/TCP connect to an arbitrary internal host:port.
-///  2. Host must not be loopback/private/link-local. This mirrors the JS-side
-///     `isSecureRelay` / `isUnsafeHost` gate (see `packages/core/src/ipUtils.ts`);
-///     without it the native path was strictly more permissive than the web path
-///     it exists to replace, so `ws://127.0.0.1:9050` or
-///     `ws://169.254.169.254/` would happily be dialled from Rust. Hostnames are
-///     not resolved here — this is the same lexical check the clients do, and
-///     DNS-level rebinding is out of scope for a relay socket that speaks only
-///     the Nostr wire protocol.
+/// 1. Scheme must be `wss` (or `ws` for a `.onion`, where the hidden-service
+///    address authenticates and encrypts the endpoint by itself). Anything else
+///    could coerce the proxy path into a raw SOCKS/TCP connect to an arbitrary
+///    internal host:port, and plaintext `ws` to a clearnet host would expose the
+///    user's filters — follow graph, hashtags — to anyone on the path.
+/// 2. Host must not be loopback/private/link-local, in ANY encoding including
+///    the IPv4-in-IPv6 forms. This mirrors the JS-side `isSecureRelay` /
+///    `isUnsafeHost` gate (see `packages/core/src/ipUtils.ts`); without it the
+///    native path is strictly more permissive than the web path it exists to
+///    replace, so `ws://127.0.0.1:9050` or `wss://[::ffff:169.254.169.254]/`
+///    would happily be dialled from Rust. Hostnames are not resolved here —
+///    this is the same lexical check the clients do, and DNS-level rebinding is
+///    out of scope for a relay socket that speaks only the Nostr wire protocol.
 fn validate_relay_url(url: &str) -> Result<(), String> {
     let parsed =
         url::Url::parse(url).map_err(|_| "invalid relay URL".to_string())?;
-    if !matches!(parsed.scheme(), "ws" | "wss") {
-        return Err("unsupported relay scheme (ws/wss only)".to_string());
+    // `wss` only, matching the JS `isSecureRelay` gate — plaintext `ws://`
+    // exposes the user's filters (follow graph, hashtags, DM-recipient pubkeys)
+    // to anyone on the path. The one exception is a Tor hidden service, where
+    // the .onion address itself authenticates and encrypts the endpoint and TLS
+    // adds nothing; those are only reachable through the SOCKS proxy anyway.
+    let is_onion = matches!(parsed.host(), Some(url::Host::Domain(d))
+        if d.to_ascii_lowercase().trim_end_matches('.').ends_with(".onion"));
+    match parsed.scheme() {
+        "wss" => {}
+        "ws" if is_onion => {}
+        _ => return Err("unsupported relay scheme (wss only; ws allowed for .onion)".to_string()),
     }
     match parsed.host() {
         Some(url::Host::Ipv4(ip)) => {
-            if ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.is_broadcast()
-                || ip.is_multicast()
-                || ip.is_documentation()
-                // 100.64.0.0/10 CGNAT and 198.18.0.0/15 benchmarking have no
-                // stable std predicate; check them by octet.
-                || (ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
-                || (ip.octets()[0] == 198 && (18..=19).contains(&ip.octets()[1]))
-                || ip.octets()[0] >= 240
-            {
+            if is_blocked_ipv4(ip) {
                 return Err("refusing to connect to a private/reserved address".to_string());
             }
         }
         Some(url::Host::Ipv6(ip)) => {
-            if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
-                return Err("refusing to connect to a private/reserved address".to_string());
-            }
-            let seg0 = ip.segments()[0];
-            // fe80::/10 link-local and fc00::/7 unique-local.
-            if (0xfe80..=0xfebf).contains(&seg0) || (0xfc00..=0xfdff).contains(&seg0) {
+            if is_blocked_ipv6(ip) {
                 return Err("refusing to connect to a private/reserved address".to_string());
             }
         }
         Some(url::Host::Domain(d)) => {
+            // Strip the trailing root dot before matching: `ws://localhost./`
+            // parses to the domain `localhost.`, which resolves to loopback but
+            // matches neither arm below unless the dot is removed. Mirrors the
+            // same normalization in `isUnsafeHost` (packages/core/src/ipUtils.ts).
             let d = d.to_ascii_lowercase();
+            let d = d.trim_end_matches('.');
             if d == "localhost" || d.ends_with(".localhost") || d.is_empty() {
                 return Err("refusing to connect to a private/reserved address".to_string());
             }
@@ -213,6 +284,47 @@ fn validate_relay_url(url: &str) -> Result<(), String> {
         None => return Err("relay URL missing host".to_string()),
     }
     Ok(())
+}
+
+/// Verify an event's id-hash and Schnorr signature before it leaves this
+/// process.
+///
+/// The JS side verifies too (`tauriQuery` / `tauriRelayQuery` in
+/// `packages/web/src/lib/tauri.ts`), but relying on that alone made the native
+/// bridge the ONLY transport in the app that hands unvalidated relay JSON to the
+/// renderer — the web and mobile builds get `verifyEvent` for free inside
+/// nostrify's `NRelay1`. Verifying here restores parity at the transport layer,
+/// so a forged event is dropped before it is ever emitted, batched, counted
+/// against `limit`, or inserted into the `seen` dedup set.
+///
+/// A malformed value that won't deserialize into an `Event` is treated as
+/// unverifiable and dropped — fail closed.
+fn authentic_event(value: &Value) -> Option<nostr::Event> {
+    let event = serde_json::from_value::<nostr::Event>(value.clone()).ok()?;
+    event.verify().ok()?;
+    Some(event)
+}
+
+/// True when `event` actually satisfies the REQ filter we sent.
+///
+/// A valid signature proves only that SOMEONE signed the event — not that it is
+/// the event we asked for. `NRelay1` on web and mobile runs `matchFilters` in
+/// addition to `verifyEvent` (node_modules/@nostrify/nostrify/NRelay1.ts), and
+/// the native bridge replaces that transport wholesale, so without this check
+/// desktop accepts any correctly-signed event a relay feels like sending.
+///
+/// That gap is reachable from the app's whole data plane: `fetchEvent.ts`
+/// caches a returned event under the id it REQUESTED, so a relay answering an
+/// `ids` lookup with a different (validly signed) note substitutes content; the
+/// same path feeds kind-10002 relay lists into `updateRelayCache`, which
+/// persists them.
+///
+/// NIP-50 `search` matching is deliberately disabled: relays implement search
+/// fuzzily, and the crate's `search_match` is a literal substring test that
+/// would discard legitimate results.
+fn matches_filter(filter: &nostr::Filter, event: &nostr::Event) -> bool {
+    let opts = nostr::filter::MatchEventOptions::new().nip50(false);
+    filter.match_event(event, opts)
 }
 
 /// Hard cap on events accumulated from a single relay connection.
@@ -388,6 +500,20 @@ async fn run_query<S>(mut ws: WebSocketStream<S>, filter: Value) -> RelayQueryRe
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Parse the filter up front so every returned event can be checked against
+    // it. Fail CLOSED on a filter we can't model: the app builds these itself,
+    // so a parse failure is our bug, and the alternative — accepting whatever
+    // the relay sends — is exactly the hole this check exists to close.
+    let parsed_filter: nostr::Filter = match serde_json::from_value(filter.clone()) {
+        Ok(f) => f,
+        Err(e) => {
+            return RelayQueryResult {
+                events: vec![],
+                error: Some(format!("unsupported filter: {e}")),
+            };
+        }
+    };
+
     let req = serde_json::json!(["REQ", "q", filter]);
     if ws.send(Message::Text(req.to_string())).await.is_err() {
         return RelayQueryResult {
@@ -418,6 +544,12 @@ where
         };
         match arr.first().and_then(|v| v.as_str()) {
             Some("EVENT") if arr.len() >= 3 => {
+                // Two checks, mirroring what NRelay1 does on web/mobile: the
+                // event must be authentic AND must be one we actually asked for.
+                let Some(event) = authentic_event(&arr[2]) else { continue };
+                if !matches_filter(&parsed_filter, &event) {
+                    continue;
+                }
                 events.push(arr[2].clone());
                 if events.len() >= MAX_EVENTS_PER_QUERY {
                     break; // hostile/broken relay streaming without EOSE
@@ -430,4 +562,195 @@ where
 
     let _ = ws.close(None).await;
     RelayQueryResult { events, error: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every one of these must be refused. The IPv4-in-IPv6 spellings are the
+    /// ones that used to get through: `Ipv6Addr::is_loopback()` is true only for
+    /// `::1`, so `::ffff:127.0.0.1` — which the OS resolves straight to loopback
+    /// — passed the old check and let the webview open a native socket to a
+    /// local service. Kept in step with the `isUnsafeHost` cases in
+    /// packages/web/src/lib/ipUtils.test.ts.
+    #[test]
+    fn rejects_private_and_reserved_hosts() {
+        let blocked = [
+            "wss://127.0.0.1",
+            "wss://10.0.0.1",
+            "wss://192.168.1.1",
+            "wss://172.16.0.1",
+            "wss://169.254.169.254",
+            "wss://100.64.0.1",
+            "wss://198.18.0.1",
+            "wss://0.0.0.0",
+            "wss://255.255.255.255",
+            "wss://localhost",
+            "wss://localhost.",
+            "wss://sub.localhost",
+            "wss://[::1]",
+            "wss://[fe80::1]",
+            "wss://[febf::1]",
+            "wss://[fc00::1]",
+            "wss://[fd12:3456::1]",
+            "wss://[ff02::1]",
+            "wss://[2001:db8::1]",
+            "wss://[100::1]",
+            // IPv4-embedding forms
+            "wss://[::ffff:127.0.0.1]",
+            "wss://[::ffff:169.254.169.254]",
+            "wss://[::ffff:10.0.0.1]",
+            "wss://[::127.0.0.1]",
+            "wss://[64:ff9b::127.0.0.1]",
+            "wss://[2002:7f00:1::]",
+        ];
+        for url in blocked {
+            assert!(
+                validate_relay_url(url).is_err(),
+                "expected {url} to be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_public_relays() {
+        for url in [
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.nostr.net/",
+            "wss://[2606:4700:4700::1111]",
+            "wss://1.1.1.1",
+        ] {
+            assert!(
+                validate_relay_url(url).is_ok(),
+                "expected {url} to be accepted",
+            );
+        }
+    }
+
+    /// Plaintext `ws://` leaks the user's filters (follow graph, hashtags) to
+    /// anyone on the path, so it is refused for clearnet — matching the JS
+    /// `isSecureRelay` gate. A `.onion` is the documented exception: the hidden
+    /// service address authenticates and encrypts the endpoint by itself.
+    #[test]
+    fn enforces_wss_except_for_onion() {
+        assert!(validate_relay_url("ws://relay.damus.io").is_err());
+        assert!(validate_relay_url("wss://relay.damus.io").is_ok());
+        assert!(validate_relay_url("ws://abcdefghij234567.onion").is_ok());
+        assert!(validate_relay_url("wss://abcdefghij234567.onion").is_ok());
+        // The onion exemption must not extend to a lookalike domain.
+        assert!(validate_relay_url("ws://notreally-onion.example").is_err());
+    }
+
+    #[test]
+    fn rejects_non_websocket_schemes() {
+        for url in [
+            "http://relay.damus.io",
+            "https://relay.damus.io",
+            "file:///etc/passwd",
+            "socks5://127.0.0.1:9050",
+            "not a url",
+            "",
+        ] {
+            assert!(
+                validate_relay_url(url).is_err(),
+                "expected {url} to be rejected",
+            );
+        }
+    }
+
+    /// The native bridge is the only transport in the app that does not get
+    /// nostrify's `verifyEvent` for free, so a forged event must be dropped
+    /// here rather than emitted to the renderer.
+    #[test]
+    fn rejects_unauthentic_events() {
+        // Structurally valid shape, but the signature is not over this content.
+        let forged = serde_json::json!({
+            "id": "0".repeat(64),
+            "pubkey": "1".repeat(64),
+            "created_at": 1_700_000_000u64,
+            "kind": 1,
+            "tags": [],
+            "content": "forged",
+            "sig": "2".repeat(128),
+        });
+        assert!(authentic_event(&forged).is_none());
+
+        // Anything that will not even deserialize as an Event fails closed.
+        assert!(authentic_event(&serde_json::json!({})).is_none());
+        assert!(authentic_event(&serde_json::json!("not an object")).is_none());
+        assert!(authentic_event(&serde_json::json!({ "id": "short" })).is_none());
+    }
+
+    /// A valid signature proves authorship, NOT that the event is the one we
+    /// asked for. Without filter matching a relay can answer an `ids` lookup
+    /// with any correctly-signed note it likes — and `fetchEvent.ts` caches the
+    /// reply under the id it REQUESTED, so the substitution sticks.
+    #[test]
+    fn rejects_signed_but_unrequested_events() {
+        use nostr::prelude::*;
+        let keys = Keys::generate();
+        let event = EventBuilder::text_note("real note")
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        // Asked for a DIFFERENT event id.
+        let other_id = EventId::all_zeros();
+        let by_id: nostr::Filter = serde_json::from_value(serde_json::json!({
+            "ids": [other_id.to_hex()],
+        }))
+        .expect("filter");
+        assert!(!matches_filter(&by_id, &event));
+
+        // Asked for a different author.
+        let by_author: nostr::Filter = serde_json::from_value(serde_json::json!({
+            "authors": [Keys::generate().public_key().to_hex()],
+        }))
+        .expect("filter");
+        assert!(!matches_filter(&by_author, &event));
+
+        // Asked for a different kind — this is the relay-list poisoning shape:
+        // request kind 10002, get handed a signed kind 1.
+        let by_kind: nostr::Filter =
+            serde_json::from_value(serde_json::json!({ "kinds": [10002] })).expect("filter");
+        assert!(!matches_filter(&by_kind, &event));
+    }
+
+    /// …and the matching must not be so strict that real queries return nothing.
+    #[test]
+    fn accepts_requested_events() {
+        use nostr::prelude::*;
+        let keys = Keys::generate();
+        let event = EventBuilder::text_note("real note")
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        for filter_json in [
+            serde_json::json!({ "ids": [event.id.to_hex()] }),
+            serde_json::json!({ "authors": [keys.public_key().to_hex()] }),
+            serde_json::json!({ "kinds": [1] }),
+            serde_json::json!({ "kinds": [1], "authors": [keys.public_key().to_hex()], "limit": 20 }),
+            serde_json::json!({}),
+        ] {
+            let f: nostr::Filter = serde_json::from_value(filter_json.clone()).expect("filter");
+            assert!(
+                matches_filter(&f, &event),
+                "expected {filter_json} to match the event",
+            );
+        }
+    }
+
+    /// A genuinely signed event must survive verification, or the check would
+    /// silently drop every real event and the test above would pass vacuously.
+    #[test]
+    fn accepts_authentic_event() {
+        use nostr::prelude::*;
+        let keys = Keys::generate();
+        let event = EventBuilder::text_note("hello")
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let value: Value = serde_json::from_str(&event.as_json()).expect("serialize");
+        assert!(authentic_event(&value).is_some());
+    }
 }

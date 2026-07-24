@@ -7,6 +7,7 @@ import { useMemo } from 'react';
 import { Text, StyleSheet } from 'react-native';
 import { nip19 } from 'nostr-tools';
 import { hasHtmlContent } from '@core/sanitizeUtils';
+import { sanitizeHtml } from '../lib/sanitize';
 import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr';
 
 /** Lightweight nip-19 validity check — keeps JSX construction out of try/catch. */
@@ -24,8 +25,9 @@ export function ProfileAbout({ about, style }: ProfileAboutProps) {
   const elements = useMemo(() => {
     if (!about) return null;
 
-    // Strip HTML tags if present
-    const text = hasHtmlContent(about) ? about.replace(/<[^>]*>/g, '') : about;
+    // Strip HTML tags if present — parity with web's ProfileAbout, which runs
+    // the same shared sanitizer rather than a bare `/<[^>]*>/`.
+    const text = hasHtmlContent(about) ? sanitizeHtml(about) : about;
     if (!text.trim()) return null;
 
     // Parse Nostr identifiers and hashtags.

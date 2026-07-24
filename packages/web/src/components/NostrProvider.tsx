@@ -864,9 +864,21 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
       if (!event.data || typeof event.data !== 'object') return;
       if (event.data.type === 'relay-cache-entry') {
         const { pubkey, relays } = event.data;
-        if (typeof pubkey === 'string' && Array.isArray(relays) && relays.every((r: unknown) => typeof r === 'string')) {
-          relayCache.delete(pubkey);
-          relayCache.set(pubkey, relays);
+        if (typeof pubkey === 'string' && Array.isArray(relays)) {
+          // Apply the SAME isSecureRelay gate the other two write paths use
+          // (updateRelayCache and loadRelayCache). Without it this was the one
+          // way into the relay cache that accepted `ws://` or a private/LAN
+          // address — a stale tab running an older build, or any same-origin
+          // script, could seed relays we'd then query with the user's follow
+          // graph. Drop the message entirely if nothing survives, rather than
+          // caching an empty list that would shadow a good one.
+          const secure = (relays as unknown[]).filter(
+            (r): r is string => typeof r === 'string' && isSecureRelay(r),
+          );
+          if (secure.length > 0) {
+            relayCache.delete(pubkey);
+            relayCache.set(pubkey, secure);
+          }
         }
       } else if (event.data.type === 'relay-cache-updated') {
         debugLog('Received full relay cache update from another tab');

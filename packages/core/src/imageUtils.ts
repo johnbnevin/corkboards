@@ -38,8 +38,6 @@ const KNOWN_THUMBNAIL_HOSTS: Record<string, (url: string, size: number) => strin
   'damus.app': withSizeParam('s'),
 };
 
-const GOOGLE_FAVICON_HOSTS = ['www.google.com', 'google.com'];
-
 export function optimizeAvatarUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
   // Reject non-HTTPS avatar URLs and suspicious file extensions
@@ -55,11 +53,11 @@ export function optimizeAvatarUrl(url: string | undefined): string | undefined {
         break;
       }
     }
-
-    if (optimized === url && GOOGLE_FAVICON_HOSTS.includes(u.hostname) && u.pathname.includes('/favicons')) {
-      u.searchParams.set('sz', String(THUMBNAIL_SIZE));
-      optimized = u.toString();
-    }
+    // NOTE: a Google-favicon-service branch used to live here, sizing
+    // `google.com/s2/favicons?domain=…` URLs. Nothing generates those any more
+    // (rss-proxy.php now inlines each feed's own favicon as a data: URI rather
+    // than pointing clients at Google), and keeping the branch only preserved a
+    // third-party tracking path we deliberately removed. Do not reintroduce it.
   } catch {
     /* fall through to passthrough */
   }

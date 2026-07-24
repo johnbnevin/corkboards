@@ -8,6 +8,7 @@ import { MediaLink } from './MediaLink'
 import { isImageUrl } from '@/lib/mediaUtils'
 import { MARKDOWN_INDICATORS_PATTERN } from '@/lib/markdownDetect'
 import { canonicalMediaUrl } from '@core/sanitizeUtils'
+import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr'
 import { optimizeMediaUrl } from '@/lib/imageUtils'
 import { parseImetaTag, type ImetaData } from '@core/blossom'
 import { InlineLink } from './InlineLink'
@@ -429,7 +430,23 @@ interface ContentPart {
   alt?: string
 }
 
-const nostrPattern = /(nostr:)?(note1|npub1|nprofile1|nevent1|naddr1)[a-zA-Z0-9]+/g
+/**
+ * NIP-19 entity matcher.
+ *
+ * The payload class is the BECH32 charset, not `[a-zA-Z0-9]`. Bech32 excludes
+ * `1`, `b`, `i` and `o` precisely so they can't be confused for other
+ * characters; matching the full alphanumeric range means any of those letters
+ * immediately after a real identifier gets swallowed into it, and the resulting
+ * token no longer decodes. `NoteLink`/`ProfileLink` then fall back to their
+ * "undecodable" path and the mention renders as inert junk instead of the
+ * author's name.
+ *
+ * `@core/nostr` already owns this pattern — it is what mobile's NoteContent and
+ * both platforms' ProfileAbout match against. Web's NoteContent was the only
+ * place with a hand-rolled second version, so the two parsers disagreed about
+ * where an identifier ends.
+ */
+const nostrPattern = new RegExp(NIP19_IDENTIFIER_PATTERN, 'g')
 const urlPattern = /(https?:\/\/[^\s]+)/g
 const hashtagPattern = /(?<!#)#([a-zA-Z]\w*)/g
 const mediaPattern = new RegExp(

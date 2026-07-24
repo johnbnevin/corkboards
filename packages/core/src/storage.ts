@@ -18,6 +18,21 @@ export interface KVStorage {
   setSync(key: string, value: string): void;
   removeSync(key: string): void;
 
+  /**
+   * Whether `key` exists in the backing store — distinct from `getSync(key)
+   * !== null`, which on a cache-backed implementation cannot tell "evicted"
+   * from "absent".
+   *
+   * That difference is destructive, not cosmetic: `stashUserData` mirrors the
+   * live keys into a per-account namespace and DELETES the stashed copy of any
+   * key it reads as absent. Given a `getSync` that can miss, an account switch
+   * silently discards the departing account's settings. Implementations that
+   * can answer authoritatively should do so; the helpers in ./storageKeys.ts
+   * fall back to leaving data alone when this is not provided, because keeping
+   * a stale value is always recoverable and deleting a live one is not.
+   */
+  hasSync?(key: string): boolean;
+
   /** Resolves when the storage backend is initialized and sync access is available. */
   readonly ready: Promise<void>;
 }

@@ -14,7 +14,8 @@ import { nip19, getPublicKey } from 'nostr-tools';
 import { NSecSigner, NConnectSigner, NRelay1 } from '@nostrify/nostrify';
 import { handleLogoutStorage, switchActiveUser } from '../lib/storageKeys';
 import { flushBackupBeforeSwitch } from '../lib/backupFlush';
-import { clearRelayCache } from './NostrProvider';
+import { clearRelayCache, createRelay, registerAuthRelay } from './NostrProvider';
+import { isSecureRelay } from '@core/nostrUtils';
 import { clearCollapsedNotesModuleState } from '../hooks/useCollapsedNotes';
 import { evictCachedProfile, clearProfileCache } from '../lib/cacheStore';
 import { mobileStorage } from '../storage/MmkvStorage';
@@ -28,6 +29,30 @@ const ACTIVE_ACCOUNT_KEY = 'corkboard:active-account';
 const MIGRATION_DONE_KEY = 'corkboard:keychain-migrated';
 const ENUM_MIGRATION_FLAG = '__accounts_migrated_to_encrypted__';
 
+/**
+ * Storage options for every secret-key entry this module writes.
+ *
+ * `WHEN_UNLOCKED_THIS_DEVICE_ONLY` matters for two independent reasons:
+ *
+ *   - THIS_DEVICE_ONLY excludes the entry from iCloud Keychain sync and from
+ *     encrypted iTunes/Finder and Android cloud backups. Without it the user's
+ *     nsec leaves the device and lands on a third party's servers — which is
+ *     exactly what "private keys never touch a server" forbids, and it happens
+ *     silently, with no UI anywhere in the app that would reveal it.
+ *   - WHEN_UNLOCKED (rather than AFTER_FIRST_UNLOCK) keeps the key unreadable
+ *     while the screen is locked, so a lock-screen-bypass or a background
+ *     process on a locked device can't pull it.
+ *
+ * The MMKV *database* encryption key already used a THIS_DEVICE_ONLY flag (see
+ * storage/MmkvStorage.ts); the nsecs it exists to protect did not. It uses
+ * AFTER_FIRST_UNLOCK deliberately — it must be readable during background
+ * launch — whereas signing only ever happens with the app in the foreground,
+ * so the stricter class is free here.
+ */
+const SECRET_STORAGE_OPTIONS = {
+  accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+} as const;
+
 function keychainService(pubkey: string) {
   return `${KEYCHAIN_SERVICE_PREFIX}${pubkey}`;
 }
@@ -39,9 +64,33 @@ function clientNsecService(pubkey: string) {
 function getBunkerData(pubkey: string): { bunkerPubkey: string; relays: string[] } | null {
   try {
     const raw = mobileStorage.getSync(`corkboard:bunker:${pubkey}`);
-    if (raw) return JSON.parse(raw) as { bunkerPubkey: string; relays: string[] };
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { bunkerPubkey?: unknown; relays?: unknown };
+    if (typeof parsed?.bunkerPubkey !== 'string') return null;
+    // Re-validate on read, not just on write: this record is persisted state
+    // that a later app version (or a restored backup) may have written under
+    // different rules, and every entry becomes a WebSocket we dial.
+    const relays = Array.isArray(parsed.relays) ? parsed.relays.filter(isSecureRelay) : [];
+    if (relays.length === 0) return null;
+    return { bunkerPubkey: parsed.bunkerPubkey, relays };
   } catch { /* ignore */ }
   return null;
+}
+
+/**
+ * Open the signalling relay for a NIP-46 bunker session.
+ *
+ * Goes through `createRelay` rather than `new NRelay1` so the connection gets
+ * the same rate limiting, failure backoff and — critically — the NIP-42 AUTH
+ * handler every other relay in the app has. A raw NRelay1 has no `auth`
+ * callback at all, so a bunker relay that gates reads behind AUTH would just
+ * return nothing and the login would hang with no error. `registerAuthRelay`
+ * marks it as a deliberate connection so the gated handler answers its
+ * challenge. Parity with web's useLoginActions, which uses createRelayDirect.
+ */
+function openBunkerRelay(url: string): NRelay1 {
+  registerAuthRelay(url);
+  return createRelay(url, { backoff: false });
 }
 
 function setBunkerData(pubkey: string, data: { bunkerPubkey: string; relays: string[] }) {
@@ -117,7 +166,7 @@ async function buildSignerForAccount(pubkey: string): Promise<NSecSigner | NConn
       if (decoded.type !== 'nsec') return null;
       const clientSk = decoded.data;
       const clientSignerInstance = new NSecSigner(clientSk);
-      const relay = new NRelay1(bunker.relays[0]);
+      const relay = openBunkerRelay(bunker.relays[0]);
       return new NConnectSigner({
         relay,
         pubkey: bunker.bunkerPubkey,
@@ -194,7 +243,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               const decoded = nip19.decode(oldCreds.password);
               if (decoded.type === 'nsec') {
                 const pk = getPublicKey(decoded.data);
-                await Keychain.setGenericPassword('nsec', oldCreds.password, { service: keychainService(pk) });
+                await Keychain.setGenericPassword('nsec', oldCreds.password, { service: keychainService(pk), ...SECRET_STORAGE_OPTIONS });
                 await Keychain.resetGenericPassword({ service: 'corkboards-nsec' });
                 setStoredActiveAccount(pk);
                 setState({ pubkey: pk, signer: new NSecSigner(decoded.data), loading: false, accounts: [pk] });
@@ -242,7 +291,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const pubkey = getPublicKey(sk);
     const signer = new NSecSigner(sk);
 
-    await Keychain.setGenericPassword('nsec', nsec, { service: keychainService(pubkey) });
+    await Keychain.setGenericPassword('nsec', nsec, { service: keychainService(pubkey), ...SECRET_STORAGE_OPTIONS });
     setAccountType(pubkey, 'nsec');
 
     // Enumerate *after* writing the keychain entry so the new account is
@@ -267,11 +316,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     relays: string[],
     userPubkey: string,
   ) => {
+    // Reject a bunker whose signalling relays are all unusable before writing
+    // anything: persisting them would produce an account that can never build a
+    // signer, and `relays[0]` below would be undefined.
+    const safeRelays = relays.filter(isSecureRelay);
+    if (safeRelays.length === 0) throw new Error('Bunker supplied no usable wss:// relay');
+
     // Store clientNsec in keychain
-    await Keychain.setGenericPassword('clientNsec', clientNsec, { service: clientNsecService(userPubkey) });
+    await Keychain.setGenericPassword('clientNsec', clientNsec, { service: clientNsecService(userPubkey), ...SECRET_STORAGE_OPTIONS });
 
     // Store bunker metadata in MMKV
-    setBunkerData(userPubkey, { bunkerPubkey, relays });
+    setBunkerData(userPubkey, { bunkerPubkey, relays: safeRelays });
     setAccountType(userPubkey, 'bunker');
 
     const accounts = await getStoredAccounts();
@@ -285,7 +340,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const decoded = nip19.decode(clientNsec);
     if (decoded.type !== 'nsec') throw new Error('Invalid client nsec');
-    const relay = new NRelay1(relays[0]);
+    const relay = openBunkerRelay(safeRelays[0]);
     const signer = new NConnectSigner({
       relay,
       pubkey: bunkerPubkey,

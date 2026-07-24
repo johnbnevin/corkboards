@@ -92,11 +92,21 @@ export function useMuteList(fetchEnabled = true) {
   const mute = useCallback(
     async (pubkey: string) => {
       const base = await resolveMuteBase();
-      const existing = base?.tags ?? muteEvent?.tags ?? [];
-      if (existing.some(t => t[0] === 'p' && t[1] === pubkey)) return;
-      await publishMuteList([...existing, ['p', pubkey]], base?.content);
+      if (!base) {
+        // Symmetric with unmute below. `mute` used to fall back to
+        // `muteEvent?.tags ?? []` here, which meant an unconfirmable list was
+        // treated as an EMPTY one — and kind 10000 is replaceable, so
+        // publishing from that base replaced every existing mute with the one
+        // being added. `content` went out as '' too, destroying the NIP-51
+        // encrypted private-mute section. `muteEvent` is nullish whenever the
+        // query hasn't run yet, which on web is the default: the hook is gated
+        // by `useMuteList(profileFetchEnabled)` and that flag starts false.
+        throw new Error('Could not confirm mute list; mute aborted to avoid data loss');
+      }
+      if (base.tags.some(t => t[0] === 'p' && t[1] === pubkey)) return;
+      await publishMuteList([...base.tags, ['p', pubkey]], base.content);
     },
-    [resolveMuteBase, muteEvent, publishMuteList],
+    [resolveMuteBase, publishMuteList],
   );
 
   const unmute = useCallback(

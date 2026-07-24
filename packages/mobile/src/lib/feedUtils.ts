@@ -118,7 +118,7 @@ export async function batchFetchByAuthors(opts: BatchFetchOpts): Promise<NostrEv
 
   if (__DEV__) {
     const effectiveWindowMinutes = (baseWindowSeconds * multiplier) / 60;
-    console.log(`[batchFetch] Query for ${authors.length} authors, window: ${effectiveWindowMinutes}min (${multiplier}x)`);
+    if (__DEV__) console.log(`[batchFetch] Query for ${authors.length} authors, window: ${effectiveWindowMinutes}min (${multiplier}x)`);
   }
 
   onProgress?.(0, 1);

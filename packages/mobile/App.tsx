@@ -1,4 +1,5 @@
-import 'react-native-get-random-values'; // Must be first — polyfills crypto.getRandomValues
+import './src/polyfills'; // Must be first — AbortSignal.timeout/any (RN has neither)
+import 'react-native-get-random-values'; // polyfills crypto.getRandomValues
 import { useEffect, useState } from 'react';
 import { View, Text, ActivityIndicator } from 'react-native';
 import { StatusBar } from 'expo-status-bar';

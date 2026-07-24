@@ -1,26 +1,28 @@
+import { htmlToPlainText } from '@core/sanitizeUtils';
+
 // Re-export pure detection helpers from core
 export { hasHtmlContent, isContentFromUser } from '@core/sanitizeUtils';
 
 /**
- * Strips HTML tags from content using regex (no DOM needed on mobile).
- * For mobile, we don't render arbitrary HTML, so stripping is sufficient.
- */
-export function stripHtml(html: string): string {
-  return html
-    .replace(/<[^>]*>/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&nbsp;/g, ' ');
-}
-
-/**
- * Sanitizes HTML content by stripping all tags.
- * Mobile equivalent of the web sanitizeHtml — since React Native doesn't
- * render HTML directly, we strip tags instead of allowlisting them.
+ * Reduce HTML-looking user content to PLAIN TEXT — mobile mirror of
+ * packages/web/src/lib/sanitize.ts.
+ *
+ * React Native has no DOM, so there is no DOMPurify here; the shared core
+ * implementation does the same job without one (drops script/style bodies,
+ * strips tags with quoted-attribute awareness, repeats until stable, decodes
+ * entities LAST). Web runs DOMPurify first and then that same decode stage, so
+ * both platforms produce the same string for the same input.
+ *
+ * ⚠ Returns PLAIN TEXT, not HTML. Render inside <Text> — never feed it to a
+ * WebView's HTML or any innerHTML equivalent.
+ *
+ * The previous mobile-only implementation stripped tags with `/<[^>]*>/g` and
+ * THEN decoded entities, so `&lt;img onerror=…&gt;` came back out as live
+ * markup, and any tag carrying a `>` inside a quoted attribute was mis-parsed.
  */
 export function sanitizeHtml(html: string): string {
-  return stripHtml(html);
+  return htmlToPlainText(html);
 }
+
+/** Alias kept for existing mobile callers. Same plain-text contract. */
+export const stripHtml = sanitizeHtml;

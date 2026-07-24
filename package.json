@@ -14,7 +14,15 @@
   "scripts": {
     "dev": "npm run dev -w @corkboards/web",
     "build": "npm run build -w @corkboards/web",
-    "test": "npm run test -w @corkboards/web"
+    "//test": "Full suite: every package, not just web. `test` used to alias test:web, which is why core had no type-check or lint coverage at all and mobile's jest/eslint never ran in a normal check. Core runs first so a shared-code break is reported at its source rather than as a confusing error inside an app.",
+    "test": "npm run test:core && npm run test:web && npm run test:mobile",
+    "test:core": "npm run test -w @corkboards/core",
+    "test:web": "npm run test -w @corkboards/web",
+    "test:mobile": "npm run test -w @corkboards/mobile",
+    "//test:desktop": "Rust checks for the Tauri backend. Kept out of `test` because it needs a Rust toolchain, which the web/mobile contributor flow does not.",
+    "test:desktop": "cargo clippy --manifest-path packages/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path packages/desktop/src-tauri/Cargo.toml",
+    "typecheck": "npm run typecheck -w @corkboards/core && npm run typecheck -w @corkboards/mobile && tsc --noEmit -p packages/web/tsconfig.json",
+    "lint": "npm run lint -w @corkboards/core && npm run lint -w @corkboards/mobile && npm run lint -w @corkboards/web"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",

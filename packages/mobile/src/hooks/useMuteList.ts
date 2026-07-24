@@ -94,11 +94,18 @@ export function useMuteList(fetchEnabled = true) {
     async (pk: string) => {
       if (!signer || !pubkey) return;
       const base = await resolveMuteBase();
-      const existing = base?.tags ?? muteEvent?.tags ?? [];
-      if (existing.some(t => t[0] === 'p' && t[1] === pk)) return;
-      await publishMuteList([...existing, ['p', pk]], base?.content);
+      if (!base) {
+        // Symmetric with unmute below, and identical to web's useMuteList.
+        // Falling back to `muteEvent?.tags ?? []` treated an unconfirmable list
+        // as an EMPTY one; kind 10000 is replaceable, so publishing from that
+        // base replaced every existing mute with the one being added and sent
+        // `content: ''`, destroying the NIP-51 encrypted private-mute section.
+        throw new Error('Could not confirm mute list; mute aborted to avoid data loss');
+      }
+      if (base.tags.some(t => t[0] === 'p' && t[1] === pk)) return;
+      await publishMuteList([...base.tags, ['p', pk]], base.content);
     },
-    [pubkey, signer, resolveMuteBase, muteEvent, publishMuteList],
+    [pubkey, signer, resolveMuteBase, publishMuteList],
   );
 
   const unmute = useCallback(

@@ -24,7 +24,26 @@ import type { NostrEvent } from '@nostrify/nostrify';
 export interface ContactPool {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   query: (...args: any[]) => Promise<NostrEvent[]>;
+  /**
+   * Optional streaming read. When present it is PREFERRED over `query`, because
+   * it is the only way to tell "the relays answered and the user has no list"
+   * apart from "every relay failed" — see {@link fetchAuthoritativeContactEvent}.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  req?: (...args: any[]) => AsyncIterable<any>;
 }
+
+/**
+ * Outcome of reading the user's authoritative kind-3.
+ *
+ * The distinction between `confirmed-empty` and `unconfirmed` is the whole
+ * point: only the former proves the user genuinely has no follow list, and only
+ * the former makes it safe to publish a kind-3 built from an empty base.
+ */
+export type ContactFetchResult =
+  | { status: 'found'; event: NostrEvent }
+  | { status: 'confirmed-empty' }
+  | { status: 'unconfirmed' };
 
 /**
  * The trustworthy base to republish a kind-3 from: the authoritative event's
@@ -37,24 +56,79 @@ export interface ContactBase {
   content: string;
 }
 
-/** Fetch the user's freshest kind-3 event from relays, or null on relay miss. */
+/**
+ * Kind 3 is replaceable — keep the most recent, applying NIP-01's tie-break
+ * (lowest id wins on equal created_at) rather than letting relay response order
+ * decide. Two kind-3s can share a timestamp when the user follows twice within
+ * a second or edits from two devices; picking the "wrong" one means the NEXT
+ * publish is built from a stale base and silently drops whatever the other
+ * event added. Matches deduplicateAndSort() in ./feedAlgorithms.ts.
+ */
+function latestReplaceable(events: NostrEvent[]): NostrEvent {
+  return events.reduce((a, b) => {
+    if (b.created_at !== a.created_at) return b.created_at > a.created_at ? b : a;
+    return b.id < a.id ? b : a;
+  });
+}
+
+const CONTACT_FILTER = (myPubkey: string) => ({ kinds: [3], authors: [myPubkey], limit: 5 });
+const CONTACT_TIMEOUT_MS = 8000;
+
+/**
+ * Read the user's freshest kind-3, reporting WHY it came back empty.
+ *
+ * This is the safety-critical distinction. `NPool.query()` swallows every
+ * transport error and returns whatever partial results it has
+ * (`node_modules/@nostrify/nostrify/NPool.ts` — `catch { // Skip errors, return
+ * partial results. }`), so an empty array from it means EITHER "the user
+ * follows nobody" OR "every relay timed out". Treating those the same is how a
+ * populated follow list gets replaced by a one-entry kind-3.
+ *
+ * `req()` exposes the signal `query()` throws away: an `EOSE` is a relay
+ * positively telling us it has finished sending everything it has. Reaching
+ * EOSE with no events is a CONFIRMED empty list. Timing out, erroring, or being
+ * CLOSED without EOSE is UNCONFIRMED, and the caller must not build on it.
+ */
 export async function fetchAuthoritativeContactEvent(
   nostr: ContactPool,
   myPubkey: string,
-): Promise<NostrEvent | null> {
-  try {
-    const events = await nostr.query(
-      [{ kinds: [3], authors: [myPubkey], limit: 5 }],
-      { signal: AbortSignal.timeout(8000) },
-    );
-    if (events.length > 0) {
-      // Kind 3 is replaceable — keep the most recent.
-      return events.reduce((a, b) => (b.created_at > a.created_at ? b : a));
+): Promise<ContactFetchResult> {
+  const filter = CONTACT_FILTER(myPubkey);
+
+  if (typeof nostr.req === 'function') {
+    const found: NostrEvent[] = [];
+    let sawEose = false;
+    try {
+      for await (const msg of nostr.req([filter], { signal: AbortSignal.timeout(CONTACT_TIMEOUT_MS) })) {
+        if (msg[0] === 'EVENT') {
+          const event = msg[2] as NostrEvent;
+          // Guard against a relay answering with someone else's list.
+          if (event?.kind === 3 && event.pubkey === myPubkey) found.push(event);
+        } else if (msg[0] === 'EOSE') {
+          sawEose = true;
+          break;
+        } else if (msg[0] === 'CLOSED') {
+          break;
+        }
+      }
+    } catch {
+      /* transport failure — fall through to the unconfirmed verdict below */
     }
-  } catch {
-    /* fall through to caller's fallback */
+    if (found.length > 0) return { status: 'found', event: latestReplaceable(found) };
+    return sawEose ? { status: 'confirmed-empty' } : { status: 'unconfirmed' };
   }
-  return null;
+
+  // Fallback for pools without req(). query() cannot distinguish empty from
+  // failed, so an empty result MUST be reported as unconfirmed — never as a
+  // confirmed empty list.
+  try {
+    const events = await nostr.query([filter], { signal: AbortSignal.timeout(CONTACT_TIMEOUT_MS) });
+    const mine = events.filter((e) => e?.kind === 3 && e.pubkey === myPubkey);
+    if (mine.length > 0) return { status: 'found', event: latestReplaceable(mine) };
+  } catch {
+    /* fall through */
+  }
+  return { status: 'unconfirmed' };
 }
 
 /**
@@ -72,15 +146,28 @@ export async function resolveContactBase(
   cached: string[] | null | undefined,
   op: 'add' | 'remove',
 ): Promise<ContactBase | null> {
-  const event = await fetchAuthoritativeContactEvent(nostr, myPubkey);
-  if (event) {
-    return { tags: event.tags, content: event.content ?? '' };
+  const result = await fetchAuthoritativeContactEvent(nostr, myPubkey);
+  if (result.status === 'found') {
+    return { tags: result.event.tags, content: result.event.content ?? '' };
   }
   if (cached && cached.length > 0) {
     return { tags: cached.map(pk => ['p', pk]), content: '' };
   }
-  if (op === 'add') return { tags: [], content: '' }; // first follow, no list anywhere
-  return null; // removal with no confirmable list — caller must abort
+  // An empty base REPLACES the user's entire follow list, so it is only safe
+  // when we positively confirmed there is nothing to replace.
+  //
+  // This used to be `if (op === 'add') return { tags: [], content: '' }` with a
+  // comment calling it the "first follow, no list anywhere" case — but nothing
+  // distinguished that from a relay outage. Both callers' contact queries return
+  // `[]` on a miss (MultiColumnClient's queryFn logs "zero contacts or relay
+  // miss" and returns []; mobile's useContacts returns [] when `!event`), so
+  // `cached.length > 0` was false too, and one click on Follow during an outage
+  // published a kind-3 containing exactly one p-tag — wiping every follow and
+  // the legacy relay-list JSON in `content` that this module exists to preserve.
+  if (result.status === 'confirmed-empty' && op === 'add') {
+    return { tags: [], content: '' }; // genuine first follow — relays confirmed no list
+  }
+  return null; // nothing confirmable — caller must abort rather than risk a wipe
 }
 
 /** Followed pubkeys from a base, in order (the `p`-tag values). */

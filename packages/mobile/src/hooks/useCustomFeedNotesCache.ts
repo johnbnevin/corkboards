@@ -257,9 +257,9 @@ export function useCustomFeedNotesCache({
       const since = now - timeWindowSeconds;
 
       if (__DEV__) {
-        console.log(`[customFeedCache] Fetching notes for feed ${feedId}:`);
-        console.log(`  timeWindowSeconds: ${timeWindowSeconds} seconds = ${timeWindowSeconds / 3600} hours`);
-        console.log(`  multiplier: ${multiplier}`);
+        if (__DEV__) console.log(`[customFeedCache] Fetching notes for feed ${feedId}:`);
+        if (__DEV__) console.log(`  timeWindowSeconds: ${timeWindowSeconds} seconds = ${timeWindowSeconds / 3600} hours`);
+        if (__DEV__) console.log(`  multiplier: ${multiplier}`);
       }
 
       const events = await batchFetchByAuthors({
@@ -272,7 +272,7 @@ export function useCustomFeedNotesCache({
       });
 
       if (__DEV__) {
-        console.log(`[customFeedCache] Got ${events.length} events for feed ${feedId}`);
+        if (__DEV__) console.log(`[customFeedCache] Got ${events.length} events for feed ${feedId}`);
       }
 
       // Save to custom feed cache
@@ -310,7 +310,7 @@ export function useCustomFeedNotesCache({
     const since = oldestTimestamp - (baseWindowSeconds * 3);
 
     if (__DEV__) {
-      console.log(`[customFeedCache] Loading older notes for feed ${feedId}: until ${until} since ${since}`);
+      if (__DEV__) console.log(`[customFeedCache] Loading older notes for feed ${feedId}: until ${until} since ${since}`);
     }
 
     const events = await batchFetchByAuthors({

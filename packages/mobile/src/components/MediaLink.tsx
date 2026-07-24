@@ -11,7 +11,6 @@ import {
   View,
   Text,
   TouchableOpacity,
-  Linking,
   Dimensions,
   StyleSheet,
   Modal,
@@ -21,6 +20,8 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { resolveMediaSources } from '@core/blossom';
 import { optimizeMediaUrl } from '@core/imageUtils';
+import { openExternal } from '../lib/openExternal';
+import { isSafeExternalUrl } from '@core/sanitizeUtils';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56;
@@ -102,7 +103,7 @@ function InlineVideo({ sources }: { sources: string[] }) {
             <Text style={styles.videoErrorAction}>Retry</Text>
           </TouchableOpacity>
           {/* Link the CANONICAL url (sources[0]), not the last failed mirror */}
-          <TouchableOpacity onPress={() => Linking.openURL(sources[0] ?? src)}>
+          <TouchableOpacity onPress={() => openExternal(sources[0] ?? src)}>
             <Text style={styles.videoErrorAction}>Open in browser</Text>
           </TouchableOpacity>
         </View>
@@ -148,9 +149,9 @@ function isVideoUrl(url: string): boolean {
   }
 }
 
-function isSafeUrl(u: string): boolean {
-  return /^https?:\/\//i.test(u.trim());
-}
+// isSafeUrl now lives in @core/sanitizeUtils as isSafeExternalUrl — one
+// definition shared by web and mobile so the platforms can't drift.
+const isSafeUrl = isSafeExternalUrl;
 
 // IDs pulled from user-supplied URLs are interpolated into embed URLs.
 // Validate each against a strict charset before use so a crafted URL can't
@@ -312,7 +313,7 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
       return <Text style={styles.unsafeUrl}>{url}</Text>;
     }
     return (
-      <TouchableOpacity onPress={() => Linking.openURL(url)}>
+      <TouchableOpacity onPress={() => openExternal(url)}>
         <Text style={styles.link}>{url}</Text>
       </TouchableOpacity>
     );
@@ -336,7 +337,7 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
         <TouchableOpacity
           activeOpacity={0.9}
           onPress={() => setLightboxOpen(true)}
-          onLongPress={() => Linking.openURL(currentImageUrl)}
+          onLongPress={() => openExternal(currentImageUrl)}
           style={styles.mediaContainer}
         >
           <SizeGuardedImage
@@ -417,7 +418,7 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
     return (
       <TouchableOpacity
         style={styles.blurPlaceholder}
-        onPress={() => Linking.openURL(embed.url)}
+        onPress={() => openExternal(embed.url)}
       >
         <Text style={styles.blurText}>Tap to load YouTube video</Text>
       </TouchableOpacity>
@@ -429,7 +430,7 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
     return (
       <TouchableOpacity
         style={styles.linkPreview}
-        onPress={() => Linking.openURL(url)}
+        onPress={() => openExternal(url)}
       >
         <View style={styles.linkPreviewIcon}>
           <Text style={styles.linkPreviewEmoji}>
@@ -448,7 +449,7 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
 
   // Fallback: open in browser
   return (
-    <TouchableOpacity onPress={() => Linking.openURL(url)}>
+    <TouchableOpacity onPress={() => openExternal(url)}>
       <Text style={styles.link}>{url}</Text>
     </TouchableOpacity>
   );

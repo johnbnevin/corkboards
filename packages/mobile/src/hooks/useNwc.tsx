@@ -7,7 +7,7 @@
  */
 import React, { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from 'react';
 import type { NRelay1 } from '@nostrify/nostrify';
-import { createRelay } from '../lib/NostrProvider';
+import { createRelay, registerAuthRelay } from '../lib/NostrProvider';
 import { getPublicKey } from 'nostr-tools';
 import { hexToBytes, bytesToHex } from 'nostr-tools/utils';
 import { encrypt as nip44Encrypt, decrypt as nip44Decrypt, getConversationKey } from 'nostr-tools/nip44';
@@ -95,6 +95,11 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
       relayRef.current = null;
       return;
     }
+    // The wallet relay is a deliberate, user-supplied connection (it comes from
+    // the NWC URI the user pasted) and commonly requires NIP-42 AUTH. Register
+    // it so the gated auto-AUTH handler will answer its challenge — without
+    // this the gate would silently break payments. Parity with web's useNwc.
+    registerAuthRelay(parsed.relay);
     relayRef.current = createRelay(parsed.relay, { backoff: false });
     return () => {
       relayRef.current?.close();

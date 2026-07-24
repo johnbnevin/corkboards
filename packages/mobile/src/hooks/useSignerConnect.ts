@@ -6,8 +6,9 @@
 import { useState, useRef, useCallback } from 'react';
 import { Linking, Platform } from 'react-native';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
-import { NSecSigner, NConnectSigner, NRelay1 } from '@nostrify/nostrify';
+import { NSecSigner, NConnectSigner } from '@nostrify/nostrify';
 import { useAuth } from '../lib/AuthContext';
+import { createRelay, registerAuthRelay } from '../lib/NostrProvider';
 import { NSEC_APP_RELAY } from '@core/relayConstants';
 
 // `_type` is kept in the signature for API stability and to leave room for
@@ -60,7 +61,12 @@ export function useSignerConnect(_type: 'amber') {
       }
 
       // Listen for NIP-46 connect response on relay.nsec.app
-      const relay = new NRelay1(NSEC_APP_RELAY);
+      // Same treatment as AuthContext's bunker relays: go through createRelay so
+      // the connection carries the NIP-42 AUTH handler (a raw NRelay1 has none,
+      // so an AUTH-gated signalling relay would silently return nothing and the
+      // connect flow would hang), and register it as a deliberate connection.
+      registerAuthRelay(NSEC_APP_RELAY);
+      const relay = createRelay(NSEC_APP_RELAY, { backoff: false });
 
       // Inner abort — closed once we have the response so the abandoned connect
       // subscription doesn't keep reading and fill NRelay1's buffer, which would

@@ -2,7 +2,7 @@
  * Combined emoji picker — standard emojis as the first tab, custom emoji sets as additional tabs.
  * Used in compose, inline reply, and note-level reaction.
  */
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { useState, useMemo, useCallback, useRef } from 'react';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useCustomEmojiSets } from '@/hooks/useCustomEmojiSets';
@@ -42,17 +42,22 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
   // Drive the emoji list's scroll manually. When the picker is mounted inside a
   // Popover that sits within a scroll-locked Dialog (the thread modal) and/or a
   // virtualized/transformed container, ancestor scroll-lockers (react-remove-
-  // scroll) intermittently swallow the scroll gesture and the list won't move.
-  // Handling wheel (desktop) AND touch (mobile) here — adjusting scrollTop
-  // ourselves and stopping the event — makes it scroll reliably regardless of
-  // the surrounding scroll context.
-  const scrollBodyRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = scrollBodyRef.current;
+  // scroll) swallow the scroll gesture and the list won't move — worse, on touch
+  // the gesture falls through to the thread behind. Handling wheel (desktop) AND
+  // touch (mobile) here — adjusting scrollTop ourselves and stopping the event —
+  // makes it scroll reliably and stops the pass-through.
+  //
+  // Uses a CALLBACK REF (not useEffect) so listeners bind to the real scroll node
+  // whenever it mounts. The picker first renders a loading skeleton with no
+  // scroll div, so a one-shot effect would attach to nothing and never re-run.
+  const scrollCleanupRef = useRef<(() => void) | null>(null);
+  const scrollBodyRef = useCallback((el: HTMLDivElement | null) => {
+    scrollCleanupRef.current?.();
+    scrollCleanupRef.current = null;
     if (!el) return;
 
     // Apply a vertical delta; returns true if we consumed it (so we can stop the
-    // event and keep ancestor scroll-lockers from hijacking the gesture).
+    // event and keep ancestor scroll-lockers / the thread from hijacking it).
     const applyDelta = (dy: number): boolean => {
       const { scrollTop, scrollHeight, clientHeight } = el;
       if (scrollHeight <= clientHeight) return false; // nothing to scroll
@@ -68,19 +73,23 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
     };
 
     // Touch: track finger delta between moves and drive scrollTop directly.
+    // preventDefault always fires (so the thread behind never scrolls), even at
+    // the list's edges.
     let lastY = 0;
     const onTouchStart = (e: TouchEvent) => { lastY = e.touches[0]?.clientY ?? 0; };
     const onTouchMove = (e: TouchEvent) => {
       const y = e.touches[0]?.clientY ?? lastY;
       const dy = lastY - y; // finger up → scroll down
       lastY = y;
-      if (applyDelta(dy)) { e.preventDefault(); e.stopPropagation(); }
+      applyDelta(dy);
+      e.preventDefault();
+      e.stopPropagation();
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });
     el.addEventListener('touchstart', onTouchStart, { passive: true });
     el.addEventListener('touchmove', onTouchMove, { passive: false });
-    return () => {
+    scrollCleanupRef.current = () => {
       el.removeEventListener('wheel', onWheel);
       el.removeEventListener('touchstart', onTouchStart);
       el.removeEventListener('touchmove', onTouchMove);

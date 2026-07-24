@@ -34,6 +34,7 @@ import { useToast } from '@/hooks/useToast';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/components/NostrProvider';
 import {
   getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS,
+  getBlobRejectingServers, clearBlobRejectingServer,
 } from '@/hooks/useNostrBackup';
 import { isTauri, tauriGetProxy, tauriSetProxy, tauriGetProxyRequired, tauriSetProxyRequired, tauriProxyLoadFailed } from '@/lib/tauri';
 import { getImageProxyTemplate, saveImageProxyTemplate } from '@/lib/imageProxySettings';
@@ -679,6 +680,13 @@ function BlossomSection() {
   const [newUrl, setNewUrl] = useState('');
   const [testing, setTesting] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Map<string, 'ok' | 'error'>>(new Map());
+  // Servers that rejected the backup-blob content type (HTTP 415) and are being
+  // skipped on save. They may still work for image uploads — this only affects
+  // the app's backup list, never the server list on your Nostr profile.
+  const [rejectedServers, setRejectedServers] = useState<string[]>(() => Array.from(getBlobRejectingServers()));
+
+  const normalize = (u: string) => (u.endsWith('/') ? u : u + '/');
+  const isRejected = (u: string) => rejectedServers.includes(normalize(u));
 
   // Persist: user servers first (priority), then fallbacks if included
   const persistServers = useCallback((users: string[], withFallbacks: boolean) => {
@@ -718,6 +726,25 @@ function BlossomSection() {
     persistServers(userServers, checked);
   };
 
+  // Clear a server's blob-rejection flag so the next backup retries it.
+  const handleRetryRejected = (url: string) => {
+    clearBlobRejectingServer(url);
+    setRejectedServers(Array.from(getBlobRejectingServers()));
+    toast({ title: 'Server re-enabled', description: 'It will be retried on the next backup.' });
+  };
+
+  // Remove a flagged custom server from the app's backup list entirely.
+  const handleRemoveRejected = (url: string) => {
+    setUserServers(prev => {
+      const updated = prev.filter(s => s !== url);
+      persistServers(updated, includeFallbacks);
+      return updated;
+    });
+    clearBlobRejectingServer(url);
+    setRejectedServers(Array.from(getBlobRejectingServers()));
+    toast({ title: 'Server removed', description: 'Removed from the servers Corkboards uses for backups (your Nostr profile is unchanged).' });
+  };
+
   const testServer = async (url: string) => {
     setTesting(url);
     try {
@@ -730,6 +757,7 @@ function BlossomSection() {
   };
 
   const ServerStatusIcon = ({ url }: { url: string }) => {
+    if (isRejected(url)) return <AlertTriangle className="h-3 w-3 text-orange-500 shrink-0" />;
     const result = testResults.get(url);
     if (result === 'ok') return <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />;
     if (result === 'error') return <WifiOff className="h-3 w-3 text-red-500 shrink-0" />;
@@ -745,6 +773,38 @@ function BlossomSection() {
       <p className="text-xs text-muted-foreground">
         Blossom servers store encrypted backup files. Your servers are tried first, then fallbacks.
       </p>
+
+      {/* ── Servers that reject backups (HTTP 415), auto-skipped ── */}
+      {rejectedServers.length > 0 && (
+        <div className="rounded-md border border-orange-500/40 bg-orange-500/10 p-2.5 space-y-2">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-3.5 w-3.5 text-orange-500 shrink-0 mt-0.5" />
+            <p className="text-[11px] text-foreground/90">
+              These servers rejected Corkboards backups (they may still work for images) and are being
+              skipped when saving. Consider removing them from the servers Corkboards uses for backups —
+              this does not change the Blossom servers on your Nostr profile.
+            </p>
+          </div>
+          <div className="space-y-1">
+            {rejectedServers.map((url) => {
+              const isCustom = userServers.includes(url);
+              return (
+                <div key={url} className="flex items-center gap-2 text-[11px] px-1.5 py-1 rounded bg-background/50">
+                  <span className="font-mono flex-1 truncate" title={url}>{url}</span>
+                  <Button variant="ghost" size="sm" onClick={() => handleRetryRejected(url)} className="h-6 px-2 text-[10px] shrink-0" title="Retry this server on the next backup">
+                    Re-enable
+                  </Button>
+                  {isCustom && (
+                    <Button variant="ghost" size="sm" onClick={() => handleRemoveRejected(url)} className="h-6 px-2 text-[10px] text-destructive shrink-0" title="Remove from Corkboards' backup servers">
+                      Remove
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── Your Servers (priority, editable) ── */}
       <div>

@@ -6,7 +6,7 @@ import { cacheProfile } from '@/lib/cacheStore'
 import { nip19 } from 'nostr-tools'
 
 // Relays to query in parallel for onboard discovery
-const RELAYS = ['wss://nos.lol', 'wss://relay.damus.io', 'wss://relay.ditto.pub']
+const RELAYS = ['wss://nos.lol', 'wss://relay.nostr.net', 'wss://relay.ditto.pub']
 
 // Curators whose follows seed the onboard discovery feed
 const CURATOR_NPUBS = [

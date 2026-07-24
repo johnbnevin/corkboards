@@ -85,6 +85,9 @@ export const STORAGE_KEYS = {
 
   // Blossom servers (per-user — different accounts may use different servers)
   BLOSSOM_SERVERS: 'corkboard:blossom-servers',
+  // Servers that rejected the backup-blob content type (HTTP 415). App-local
+  // health state so backup saves skip them; NOT backed up (device/network-specific).
+  BLOSSOM_BLOB_REJECTS: 'corkboard:blossom-blob-rejects',
 
   // Media / bandwidth settings (shared)
   IMAGE_SIZE_LIMIT: 'corkboard:image-size-limit',
@@ -232,6 +235,7 @@ function getAllPerUserKeys(): string[] {
     STORAGE_KEYS.LAST_BACKUP_TS,
     STORAGE_KEYS.LAST_CHUNK_COUNT,
     STORAGE_KEYS.BACKUP_SLOT_CURSOR, // per-user local bookkeeping (not backed up)
+    STORAGE_KEYS.BLOSSOM_BLOB_REJECTS, // per-user server-health state (not backed up)
     STORAGE_KEYS.LAST_BACKUP_DATA,
     STORAGE_KEYS.LAST_BACKUP_HASHES,
     STORAGE_KEYS.LAST_BACKUP_COUNTS,

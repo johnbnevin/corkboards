@@ -141,6 +141,33 @@ export function EmojiSetEditor() {
     }
   }, [user, publish, favoritesEvent, toast, queryClient])
 
+  // Subscribe to a public set WITHOUT copying it: add an 'a'-tag reference to the
+  // user's kind-10030 favorites list (NIP-51). The set stays owned by its author,
+  // their updates flow through, and removing it just un-references (see
+  // handleDeleteFromList). This is distinct from Fork/"Save to My Sets", which copy.
+  const [isSubscribing, setIsSubscribing] = useState(false)
+  const subscribeToSet = useCallback(async (set: { pubkey: string; dTag: string; name: string }) => {
+    if (!user) { toast({ title: 'Log in to subscribe', variant: 'destructive' }); return }
+    setIsSubscribing(true)
+    try {
+      const addr = `30030:${set.pubkey}:${set.dTag}`
+      const existingTags = favoritesEvent?.tags ?? []
+      if (existingTags.some(t => t[0] === 'a' && t[1] === addr)) {
+        toast({ title: 'Already subscribed' })
+        return
+      }
+      const newTags = [...existingTags, ['a', addr]]
+      await publish({ kind: 10030, content: favoritesEvent?.content ?? '', tags: newTags } as never)
+      toast({ title: `Subscribed to "${set.name}"`, description: 'Added to your emoji sets without copying.' })
+      queryClient.invalidateQueries({ queryKey: ['custom-emoji-sets'] })
+      queryClient.invalidateQueries({ queryKey: ['emoji-favorites-list'] })
+    } catch (err) {
+      toast({ title: 'Subscribe failed', description: String(err), variant: 'destructive' })
+    } finally {
+      setIsSubscribing(false)
+    }
+  }, [user, publish, favoritesEvent, toast, queryClient])
+
   // Inline shortcode editing
   const [editingShortcode, setEditingShortcode] = useState<string | null>(null)
   const [editingShortcodeValue, setEditingShortcodeValue] = useState('')
@@ -471,6 +498,19 @@ export function EmojiSetEditor() {
                       <p className="text-[10px] text-muted-foreground font-mono truncate">{set.pubkey.slice(0, 12)}...</p>
                     </div>
                     <div className="flex gap-1 shrink-0">
+                      {user && set.pubkey !== user.pubkey && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs gap-1"
+                          disabled={isSubscribing}
+                          title="Add this set to yours without copying — references the original author's set"
+                          onClick={() => subscribeToSet(set)}
+                        >
+                          <Plus className="h-3 w-3" />
+                          Subscribe
+                        </Button>
+                      )}
                       {editing ? (
                         <Button
                           size="sm"

@@ -38,6 +38,10 @@ const defaultConfig: AppConfig = {
     relays: [],
     updatedAt: 0,
   },
+  // Off by default — the `client` tag is followable, so a non-anon sender's
+  // pubkey gets correlated to "uses corkboards" by relay observers forever.
+  // Users can opt in via Advanced Settings.
+  publishClientTag: false,
 };
 
 export function App() {

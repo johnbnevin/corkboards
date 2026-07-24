@@ -14,7 +14,7 @@ export interface AppConfig {
   theme: Theme;
   /** NIP-65 relay list metadata */
   relayMetadata: RelayMetadata;
-  /** Whether to include the ["client", "corkboards.me"] tag on published events (default: true) */
+  /** Whether to include the ["client", "corkboards.me"] tag on published events (default: false) */
   publishClientTag?: boolean;
 }
 

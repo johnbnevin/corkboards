@@ -28,7 +28,6 @@ export const KNOWN_BLOSSOM_SERVERS = [
   'https://blossom.band/',
   'https://blossom.primal.net/',
   'https://blossom.yakihonne.com/',
-  'https://cdn.sovbit.host/',
   'https://blossom.f7z.io/',
   'https://blossom.ditto.pub/',
   'https://nostr.download/',

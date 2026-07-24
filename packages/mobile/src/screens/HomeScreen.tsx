@@ -234,7 +234,8 @@ export function HomeScreen() {
 
   // ── Filter state ────────────────────────────────────────────────────────────
   const [filtersCollapsed, setFiltersCollapsed] = useState(true);
-  const [kindFilters, setKindFilters] = useState<Set<KindFilter>>(new Set());
+  // kindFilters holds the HIDDEN kinds; default hides reactions (all others shown).
+  const [kindFilters, setKindFilters] = useState<Set<KindFilter>>(new Set(['reactions']));
   const [filterMode, setFilterMode] = useState<'any' | 'strict'>('any');
   const [hashtagFilters, setHashtagFilters] = useState<Set<string>>(new Set());
 

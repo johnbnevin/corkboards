@@ -1,6 +1,6 @@
 {
   "name": "@corkboards/desktop",
-  "version": "0.7.62",
+  "version": "0.7.63",
   "private": true,
   "scripts": {
     "dev": "cd ../.. && npx vite --port 8080 & npx @tauri-apps/cli dev --config src-tauri/tauri.conf.json",

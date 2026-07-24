@@ -1,6 +1,5 @@
 import { formatTimeAgo } from '@core/formatTimeAgo';
 import { FEED_KINDS, FEED_PAGE_SIZE_MOBILE } from '@core/feedConstants';
-import { getConversationPartner } from '@core/dmUtils';
 
 describe('core imports', () => {
   it('formatTimeAgo returns a string for recent timestamps', () => {
@@ -12,20 +11,5 @@ describe('core imports', () => {
     expect(FEED_KINDS).toBeDefined();
     expect(FEED_KINDS.length).toBeGreaterThan(0);
     expect(FEED_PAGE_SIZE_MOBILE).toBeGreaterThan(0);
-  });
-
-  it('getConversationPartner returns partner pubkey', () => {
-    const userPubkey = 'a'.repeat(64);
-    const partnerPubkey = 'b'.repeat(64);
-    const event = {
-      id: '1',
-      kind: 4,
-      pubkey: userPubkey,
-      content: 'test',
-      created_at: 0,
-      tags: [['p', partnerPubkey]],
-      sig: '',
-    };
-    expect(getConversationPartner(event, userPubkey)).toBe(partnerPubkey);
   });
 });

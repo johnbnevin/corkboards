@@ -81,14 +81,26 @@ export function isRelayBlocked(url: string): boolean {
   return getBlockedRelays().has(normalized);
 }
 
+// Default blossom servers for backup file upload. blossom.band is excluded
+// because it rejects text/octet-stream blobs (HTTP 415). Servers that turn out
+// to reject the blob type at runtime are flagged (markBlobRejectingServer) and
+// skipped by getActiveBlossomServers.
 export const DEFAULT_BLOSSOM_SERVERS = [
   'https://blossom.primal.net/',
   'https://blossom.nostr.build/',
   'https://nostr.download/',
-  'https://cdn.sovbit.host/',
+  'https://blossom.yakihonne.com/',
+  'https://blossom.ditto.pub/',
 ];
 
 const BLOSSOM_SERVERS_KEY = STORAGE_KEYS.BLOSSOM_SERVERS;
+const BLOSSOM_BLOB_REJECTS_KEY = STORAGE_KEYS.BLOSSOM_BLOB_REJECTS;
+// Aim for this many independent Blossom copies of each backup blob (redundancy).
+const REDUNDANT_COPIES = 3;
+
+function normalizeServer(url: string): string {
+  return url.endsWith('/') ? url : url + '/';
+}
 
 /** Get user-configured blossom servers, falling back to defaults */
 export function getBlossomServers(): string[] {
@@ -107,9 +119,51 @@ export function setBlossomServers(servers: string[]): void {
   mobileStorage.setSync(BLOSSOM_SERVERS_KEY, JSON.stringify(servers));
 }
 
-function getActiveBlossomServers(): string[] {
-  return getBlossomServers();
+/**
+ * Servers that have rejected the backup-blob content type (HTTP 415). They still
+ * work for image/media uploads (separate path), but are useless for the backup
+ * blob, so we skip them on save and surface them in Settings.
+ */
+export function getBlobRejectingServers(): Set<string> {
+  const stored = mobileStorage.getSync(BLOSSOM_BLOB_REJECTS_KEY);
+  if (!stored) return new Set();
+  try {
+    const arr = JSON.parse(stored);
+    return Array.isArray(arr) ? new Set(arr.map(normalizeServer)) : new Set();
+  } catch { return new Set(); }
 }
+
+export function markBlobRejectingServer(url: string): void {
+  const set = getBlobRejectingServers();
+  const norm = normalizeServer(url);
+  if (!set.has(norm)) {
+    set.add(norm);
+    mobileStorage.setSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(Array.from(set)));
+  }
+}
+
+export function clearBlobRejectingServer(url: string): void {
+  const set = getBlobRejectingServers();
+  if (set.delete(normalizeServer(url))) {
+    mobileStorage.setSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(Array.from(set)));
+  }
+}
+
+export function isBlobRejectingServer(url: string): boolean {
+  return getBlobRejectingServers().has(normalizeServer(url));
+}
+
+// Skips servers known to reject the blob type; falls back to the full list if
+// that would leave nothing (flags may be stale / network may have changed).
+function getActiveBlossomServers(): string[] {
+  const all = getBlossomServers();
+  const rejects = getBlobRejectingServers();
+  const usable = all.filter(s => !rejects.has(normalizeServer(s)));
+  return usable.length > 0 ? usable : all;
+}
+
+/** Result of an auto-save attempt — lets callers show accurate messaging. */
+export type AutoSaveResult = 'saved' | 'skipped' | 'no-servers' | 'error';
 
 
 function getStoredCheckpoints(): RemoteCheckpoint[] {
@@ -263,7 +317,14 @@ async function blossomUpload(
     });
 
     if (!response.ok) {
-      if (__DEV__) console.warn(`[backup] ${server} upload failed: ${response.status}`);
+      // 415 = server rejects the backup-blob content type. Flag it so future
+      // saves skip it (it may still work for image uploads — separate path).
+      if (response.status === 415) {
+        markBlobRejectingServer(server);
+        if (__DEV__) console.warn(`[backup] ${server} rejects backup blobs (415) — flagged`);
+      } else if (__DEV__) {
+        console.warn(`[backup] ${server} upload failed: ${response.status}`);
+      }
       return null;
     }
 
@@ -276,6 +337,32 @@ async function blossomUpload(
     if (__DEV__) console.warn(`[backup] ${server} upload error:`, err);
     return null;
   }
+}
+
+/**
+ * Upload to Blossom servers aiming for REDUNDANT_COPIES copies. Stops once
+ * enough copies land; returns the primary URL/hash and how many landed.
+ * 415-rejecting servers are flagged inside blossomUpload and skipped next time.
+ */
+async function blossomUploadWithRedundancy(
+  servers: string[],
+  content: string,
+  signer: BackupSigner,
+  onLog?: (msg: string) => void,
+): Promise<{ url: string | null; hash?: string; count: number }> {
+  let url: string | null = null;
+  let hash: string | undefined;
+  let count = 0;
+  for (const server of servers) {
+    if (count >= REDUNDANT_COPIES) break;
+    const result = await blossomUpload(server, content, signer);
+    if (result) {
+      if (!url) { url = result.url; hash = result.hash; }
+      count++;
+      onLog?.(`  Uploaded to ${server} (${count}/${REDUNDANT_COPIES})`);
+    }
+  }
+  return { url, hash, count };
 }
 
 export function useNostrBackup(pubkey: string | null, signer: BackupSigner | null) {
@@ -336,20 +423,11 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       setStatus('saving');
       setMessage('Uploading to Blossom…');
 
-      let blossomUrl: string | null = null;
-      let blossomHash: string | undefined;
-      for (const server of getActiveBlossomServers()) {
-        log(`  Uploading to ${server}…`);
-        const result = await blossomUpload(server, encryptedData, signer);
-        if (result) {
-          blossomUrl = result.url;
-          blossomHash = result.hash;
-          log(`  Uploaded: ${blossomUrl}`);
-          break;
-        }
-      }
+      const { url: blossomUrl, hash: blossomHash, count: blossomCount } =
+        await blossomUploadWithRedundancy(getActiveBlossomServers(), encryptedData, signer, log);
 
       if (!blossomUrl) throw new Error('All Blossom servers failed');
+      log(`Backup landed on ${blossomCount} Blossom server(s)`);
 
       // Publish manifest (kind 30078) — manual saves use timestamp d-tags (matches web)
       const now = Math.floor(Date.now() / 1000);
@@ -435,17 +513,18 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
   }, [pubkey, signer, log, deviceId]);
 
   // Silent auto-save — same logic as saveBackup but no status/message updates.
-  // Returns true on success, false on failure. Used by auto-save orchestration.
-  const autoSaveBackup = useCallback(async (): Promise<boolean> => {
-    if (!pubkey || !signer || isSaving.current || isRestoring.current) return false;
-    if (!signer.nip04 && !signer.nip44) return false;
-    if (!hasUnsavedChanges()) return false;
+  // Returns a status so callers can distinguish a real upload failure
+  // ('no-servers'/'error') from a benign protective skip ('skipped', silent).
+  const autoSaveBackup = useCallback(async (): Promise<AutoSaveResult> => {
+    if (!pubkey || !signer || isSaving.current || isRestoring.current) return 'skipped';
+    if (!signer.nip04 && !signer.nip44) return 'skipped';
+    if (!hasUnsavedChanges()) return 'skipped';
 
     // Guard: don't overwrite a good cloud backup with empty/corrupt local state.
     // If MMKV writes have been failing, local data may not reflect what's on disk.
     if (!isStorageHealthy()) {
       if (__DEV__) console.warn('[backup] Auto-save blocked: MMKV writes are failing — protecting cloud backup');
-      return false;
+      return 'skipped';
     }
 
     // Guard: don't save if the data is essentially empty (no feeds, no dismissed, no collapsed).
@@ -456,7 +535,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     const hasMeaningfulData = (feeds && feeds !== '[]') || (dismissed && dismissed !== '[]') || (collapsed && collapsed !== '[]');
     if (!hasMeaningfulData) {
       if (__DEV__) console.warn('[backup] Auto-save blocked: no meaningful data to save');
-      return false;
+      return 'skipped';
     }
 
     // Guard: don't save if key data regressed significantly vs last snapshot.
@@ -471,21 +550,21 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         const currDismissed = JSON.parse(dismissed || '[]').length as number;
         if (prevDismissed > 20 && currDismissed < prevDismissed * 0.5) {
           if (__DEV__) console.warn(`[backup] Auto-save blocked: dismissed notes dropped from ${prevDismissed} to ${currDismissed} — MMKV may be partially cleared`);
-          return false;
+          return 'skipped';
         }
 
         const prevFeeds = JSON.parse(prevSnap[STORAGE_KEYS.CUSTOM_FEEDS] || '[]') as unknown[];
         const currFeeds = JSON.parse(feeds || '[]') as unknown[];
         if (prevFeeds.length > 0 && currFeeds.length === 0) {
           if (__DEV__) console.warn('[backup] Auto-save blocked: custom feeds dropped to zero — MMKV may be partially cleared');
-          return false;
+          return 'skipped';
         }
 
         const prevCollapsed = JSON.parse(prevSnap[STORAGE_KEYS.COLLAPSED_NOTES] || '[]').length as number;
         const currCollapsed = JSON.parse(collapsed || '[]').length as number;
         if (prevCollapsed > 10 && currCollapsed < prevCollapsed * 0.5) {
           if (__DEV__) console.warn(`[backup] Auto-save blocked: saved notes dropped from ${prevCollapsed} to ${currCollapsed} — MMKV may be partially cleared`);
-          return false;
+          return 'skipped';
         }
       } catch { /* ignore parse errors — don't block save on unexpected format */ }
     }
@@ -502,18 +581,10 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         : await signer.nip04!.encrypt(pubkey, aesKeyHex);
       const encryptedData = await aesEncrypt(aesKey, json);
 
-      let blossomUrl: string | null = null;
-      let blossomHash: string | undefined;
-      let blossomServerCount = 0;
-      for (const server of getActiveBlossomServers()) {
-        const result = await blossomUpload(server, encryptedData, signer);
-        if (result) {
-          if (!blossomUrl) { blossomUrl = result.url; blossomHash = result.hash; }
-          blossomServerCount++;
-          if (blossomServerCount >= 2) break; // two copies is sufficient redundancy
-        }
-      }
-      if (!blossomUrl) return false;
+      // Redundant, 415-aware upload (skips servers known to reject the blob type).
+      const { url: blossomUrl, hash: blossomHash } =
+        await blossomUploadWithRedundancy(getActiveBlossomServers(), encryptedData, signer);
+      if (!blossomUrl) return 'no-servers';
 
       const now = Math.floor(Date.now() / 1000);
       const dTag = `${D_TAG_PREFIX}:auto`;
@@ -593,10 +664,10 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       setCheckpoints(merged);
 
       if (__DEV__) console.log('[backup] Auto-save complete');
-      return true;
+      return 'saved';
     } catch {
       if (__DEV__) console.warn('[backup] Auto-save failed');
-      return false;
+      return 'error';
     } finally {
       isSaving.current = false;
     }

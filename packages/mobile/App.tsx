@@ -7,7 +7,6 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { prepareSecureStorage, mmkvInitError, mmkvIsEncrypted, mobileStorage } from './src/storage/MmkvStorage';
 import { setImageProxyTemplate } from '@core/imageProxy';
-import { dmStoreReady } from './src/lib/dmMessageStore';
 import { NostrProvider, WelshmanRouterBridge } from './src/lib/NostrProvider';
 import { AuthProvider } from './src/lib/AuthContext';
 import { useNotificationCount } from './src/hooks/useNotificationCount';
@@ -20,7 +19,6 @@ import { AutoSaveManager } from './src/components/AutoSaveManager';
 import { HomeScreen } from './src/screens/HomeScreen';
 import { DiscoverScreen } from './src/screens/DiscoverScreen';
 import { SavedScreen } from './src/screens/SavedScreen';
-import { MessagesScreen } from './src/screens/MessagesScreen';
 import { NotificationsScreen } from './src/screens/NotificationsScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 
@@ -72,11 +70,6 @@ function AppTabs() {
           listeners={{ focus: () => markSeen() }}
         />
         <Tab.Screen
-          name="Messages"
-          component={MessagesScreen}
-          options={{ tabBarLabel: 'DMs' }}
-        />
-        <Tab.Screen
           name="Settings"
           component={SettingsScreen}
           options={{ tabBarLabel: 'Settings' }}
@@ -108,11 +101,11 @@ export default function App() {
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
   const [warningAcked, setWarningAcked] = useState(false);
   useEffect(() => {
-    Promise.all([prepareSecureStorage(), dmStoreReady]).finally(() => {
+    Promise.all([prepareSecureStorage()]).finally(() => {
       if (mmkvInitError) {
         setStorageWarning(mmkvInitError);
       } else if (!mmkvIsEncrypted) {
-        setStorageWarning('Storage is running in unencrypted mode. Sensitive data (DMs, backup metadata) is not protected at rest.');
+        setStorageWarning('Storage is running in unencrypted mode. Sensitive data (backup metadata) is not protected at rest.');
       }
       // Activate the persisted image-proxy template (if any) before any
       // image renders. Settings UI calls setImageProxyTemplate directly on

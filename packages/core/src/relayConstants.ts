@@ -17,7 +17,7 @@
  */
 export const FALLBACK_RELAYS = [
   'wss://nos.lol',
-  'wss://relay.damus.io',
+  'wss://relay.nostr.net',
   'wss://relay.ditto.pub',
 ];
 
@@ -47,7 +47,7 @@ export const PROFILE_INDEXER_RELAYS = [
  * (wallets, clients) are likely to query.
  */
 export const ZAP_RELAYS = [
-  'wss://relay.damus.io',
+  'wss://relay.nostr.net',
   'wss://nos.lol',
 ];
 
@@ -58,7 +58,7 @@ export const ZAP_RELAYS = [
  */
 export const NOSTRCONNECT_RELAYS = [
   'wss://nos.lol',
-  'wss://relay.damus.io',
+  'wss://relay.nostr.net',
   'wss://relay.ditto.pub',
 ];
 

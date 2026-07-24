@@ -18,6 +18,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { debugLog, debugWarn } from '@/lib/debug';
+import type { AutoSaveResult } from '@/hooks/useNostrBackup';
 
 const MIN_INTERVAL_MS = 30 * 1000;
 const POLL_INTERVAL_MS = 30 * 1000;
@@ -31,8 +32,8 @@ export interface UseAutoSaveTriggerOptions {
   lastBackupTs: number;
   /** Returns true when there's something new worth uploading. */
   hasUnsavedChanges: () => boolean;
-  /** Perform the actual upload; resolves true on success. */
-  autoSaveBackup: () => Promise<boolean>;
+  /** Perform the actual upload; resolves with a status describing the outcome. */
+  autoSaveBackup: () => Promise<AutoSaveResult>;
   /** Indicator state setter for UI ("unsaved" / "saved"). */
   setBackupIndicator: (state: 'idle' | 'unsaved' | 'saved') => void;
   /** Toast for surfacing failures. */
@@ -92,14 +93,25 @@ export function useAutoSaveTrigger({
       }
       debugLog(`[AutoSave] triggering (${source})`);
       changeDetectedAt = null;
-      autoSaveBackup().then((saved) => {
-        if (saved) {
+      autoSaveBackup().then((result) => {
+        if (result === 'saved') {
           setBackupIndicator('saved');
-        } else {
-          debugWarn('[AutoSave] Blossom upload failed');
+        } else if (result === 'skipped') {
+          // Benign — nothing worth saving yet, or a protective guard tripped.
+          // Not a failure; stay silent (this used to show a false "save failed").
+          debugLog('[AutoSave] skipped (no changes or protective guard)');
+        } else if (result === 'no-servers') {
+          debugWarn('[AutoSave] every Blossom server failed/rejected the backup');
           toast({
-            title: 'Auto-save failed',
-            description: 'Could not save to Blossom. Use the backup menu to retry or download a local copy.',
+            title: 'Backup not saved',
+            description: 'Couldn’t reach any of your backup servers. Check your Blossom server list in Advanced Settings.',
+            variant: 'destructive',
+          });
+        } else {
+          debugWarn('[AutoSave] unexpected error while saving backup');
+          toast({
+            title: 'Backup error',
+            description: 'Something went wrong while saving. Use the backup menu to retry or download a local copy.',
             variant: 'destructive',
           });
         }
@@ -121,7 +133,7 @@ export function useAutoSaveTrigger({
         setTimeout(() => {
           if (hasUnsavedChanges()) {
             autoSaveBackup()
-              .then((saved) => { if (saved) setBackupIndicator('saved'); })
+              .then((result) => { if (result === 'saved') setBackupIndicator('saved'); })
               .catch(e => debugWarn('[AutoSave] resume save failed:', e));
           }
         }, 2000);

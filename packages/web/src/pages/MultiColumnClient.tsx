@@ -70,7 +70,7 @@ const ComposeDialog = lazy(async () => {
   const fresh = await import('@/components/ComposeDialog');
   return { default: fresh.ComposeDialog };
 });
-import { PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, Volume2, Smile, Loader2, SlidersHorizontal, RefreshCw, Wifi, Server } from 'lucide-react';
+import { PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, Volume2, Smile, Loader2, SlidersHorizontal, Wifi, Server } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useRelayHealth } from '@/hooks/useRelayHealth';
@@ -829,16 +829,21 @@ export function MultiColumnClient() {
     try {
       if (hasUnsavedChanges()) {
         logLogout('Unsaved changes detected. Saving backup...');
-        const saved = await autoSaveBackup();
-        if (saved) {
+        const result = await autoSaveBackup();
+        if (result === 'saved') {
           logLogout('Backup saved to Blossom.');
+        } else if (result === 'skipped') {
+          logLogout('No new changes needed saving.');
         } else {
+          const reason = result === 'no-servers'
+            ? 'Could not reach any Blossom server'
+            : 'Backup save error';
           const lastTs = lastBackupTs;
           if (lastTs) {
             const ago = Math.round((Date.now() / 1000 - lastTs) / 60);
-            logLogout(`Blossom save failed. Last saved ${ago < 1 ? 'just now' : `${ago}m ago`}.`);
+            logLogout(`${reason}. Last saved ${ago < 1 ? 'just now' : `${ago}m ago`}.`);
           } else {
-            logLogout('Blossom save failed. No previous backup found.');
+            logLogout(`${reason}. No previous backup found.`);
           }
           logLogout('Continuing with logout...');
         }
@@ -903,10 +908,6 @@ export function MultiColumnClient() {
   const [showBackupConfirm, setShowBackupConfirm] = useState(false);
   const [backupIndicator, setBackupIndicator] = useState<'idle' | 'unsaved' | 'saved'>('idle');
   const [showDownloadPrompt, setShowDownloadPrompt] = useState(false);
-
-  // Soft refresh state. The handler itself is defined after useFeedPagination
-  // (below) because it also pulls newer notes via loadNewerNotes.
-  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Prompt to download settings backup every 30 days
   const hasCheckedDownloadPrompt = useRef(false);
@@ -1176,8 +1177,12 @@ export function MultiColumnClient() {
   const showPinned = currentTabSettings.showPinned ?? true;
   const showUnpinned = currentTabSettings.showUnpinned ?? true;
 
-  // Kind/hashtag filters are Sets (for efficient lookup in filter logic)
-  const kindFilters = useMemo(() => new Set<KindFilter>((currentTabSettings.kindFilters ?? []) as KindFilter[]), [currentTabSettings]);
+  // Kind/hashtag filters are Sets (for efficient lookup in filter logic).
+  // The Set holds the kinds that are HIDDEN. Default for never-configured tabs
+  // hides reactions (all other kinds shown); once the user touches kind filters,
+  // an explicit array is persisted (see handleFilterByKind) and this default no
+  // longer applies to that tab.
+  const kindFilters = useMemo(() => new Set<KindFilter>((currentTabSettings.kindFilters ?? ['reactions']) as KindFilter[]), [currentTabSettings]);
   const filterMode: 'any' | 'strict' = currentTabSettings.filterMode ?? 'any';
   const hashtagFilters = useMemo(() => new Set<string>(currentTabSettings.hashtagFilters ?? []), [currentTabSettings]);
 
@@ -2285,38 +2290,6 @@ export function MultiColumnClient() {
   useEffect(() => {
     batchProgressCallbackRef.current = _paginationSetBatchProgressInternal;
   }, [_paginationSetBatchProgressInternal]);
-
-  // Reload button: pull newer notes for the active tab AND retry any content
-  // that previously failed (broken avatars/nicknames, errored notes). The
-  // "pull newer" part is what makes the button feel like it does something even
-  // when nothing is in an error state. Non-destructive — keeps scroll/feed.
-  const handleSoftRefresh = useCallback(() => {
-    if (isRefreshing) return;
-    setIsRefreshing(true);
-    // Pull newer notes at the leading edge of the active feed.
-    try {
-      const r = loadNewerNotes?.();
-      if (r && typeof (r as Promise<unknown>).catch === 'function') {
-        (r as Promise<unknown>).catch(() => {});
-      }
-    } catch {
-      // ignore — the retry pass below still runs
-    }
-    // Re-fetch authors with empty/missing metadata (broken avatars & nicknames)
-    queryClient.invalidateQueries({
-      queryKey: ['author'],
-      predicate: (query) => {
-        const data = query.state.data as { metadata?: Record<string, unknown> } | undefined;
-        return query.state.status === 'error' || !data?.metadata || Object.keys(data.metadata).length === 0;
-      },
-    });
-    // Re-fetch notes that errored (content that failed to load)
-    queryClient.invalidateQueries({
-      queryKey: ['note'],
-      predicate: (query) => query.state.status === 'error',
-    });
-    setTimeout(() => setIsRefreshing(false), 2000);
-  }, [isRefreshing, queryClient, loadNewerNotes]);
 
   // Autofetch extracted into useAutoFetch — interval, visibility gating,
   // and tab-switch re-trigger all live there. Three relay-storm bugs traced
@@ -3578,11 +3551,6 @@ export function MultiColumnClient() {
                     </DropdownMenuContent>
                   </DropdownMenu>
                 )}
-                {canLoadNotes && (
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Refresh feed — pull newer notes & retry failed content" onClick={handleSoftRefresh}>
-                    <RefreshCw className={`h-3.5 w-3.5 text-muted-foreground ${isRefreshing ? 'animate-spin' : ''}`} />
-                  </Button>
-                )}
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 <Button onClick={openCompose} size="sm" className="bg-orange-500 hover:bg-orange-600 text-white font-medium gap-1 h-7 px-2 text-xs">
@@ -3720,12 +3688,12 @@ export function MultiColumnClient() {
                   <DropdownMenuItem
                     disabled={backupStatus === 'saving' || backupStatus === 'encrypting'}
                     onClick={async () => {
-                      try {
-                        await saveBackup();
+                      const ok = await saveBackup();
+                      if (ok) {
                         setBackupIndicator('saved');
                         toast({ title: 'Saved', description: 'Backup saved to Blossom.' });
-                      } catch {
-                        toast({ title: 'Save failed', description: 'Could not save to Blossom.', variant: 'destructive' });
+                      } else {
+                        toast({ title: 'Save failed', description: 'Could not save to Blossom — check your server list in Advanced Settings.', variant: 'destructive' });
                       }
                     }}
                     className="gap-2"
@@ -3758,11 +3726,6 @@ export function MultiColumnClient() {
                     <DropdownMenuItem onClick={() => { setAdvancedSettingsOpen(true); setAdvancedSection('blossom'); }} className="gap-2"><Server className="h-4 w-4" />Blossom Servers</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
-              )}
-              {canLoadNotes && (
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Refresh feed — pull newer notes & retry failed content" onClick={handleSoftRefresh}>
-                  <RefreshCw className={`h-3.5 w-3.5 text-muted-foreground ${isRefreshing ? 'animate-spin' : ''}`} />
-                </Button>
               )}
             </div>
           </div>
@@ -4295,7 +4258,7 @@ export function MultiColumnClient() {
         </div>
 
         {/* Onboard search widget — shown during onboard procedure on discover tab */}
-        {isOnboarding && isDiscoverTab && <OnboardSearchWidget contactCount={contacts?.length ?? 0} followTarget={onboardFollowTarget} onSkip={() => { setOnboardingSkipped(true); setActiveTab('me'); autoSaveBackup().then((saved) => { if (saved) { setBackupIndicator('saved'); } else { toast({ title: 'Backup failed', description: 'Onboarding preference could not be saved to cloud. It will retry automatically.', variant: 'destructive' }); } }).catch(() => {}); }} />}
+        {isOnboarding && isDiscoverTab && <OnboardSearchWidget contactCount={contacts?.length ?? 0} followTarget={onboardFollowTarget} onSkip={() => { setOnboardingSkipped(true); setActiveTab('me'); autoSaveBackup().then((result) => { if (result === 'saved') { setBackupIndicator('saved'); } else if (result !== 'skipped') { toast({ title: 'Backup not saved', description: 'Onboarding preference could not be saved to cloud. It will retry automatically.', variant: 'destructive' }); } }).catch(() => {}); }} />}
 
 
 

@@ -17,7 +17,7 @@ import {
   Switch,
 } from 'react-native';
 import { Platform } from 'react-native';
-import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS } from '../hooks/useNostrBackup';
+import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS, getBlobRejectingServers, clearBlobRejectingServer } from '../hooks/useNostrBackup';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { setImageProxyTemplate } from '@core/imageProxy';
 
@@ -377,6 +377,17 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
   const [servers, setServersState] = useState<string[]>(getBlossomServers);
   const [newUrl, setNewUrl] = useState('');
   const [testResults, setTestResults] = useState<Map<string, 'ok' | 'error'>>(new Map());
+  // Servers that rejected the backup-blob content type (HTTP 415), auto-skipped
+  // on save. App-local backup list only — never touches your Nostr profile.
+  const [rejectedServers, setRejectedServers] = useState<string[]>(() => Array.from(getBlobRejectingServers()));
+
+  const normalize = (u: string) => (u.endsWith('/') ? u : u + '/');
+  const isRejected = (u: string) => rejectedServers.includes(normalize(u));
+
+  const handleRetryRejected = (url: string) => {
+    clearBlobRejectingServer(url);
+    setRejectedServers(Array.from(getBlobRejectingServers()));
+  };
 
   const getHostname = (url: string) => {
     try { return new URL(url).hostname; } catch { return url; }
@@ -405,6 +416,8 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
     const updated = servers.filter(s => s !== url);
     setServersState(updated);
     setBlossomServers(updated);
+    clearBlobRejectingServer(url);
+    setRejectedServers(Array.from(getBlobRejectingServers()));
   };
 
   const handleResetDefaults = () => {
@@ -429,22 +442,39 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
       <Text style={styles.sectionTitle}>Blossom Servers</Text>
       <Text style={styles.settingHint}>Blossom servers store encrypted backup files. Servers are tried in order.</Text>
 
+      {rejectedServers.length > 0 && (
+        <View style={{ borderWidth: 1, borderColor: 'rgba(249,115,22,0.4)', backgroundColor: 'rgba(249,115,22,0.1)', borderRadius: 8, padding: 10, marginBottom: 10 }}>
+          <Text style={{ color: '#f97316', fontSize: 12, fontWeight: '600', marginBottom: 4 }}>⚠ Servers rejecting backups</Text>
+          <Text style={{ color: '#d4d4d4', fontSize: 11, lineHeight: 16 }}>
+            These servers rejected Corkboards backups (they may still work for images) and are being skipped when saving.
+            Consider removing them below — this does not change the Blossom servers on your Nostr profile.
+          </Text>
+        </View>
+      )}
+
       {servers.map((url, i) => {
         const result = testResults.get(url);
         const isDefault = DEFAULT_BLOSSOM_SERVERS.includes(url);
+        const rejected = isRejected(url);
         return (
           <View key={url} style={styles.relayRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.relayUrl} numberOfLines={1}>
-                {result === 'ok' ? '● ' : result === 'error' ? '○ ' : ''}
+                {rejected ? '⚠ ' : result === 'ok' ? '● ' : result === 'error' ? '○ ' : ''}
                 {getHostname(url)}
                 {isDefault ? ' (default)' : ''}
               </Text>
-              <Text style={styles.settingHint}>#{i + 1}</Text>
+              <Text style={styles.settingHint}>{rejected ? 'Rejects backups (415) — skipped' : `#${i + 1}`}</Text>
             </View>
-            <TouchableOpacity onPress={() => testServer(url)} style={{ marginRight: 8 }}>
-              <Text style={styles.backText}>Test</Text>
-            </TouchableOpacity>
+            {rejected ? (
+              <TouchableOpacity onPress={() => handleRetryRejected(url)} style={{ marginRight: 8 }}>
+                <Text style={styles.backText}>Re-enable</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity onPress={() => testServer(url)} style={{ marginRight: 8 }}>
+                <Text style={styles.backText}>Test</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity
               onPress={() => {
                 if (servers.length <= 1) return;

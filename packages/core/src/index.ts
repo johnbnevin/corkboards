@@ -11,8 +11,6 @@ export type { KVStorage } from './storage';
 // Nostr protocol
 export * from './nostr';
 export * from './noteClassifier';
-export * from './dmUtils';
-export * from './dmConstants';
 export * from './normalizeRelay';
 
 // Feed

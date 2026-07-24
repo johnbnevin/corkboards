@@ -104,8 +104,8 @@ export function SecurityInfoDialog() {
                 <View style={styles.signerLinks}>
                   <Text style={styles.bodyText}>
                     <Text style={styles.bold}>Android: </Text>
-                    <Text style={styles.link} onPress={() => openLink('https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner')}>Amber</Text>
-                    {' (dedicated signer)'}
+                    <Text style={styles.link} onPress={() => openLink('https://zapstore.dev')}>Amber</Text>
+                    {' (dedicated signer, via Zap Store)'}
                   </Text>
                   <Text style={styles.bodyText}>
                     <Text style={styles.bold}>iPhone: </Text>

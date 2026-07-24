@@ -13,6 +13,7 @@ import * as Keychain from 'react-native-keychain';
 import { nip19, getPublicKey } from 'nostr-tools';
 import { NSecSigner, NConnectSigner, NRelay1 } from '@nostrify/nostrify';
 import { handleLogoutStorage, switchActiveUser } from '../lib/storageKeys';
+import { flushBackupBeforeSwitch } from '../lib/backupFlush';
 import { clearRelayCache } from './NostrProvider';
 import { clearCollapsedNotesModuleState } from '../hooks/useCollapsedNotes';
 import { evictCachedProfile, clearProfileCache } from '../lib/cacheStore';
@@ -304,6 +305,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const oldPubkey = pubkeyRef.current;
     if (oldPubkey && oldPubkey !== pubkey) {
+      // Flush the departing account's pending cloud backup before swapping
+      // (parity with logout; local data is already stashed per-pubkey below).
+      await flushBackupBeforeSwitch();
       // Abort first — otherwise stale subscriptions for oldPubkey may resolve
       // after setState below and write into the new account's UI.
       bumpSessionEpoch();

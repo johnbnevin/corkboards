@@ -17,7 +17,7 @@ const MOBILE_SIGNERS: Record<string, SignerRec[]> = {
     { name: 'Nostur', note: 'Full Nostr client with built-in key management', url: 'https://apps.apple.com/us/app/nostur-nostr-client/id1672780508' },
   ],
   Android: [
-    { name: 'Amber', note: 'Dedicated signer app — keys never leave the device (recommended)', url: 'https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner' },
+    { name: 'Amber', note: 'Dedicated signer app — keys never leave the device (recommended)', url: 'https://zapstore.dev' },
     { name: 'Amethyst', note: 'Full Nostr client with built-in key management', url: 'https://play.google.com/store/apps/details?id=com.vitorpamplona.amethyst' },
   ],
 };
@@ -41,7 +41,7 @@ export function getTopSignerForPlatform(): { name: string; url?: string; platfor
   const platform = detectPlatform();
   const signers = MOBILE_SIGNERS[platform];
   if (signers?.[0]) return { ...signers[0], platform };
-  return { name: 'Amber', url: 'https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner', platform };
+  return { name: 'Amber', url: 'https://zapstore.dev', platform };
 }
 
 interface SignerRecommendationsProps {

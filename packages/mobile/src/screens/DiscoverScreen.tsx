@@ -10,7 +10,7 @@
  *
  * Mirrors web's discover tab in MultiColumnClient.
  */
-import { useCallback, useRef, useMemo, useState } from 'react';
+import { useCallback, useRef, useMemo, useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -34,6 +34,7 @@ import { useBulkAuthors } from '../hooks/useAuthor';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { useNostrBackup } from '../hooks/useNostrBackup';
 import { STORAGE_KEYS } from '../lib/storageKeys';
+import { getOnboarded, setOnboarded } from '../lib/onboardingFlag';
 import { NoteCard } from '../components/NoteCard';
 import { OnboardSearchWidget } from '../components/OnboardSearchWidget';
 import { ZapDialog } from '../components/ZapDialog';
@@ -215,7 +216,18 @@ export function DiscoverScreen() {
   // Onboarding state — show search widget when user has fewer than target follows
   const [onboardingSkipped, setOnboardingSkipped] = useLocalStorage<boolean>(STORAGE_KEYS.ONBOARDING_SKIPPED, false);
   const [onboardFollowTarget] = useLocalStorage<number>(STORAGE_KEYS.ONBOARDING_FOLLOW_TARGET, 10);
-  const isOnboarding = contacts !== undefined && (contacts.length ?? 0) < onboardFollowTarget && !onboardingSkipped;
+  // Per-pubkey "has onboarded" flag — survives login so a user who skipped isn't
+  // re-prompted every login (MMKV is synchronous, so no load-race guard needed).
+  const [hasOnboardedFlag, setHasOnboardedFlag] = useState(() => (pubkey ? getOnboarded(pubkey) : true));
+  useEffect(() => { setHasOnboardedFlag(pubkey ? getOnboarded(pubkey) : true); }, [pubkey]);
+  const markOnboarded = useCallback(() => {
+    if (pubkey) { setOnboarded(pubkey); setHasOnboardedFlag(true); }
+  }, [pubkey]);
+  // Persist completion so later unfollows don't drop the user back into onboarding.
+  useEffect(() => {
+    if (pubkey && contacts !== undefined && contacts.length >= onboardFollowTarget) markOnboarded();
+  }, [pubkey, contacts, onboardFollowTarget, markOnboarded]);
+  const isOnboarding = !hasOnboardedFlag && contacts !== undefined && (contacts.length ?? 0) < onboardFollowTarget && !onboardingSkipped;
 
   const follows = pubkey && contacts && contacts.length > 0 ? contacts : undefined;
   const { discoveredNotes, isLoading, refresh, loadMore, hasMoreDiscover, totalDiscoverCount } = useDiscover(follows);
@@ -346,7 +358,7 @@ export function DiscoverScreen() {
           contactCount={contacts?.length ?? 0}
           followTarget={onboardFollowTarget}
           onSelectProfile={(pk) => setViewingProfile(pk)}
-          onSkip={() => { setOnboardingSkipped(true); saveBackup().catch((e) => console.warn('[onboarding] backup failed:', e)); }}
+          onSkip={() => { setOnboardingSkipped(true); markOnboarded(); saveBackup().catch((e) => console.warn('[onboarding] backup failed:', e)); }}
         />
         <Text style={[styles.emptyText, { marginTop: 20 }]}>Follow some people to discover new content</Text>
         {viewingProfile && (
@@ -373,7 +385,7 @@ export function DiscoverScreen() {
           contactCount={contacts?.length ?? 0}
           followTarget={onboardFollowTarget}
           onSelectProfile={(pk) => setViewingProfile(pk)}
-          onSkip={() => { setOnboardingSkipped(true); saveBackup().catch((e) => console.warn('[onboarding] backup failed:', e)); }}
+          onSkip={() => { setOnboardingSkipped(true); markOnboarded(); saveBackup().catch((e) => console.warn('[onboarding] backup failed:', e)); }}
         />
       )}
 

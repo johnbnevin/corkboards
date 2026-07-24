@@ -100,7 +100,7 @@ export function SecurityInfoDialog() {
                 <div className="text-xs space-y-1 mt-1">
                   <p>
                     <strong>Android:</strong>{' '}
-                    <a href="https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-foreground">Amber</a>
+                    <a href="https://zapstore.dev" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-foreground">Amber</a>
                     {' '}(dedicated signer — keys never leave the device)
                   </p>
                   <p>

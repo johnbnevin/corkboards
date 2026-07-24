@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { nip19 } from 'nostr-tools';
 import { useAuth } from '../lib/AuthContext';
+import { getOnboarded, clearOnboarded } from '../lib/onboardingFlag';
 import { useAuthor } from '../hooks/useAuthor';
 import { useNostrPublish } from '../hooks/useNostrPublish';
 import { useNostr } from '../lib/NostrProvider';
@@ -200,6 +201,7 @@ export function SettingsScreen() {
   const handleResetOnboarding = () => {
     setOnboardFollowTarget((contacts?.length ?? 0) + 10);
     setOnboardingSkipped(false);
+    if (pubkey) clearOnboarded(pubkey);
     Alert.alert('Onboarding restarted', 'Go to Discover to follow 10 more people.');
   };
 
@@ -488,7 +490,7 @@ export function SettingsScreen() {
             publicBookmarks={publicBookmarks}
             onTogglePublicBookmarks={handleTogglePublicBookmarks}
             onDeleteAccount={handleDeleteAccount}
-            isOnboarding={!(contacts !== undefined && (contacts.length >= onboardFollowTarget || onboardingSkipped))}
+            isOnboarding={!(contacts !== undefined && (contacts.length >= onboardFollowTarget || onboardingSkipped || (!!pubkey && getOnboarded(pubkey))))}
             onResetOnboarding={handleResetOnboarding}
           />
         </View>

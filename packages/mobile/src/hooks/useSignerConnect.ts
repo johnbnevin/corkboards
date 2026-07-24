@@ -48,7 +48,10 @@ export function useSignerConnect(_type: 'amber') {
       const connectUri = `nostrconnect://${clientPubkey}?${params.toString()}`;
 
       if (Platform.OS === 'android') {
-        const fallback = encodeURIComponent('https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner');
+        // Amber isn't on the Play Store — when it isn't installed, send users to
+        // the Zap Store (the Nostr-native Android app store that distributes it)
+        // rather than a dead Play Store listing.
+        const fallback = encodeURIComponent('https://zapstore.dev');
         await Linking.openURL(
           `intent://${clientPubkey}?${params.toString()}#Intent;scheme=nostrconnect;package=com.greenart7c3.nostrsigner;S.browser_fallback_url=${fallback};end`
         );

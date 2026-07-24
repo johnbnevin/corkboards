@@ -4,6 +4,7 @@ import { useNostrLogin } from '@nostrify/react/login';
 import { useQuery } from '@tanstack/react-query';
 import { NSchema as n, NostrEvent, NostrMetadata } from '@nostrify/nostrify';
 import { switchActiveUser, getActiveUserPubkey } from '@/lib/storageKeys';
+import { flushBackupBeforeSwitch } from '@/lib/backupFlush';
 import { isTauri, keychainDelete } from '@/lib/tauri';
 import { deleteNsec } from '@/lib/webKeyStore';
 
@@ -63,16 +64,21 @@ export function useLoggedInAccounts() {
     rawRemoveLogin(loginId);
   }, [logins, rawRemoveLogin]);
 
-  // Wrap setLogin to handle per-user localStorage isolation
-  const setLogin = useCallback((loginId: string) => {
+  // Wrap setLogin to handle per-user localStorage isolation. Async so we can
+  // flush the departing account's pending cloud backup before swapping — the
+  // same safety the logout path has (switchActiveUser already stashes local
+  // data per-pubkey, so this only guards the last edits reaching the cloud).
+  const setLogin = useCallback(async (loginId: string) => {
     const oldPubkey = currentUser?.pubkey ?? getActiveUserPubkey();
     const newLogin = logins.find(l => l.id === loginId);
-    if (newLogin && oldPubkey !== newLogin.pubkey) {
+    const isSwitch = !!newLogin && oldPubkey !== newLogin.pubkey;
+    if (isSwitch) {
+      await flushBackupBeforeSwitch();
       switchActiveUser(oldPubkey, newLogin.pubkey);
     }
     rawSetLogin(loginId);
     // Reload to ensure all React state picks up the new localStorage values
-    if (newLogin && oldPubkey !== newLogin.pubkey) {
+    if (isSwitch) {
       window.location.reload();
     }
   }, [currentUser?.pubkey, logins, rawSetLogin]);

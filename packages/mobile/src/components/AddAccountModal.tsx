@@ -366,7 +366,7 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
             <Text style={styles.sectionLabel}>Login with Amber</Text>
             <Text style={styles.hint}>
               {Platform.OS === 'android'
-                ? 'Opening Amber... Approve the connection and return here. If Amber isn\'t installed, you\'ll be taken to the Play Store.'
+                ? 'Opening Amber... Approve the connection and return here. If Amber isn\'t installed, you\'ll be taken to the Zap Store.'
                 : 'Opening your Nostr signer app... Approve the connection and return here.'}
             </Text>
             {amber.connecting && <ActivityIndicator color="#f97316" style={{ marginVertical: 8 }} />}

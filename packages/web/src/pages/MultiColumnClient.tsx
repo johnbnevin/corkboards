@@ -42,6 +42,7 @@ import { ProfileCard } from '@/components/ProfileCard';
 import { ThreadPanel } from '@/components/thread'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { genUserName } from '@/lib/genUserName';
+import { optimizeAvatarUrl } from '@/lib/imageUtils';
 import type { KindFilter } from '@/components/NoteKindToggles';
 import { ALL_NOTE_KIND_FILTERS } from '@/components/NoteKindToggles';
 import type { ContentFilterConfig, ContentFilterKey } from '@/components/ContentFilters';
@@ -88,6 +89,8 @@ import { AdvancedSettings } from '@/components/AdvancedSettings';
 import { EmojiSetEditor } from '@/components/EmojiSetEditor';
 import { useNostrBackup, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
+import { registerBackupFlush } from '@/lib/backupFlush';
+import { getOnboarded, setOnboarded, clearOnboarded, idbReady as onboardIdbReady } from '@/lib/onboardingFlag';
 import { STORAGE_KEYS } from '@/lib/storageKeys';
 import { useAccountIsolation } from '@/hooks/useAccountIsolation';
 import { useAutoRestoreGuard } from '@/hooks/useAutoRestoreGuard';
@@ -884,6 +887,14 @@ export function MultiColumnClient() {
       window.location.reload();
     }
   }, [user?.pubkey, otherUsers, autoSaveBackup, loginActions, hasUnsavedChanges, lastBackupTs, logLogout, switchToAccount]);
+
+  // Expose the backup flush to the account-switch choke point so switching
+  // accounts (header switcher / mobile menu) flushes pending cloud backup for
+  // the departing account first — parity with logout's safety.
+  useEffect(() => {
+    registerBackupFlush(async () => { if (hasUnsavedChanges()) { await autoSaveBackup(); } });
+    return () => registerBackupFlush(null);
+  }, [hasUnsavedChanges, autoSaveBackup]);
 
 
   const _backupTs = lastBackupTs; // read so React re-renders after saves
@@ -1750,7 +1761,34 @@ export function MultiColumnClient() {
   const [onboardFollowTarget, setOnboardFollowTarget] = useLocalStorage<number>(STORAGE_KEYS.ONBOARDING_FOLLOW_TARGET, 10);
   const wasRestoredRef = useRef(false);
   if (backupStatus === 'restored' || backupStatus === 'restoring') wasRestoredRef.current = true;
-  const isOnboarding = contacts !== undefined && contacts.length < onboardFollowTarget && !onboardingSkipped && !wasRestoredRef.current;
+
+  // Persisted per-pubkey "has onboarded" flag — survives logout/login so a user
+  // who skipped/completed isn't re-prompted every login. Default true (don't
+  // onboard) until we've actually read storage, which also avoids the cold-load
+  // race where the guide flashed before the skip flag loaded.
+  const [onboardFlagLoaded, setOnboardFlagLoaded] = useState(false);
+  const [hasOnboardedFlag, setHasOnboardedFlag] = useState(true);
+  useEffect(() => {
+    const pk = user?.pubkey;
+    if (!pk) { setHasOnboardedFlag(true); setOnboardFlagLoaded(false); return; }
+    let cancelled = false;
+    setOnboardFlagLoaded(false);
+    onboardIdbReady.then(() => {
+      if (cancelled) return;
+      setHasOnboardedFlag(getOnboarded(pk));
+      setOnboardFlagLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, [user?.pubkey]);
+
+  const markOnboarded = useCallback(() => {
+    const pk = user?.pubkey;
+    if (pk) { setOnboarded(pk); setHasOnboardedFlag(true); }
+  }, [user?.pubkey]);
+
+  const isOnboarding = onboardFlagLoaded && !hasOnboardedFlag
+    && contacts !== undefined && contacts.length < onboardFollowTarget
+    && !onboardingSkipped && !wasRestoredRef.current;
 
   // Open the edit-profile dialog the first time onboarding completes (contacts reach 10).
   // Skip if onboarding was dismissed via a backup restore (user already set up their profile).
@@ -1760,23 +1798,26 @@ export function MultiColumnClient() {
       onboardingWasActiveRef.current = true;
     } else if (onboardingWasActiveRef.current && !wasRestoredRef.current && !onboardingSkipped) {
       onboardingWasActiveRef.current = false;
+      // Persist completion so later unfollows (contacts dropping below target)
+      // don't drop the user back into onboarding.
+      markOnboarded();
       setEditProfileOpen(true);
     }
-  }, [isOnboarding, onboardingSkipped]);
+  }, [isOnboarding, onboardingSkipped, markOnboarded]);
 
   // Auto-switch to discover tab on first contacts load when following fewer than 10 people
   const contactsFirstLoadRef = useRef<string | null>(null);
   useEffect(() => {
-    if (contacts === undefined || !user?.pubkey) return;
+    if (contacts === undefined || !user?.pubkey || !onboardFlagLoaded) return;
     // Reset when user changes (account switch)
     if (contactsFirstLoadRef.current === user.pubkey) return;
     contactsFirstLoadRef.current = user.pubkey;
-    if (contacts.length < onboardFollowTarget && !onboardingSkipped && (activeTab === 'me' || activeTab === 'discover')) {
+    if (!hasOnboardedFlag && contacts.length < onboardFollowTarget && !onboardingSkipped && (activeTab === 'me' || activeTab === 'discover')) {
       setActiveTab('discover');
     }
   // setActiveTab is stable but not listed to avoid stale-closure lint noise
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contacts, user?.pubkey]);
+  }, [contacts, user?.pubkey, onboardFlagLoaded]);
 
   // Stable ref for the pagination setBatchProgress, so feed hooks can call it
   // before useFeedPagination has been initialised (hooks must always run in order).
@@ -3649,6 +3690,25 @@ export function MultiColumnClient() {
                       <Wallet className="h-4 w-4" />
                       <span className="text-sm">Connect Wallet</span>
                     </DropdownMenuItem>
+                    {/* Switch to another logged-in account (mobile-viewport menu — the
+                        desktop header uses AccountSwitcher for this). */}
+                    {otherUsers.length > 0 && <DropdownMenuSeparator />}
+                    {otherUsers.map((acct) => {
+                      const acctName = acct.metadata.name ?? genUserName(acct.pubkey);
+                      return (
+                        <DropdownMenuItem
+                          key={acct.id}
+                          onClick={() => switchToAccount(acct.id)}
+                          className="flex items-center gap-2 cursor-pointer p-2 rounded-md"
+                        >
+                          <Avatar className="h-6 w-6">
+                            <AvatarImage src={optimizeAvatarUrl(acct.metadata.picture)} alt={acctName} />
+                            <AvatarFallback className="text-[8px]">{acctName.charAt(0)}</AvatarFallback>
+                          </Avatar>
+                          <span className="text-sm truncate flex-1">{acctName}</span>
+                        </DropdownMenuItem>
+                      );
+                    })}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => setAddAccountDialogOpen(true)} className="flex items-center gap-2 cursor-pointer p-2 rounded-md">
                       <UserPlus className="h-4 w-4" />
@@ -4332,7 +4392,7 @@ export function MultiColumnClient() {
         </div>
 
         {/* Onboard search widget — shown during onboard procedure on discover tab */}
-        {isOnboarding && isDiscoverTab && <OnboardSearchWidget contactCount={contacts?.length ?? 0} followTarget={onboardFollowTarget} onSkip={() => { setOnboardingSkipped(true); setActiveTab('me'); autoSaveBackup().then((result) => { if (result === 'saved') { setBackupIndicator('saved'); } else if (result !== 'skipped') { toast({ title: 'Backup not saved', description: 'Onboarding preference could not be saved to cloud. It will retry automatically.', variant: 'destructive' }); } }).catch(() => {}); }} />}
+        {isOnboarding && isDiscoverTab && <OnboardSearchWidget contactCount={contacts?.length ?? 0} followTarget={onboardFollowTarget} onSkip={() => { setOnboardingSkipped(true); markOnboarded(); setActiveTab('me'); autoSaveBackup().then((result) => { if (result === 'saved') { setBackupIndicator('saved'); } else if (result !== 'skipped') { toast({ title: 'Backup not saved', description: 'Onboarding preference could not be saved to cloud. It will retry automatically.', variant: 'destructive' }); } }).catch(() => {}); }} />}
 
 
 
@@ -4616,7 +4676,7 @@ export function MultiColumnClient() {
               onDeleteAccount={() => { setAdvancedSettingsOpen(false); setShowVanishConfirm(true); }}
               initialSection={advancedSection}
               isOnboarding={isOnboarding}
-              onResetOnboarding={() => { setOnboardFollowTarget((contacts?.length ?? 0) + 10); setOnboardingSkipped(false); setAdvancedSettingsOpen(false); setActiveTab('discover'); }}
+              onResetOnboarding={() => { setOnboardFollowTarget((contacts?.length ?? 0) + 10); setOnboardingSkipped(false); if (user?.pubkey) clearOnboarded(user.pubkey); setHasOnboardedFlag(false); setAdvancedSettingsOpen(false); setActiveTab('discover'); }}
               collapseReactions={collapseReactions}
               onToggleCollapseReactions={() => setCollapseReactions(!collapseReactions)}
               renderMarkdown={renderMarkdown}

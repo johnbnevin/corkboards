@@ -297,7 +297,9 @@ export function useLoginActions() {
       // Trigger Amber — use Intent URI on Android, link click on desktop
       const isAndroid = /Android/i.test(navigator.userAgent);
       if (isAndroid) {
-        const fallback = encodeURIComponent('https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner');
+        // Amber isn't on the Play Store — when it isn't installed, send users to
+        // the Zap Store (the Nostr-native Android app store that distributes it).
+        const fallback = encodeURIComponent('https://zapstore.dev');
         window.location.href = `intent://${clientPubkey}?${params.toString()}#Intent;scheme=nostrconnect;package=com.greenart7c3.nostrsigner;S.browser_fallback_url=${fallback};end`;
       } else {
         const a = document.createElement('a');

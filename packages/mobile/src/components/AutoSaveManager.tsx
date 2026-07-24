@@ -12,6 +12,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 import { useAuth } from '../lib/AuthContext';
 import { useNostrBackup } from '../hooks/useNostrBackup';
+import { registerBackupFlush } from '../lib/backupFlush';
 import { mobileStorage } from '../storage/MmkvStorage';
 
 const MIN_SAVE_INTERVAL_MS = 30_000;
@@ -29,6 +30,13 @@ export function AutoSaveManager() {
 
   const lastHiddenRef = useRef(0);
   const idleCheckDoneRef = useRef(false);
+
+  // Expose the backup flush so AuthContext.switchAccount can flush pending cloud
+  // backup for the departing account before swapping (parity with logout).
+  useEffect(() => {
+    registerBackupFlush(async () => { if (hasUnsavedChanges()) { await autoSaveBackup(); } });
+    return () => registerBackupFlush(null);
+  }, [autoSaveBackup, hasUnsavedChanges]);
 
   // Trigger auto-save if conditions are met (mirrors web's triggerBlossomIfReady).
   const changeDetectedAtRef = useRef<number | null>(null);

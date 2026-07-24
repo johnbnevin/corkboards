@@ -15,7 +15,7 @@ const MOBILE_SIGNERS: Record<string, SignerRec[]> = {
     { name: 'Nostur', note: 'Full Nostr client with built-in key management', url: 'https://apps.apple.com/us/app/nostur-nostr-client/id1672780508' },
   ],
   Android: [
-    { name: 'Amber', note: 'Dedicated signer app — keys never leave the device (recommended)', url: 'https://play.google.com/store/apps/details?id=com.greenart7c3.nostrsigner' },
+    { name: 'Amber', note: 'Dedicated signer app — keys never leave the device (recommended)', url: 'https://zapstore.dev' },
     { name: 'Amethyst', note: 'Full Nostr client with built-in key management', url: 'https://play.google.com/store/apps/details?id=com.vitorpamplona.amethyst' },
   ],
 };

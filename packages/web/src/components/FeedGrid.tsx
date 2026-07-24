@@ -160,6 +160,8 @@ interface FeedGridProps {
   /** Active corkboard's hashtags (normalized, no '#') — used to flag notes that
    *  are tagged with the hashtag but don't mention it in their content. */
   activeHashtags?: string[];
+  /** Open the custom emoji set builder ("Manage Sets") from note reaction pickers. */
+  onOpenEmojiSets?: () => void;
 }
 
 export const FeedGrid = React.memo(function FeedGrid({
@@ -213,6 +215,7 @@ export const FeedGrid = React.memo(function FeedGrid({
   onFindMoreForMe,
   isFindingMore = false,
   activeHashtags,
+  onOpenEmojiSets,
 }: FeedGridProps) {
   // ── Incremental rendering: render a small batch first, add more on scroll ──
   const maxColLength = Math.max(...columns.map(c => c.length), 0);
@@ -458,6 +461,7 @@ export const FeedGrid = React.memo(function FeedGrid({
                         engagement={engagementByTarget?.get(note.id) || (stubNoteIds?.has(note.id) ? engagementByTarget?.get(note.tags.find(t => t[0] === 'e')?.[1] ?? '') : undefined)}
                         isEngagementStub={stubNoteIds?.has(note.id)}
                         onDismissThread={onDismissThread && activeTab !== 'me' && !(userPubkey && note.pubkey === userPubkey) ? () => onDismissThread(note.id) : undefined}
+                        onOpenEmojiSets={onOpenEmojiSets}
                       />
                     );
                   })}

@@ -63,11 +63,14 @@ export interface ThreadReplyRowProps {
   onZap?: (event: NostrEvent) => void
   onPinToBoard?: (event: NostrEvent) => void
   onReactionPublished?: (event: NostrEvent) => void
+  /** Open the custom emoji set builder ("Manage Sets") from the reaction picker. */
+  onOpenEmojiSets?: () => void
 }
 
 export const ThreadReplyRow = memo(function ThreadReplyRow({
   node, depth, isTarget, isCollapsed, onToggleCollapse,
   onViewThread, onReply, onQuote, onRepost, onZap, onPinToBoard, onReactionPublished,
+  onOpenEmojiSets,
 }: ThreadReplyRowProps) {
   const { event, children: childNodes, reactions } = node
   const { data: author } = useAuthor(event.pubkey)
@@ -215,6 +218,7 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
                       <CombinedEmojiPicker
                         onSelectEmoji={(emoji) => handleReact(emoji)}
                         onSelectCustomEmoji={(shortcode, url) => handleReact(`:${shortcode}:`, shortcode, url)}
+                        onOpenSetBuilder={onOpenEmojiSets}
                       />
                     </PopoverContent>
                   </Popover>

@@ -4426,6 +4426,7 @@ export function MultiColumnClient() {
           onComment={openThreadAndReply}
           onOpenThread={openThread}
           activeHashtags={isCustomFeedTab ? activeHashtags : undefined}
+          onOpenEmojiSets={() => setEmojiSetsOpen(true)}
           onPinClick={handlePinNote}
           onZapClick={(note) => setZapTargetNote(note)}
           onRepost={(note) => openRepost(note)}

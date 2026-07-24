@@ -143,6 +143,7 @@ export function ThreadTree({
                 onZap={onZap}
                 onPinToBoard={onPinToBoard}
                 onReactionPublished={onReactionPublished}
+                onOpenEmojiSets={onOpenEmojiSets}
               />
               {/* Reply composer anchored directly beneath the note being
                   replied to — indented to line up under its row. */}

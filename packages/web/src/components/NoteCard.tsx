@@ -262,6 +262,8 @@ interface NoteCardProps {
   hashtagTaggedOnly?: boolean;
   /** The specific hashtag the note is tagged-but-not-mentioned for (for the badge). */
   hashtagTaggedLabel?: string;
+  /** Open the custom emoji set builder ("Manage Sets") from the reaction picker. */
+  onOpenEmojiSets?: () => void;
 }
 
 /** Compact display of the parent note for replies */
@@ -523,6 +525,7 @@ export const NoteCard = React.memo(function NoteCard({
   onDismissThread,
   hashtagTaggedOnly,
   hashtagTaggedLabel,
+  onOpenEmojiSets,
 }: NoteCardProps) {
   // When a media filter is active, override blurMedia to show all media
   const effectiveBlurMedia = mediaFilterActive ? false : blurMedia;
@@ -1523,6 +1526,7 @@ export const NoteCard = React.memo(function NoteCard({
                   <CombinedEmojiPicker
                     onSelectEmoji={(emoji) => handleReact(emoji)}
                     onSelectCustomEmoji={(shortcode, url) => handleReact(`:${shortcode}:`, shortcode, url)}
+                    onOpenSetBuilder={onOpenEmojiSets}
                   />
                 </PopoverContent>
               </Popover>

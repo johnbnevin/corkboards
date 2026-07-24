@@ -16,6 +16,7 @@ import { ToastProvider } from './src/hooks/useToast';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { NostrSync } from './src/components/NostrSync';
 import { AutoSaveManager } from './src/components/AutoSaveManager';
+import { EmojiSetsModalProvider } from './src/components/EmojiSetsModalProvider';
 import { HomeScreen } from './src/screens/HomeScreen';
 import { DiscoverScreen } from './src/screens/DiscoverScreen';
 import { SavedScreen } from './src/screens/SavedScreen';
@@ -166,7 +167,9 @@ export default function App() {
       <WelshmanRouterBridge />
       <NostrSync />
       <AutoSaveManager />
-      <AppTabs />
+      <EmojiSetsModalProvider>
+        <AppTabs />
+      </EmojiSetsModalProvider>
       </NwcProvider>
       </AuthProvider>
       </NostrProvider>

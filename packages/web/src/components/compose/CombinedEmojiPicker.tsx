@@ -34,66 +34,83 @@ function getFavoriteEmojis(): string[] {
 
 type TabKind = { type: 'corkboards-default' } | { type: 'favorites' } | { type: 'category'; index: number } | { type: 'custom'; setIndex: number };
 
+/**
+ * Attach manual wheel + touch scrolling to a scroll container along one axis,
+ * driving scrollLeft/scrollTop ourselves and stopping the event so ancestor
+ * scroll-lockers (react-remove-scroll) / the thread behind can't hijack it.
+ * Only consumes gestures where the target axis dominates, so an orthogonal swipe
+ * (e.g. a vertical swipe on the horizontal tab strip) still passes through.
+ * Returns a cleanup function.
+ */
+function attachManualScroll(el: HTMLDivElement, axis: 'x' | 'y'): () => void {
+  const apply = (delta: number): boolean => {
+    const size = axis === 'y' ? el.clientHeight : el.clientWidth;
+    const scrollSize = axis === 'y' ? el.scrollHeight : el.scrollWidth;
+    const pos = axis === 'y' ? el.scrollTop : el.scrollLeft;
+    if (scrollSize <= size) return false; // nothing to scroll
+    if ((pos <= 0 && delta < 0) || (pos + size >= scrollSize - 1 && delta > 0)) return false; // at edge
+    if (axis === 'y') el.scrollTop += delta; else el.scrollLeft += delta;
+    return true;
+  };
+
+  const onWheel = (e: WheelEvent) => {
+    // Support vertical wheels on the horizontal strip (common on trackpads/mice).
+    const delta = axis === 'y'
+      ? e.deltaY
+      : (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY);
+    if (apply(delta)) { e.preventDefault(); e.stopPropagation(); }
+  };
+
+  let lastX = 0, lastY = 0;
+  const onTouchStart = (e: TouchEvent) => {
+    lastX = e.touches[0]?.clientX ?? 0;
+    lastY = e.touches[0]?.clientY ?? 0;
+  };
+  const onTouchMove = (e: TouchEvent) => {
+    const x = e.touches[0]?.clientX ?? lastX;
+    const y = e.touches[0]?.clientY ?? lastY;
+    const dx = lastX - x, dy = lastY - y;
+    lastX = x; lastY = y;
+    const dominates = axis === 'y' ? Math.abs(dy) >= Math.abs(dx) : Math.abs(dx) >= Math.abs(dy);
+    if (!dominates) return; // let the orthogonal gesture through
+    apply(axis === 'y' ? dy : dx);
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  el.addEventListener('wheel', onWheel, { passive: false });
+  el.addEventListener('touchstart', onTouchStart, { passive: true });
+  el.addEventListener('touchmove', onTouchMove, { passive: false });
+  return () => {
+    el.removeEventListener('wheel', onWheel);
+    el.removeEventListener('touchstart', onTouchStart);
+    el.removeEventListener('touchmove', onTouchMove);
+  };
+}
+
 export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpenSetBuilder }: CombinedEmojiPickerProps) {
   const { sets, isLoading } = useCustomEmojiSets();
   const [search, setSearch] = useState('');
   const [activeTab, setActiveTab] = useState<TabKind>({ type: 'favorites' });
 
-  // Drive the emoji list's scroll manually. When the picker is mounted inside a
-  // Popover that sits within a scroll-locked Dialog (the thread modal) and/or a
-  // virtualized/transformed container, ancestor scroll-lockers (react-remove-
-  // scroll) swallow the scroll gesture and the list won't move — worse, on touch
-  // the gesture falls through to the thread behind. Handling wheel (desktop) AND
-  // touch (mobile) here — adjusting scrollTop ourselves and stopping the event —
-  // makes it scroll reliably and stops the pass-through.
+  // Drive scrolling manually for both the vertical emoji list AND the horizontal
+  // set-tab strip. When the picker sits inside a scroll-locked Dialog (the thread
+  // modal) and/or a virtualized/transformed container, ancestor scroll-lockers
+  // (react-remove-scroll) swallow the gesture — the list won't move and on touch
+  // it falls through to the thread behind. See attachManualScroll (module scope).
   //
-  // Uses a CALLBACK REF (not useEffect) so listeners bind to the real scroll node
-  // whenever it mounts. The picker first renders a loading skeleton with no
-  // scroll div, so a one-shot effect would attach to nothing and never re-run.
-  const scrollCleanupRef = useRef<(() => void) | null>(null);
+  // CALLBACK REFS (not useEffect) so listeners bind to the real node whenever it
+  // mounts — the picker first renders a loading skeleton with no scroll div, so a
+  // one-shot effect would attach to nothing and never re-run.
+  const bodyCleanupRef = useRef<(() => void) | null>(null);
   const scrollBodyRef = useCallback((el: HTMLDivElement | null) => {
-    scrollCleanupRef.current?.();
-    scrollCleanupRef.current = null;
-    if (!el) return;
-
-    // Apply a vertical delta; returns true if we consumed it (so we can stop the
-    // event and keep ancestor scroll-lockers / the thread from hijacking it).
-    const applyDelta = (dy: number): boolean => {
-      const { scrollTop, scrollHeight, clientHeight } = el;
-      if (scrollHeight <= clientHeight) return false; // nothing to scroll
-      const atTop = scrollTop <= 0 && dy < 0;
-      const atBottom = scrollTop + clientHeight >= scrollHeight - 1 && dy > 0;
-      if (atTop || atBottom) return false; // let the edge pass through
-      el.scrollTop += dy;
-      return true;
-    };
-
-    const onWheel = (e: WheelEvent) => {
-      if (applyDelta(e.deltaY)) { e.preventDefault(); e.stopPropagation(); }
-    };
-
-    // Touch: track finger delta between moves and drive scrollTop directly.
-    // preventDefault always fires (so the thread behind never scrolls), even at
-    // the list's edges.
-    let lastY = 0;
-    const onTouchStart = (e: TouchEvent) => { lastY = e.touches[0]?.clientY ?? 0; };
-    const onTouchMove = (e: TouchEvent) => {
-      const y = e.touches[0]?.clientY ?? lastY;
-      const dy = lastY - y; // finger up → scroll down
-      lastY = y;
-      applyDelta(dy);
-      e.preventDefault();
-      e.stopPropagation();
-    };
-
-    el.addEventListener('wheel', onWheel, { passive: false });
-    el.addEventListener('touchstart', onTouchStart, { passive: true });
-    el.addEventListener('touchmove', onTouchMove, { passive: false });
-    scrollCleanupRef.current = () => {
-      el.removeEventListener('wheel', onWheel);
-      el.removeEventListener('touchstart', onTouchStart);
-      el.removeEventListener('touchmove', onTouchMove);
-    };
+    bodyCleanupRef.current?.();
+    bodyCleanupRef.current = el ? attachManualScroll(el, 'y') : null;
+  }, []);
+  const tabStripCleanupRef = useRef<(() => void) | null>(null);
+  const tabStripRef = useCallback((el: HTMLDivElement | null) => {
+    tabStripCleanupRef.current?.();
+    tabStripCleanupRef.current = el ? attachManualScroll(el, 'x') : null;
   }, []);
 
   const favorites = useMemo(() => getFavoriteEmojis(), []);
@@ -160,7 +177,7 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
 
       {/* Tabs: Corkboards Default | Favorites | Emoji categories | Custom sets */}
       {!search && (
-        <div className="flex border-b px-1 py-1 gap-0.5 overflow-x-auto shrink-0">
+        <div ref={tabStripRef} className="flex border-b px-1 py-1 gap-0.5 overflow-x-auto shrink-0 [touch-action:pan-x]">
           {/* Favorites */}
           {favorites.length > 0 && (
             <button

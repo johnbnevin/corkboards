@@ -25,6 +25,7 @@ import {
 import { EMOJI_CATEGORIES } from '@core/emojiCategories';
 import { CORKBOARDS_DEFAULT_EMOJIS } from '@core/defaultEmojiSet';
 import { useCustomEmojiSets } from '../hooks/useCustomEmojiSets';
+import { useEmojiSetsModal } from './EmojiSetsModalProvider';
 import { mobileStorage } from '../storage/MmkvStorage';
 
 // ── Favorites tracking (mirrors web's trackEmojiUse in EmojiSetEditor.tsx) ──
@@ -60,6 +61,8 @@ interface EmojiPickerProps {
   onSelectEmoji: (emoji: string) => void;
   /** Triggered when a NIP-30 custom emoji is selected */
   onSelectCustomEmoji: (shortcode: string, url: string) => void;
+  /** Open the custom emoji set editor ("Manage Sets"). When set, a footer shows. */
+  onManageSets?: () => void;
 }
 
 // ── Tab types (mirrors web) ──────────────────────────────────────────────────
@@ -78,7 +81,7 @@ const CUSTOM_COLS = 6;
 const CELL_SIZE = Math.floor(SCREEN_WIDTH / STANDARD_COLS);
 const CUSTOM_CELL_SIZE = Math.floor(SCREEN_WIDTH / CUSTOM_COLS);
 
-export function EmojiPicker({ onSelectEmoji, onSelectCustomEmoji }: EmojiPickerProps) {
+export function EmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onManageSets }: EmojiPickerProps) {
   const { sets, isLoading } = useCustomEmojiSets();
   const [search, setSearch] = useState('');
   const [activeTab, setActiveTab] = useState<TabKind>({ type: 'favorites' });
@@ -300,6 +303,13 @@ export function EmojiPicker({ onSelectEmoji, onSelectCustomEmoji }: EmojiPickerP
           style={styles.scrollArea}
         />
       )}
+
+      {/* Manage Sets — available in every picker (parity with web). */}
+      {onManageSets && (
+        <TouchableOpacity style={styles.manageFooter} onPress={onManageSets}>
+          <Text style={styles.manageFooterText}>{'⚙️'}  Manage Sets</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -312,6 +322,7 @@ interface EmojiPickerModalProps extends EmojiPickerProps {
 }
 
 export function EmojiPickerModal({ visible, onClose, onSelectEmoji, onSelectCustomEmoji }: EmojiPickerModalProps) {
+  const { open: openEmojiSets } = useEmojiSetsModal();
   const handleSelectEmoji = useCallback((emoji: string) => {
     onSelectEmoji(emoji);
     onClose();
@@ -322,6 +333,12 @@ export function EmojiPickerModal({ visible, onClose, onSelectEmoji, onSelectCust
     onClose();
   }, [onSelectCustomEmoji, onClose]);
 
+  // Close this picker first, then open the editor (avoid stacked RN modals).
+  const handleManageSets = useCallback(() => {
+    onClose();
+    openEmojiSets();
+  }, [onClose, openEmojiSets]);
+
   return (
     <Modal
       visible={visible}
@@ -331,7 +348,7 @@ export function EmojiPickerModal({ visible, onClose, onSelectEmoji, onSelectCust
       statusBarTranslucent={Platform.OS === 'android'}
     >
       <TouchableOpacity style={styles.overlay} activeOpacity={1} onPress={onClose} />
-      <EmojiPicker onSelectEmoji={handleSelectEmoji} onSelectCustomEmoji={handleSelectCustomEmoji} />
+      <EmojiPicker onSelectEmoji={handleSelectEmoji} onSelectCustomEmoji={handleSelectCustomEmoji} onManageSets={handleManageSets} />
     </Modal>
   );
 }
@@ -431,6 +448,17 @@ const styles = StyleSheet.create({
   // Content
   scrollArea: {
     flex: 1,
+  },
+  manageFooter: {
+    borderTopWidth: 1,
+    borderTopColor: '#404040',
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  manageFooterText: {
+    color: '#a855f7',
+    fontSize: 14,
+    fontWeight: '600',
   },
   loadingContainer: {
     flex: 1,

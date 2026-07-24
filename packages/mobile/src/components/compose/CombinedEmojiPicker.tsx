@@ -17,6 +17,7 @@ import {
   Platform,
 } from 'react-native';
 import { EmojiPicker } from '../EmojiPicker';
+import { useEmojiSetsModal } from '../EmojiSetsModalProvider';
 
 interface CombinedEmojiPickerProps {
   /** Standard emoji selected (unicode string) */
@@ -35,13 +36,15 @@ interface CombinedEmojiPickerProps {
 export function CombinedEmojiPicker({
   onSelectEmoji,
   onSelectCustomEmoji,
-  onOpenSetBuilder: _onOpenSetBuilder,
+  onOpenSetBuilder,
 }: CombinedEmojiPickerProps) {
+  const { open: openEmojiSets } = useEmojiSetsModal();
   return (
     <View style={styles.container}>
       <EmojiPicker
         onSelectEmoji={onSelectEmoji}
         onSelectCustomEmoji={onSelectCustomEmoji}
+        onManageSets={onOpenSetBuilder ?? openEmojiSets}
       />
     </View>
   );
@@ -60,8 +63,9 @@ export function CombinedEmojiPickerModal({
   onClose,
   onSelectEmoji,
   onSelectCustomEmoji,
-  onOpenSetBuilder: _onOpenSetBuilder,
+  onOpenSetBuilder,
 }: CombinedEmojiPickerModalProps) {
+  const { open: openEmojiSets } = useEmojiSetsModal();
   const handleSelectEmoji = useCallback((emoji: string) => {
     onSelectEmoji(emoji);
     onClose();
@@ -71,6 +75,12 @@ export function CombinedEmojiPickerModal({
     onSelectCustomEmoji(shortcode, url);
     onClose();
   }, [onSelectCustomEmoji, onClose]);
+
+  // Close this picker first, then open the editor (avoid stacked RN modals).
+  const handleManageSets = useCallback(() => {
+    onClose();
+    (onOpenSetBuilder ?? openEmojiSets)();
+  }, [onClose, onOpenSetBuilder, openEmojiSets]);
 
   return (
     <Modal
@@ -84,6 +94,7 @@ export function CombinedEmojiPickerModal({
       <EmojiPicker
         onSelectEmoji={handleSelectEmoji}
         onSelectCustomEmoji={handleSelectCustomEmoji}
+        onManageSets={handleManageSets}
       />
     </Modal>
   );

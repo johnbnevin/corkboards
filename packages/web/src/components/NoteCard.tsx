@@ -1495,7 +1495,7 @@ export const NoteCard = React.memo(function NoteCard({
           >
             <MessageSquare className="h-3.5 w-3.5" />
           </Button>
-          {!isMeTab && user && (
+          {user && (
             sentReaction ? (
               // Show the emoji we reacted with, in place of the picker
               <span

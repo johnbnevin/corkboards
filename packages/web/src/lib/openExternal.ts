@@ -13,7 +13,8 @@
  * anything derived from a note, a profile, or a relay.
  */
 import { isSafeExternalUrl } from '@core/sanitizeUtils';
-import { isTauri, tauriOpenExternal } from './tauri';
+import { toLightningUri } from '@core/lightningTarget';
+import { isTauri, tauriOpenExternal, tauriOpenLightning } from './tauri';
 
 /**
  * Open `url` in the user's browser. Returns true when the open was attempted.
@@ -37,6 +38,41 @@ export function openExternal(url: string | null | undefined): boolean {
     return true;
   }
   window.open(trimmed, '_blank', 'noopener,noreferrer');
+  return true;
+}
+
+/**
+ * Hand a BOLT-11 invoice to whichever wallet the machine has registered for
+ * `lightning:`. Returns true when the open was attempted.
+ *
+ * The one deliberate exception to the http(s)-only rule above, and narrow on
+ * purpose: `toLightningUri` returns null for anything that isn't a real
+ * invoice, so this can't be turned into a generic scheme launcher by feeding it
+ * note content. Invoices reaching it are ones this app just requested from an
+ * already-SSRF-checked LNURL endpoint.
+ *
+ * Desktop goes through a separate host command rather than `open_external` —
+ * that one refuses non-web schemes on purpose, and assigning `location.href`
+ * inside WebKitGTK with no registered handler navigates the app away from
+ * itself with no way back.
+ */
+export function openLightningInvoice(invoice: string | null | undefined): boolean {
+  const uri = toLightningUri(invoice);
+  if (!uri) {
+    console.warn('[openLightningInvoice] refused non-invoice payload');
+    return false;
+  }
+  if (isTauri) {
+    void tauriOpenLightning(uri).then((ok) => {
+      // No wallet registered is the common case, not an error worth a dialog —
+      // the QR code beside the button is the fallback.
+      if (!ok) console.warn('[openLightningInvoice] desktop host could not open a wallet');
+    });
+    return true;
+  }
+  // A browser with no handler for the scheme simply does nothing here, which is
+  // the intended outcome — the QR code stays on screen.
+  window.location.href = uri;
   return true;
 }
 

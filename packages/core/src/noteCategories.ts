@@ -226,6 +226,16 @@ export function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrE
 // ─── Text-filter helpers ─────────────────────────────────────────────────────
 
 /**
+ * Resolve an event id to the event, for callers that can see more events than
+ * the one being tested — the feed's own note map, a fetch cache, etc.
+ */
+export type EventResolver = (id: string) => NostrEvent | null | undefined;
+
+const REPOST_KINDS = new Set([6, 16]);
+/** Nested reposts (16 → 6 → 1) happen; a chain longer than this is pathological. */
+const MAX_REPOST_UNWRAP = 3;
+
+/**
  * The text a note actually shows the reader, for text-matching filters.
  *
  * A repost's own `content` is a JSON blob, and long-form posts carry a title in
@@ -233,16 +243,38 @@ export function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrE
  * field alone meant the "hide notes containing this text" filter silently did
  * nothing for either — and, because reposts are JSON, it could match on
  * incidental substrings like `"kind"` or a pubkey.
+ *
+ * A repost displays the note it carries, so that's what the text filter has to
+ * see. NIP-18 only says the reposted event SHOULD be embedded in `content`, and
+ * plenty of clients publish a bare envelope with just an `e` tag — for those the
+ * embedded JSON is absent and the reposted text can only come from `resolve`.
+ * Without it those reposts were invisible to the filter: the phrase was plainly
+ * on screen and the note stayed. Unwrapping is recursive, so a repost of an
+ * article matches on its title and a repost-of-a-repost matches on the innermost
+ * note.
+ *
+ * @param resolve - Optional id → event lookup. When a repost can't be resolved
+ *   through it (target not fetched yet), the repost displays nothing of its own
+ *   and is left alone rather than hidden on a guess.
  */
-export function noteDisplayText(note: NostrEvent): string {
-  if (note.kind === 6 || note.kind === 16) {
-    const embedded = parseEmbeddedRepost(note.content);
-    // A repost with an unparseable body displays nothing of its own.
-    return embedded ? embedded.content : '';
+export function noteDisplayText(note: NostrEvent, resolve?: EventResolver): string {
+  let current = note;
+  // Depth-capped rather than cycle-tracked: a repost that points at itself just
+  // runs out the counter and reports nothing, which is the same answer.
+  for (let depth = 0; depth < MAX_REPOST_UNWRAP && REPOST_KINDS.has(current.kind); depth++) {
+    // Embedded JSON first: it needs no lookup and is what the card renders.
+    const targetId = (current.tags ?? []).find(t => t[0] === 'e')?.[1];
+    const target = parseEmbeddedRepost(current.content)
+      ?? (targetId && resolve ? resolve(targetId) : null);
+    if (!target) return '';
+    current = target;
   }
-  const title = note.tags.find(t => t[0] === 'title')?.[1];
-  const summary = note.tags.find(t => t[0] === 'summary')?.[1];
-  return [title, summary, note.content].filter(Boolean).join('\n');
+  // Still a repost after the unwrap limit — nothing displayable was reached.
+  if (REPOST_KINDS.has(current.kind)) return '';
+  const tags = current.tags ?? [];
+  const title = tags.find(t => t[0] === 'title')?.[1];
+  const summary = tags.find(t => t[0] === 'summary')?.[1];
+  return [title, summary, current.content].filter(Boolean).join('\n');
 }
 
 // ─── Kind-filter evaluation ──────────────────────────────────────────────────

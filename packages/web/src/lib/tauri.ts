@@ -145,6 +145,26 @@ export async function tauriOpenExternal(url: string): Promise<boolean> {
   }
 }
 
+/**
+ * Hand a `lightning:` invoice URI to the host so the OS opens it in whatever
+ * wallet is registered for the scheme.
+ *
+ * Separate from `open_external` on purpose — that command refuses every
+ * non-web scheme, and relaxing it would turn it into a generic local-handler
+ * launcher reachable from note content. Rust re-validates the invoice shape.
+ * Returns false outside Tauri, or when the host refused / found no handler.
+ */
+export async function tauriOpenLightning(uri: string): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    await invoke('open_lightning', { uri });
+    return true;
+  } catch (e) {
+    console.warn('[tauri] open_lightning failed:', e);
+    return false;
+  }
+}
+
 // ─── Native Relay Query ───────────────────────────────────────────────────────
 
 interface RelayQueryResult {

@@ -38,9 +38,13 @@ function ev(partial: Partial<NostrEvent>): NostrEvent {
 }
 
 /** Mirrors the caller: hideExactText is trimmed + lowercased once per feed pass. */
-const keep = (note: NostrEvent, cfg: Partial<ContentFilterConfig> = {}) => {
+const keep = (
+  note: NostrEvent,
+  cfg: Partial<ContentFilterConfig> = {},
+  resolve?: (id: string) => NostrEvent | undefined,
+) => {
   const config = { ...OFF, ...cfg };
-  return noteMatchesContentFilters(note, config, config.hideExactText.trim().toLowerCase());
+  return noteMatchesContentFilters(note, config, config.hideExactText.trim().toLowerCase(), resolve);
 };
 
 describe('text filter', () => {
@@ -70,6 +74,54 @@ describe('text filter', () => {
     expect(keep(repost, { hideExactText: 'good morning' })).toBe(false);
     // ...and does not match on JSON structure the reader never sees.
     expect(keep(repost, { hideExactText: 'created_at' })).toBe(true);
+  });
+
+  it('reads a bare repost through the resolver when nothing is embedded', () => {
+    // NIP-18 only SHOULDs the embedded JSON; a repost that is just an `e` tag
+    // still displays the original, so the filter has to follow the tag.
+    const original = ev({ id: 'a'.repeat(64), content: 'good morning' });
+    const repost = ev({ kind: 6, content: '', tags: [['e', original.id]] });
+    const resolve = (id: string) => (id === original.id ? original : undefined);
+    expect(keep(repost, { hideExactText: 'good morning' }, resolve)).toBe(false);
+  });
+
+  it('leaves a repost alone when its target has not been fetched yet', () => {
+    const repost = ev({ kind: 6, content: '', tags: [['e', 'a'.repeat(64)]] });
+    expect(keep(repost, { hideExactText: 'good morning' }, () => undefined)).toBe(true);
+  });
+
+  it('ignores case on both sides of a reposted match', () => {
+    // The query and the reposted text are lowercased independently, so any
+    // mix of cases in either one still matches.
+    const original = ev({ id: 'a'.repeat(64), content: 'GoOd MoRnInG everyone' });
+    const embedded = ev({ kind: 6, content: JSON.stringify(original) });
+    const bare = ev({ kind: 6, content: '', tags: [['e', original.id]] });
+    for (const query of ['good morning', 'GOOD MORNING', 'GoOd mOrNiNg']) {
+      expect(keep(embedded, { hideExactText: query })).toBe(false);
+      expect(keep(bare, { hideExactText: query }, () => original)).toBe(false);
+    }
+  });
+
+  it('matches a reposted article on its title', () => {
+    const article = ev({
+      id: 'a'.repeat(64), kind: 30023, content: 'body',
+      tags: [['title', 'Good Morning Everyone']],
+    });
+    const repost = ev({ kind: 6, content: '', tags: [['e', article.id]] });
+    expect(keep(repost, { hideExactText: 'good morning' }, () => article)).toBe(false);
+  });
+
+  it('follows a repost of a repost down to the innermost note', () => {
+    const original = ev({ id: 'a'.repeat(64), content: 'good morning' });
+    const inner = ev({ id: 'b'.repeat(64), kind: 6, content: JSON.stringify(original) });
+    const outer = ev({ kind: 16, content: '', tags: [['e', inner.id]] });
+    const resolve = (id: string) => (id === inner.id ? inner : undefined);
+    expect(keep(outer, { hideExactText: 'good morning' }, resolve)).toBe(false);
+  });
+
+  it('terminates on a repost that resolves to itself', () => {
+    const selfRepost = ev({ id: 'a'.repeat(64), kind: 6, content: '', tags: [['e', 'a'.repeat(64)]] });
+    expect(keep(selfRepost, { hideExactText: 'anything' }, () => selfRepost)).toBe(true);
   });
 
   it('is not overridden by the always-show exceptions', () => {

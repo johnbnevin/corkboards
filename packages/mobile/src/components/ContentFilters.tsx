@@ -102,6 +102,11 @@ export const ContentFilters = React.memo(function ContentFilters({
               onChangeText={v => onChange('hideExactText', v)}
               placeholder=""
               placeholderTextColor="#666"
+              // The match itself ignores case, but the keyboard's default
+              // sentence-casing and autocorrect would rewrite what the user
+              // typed in the field they're reading back.
+              autoCapitalize="none"
+              autoCorrect={false}
             />
           </View>
 

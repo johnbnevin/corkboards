@@ -2,8 +2,8 @@
  * Note action bar — like, repost, reply, bookmark, zap.
  * Mirrors the web version's interaction patterns.
  */
-import { useState, useEffect, useCallback } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, Platform, TextInput, Modal } from 'react-native';
+import { useState, useCallback } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Alert, Modal } from 'react-native';
 import { useQueryClient } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useNostr, getRelayCache, getUserRelays, FALLBACK_RELAYS } from '../lib/NostrProvider';
@@ -12,6 +12,7 @@ import { ComposeScreen } from '../screens/ComposeScreen';
 import { useZap } from '../hooks/useZap';
 import { useNoteEngagement } from '../hooks/useNoteEngagement';
 import { EmojiPickerModal } from './EmojiPicker';
+import { ZapDialog } from './ZapDialog';
 import { recordUserZap, hasUserZapped } from '../lib/userZapCache';
 
 interface NoteActionsProps {
@@ -32,7 +33,6 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
   const [likePending, setLikePending] = useState(false);
   const [repostPending, setRepostPending] = useState(false);
   const [zapModalVisible, setZapModalVisible] = useState(false);
-  const [zapAmount, setZapAmount] = useState('21');
   const [emojiPickerVisible, setEmojiPickerVisible] = useState(false);
   const [quoting, setQuoting] = useState(false);
   // Optimistic zapped flag — seeded from the session cache so a note the user
@@ -48,15 +48,11 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
   const likeCount = (engagement?.likeCount ?? 0) + (likedOverride && !engagement?.liked ? 1 : 0);
   const repostCount = (engagement?.repostCount ?? 0) + (repostedOverride && !engagement?.reposted ? 1 : 0);
 
-  const { zap, isZapping, error: zapError, clearError: clearZapError, canZap, isConnected: nwcConnected } = useZap(event);
-
-  // Show zap errors via Alert; clear immediately so the same error can re-fire next time.
-  useEffect(() => {
-    if (zapError) {
-      clearZapError();
-      Alert.alert('Zap failed', zapError);
-    }
-  }, [zapError, clearZapError]);
+  // Only `canZap` — whether to show the button at all. The zap itself, its
+  // progress spinner and its errors all now live inside ZapDialog, which holds
+  // its own useZap; reading those from this instance would show a spinner that
+  // never spins and an error that never fires.
+  const { canZap } = useZap(event);
 
   const requireAuth = (action: () => void) => {
     if (!pubkey || !signer) {
@@ -158,58 +154,25 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     ]);
   };
 
-  // Fire a zap and, on success, record it optimistically so the zap icon
-  // lights up right away (mirrors web's recordUserZap in NoteCard).
-  const runZap = (sats: number) => {
-    zap(sats)
-      .then(() => {
-        recordUserZap(event.id);
-        setZappedOverride(true);
-        queryClient.invalidateQueries({ queryKey: ['note-engagement', event.id] });
-      })
-      .catch(() => { /* error shown via effect */ });
-  };
+  // Record a paid zap optimistically so the zap icon lights up right away
+  // (mirrors web's recordUserZap in NoteCard).
+  const handleZapped = useCallback(() => {
+    recordUserZap(event.id);
+    setZappedOverride(true);
+    queryClient.invalidateQueries({ queryKey: ['note-engagement', event.id] });
+  }, [event.id, queryClient]);
 
+  // The shared ZapDialog handles everything from here: presets, a custom
+  // amount, a message, and — with no wallet connected — a QR code for an
+  // external one. This used to be a bare amount prompt that refused to open at
+  // all without NWC, which left anyone whose sats live in another app with no
+  // way to zap and no way to find out why.
   const handleZapPress = () => {
-    if (!nwcConnected) {
-      Alert.alert('No wallet', 'Connect a Lightning wallet in Settings to send zaps.');
-      return;
-    }
     if (!canZap) {
       Alert.alert('No lightning address', 'This user has no lightning address set.');
       return;
     }
-    if (Platform.OS === 'ios') {
-      Alert.prompt(
-        'Zap amount',
-        'Enter amount in sats:',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Zap ⚡',
-            onPress: (value: string | undefined) => {
-              const sats = parseInt(value || '21', 10);
-              if (!isNaN(sats) && sats > 0) {
-                runZap(sats);
-              }
-            },
-          },
-        ],
-        'plain-text',
-        '21',
-        'number-pad',
-      );
-    } else {
-      setZapModalVisible(true);
-    }
-  };
-
-  const handleZapConfirm = () => {
-    const sats = parseInt(zapAmount, 10);
-    if (!isNaN(sats) && sats > 0) {
-      setZapModalVisible(false);
-      runZap(sats);
-    }
+    setZapModalVisible(true);
   };
 
   const reactionGroups = engagement?.reactionGroups ?? [];
@@ -276,41 +239,20 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
           <TouchableOpacity
             style={styles.action}
             onPress={() => requireAuth(handleZapPress)}
-            disabled={isZapping}
           >
-            {isZapping ? (
-              <ActivityIndicator size="small" color="#f59e0b" />
-            ) : (
-              <Text style={[styles.icon, styles.zapIcon, zapped && styles.activeZap]}>⚡</Text>
-            )}
+            <Text style={[styles.icon, styles.zapIcon, zapped && styles.activeZap]}>⚡</Text>
             {(engagement?.zapCount ?? 0) > 0 && <Text style={[styles.count, styles.zapIcon, zapped && styles.activeZap]}>{engagement?.zapCount}</Text>}
           </TouchableOpacity>
         ) : null}
       </View>
 
-      {/* Android zap amount modal */}
-      <Modal visible={zapModalVisible} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Zap amount (sats)</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={zapAmount}
-              onChangeText={setZapAmount}
-              keyboardType="number-pad"
-              autoFocus
-            />
-            <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.modalCancel} onPress={() => setZapModalVisible(false)}>
-                <Text style={styles.modalCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.modalConfirm} onPress={handleZapConfirm}>
-                <Text style={styles.modalConfirmText}>Zap ⚡</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* Zap dialog — the same one the thread and saved screens use */}
+      <ZapDialog
+        note={event}
+        visible={zapModalVisible}
+        onClose={() => setZapModalVisible(false)}
+        onZapped={handleZapped}
+      />
 
       {/* Quote compose modal */}
       <Modal visible={quoting} animationType="slide">
@@ -352,14 +294,4 @@ const styles = StyleSheet.create({
   chipEmoji: { fontSize: 13, color: '#f2f2f2' },
   chipCount: { fontSize: 11, color: '#b3b3b3' },
   chipCountActive: { color: '#ec4899', fontWeight: '600' },
-  // Android zap modal
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center' },
-  modalCard: { backgroundColor: '#2a2a2a', borderRadius: 12, padding: 20, width: 260, gap: 12 },
-  modalTitle: { color: '#f2f2f2', fontSize: 16, fontWeight: '600', textAlign: 'center' },
-  modalInput: { backgroundColor: '#333', color: '#f2f2f2', borderRadius: 8, padding: 12, fontSize: 18, textAlign: 'center' },
-  modalButtons: { flexDirection: 'row', gap: 8 },
-  modalCancel: { flex: 1, padding: 12, borderRadius: 8, backgroundColor: '#333', alignItems: 'center' },
-  modalCancelText: { color: '#b3b3b3', fontSize: 14 },
-  modalConfirm: { flex: 1, padding: 12, borderRadius: 8, backgroundColor: '#333', alignItems: 'center' },
-  modalConfirmText: { color: '#f59e0b', fontSize: 14, fontWeight: '600' },
 });

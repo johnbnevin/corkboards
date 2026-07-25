@@ -6,7 +6,7 @@ import { useNwc } from '@/hooks/useNwc';
 import { debugLog } from '@/lib/debug';
 import { ZAP_RELAYS } from '@/lib/relayConstants';
 import { resolveZapEndpoint } from '@core/zap';
-import { fetchLnurlPayInfo, checkSendableRange, buildInvoiceUrl, requestInvoice } from '@core/lnurlPay';
+import { createZapInvoice } from '@core/lnurlPay';
 
 export function useZap(note: NostrEvent | null) {
   const { user } = useCurrentUser();
@@ -20,6 +20,42 @@ export function useZap(note: NostrEvent | null) {
   // users only set lud06, which the old lud16-only check treated as "no address".
   const zapEndpoint = resolveZapEndpoint(authorData?.metadata);
   const canZap = !!zapEndpoint;
+
+  /**
+   * Produce the invoice for this note without paying it.
+   *
+   * Deliberately NOT gated on a connected wallet: this is what the external-
+   * wallet path shows as a QR code. The fetch, the JSON handling, the SSRF
+   * re-check of the server's own callback and the NIP-57 attachment all live in
+   * @core/lnurlPay, so the invoice a stranger's phone pays is byte-for-byte the
+   * one NWC would have paid — same zap request, same receipt.
+   */
+  const createInvoice = useCallback(async (amountSats: number, comment?: string): Promise<string> => {
+    if (!note || !zapEndpoint) throw new Error('Missing note or lightning address');
+
+    return createZapInvoice(zapEndpoint, amountSats, {
+      comment,
+      // Logged out, the zap still pays — it just can't be signed, so it
+      // arrives as a plain LNURL payment with no receipt.
+      signZapRequest: user
+        ? async (amountMsats) => {
+            const zapRequest = await user.signer.signEvent({
+              kind: 9734,
+              content: comment || '',
+              tags: [
+                ['p', note.pubkey],
+                ['e', note.id],
+                ['amount', amountMsats.toString()],
+                ['relays', ...ZAP_RELAYS],
+              ],
+              created_at: Math.floor(Date.now() / 1000),
+            });
+            debugLog('[zap] Signed zap request, fetching invoice...');
+            return JSON.stringify(zapRequest);
+          }
+        : undefined,
+    });
+  }, [note, user, zapEndpoint]);
 
   const zap = useCallback(async (amountSats: number, comment?: string) => {
     if (!note || !user || !zapEndpoint) {
@@ -35,46 +71,7 @@ export function useZap(note: NostrEvent | null) {
     setError(null);
 
     try {
-      const amountMsats = amountSats * 1000;
-
-      // 1. Fetch + validate the LNURL pay info (endpoint resolved from lud16 or
-      //    lud06). The fetch, the JSON handling and the SSRF re-check of the
-      //    server's own callback all live in @core/lnurlPay so the scan-a-QR
-      //    flow can't end up with weaker guards than this one.
-      const info = await fetchLnurlPayInfo(zapEndpoint);
-      const rangeError = checkSendableRange(info, amountMsats);
-      if (rangeError) throw new Error(rangeError);
-
-      debugLog('[zap] LNURL pay info: allowsNostr=%s', info.allowsNostr);
-
-      // 2. Build the callback URL. A NIP-57 zap request is attached only when
-      //    the server can actually produce a zap receipt; otherwise this
-      //    degrades to a plain LNURL payment with the comment inline.
-      let extraParams: Record<string, string> | undefined;
-      if (info.allowsNostr && info.nostrPubkey) {
-        const zapRequest = await user.signer.signEvent({
-          kind: 9734,
-          content: comment || '',
-          tags: [
-            ['p', note.pubkey],
-            ['e', note.id],
-            ['amount', amountMsats.toString()],
-            ['relays', ...ZAP_RELAYS],
-          ],
-          created_at: Math.floor(Date.now() / 1000),
-        });
-        extraParams = { nostr: JSON.stringify(zapRequest) };
-        debugLog('[zap] Signed zap request, fetching invoice...');
-      }
-      // The comment rides in the signed zap request when there is one; passing
-      // it as well would duplicate it on servers that honour both.
-      const invoiceUrl = buildInvoiceUrl(info, amountMsats, {
-        comment: extraParams ? undefined : comment,
-        extraParams,
-      });
-
-      // 3. Request the invoice, then pay it via NWC.
-      const bolt11 = await requestInvoice(invoiceUrl);
+      const bolt11 = await createInvoice(amountSats, comment);
       debugLog('[zap] Got invoice, paying via NWC...');
       await payInvoice(bolt11);
       debugLog('[zap] Payment complete!');
@@ -85,7 +82,7 @@ export function useZap(note: NostrEvent | null) {
     } finally {
       setIsZapping(false);
     }
-  }, [note, user, zapEndpoint, isConnected, payInvoice]);
+  }, [note, user, zapEndpoint, isConnected, payInvoice, createInvoice]);
 
-  return { zap, isZapping, error, lud16, canZap, isConnected };
+  return { zap, createInvoice, isZapping, error, lud16, canZap, isConnected };
 }

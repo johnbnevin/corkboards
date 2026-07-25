@@ -7,7 +7,7 @@ mod signer;
 
 use keychain::{keychain_store, keychain_delete};
 use logger::{write_log, clear_log};
-use opener::open_external;
+use opener::{open_external, open_lightning};
 use proxy::{
     get_proxy, set_proxy, get_proxy_required, set_proxy_required, proxy_load_failed,
     proxy_webview_unprotected,
@@ -89,6 +89,7 @@ pub fn run() {
             nip04_encrypt,
             nip04_decrypt,
             open_external,
+            open_lightning,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

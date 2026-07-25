@@ -9,7 +9,7 @@ import { useAuthor } from './useAuthor';
 import { useNwc } from './useNwc';
 import { ZAP_RELAYS } from '../lib/NostrProvider';
 import { resolveZapEndpoint } from '@core/zap';
-import { fetchLnurlPayInfo, checkSendableRange, buildInvoiceUrl, requestInvoice } from '@core/lnurlPay';
+import { createZapInvoice } from '@core/lnurlPay';
 
 export function useZap(note: NostrEvent | null) {
   const { signer } = useAuth();
@@ -23,6 +23,40 @@ export function useZap(note: NostrEvent | null) {
   // users only set lud06, which the old lud16-only check treated as "no address".
   const zapEndpoint = resolveZapEndpoint(authorData?.metadata);
   const canZap = !!zapEndpoint;
+
+  /**
+   * Produce the invoice for this note without paying it.
+   *
+   * Deliberately NOT gated on a connected wallet: this is what the external-
+   * wallet path shows as a QR code. Sharing @core/createZapInvoice with the NWC
+   * path means the invoice an external wallet pays carries the same signed zap
+   * request, and so earns the same receipt.
+   */
+  const createInvoice = useCallback(async (amountSats: number, comment?: string): Promise<string> => {
+    if (!note || !zapEndpoint) throw new Error('Missing note or lightning address');
+
+    return createZapInvoice(zapEndpoint, amountSats, {
+      comment,
+      // Signed out, the zap still pays — it just arrives as a plain LNURL
+      // payment with no receipt.
+      signZapRequest: signer
+        ? async (amountMsats) => {
+            const zapRequest = await signer.signEvent({
+              kind: 9734,
+              content: comment || '',
+              tags: [
+                ['p', note.pubkey],
+                ['e', note.id],
+                ['amount', amountMsats.toString()],
+                ['relays', ...ZAP_RELAYS],
+              ],
+              created_at: Math.floor(Date.now() / 1000),
+            });
+            return JSON.stringify(zapRequest);
+          }
+        : undefined,
+    });
+  }, [note, signer, zapEndpoint]);
 
   const zap = useCallback(async (amountSats: number, comment?: string) => {
     if (!note || !signer || !zapEndpoint) {
@@ -38,44 +72,7 @@ export function useZap(note: NostrEvent | null) {
     setError(null);
 
     try {
-      const amountMsats = amountSats * 1000;
-
-      // 1. Fetch + validate the LNURL pay info (endpoint resolved from lud16 or
-      //    lud06). The fetch, the JSON handling and the SSRF re-check of the
-      //    server's own callback all live in @core/lnurlPay, shared with web.
-      const info = await fetchLnurlPayInfo(zapEndpoint);
-      const rangeError = checkSendableRange(info, amountMsats);
-      if (rangeError) throw new Error(rangeError);
-
-      // 2. Build the callback URL. A NIP-57 zap request is attached only when
-      //    the server can actually produce a zap receipt; otherwise this
-      //    degrades to a plain LNURL payment with the comment inline.
-      let extraParams: Record<string, string> | undefined;
-      if (info.allowsNostr && info.nostrPubkey) {
-        const zapRequest = await signer.signEvent({
-          kind: 9734,
-          content: comment || '',
-          tags: [
-            ['p', note.pubkey],
-            ['e', note.id],
-            ['amount', amountMsats.toString()],
-            ['relays', ...ZAP_RELAYS],
-          ],
-          created_at: Math.floor(Date.now() / 1000),
-        });
-        extraParams = { nostr: JSON.stringify(zapRequest) };
-      }
-      // The comment rides in the signed zap request when there is one; passing
-      // it as well would duplicate it on servers that honour both.
-      const invoiceUrl = buildInvoiceUrl(info, amountMsats, {
-        comment: extraParams ? undefined : comment,
-        extraParams,
-      });
-
-      // 3. Request invoice
-      const bolt11 = await requestInvoice(invoiceUrl);
-
-      // 4. Pay via NWC
+      const bolt11 = await createInvoice(amountSats, comment);
       await payInvoice(bolt11);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Zap failed';
@@ -84,9 +81,9 @@ export function useZap(note: NostrEvent | null) {
     } finally {
       setIsZapping(false);
     }
-  }, [note, signer, zapEndpoint, isConnected, payInvoice]);
+  }, [note, signer, zapEndpoint, isConnected, payInvoice, createInvoice]);
 
   const clearError = useCallback(() => setError(null), []);
 
-  return { zap, isZapping, error, clearError, lud16, canZap, isConnected };
+  return { zap, createInvoice, isZapping, error, clearError, lud16, canZap, isConnected };
 }

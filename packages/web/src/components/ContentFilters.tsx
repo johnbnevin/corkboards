@@ -102,6 +102,11 @@ export const ContentFilters = memo(function ContentFilters({
               value={config.hideExactText}
               onChange={e => onChange('hideExactText', e.target.value)}
               placeholder=""
+              // The match itself ignores case; these stop a touch keyboard from
+              // sentence-casing or autocorrecting what the user typed.
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               className="h-5 px-1.5 text-xs border rounded bg-background flex-1 max-w-[120px]"
             />
           </div>

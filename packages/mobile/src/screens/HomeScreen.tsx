@@ -48,6 +48,7 @@ import { NoteCard } from '../components/NoteCard';
 import { FeedFilters } from '../components/FeedFilters';
 import { ContentFilters } from '../components/ContentFilters';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { getCachedEvent } from '../lib/fetchEvent';
 import {
   noteMatchesContentFilters,
   hasActiveContentFilters as hasActiveContentFiltersFor,
@@ -279,11 +280,17 @@ export function HomeScreen() {
   });
 
   // ── Mute + deduplicate ──────────────────────────────────────────────────────
-  const events = useMemo(() => {
-    if (!rawEvents) return rawEvents;
+  const { events, eventLookup } = useMemo((): { events: NostrEvent[] | undefined; eventLookup: Map<string, NostrEvent> | undefined } => {
+    if (!rawEvents) return { events: rawEvents, eventLookup: undefined };
     let filtered = mutedPubkeys.size > 0
       ? rawEvents.filter(e => !mutedPubkeys.has(e.pubkey))
       : rawEvents;
+
+    // Lookup for resolving reaction/repost targets, built BEFORE dedup the way
+    // web builds it. Dedup keeps only one of {repost, original}, so a lookup
+    // built afterwards is missing exactly the originals reposts point at — the
+    // ones the text filter and the classifier need to read.
+    const lookup = new Map(filtered.map(e => [e.id, e]));
 
     // Standalone "content" kinds — notes that render on their own. A reaction/zap
     // card is suppressed when the note it targets is already in the feed as one
@@ -315,16 +322,8 @@ export function HomeScreen() {
       return true;
     });
 
-    return filtered;
+    return { events: filtered, eventLookup: lookup };
   }, [rawEvents, mutedPubkeys]);
-
-  // ── Build event lookup for category classification ──────────────────────────
-  const eventLookup = useMemo(() => {
-    if (!events) return undefined;
-    const map = new Map<string, NostrEvent>();
-    for (const e of events) map.set(e.id, e);
-    return map;
-  }, [events]);
 
   // ── Kind filtering ──────────────────────────────────────────────────────────
   // Hoisted out of the component so the useMemo dep array stays stable.
@@ -347,9 +346,19 @@ export function HomeScreen() {
     }
 
     // Content filters — same shared predicate the web feed uses.
+    //
+    // The resolver lets the text filter read a repost's *reposted note*. Usually
+    // that note is embedded in the repost's content, but a bare envelope (just
+    // an `e` tag) is legal NIP-18 and common, and there the phrase is on screen
+    // with nothing in the repost itself to match. `eventLookup` covers targets
+    // in the feed, the fetch cache covers ones already pulled in elsewhere; a
+    // target neither has yet is left alone until it resolves.
     if (hasContentFilters) {
       const textLower = debouncedHideExactText.trim().toLowerCase();
-      result = result.filter(note => noteMatchesContentFilters(note, feedContentFilterConfig, textLower));
+      const resolveEvent = (id: string) => eventLookup?.get(id) ?? getCachedEvent(id);
+      result = result.filter(note =>
+        noteMatchesContentFilters(note, feedContentFilterConfig, textLower, resolveEvent)
+      );
     }
 
     // Hashtag filters — only show notes whose hashtags match the selection.

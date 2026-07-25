@@ -120,6 +120,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { FeedInfoCard } from '@/components/FeedInfoCard';
 import { getNoteCategories, noteMatchesHashtags, noteMatchesKindFilters, computeHashtagCounts, computeNoteKindStats } from '@core/noteCategories';
 import { noteMatchesContentFilters, hasActiveContentFilters as hasActiveContentFiltersFor } from '@core/contentFilters';
+import { getCachedEvent } from '@/lib/fetchEvent';
 import { StatusBar } from '@/components/StatusBar';
 import { TabBar } from '@/components/TabBar';
 import { NotificationsCorkboard } from '@/components/NotificationsCorkboard';
@@ -3046,10 +3047,19 @@ export function MultiColumnClient() {
 
     // Content filters — the predicate lives in @core/contentFilters so mobile
     // evaluates exactly the same rules.
+    //
+    // The resolver lets the text filter read a repost's *reposted note*. Most of
+    // the time that note is embedded in the repost's content and no lookup is
+    // needed, but a bare envelope (just an `e` tag) is legal NIP-18 and common,
+    // and there the phrase is on screen with nothing in the repost itself to
+    // match. `eventLookup` covers targets that are in the feed; the fetch cache
+    // covers the ones NoteCard pulled in to render the card. A target neither
+    // has yet is left alone — it gets filtered on the next pass, once fetched.
     if (hasActiveContentFilters) {
       const textLower = debouncedHideExactText.trim().toLowerCase();
+      const resolveEvent = (id: string) => eventLookup.get(id) ?? getCachedEvent(id);
       filteredNotes = filteredNotes.filter(note =>
-        noteMatchesContentFilters(note, feedContentFilterConfig, textLower)
+        noteMatchesContentFilters(note, feedContentFilterConfig, textLower, resolveEvent)
       );
     }
 

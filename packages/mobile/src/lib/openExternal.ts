@@ -15,6 +15,7 @@
  */
 import { Linking } from 'react-native';
 import { isSafeExternalUrl } from '@core/sanitizeUtils';
+import { toLightningUri } from '@core/lightningTarget';
 import { debugWarn } from './debug';
 
 /**
@@ -29,6 +30,30 @@ export function openExternal(url: string | null | undefined): boolean {
   }
   Linking.openURL(url!.trim()).catch((err) => {
     debugWarn('[openExternal] failed to open:', err);
+  });
+  return true;
+}
+
+/**
+ * Hand a BOLT-11 invoice to whichever wallet app the OS has registered for
+ * `lightning:`. Returns true when the open was attempted.
+ *
+ * The one deliberate exception to the http(s)-only rule above, and narrow on
+ * purpose: `toLightningUri` returns null for anything that isn't a real
+ * invoice, so this can't be turned into a generic scheme launcher by feeding it
+ * note content. Invoices reaching it are ones this app just requested from an
+ * already-SSRF-checked LNURL endpoint.
+ */
+export function openLightningInvoice(invoice: string | null | undefined): boolean {
+  const uri = toLightningUri(invoice);
+  if (!uri) {
+    debugWarn('[openLightningInvoice] refused non-invoice payload');
+    return false;
+  }
+  Linking.openURL(uri).catch((err) => {
+    // No wallet app installed is the common case here, not an error worth a
+    // dialog — the QR code beside the button is the fallback.
+    debugWarn('[openLightningInvoice] no handler:', err);
   });
   return true;
 }

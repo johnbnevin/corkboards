@@ -118,6 +118,30 @@ describe('noteDisplayText', () => {
     expect(noteDisplayText(ev({ kind: 6, content: 'not json' }))).toBe('');
   });
 
+  it('falls back to the resolver for a repost that embeds nothing', () => {
+    const original = ev({ id: 'a'.repeat(64), content: 'the original text' });
+    const repost = ev({ kind: 6, content: '', tags: [['e', original.id]] });
+    expect(noteDisplayText(repost, id => (id === original.id ? original : undefined)))
+      .toBe('the original text');
+    // No resolver, nothing embedded — the repost displays nothing of its own.
+    expect(noteDisplayText(repost)).toBe('');
+  });
+
+  it('prefers the embedded note over the resolver', () => {
+    const embedded = ev({ id: 'a'.repeat(64), content: 'embedded text' });
+    const repost = ev({ kind: 6, content: JSON.stringify(embedded), tags: [['e', embedded.id]] });
+    expect(noteDisplayText(repost, () => ev({ content: 'stale copy' }))).toBe('embedded text');
+  });
+
+  it('carries the article title through a repost', () => {
+    const article = ev({
+      id: 'a'.repeat(64), kind: 30023, content: 'body text',
+      tags: [['title', 'My Headline']],
+    });
+    const repost = ev({ kind: 6, content: '', tags: [['e', article.id]] });
+    expect(noteDisplayText(repost, () => article)).toContain('My Headline');
+  });
+
   it('includes an article title and summary alongside the body', () => {
     const article = ev({
       kind: 30023,

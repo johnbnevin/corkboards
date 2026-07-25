@@ -81,9 +81,63 @@ pub fn open_external(url: String) -> Result<(), String> {
     launch(&safe)
 }
 
+/// Reject anything that isn't a `lightning:` URI wrapping a BOLT-11 invoice.
+///
+/// `open_external` refuses non-web schemes for good reason, and this does not
+/// relax that: it is a second, single-purpose door that only a real invoice
+/// fits through. An invoice is `ln` + network prefix + optional amount + `1` +
+/// bech32 data, with no host, path, query or credentials for a local handler to
+/// be tricked by — so validating the shape here is enough, and note content
+/// cannot be shaped into anything this accepts.
+fn validate_lightning(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 4096 {
+        return Err("invoice missing or too long".into());
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err("invoice contains control characters".into());
+    }
+    let rest = trimmed
+        .strip_prefix("lightning:")
+        .or_else(|| trimmed.strip_prefix("LIGHTNING:"))
+        .ok_or("not a lightning: URI")?;
+    // Case-insensitive per bech32; normalize once so the checks below are ASCII.
+    let payload = rest.to_ascii_lowercase();
+    let after_prefix = ["lnbcrt", "lnbc", "lntb", "lnsb"]
+        .iter()
+        .find_map(|p| payload.strip_prefix(p))
+        .ok_or("not a BOLT-11 invoice")?;
+    // The separator is the LAST `1`: bech32 excludes `1` from the data charset
+    // precisely so it can mark the end of the human-readable part. Splitting on
+    // the first one instead would cut `lnbc210n1p…` (210 nano-BTC) in half.
+    let sep = after_prefix.rfind('1').ok_or("invoice has no separator")?;
+    let (amount, data) = (&after_prefix[..sep], &after_prefix[sep + 1..]);
+
+    // Amount is optional: digits, then an optional milli/micro/nano/pico suffix.
+    if !amount.is_empty() {
+        let digits = amount.strip_suffix(['m', 'u', 'n', 'p']).unwrap_or(amount);
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+            return Err("malformed invoice amount".into());
+        }
+    }
+
+    // Bech32 data charset: `1`, `b`, `i` and `o` are excluded by design.
+    if data.len() < 20 || !data.chars().all(|c| "023456789acdefghjklmnpqrstuvwxyz".contains(c)) {
+        return Err("invoice data is not bech32".into());
+    }
+    Ok(format!("lightning:{payload}"))
+}
+
+/// Open a BOLT-11 invoice in the user's Lightning wallet.
+#[tauri::command]
+pub fn open_lightning(uri: String) -> Result<(), String> {
+    let safe = validate_lightning(&uri)?;
+    launch(&safe)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate;
+    use super::{validate, validate_lightning};
 
     #[test]
     fn accepts_plain_web_urls() {
@@ -119,5 +173,59 @@ mod tests {
     #[test]
     fn treats_triple_slash_as_a_host() {
         assert_eq!(validate("http:///etc/passwd").unwrap(), "http://etc/passwd");
+    }
+
+    /// A real mainnet invoice body, truncated to the shape the validator checks.
+    const DATA: &str = "pp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypq";
+
+    #[test]
+    fn accepts_invoices_with_and_without_an_amount() {
+        for good in [
+            format!("lightning:lnbc1{DATA}"),
+            format!("lightning:lnbc210n1{DATA}"),
+            format!("lightning:lnbc2500u1{DATA}"),
+            format!("lightning:lntb20m1{DATA}"),
+            format!("lightning:lnbcrt1{DATA}"),
+            // Uppercase is what a QR code carries; bech32 is case-insensitive.
+            format!("LIGHTNING:LNBC210N1{}", DATA.to_uppercase()),
+        ] {
+            assert!(validate_lightning(&good).is_ok(), "should accept {good}");
+        }
+    }
+
+    #[test]
+    fn normalizes_to_a_lowercase_lightning_uri() {
+        let out = validate_lightning(&format!("  LIGHTNING:LNBC210N1{}  ", DATA.to_uppercase())).unwrap();
+        assert_eq!(out, format!("lightning:lnbc210n1{DATA}"));
+    }
+
+    /// The amount's own digits can contain `1`, so the split has to anchor on
+    /// the LAST one. Splitting on the first would leave `0n1…` as the data part.
+    #[test]
+    fn splits_on_the_last_separator_not_the_first() {
+        assert!(validate_lightning(&format!("lightning:lnbc210n1{DATA}")).is_ok());
+    }
+
+    #[test]
+    fn rejects_everything_that_is_not_an_invoice() {
+        for bad in [
+            "https://example.com".to_string(),
+            "file:///etc/passwd".to_string(),
+            "lightning:".to_string(),
+            // Another scheme wearing the prefix.
+            format!("lightning:javascript:alert(1){DATA}"),
+            // LNURL and lightning addresses are not payable by this door.
+            "lightning:lnurl1dp68gurn8ghj7ampd3kx2ar0veekzar0wd5xjtnrdakj7".to_string(),
+            "lightning:alice@example.com".to_string(),
+            // Right prefix, data too short to be an invoice.
+            "lightning:lnbc1pp5qq".to_string(),
+            // `b`, `i`, `o` are not in the bech32 charset.
+            format!("lightning:lnbc1{}", "b".repeat(30)),
+            // Amount that isn't a number.
+            format!("lightning:lnbcxyz1{DATA}"),
+            format!("lightning:lnbc\n210n1{DATA}"),
+        ] {
+            assert!(validate_lightning(&bad).is_err(), "should reject {bad}");
+        }
     }
 }

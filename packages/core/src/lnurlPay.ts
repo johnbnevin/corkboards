@@ -137,3 +137,45 @@ export async function resolveLnurlInvoice(
   if (rangeError) throw new Error(rangeError);
   return requestInvoice(buildInvoiceUrl(info, amountMsats, { comment }));
 }
+
+/**
+ * Full round trip for zapping a note: resolve the endpoint, attach a NIP-57 zap
+ * request when the server can honour one, and return the BOLT-11 invoice.
+ *
+ * Stops at the invoice rather than paying it. Who pays is the caller's business
+ * — the connected NWC wallet, or the user's phone scanning a QR code — and both
+ * must get the *same* invoice, or a zap paid externally would silently lose its
+ * receipt and never show up as a zap on the note. That's why this is one shared
+ * function instead of a second, parallel invoice builder for the QR path.
+ *
+ * @param signZapRequest - Serializes a signed kind-9734 for the `nostr` param.
+ *   Omitted (logged out) or returning null degrades to a plain LNURL payment:
+ *   the sats still arrive, there's just no zap receipt to publish.
+ */
+export async function createZapInvoice(
+  endpoint: string,
+  amountSats: number,
+  opts?: {
+    comment?: string;
+    signZapRequest?: (amountMsats: number) => Promise<string | null>;
+  },
+): Promise<string> {
+  const amountMsats = amountSats * 1000;
+
+  const info = await fetchLnurlPayInfo(endpoint);
+  const rangeError = checkSendableRange(info, amountMsats);
+  if (rangeError) throw new Error(rangeError);
+
+  let extraParams: Record<string, string> | undefined;
+  if (info.allowsNostr && info.nostrPubkey && opts?.signZapRequest) {
+    const serialized = await opts.signZapRequest(amountMsats);
+    if (serialized) extraParams = { nostr: serialized };
+  }
+
+  // The comment rides inside the signed zap request when there is one; passing
+  // it again would duplicate it on servers that honour both.
+  return requestInvoice(buildInvoiceUrl(info, amountMsats, {
+    comment: extraParams ? undefined : opts?.comment,
+    extraParams,
+  }));
+}

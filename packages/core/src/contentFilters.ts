@@ -21,7 +21,7 @@
  */
 
 import { type NostrEvent } from '@nostrify/nostrify';
-import { noteDisplayText } from './noteCategories';
+import { noteDisplayText, type EventResolver } from './noteCategories';
 
 // Emoji-presentation codepoints plus the joiners/variation selectors that glue
 // them together — a note made only of these is "just emoji".
@@ -78,15 +78,20 @@ export function hasActiveContentFilters(c: ContentFilterConfig): boolean {
  * @param textLower - `config.hideExactText` pre-trimmed and lowercased. Passed
  *   in rather than derived because this runs once per note in the feed's hot
  *   path and the caller already has it hoisted out of the loop.
+ * @param resolve - Optional id → event lookup, used to see inside a repost whose
+ *   `content` doesn't embed the reposted note. Without it such reposts show a
+ *   phrase the filter can't match.
  * @returns true to keep the note.
  */
 export function noteMatchesContentFilters(
   note: NostrEvent,
   config: ContentFilterConfig,
   textLower: string,
+  resolve?: EventResolver,
 ): boolean {
-  // Text filter: applies to every kind, and no exception overrides it.
-  if (textLower && noteDisplayText(note).toLowerCase().includes(textLower)) return false;
+  // Text filter: applies to every kind, and no exception overrides it. For a
+  // repost this reads the reposted note — that's the text on screen.
+  if (textLower && noteDisplayText(note, resolve).toLowerCase().includes(textLower)) return false;
 
   // Shape filters only describe short notes and reactions.
   if (note.kind !== 1 && note.kind !== 7) return true;

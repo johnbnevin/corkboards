@@ -146,6 +146,27 @@ export function parseLightningTarget(raw: string | null | undefined): LightningT
   return null;
 }
 
+/**
+ * Wrap a BOLT-11 invoice as a `lightning:` URI — what a QR code carries and
+ * what a tap hands to an installed wallet app.
+ *
+ * Returns null unless the input really is an invoice, so this doubles as the
+ * guard on every sink that opens one: the platform link helpers refuse anything
+ * that isn't http(s), and a `lightning:` URI has to earn its exception here
+ * rather than by bypassing them.
+ *
+ * `forQr` uppercases the whole URI. Bech32 and URI schemes are both case-
+ * insensitive, and uppercase lets a QR encoder use its compact alphanumeric
+ * mode — the difference between a dense version-13 code and a version-9 one
+ * that a phone camera can actually read off a laptop screen.
+ */
+export function toLightningUri(invoice: string | null | undefined, forQr = false): string | null {
+  const parsed = parseLightningTarget(invoice);
+  if (parsed?.kind !== 'invoice') return null;
+  const uri = `lightning:${parsed.invoice}`;
+  return forQr ? uri.toUpperCase() : uri;
+}
+
 /** Short, human-readable label for a parsed target — for confirmation UI. */
 export function describeLightningTarget(target: LightningTarget): string {
   switch (target.kind) {

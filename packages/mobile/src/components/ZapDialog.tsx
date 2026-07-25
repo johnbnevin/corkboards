@@ -16,12 +16,16 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useAuthor } from '../hooks/useAuthor';
 import { useZap } from '../hooks/useZap';
 import { useToast } from '../hooks/useToast';
 import { SizeGuardedImage } from './SizeGuardedImage';
+import { QrCode } from './QrCode';
+import { openLightningInvoice } from '../lib/openExternal';
 import { genUserName } from '@core/genUserName';
+import { toLightningUri } from '@core/lightningTarget';
 
 const PRESETS = [21, 100, 500, 1000, 5000];
 
@@ -30,39 +34,83 @@ interface ZapDialogProps {
   visible: boolean;
   onClose: () => void;
   onOpenWalletSettings?: () => void;
+  /**
+   * Fired after a zap is paid through the connected wallet, so the caller can
+   * light its zap icon up straight away. Not fired for the external-wallet
+   * path: this app never learns when that invoice is settled — the zap receipt
+   * arriving from the relay is what confirms it.
+   */
+  onZapped?: (amountSats: number) => void;
 }
 
-export function ZapDialog({ note, visible, onClose, onOpenWalletSettings }: ZapDialogProps) {
+export function ZapDialog({ note, visible, onClose, onOpenWalletSettings, onZapped }: ZapDialogProps) {
   const { data: authorData } = useAuthor(note?.pubkey);
-  const { zap, isZapping, error, lud16, canZap, isConnected } = useZap(note);
+  const { zap, createInvoice, isZapping, error, lud16, canZap, isConnected } = useZap(note);
   const { toast } = useToast();
   const [amount, setAmount] = useState(21);
   const [customAmount, setCustomAmount] = useState('');
   const [comment, setComment] = useState('');
   const [useCustom, setUseCustom] = useState(false);
+  // External-wallet flow: an invoice to show as a QR code, for a wallet this app
+  // isn't connected to.
+  const [invoice, setInvoice] = useState('');
+  const [isCreatingInvoice, setIsCreatingInvoice] = useState(false);
+  const [invoiceError, setInvoiceError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const metadata = authorData?.metadata;
   const displayName = metadata?.display_name || metadata?.name || (note ? genUserName(note.pubkey) : 'Unknown');
   const effectiveAmount = useCustom ? parseInt(customAmount) || 0 : amount;
 
+  // An invoice is for one exact amount. Editing the amount or the message after
+  // one is on screen has to discard it, or the QR code silently stops matching
+  // the numbers next to it.
+  const discardInvoice = () => {
+    setInvoice('');
+    setInvoiceError(null);
+    setCopied(false);
+  };
+
   const handleZap = async () => {
     if (effectiveAmount <= 0) return;
     try {
       await zap(effectiveAmount, comment || undefined);
+      onZapped?.(effectiveAmount);
       toast({ title: 'Zap sent!', description: `${effectiveAmount} sats to ${displayName}` });
       onClose();
       setComment('');
       setCustomAmount('');
       setUseCustom(false);
       setAmount(21);
+      discardInvoice();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Something went wrong';
       toast({ title: 'Zap failed', description: message, variant: 'destructive' });
     }
   };
 
+  const handleCreateInvoice = async () => {
+    if (effectiveAmount <= 0) return;
+    setIsCreatingInvoice(true);
+    setInvoiceError(null);
+    try {
+      setInvoice(await createInvoice(effectiveAmount, comment || undefined));
+    } catch (err) {
+      setInvoiceError(err instanceof Error ? err.message : 'Could not create an invoice');
+    } finally {
+      setIsCreatingInvoice(false);
+    }
+  };
+
+  const handleCopyInvoice = async () => {
+    await Clipboard.setStringAsync(invoice);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   // "Can't receive zaps" only when neither lud16 nor lud06 resolves an endpoint.
   const noZapAddress = !canZap && note;
+  const qrPayload = toLightningUri(invoice, true) ?? '';
 
   return (
     <Modal
@@ -102,14 +150,28 @@ export function ZapDialog({ note, visible, onClose, onOpenWalletSettings }: ZapD
           <Text style={styles.noLud16}>
             This author hasn't set a lightning address -- they can't receive zaps yet.
           </Text>
-        ) : !isConnected ? (
-          <View style={styles.connectSection}>
-            <Text style={styles.connectText}>Connect a wallet to send zaps.</Text>
-            <TouchableOpacity
-              style={styles.connectBtn}
-              onPress={() => { onClose(); onOpenWalletSettings?.(); }}
-            >
-              <Text style={styles.connectBtnText}>Connect Wallet</Text>
+        ) : invoice ? (
+          /* External wallet: the invoice is already made, so all that's left is
+             getting it into a wallet this app has no connection to. */
+          <View style={styles.zapSection}>
+            <QrCode value={qrPayload} />
+            <Text style={styles.qrHint}>
+              Scan with any Lightning wallet to send {effectiveAmount.toLocaleString()} sats.
+              The zap shows up on the note once your wallet pays it.
+            </Text>
+            <View style={styles.qrActions}>
+              <TouchableOpacity style={[styles.secondaryBtn, styles.qrAction]} onPress={handleCopyInvoice}>
+                <Text style={styles.secondaryBtnText}>{copied ? 'Copied' : 'Copy invoice'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.zapBtn, styles.qrAction]}
+                onPress={() => openLightningInvoice(invoice)}
+              >
+                <Text style={styles.zapBtnText}>Open wallet</Text>
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity style={styles.ghostBtn} onPress={discardInvoice}>
+              <Text style={styles.ghostBtnText}>{'\u2190'} Change amount</Text>
             </TouchableOpacity>
           </View>
         ) : (
@@ -123,7 +185,7 @@ export function ZapDialog({ note, visible, onClose, onOpenWalletSettings }: ZapD
                     styles.presetBtn,
                     !useCustom && amount === preset && styles.presetBtnActive,
                   ]}
-                  onPress={() => { setAmount(preset); setUseCustom(false); }}
+                  onPress={() => { setAmount(preset); setUseCustom(false); discardInvoice(); }}
                 >
                   <Text style={[
                     styles.presetText,
@@ -142,7 +204,7 @@ export function ZapDialog({ note, visible, onClose, onOpenWalletSettings }: ZapD
                 placeholder="Custom amount"
                 placeholderTextColor="#666"
                 value={customAmount}
-                onChangeText={(v) => { setCustomAmount(v); setUseCustom(true); }}
+                onChangeText={(v) => { setCustomAmount(v); setUseCustom(true); discardInvoice(); }}
                 onFocus={() => setUseCustom(true)}
                 keyboardType="number-pad"
               />
@@ -155,26 +217,57 @@ export function ZapDialog({ note, visible, onClose, onOpenWalletSettings }: ZapD
               placeholder="Add a message (optional)"
               placeholderTextColor="#666"
               value={comment}
-              onChangeText={setComment}
+              onChangeText={(v) => { setComment(v); discardInvoice(); }}
               maxLength={280}
             />
 
-            {/* Send button */}
-            <TouchableOpacity
-              style={[styles.zapBtn, (isZapping || effectiveAmount <= 0) && styles.zapBtnDisabled]}
-              onPress={handleZap}
-              disabled={isZapping || effectiveAmount <= 0}
-            >
-              {isZapping ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.zapBtnText}>
-                  {'\u26A1'} Zap {effectiveAmount > 0 ? `${effectiveAmount} sats` : ''}
+            {isConnected ? (
+              /* Send button */
+              <TouchableOpacity
+                style={[styles.zapBtn, (isZapping || effectiveAmount <= 0) && styles.zapBtnDisabled]}
+                onPress={handleZap}
+                disabled={isZapping || effectiveAmount <= 0}
+              >
+                {isZapping ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.zapBtnText}>
+                    {'\u26A1'} Zap {effectiveAmount > 0 ? `${effectiveAmount} sats` : ''}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            ) : (
+              /* No connected wallet is not a dead end: the amount and message
+                 above still apply, they just get paid somewhere else. Offering
+                 only "Connect Wallet" here turned every zap into a settings
+                 detour for anyone who keeps their sats in another app. */
+              <View style={styles.connectSection}>
+                <TouchableOpacity
+                  style={[styles.zapBtn, (isCreatingInvoice || effectiveAmount <= 0) && styles.zapBtnDisabled]}
+                  onPress={handleCreateInvoice}
+                  disabled={isCreatingInvoice || effectiveAmount <= 0}
+                >
+                  {isCreatingInvoice ? (
+                    <ActivityIndicator color="#000" size="small" />
+                  ) : (
+                    <Text style={styles.zapBtnText}>Pay with any wallet</Text>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.secondaryBtn}
+                  onPress={() => { onClose(); onOpenWalletSettings?.(); }}
+                >
+                  <Text style={styles.secondaryBtnText}>Connect Wallet</Text>
+                </TouchableOpacity>
+                <Text style={styles.connectHint}>
+                  Connect a wallet for one-tap zaps, or get a QR code to scan with the wallet you already use.
                 </Text>
-              )}
-            </TouchableOpacity>
+              </View>
+            )}
 
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+            {error || invoiceError ? (
+              <Text style={styles.errorText}>{error || invoiceError}</Text>
+            ) : null}
           </View>
         )}
       </View>
@@ -267,23 +360,46 @@ const styles = StyleSheet.create({
   },
 
   connectSection: {
-    gap: 12,
-    paddingVertical: 8,
+    gap: 8,
   },
-  connectText: {
-    fontSize: 14,
+  connectHint: {
+    fontSize: 11,
     color: '#b3b3b3',
+    textAlign: 'center',
   },
-  connectBtn: {
-    backgroundColor: '#f97316',
+  secondaryBtn: {
     padding: 14,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#404040',
     alignItems: 'center',
   },
-  connectBtnText: {
-    color: '#fff',
+  secondaryBtnText: {
+    color: '#f2f2f2',
     fontSize: 15,
     fontWeight: '600',
+  },
+
+  qrHint: {
+    fontSize: 12,
+    color: '#b3b3b3',
+    textAlign: 'center',
+  },
+  qrActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  qrAction: {
+    flex: 1,
+  },
+  ghostBtn: {
+    padding: 10,
+    alignItems: 'center',
+  },
+  ghostBtnText: {
+    color: '#b3b3b3',
+    fontSize: 13,
+    fontWeight: '500',
   },
 
   zapSection: {

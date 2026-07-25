@@ -1025,20 +1025,47 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
       return merged;
     };
 
-    /** Minimal NRelay-shaped shim backed by the native bridge. */
+    /**
+     * Route `query()` through the native bridge while leaving everything else
+     * — crucially `req()` — on the real pool relay.
+     *
+     * This MUST wrap the real relay rather than replace it. An earlier version
+     * returned a hand-rolled object with only `query`/`close`, which silently
+     * removed `req()` from every `nostr.relay()` / `nostr.group()` caller. That
+     * broke NIP-46 (bunker) signing outright: NConnectSigner keeps a live
+     * kind-24133 subscription open on `pool.group(...)` to receive the remote
+     * signer's replies, so every sign and every NIP-44 decrypt failed with
+     * "this.relay.req is not a function" — taking bookmarks and the backup
+     * restore flow down with them.
+     *
+     * `req()` therefore stays on the pool's own socket. That is deliberate, not
+     * an oversight: the native bridge is one-shot (REQ → EOSE → close), and a
+     * NIP-46 subscription must stay open to hear the response. It is also not a
+     * load concern — it's a handful of long-lived subscriptions, not the
+     * per-profile query storm the bridge exists to keep off WebKitGTK.
+     */
     const nativeRelayShim = (urls: string[]) => {
       const healthy = urls.map(normalizeRelayUrl).filter(u => !isRelayBlocked(u));
       // All candidates in backoff: still try them rather than returning nothing —
       // a hard empty would surface as "profile not found" for the whole session.
       const targets = healthy.length > 0 ? healthy : urls.map(normalizeRelayUrl);
-      return {
-        query: (filters: unknown[], opts?: { signal?: AbortSignal }) =>
-          runNativeQuery(filters, opts, () => targets),
-        // `req` streaming isn't offered by the bridge; callers that need it
-        // (the relay-browse tab) fall through to the pool via Reflect below.
-        async close() {},
-        async [Symbol.asyncDispose]() {},
-      };
+      // Call through `pool` (the raw NPool), not the proxy, or this recurses.
+      const underlying = urls.length === 1 ? pool.relay(urls[0]) : pool.group(urls);
+      return new Proxy(underlying, {
+        get(t, prop) {
+          if (prop === 'query') {
+            return (filters: unknown[], opts?: { signal?: AbortSignal }) =>
+              runNativeQuery(filters, opts, () => targets);
+          }
+          // Read with the TARGET as receiver, not the proxy: NRelay1 uses private
+          // `#fields`, and those are keyed to the real instance. Forwarding the
+          // proxy as receiver makes any getter that touches one throw
+          // "Cannot read private member from an object whose class did not
+          // declare it". Same reason methods are bound below.
+          const value = Reflect.get(t, prop);
+          return typeof value === 'function' ? value.bind(t) : value;
+        },
+      });
     };
 
     const tauriProxy = new Proxy(pool, {

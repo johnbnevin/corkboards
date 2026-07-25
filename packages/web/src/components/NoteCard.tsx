@@ -31,6 +31,7 @@ import { getRelayCache, FALLBACK_RELAYS } from '@/components/NostrProvider'
 import { useToast } from '@/hooks/useToast'
 import { EmojiName } from '@/components/EmojiName'
 import { verifyEmbeddedEvent } from '@/lib/embeddedEvent'
+import { getZapReceiptAmountSats } from '@core/lightningTarget'
 
 // (B4) Named constants extracted from inline magic numbers
 /** Character limit for the "more from this author" note previews (discover tab) */
@@ -1232,17 +1233,9 @@ export const NoteCard = React.memo(function NoteCard({
                 <Badge variant="outline" className="text-xs gap-1 text-amber-600 dark:text-amber-400 border-amber-300 dark:border-amber-700">
                   <Zap className="h-3 w-3" />
                   {(() => {
-                    const bolt11 = note.tags.find(t => t[0] === 'bolt11')?.[1];
-                    if (bolt11) {
-                      const amountMatch = bolt11.match(/lnbc(\d+)([munp]?)/i);
-                      if (amountMatch) {
-                        const [, num, unit] = amountMatch;
-                        const multipliers: Record<string, number> = { '': 1e8, 'm': 1e5, 'u': 100, 'n': 0.1, 'p': 0.001 };
-                        const sats = Math.round(parseInt(num) * (multipliers[unit] || 1));
-                        return sats >= 1000 ? `${(sats / 1000).toFixed(sats % 1000 === 0 ? 0 : 1)}k sats` : `${sats} sats`;
-                      }
-                    }
-                    return 'Zapped';
+                    const sats = getZapReceiptAmountSats(note);
+                    if (sats === null) return 'Zapped';
+                    return sats >= 1000 ? `${(sats / 1000).toFixed(sats % 1000 === 0 ? 0 : 1)}k sats` : `${sats} sats`;
                   })()}
                 </Badge>
               )}

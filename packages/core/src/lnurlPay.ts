@@ -14,6 +14,7 @@
  */
 
 import { isSafeZapUrl } from './zap';
+import { invoiceAmountSats } from './lightningTarget';
 
 export interface LnurlPayInfo {
   /** The callback URL to request an invoice from. Already SSRF-checked. */
@@ -113,6 +114,30 @@ export function buildInvoiceUrl(
   return url;
 }
 
+/**
+ * Verify a returned BOLT-11 invoice actually asks for the amount we requested,
+ * before any caller pays it.
+ *
+ * Without this a hostile (or buggy) LNURL server could hand back an invoice for
+ * far more than the user approved, and an auto-paying NWC wallet would honour it
+ * silently — the user clicks "zap 21 sats" and 21,000 leave the wallet. The
+ * amount encoded in the invoice HRP must match the requested sats (±1 for
+ * sub-sat rounding); an open invoice with no amount is rejected outright, since
+ * a zap is always for a specific amount. Uses the single shared BOLT-11 parser
+ * (`invoiceAmountSats`) so this can never disagree with the QR/scan path.
+ */
+function assertInvoiceAmount(bolt11: string, amountSats: number): void {
+  const encoded = invoiceAmountSats(bolt11);
+  if (encoded === null) {
+    throw new Error('Lightning server returned an open invoice with no amount');
+  }
+  if (Math.abs(encoded - amountSats) > 1) {
+    throw new Error(
+      `Invoice is for ${encoded.toLocaleString()} sats, not the ${amountSats.toLocaleString()} sats you approved`,
+    );
+  }
+}
+
 /** Request the invoice itself. Returns the BOLT-11 string. Throws on any problem. */
 export async function requestInvoice(invoiceUrl: string): Promise<string> {
   // Fresh timeout — the caller may have spent time signing between steps.
@@ -149,7 +174,9 @@ export async function resolveLnurlInvoice(
   const info = await fetchLnurlPayInfo(endpoint);
   const rangeError = checkSendableRange(info, amountMsats);
   if (rangeError) throw new Error(rangeError);
-  return requestInvoice(buildInvoiceUrl(info, amountMsats, { comment }));
+  const bolt11 = await requestInvoice(buildInvoiceUrl(info, amountMsats, { comment }));
+  assertInvoiceAmount(bolt11, amountSats);
+  return bolt11;
 }
 
 /**
@@ -188,8 +215,10 @@ export async function createZapInvoice(
 
   // The comment rides inside the signed zap request when there is one; passing
   // it again would duplicate it on servers that honour both.
-  return requestInvoice(buildInvoiceUrl(info, amountMsats, {
+  const bolt11 = await requestInvoice(buildInvoiceUrl(info, amountMsats, {
     comment: extraParams ? undefined : opts?.comment,
     extraParams,
   }));
+  assertInvoiceAmount(bolt11, amountSats);
+  return bolt11;
 }

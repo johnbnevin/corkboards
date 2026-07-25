@@ -15,6 +15,7 @@ import { useInfiniteQuery } from '@tanstack/react-query';
 import { useNostr } from '@/hooks/useNostr';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import type { NostrEvent } from '@nostrify/nostrify';
+import { getZapReceiptAmountSats } from '@core/lightningTarget';
 
 export type NotificationType = 'reaction' | 'reply' | 'mention' | 'repost' | 'zap';
 
@@ -102,33 +103,10 @@ export function getZapSenderPubkey(event: NostrEvent): string | null {
   return null;
 }
 
-/** Extract sats from a zap receipt (kind 9735) */
+/** Extract sats from a zap receipt (kind 9735). Delegates to the single shared,
+ *  NaN-safe parser (amount tag → embedded zap-request → bolt11 invoice). */
 export function getZapAmountSats(event: NostrEvent): number | null {
-  if (event.kind !== 9735) return null;
-
-  // Try direct amount tag (msats)
-  const amountTag = event.tags.find(t => t[0] === 'amount');
-  if (amountTag?.[1]) {
-    const msats = parseInt(amountTag[1], 10);
-    if (!isNaN(msats) && msats > 0) return Math.floor(msats / 1000);
-  }
-
-  // Try description tag (JSON of zap request kind 9734)
-  const descTag = event.tags.find(t => t[0] === 'description');
-  if (descTag?.[1]) {
-    try {
-      const zapRequest = JSON.parse(descTag[1]) as { tags?: string[][] };
-      const zapAmountTag = zapRequest.tags?.find(t => t[0] === 'amount');
-      if (zapAmountTag?.[1]) {
-        const msats = parseInt(zapAmountTag[1], 10);
-        if (!isNaN(msats) && msats > 0) return Math.floor(msats / 1000);
-      }
-    } catch {
-      // ignore parse errors
-    }
-  }
-
-  return null;
+  return getZapReceiptAmountSats(event);
 }
 
 const NOTIF_PAGE_SIZE = 100;

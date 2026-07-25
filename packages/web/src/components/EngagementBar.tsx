@@ -6,6 +6,7 @@
  */
 import { useMemo } from 'react'
 import type { NostrEvent } from '@nostrify/nostrify'
+import { getZapReceiptAmountSats } from '@core/lightningTarget'
 import { useAuthor } from '@/hooks/useAuthor'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -103,30 +104,10 @@ export function ReactionBadges({ reactions, compact }: { reactions: NostrEvent[]
 // ── Zap amount extraction ─────────────────────────────────────────────────
 
 function getZapAmount(zap: NostrEvent): number {
-  // Try to get amount from the zap request embedded in the description tag
-  const descTag = zap.tags.find(t => t[0] === 'description')?.[1]
-  if (descTag) {
-    try {
-      const zapRequest = JSON.parse(descTag)
-      const amountTag = zapRequest.tags?.find((t: string[]) => t[0] === 'amount')?.[1]
-      if (amountTag) return Math.floor(parseInt(amountTag, 10) / 1000) // millisats → sats
-    } catch { /* ignore */ }
-  }
-  // Fallback: check bolt11 for amount (rough parse)
-  const bolt11 = zap.tags.find(t => t[0] === 'bolt11')?.[1]
-  if (bolt11) {
-    const match = bolt11.match(/lnbc(\d+)([munp]?)/)
-    if (match) {
-      const num = parseInt(match[1], 10)
-      const unit = match[2]
-      if (unit === 'm') return num * 100_000 // mBTC → sats
-      if (unit === 'u') return num * 100      // μBTC → sats
-      if (unit === 'n') return Math.floor(num / 10) // nBTC → sats
-      if (unit === 'p') return Math.floor(num / 10_000) // pBTC → sats
-      return num // assume sats if no unit
-    }
-  }
-  return 0
+  // Single shared parser (amount tag → zap-request → bolt11), NaN-safe. The
+  // hand-rolled versions this replaces disagreed by up to 1e8 and could return
+  // NaN, poisoning a note's whole zap total.
+  return getZapReceiptAmountSats(zap) ?? 0
 }
 
 function formatSats(sats: number): string {

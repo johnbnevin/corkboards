@@ -20,6 +20,7 @@
  * than passed along for some later layer to notice.
  */
 
+import type { NostrEvent } from '@nostrify/nostrify';
 import { lud06ToLnurlPayUrl, lud16ToLnurlPayUrl } from './zap';
 
 export type LightningTarget =
@@ -76,6 +77,53 @@ export function invoiceAmountSats(invoice: string): number | null {
     case 'p': return Math.round(value * SATS_PER_BTC / 1e12);
     default: return Math.round(value * SATS_PER_BTC);
   }
+}
+
+/**
+ * Sats amount of a NIP-57 zap receipt (kind 9735), or null when it can't be
+ * determined.
+ *
+ * Prefers the millisat `amount` tag, then the amount inside the embedded
+ * zap-request (`description`), then the amount encoded in the receipt's own
+ * BOLT-11 invoice via the shared parser. This is the single source of truth for
+ * every zap total in the app: the ad-hoc regexes it replaces disagreed by up to
+ * a factor of 100 million (one dropped the ×1e8 for a whole-BTC invoice, another
+ * had the pico multiplier 10× off), and one path floored `NaN` from a malformed
+ * `amount` tag straight into a note's zap total. A bad amount yields null here,
+ * never NaN.
+ *
+ * NOTE: this does not by itself prove the receipt is genuine — full NIP-57
+ * Appendix-F validation would also check the receipt is signed by the
+ * recipient's advertised LNURL `nostrPubkey`, which needs that server's config.
+ * It does mean a forged `amount` tag can't inflate a total past what the invoice
+ * actually encodes.
+ */
+export function getZapReceiptAmountSats(event: NostrEvent): number | null {
+  if (event.kind !== 9735) return null;
+
+  const amountTag = event.tags.find((t) => t[0] === 'amount')?.[1];
+  if (amountTag) {
+    const msats = parseInt(amountTag, 10);
+    if (Number.isFinite(msats) && msats > 0) return Math.floor(msats / 1000);
+  }
+
+  const descTag = event.tags.find((t) => t[0] === 'description')?.[1];
+  if (descTag) {
+    try {
+      const zapRequest = JSON.parse(descTag) as { tags?: string[][] };
+      const reqAmount = zapRequest.tags?.find((t) => t[0] === 'amount')?.[1];
+      if (reqAmount) {
+        const msats = parseInt(reqAmount, 10);
+        if (Number.isFinite(msats) && msats > 0) return Math.floor(msats / 1000);
+      }
+    } catch {
+      /* malformed description JSON — fall through to the invoice */
+    }
+  }
+
+  const bolt11 = event.tags.find((t) => t[0] === 'bolt11')?.[1];
+  if (bolt11) return invoiceAmountSats(bolt11);
+  return null;
 }
 
 /**

@@ -30,6 +30,16 @@ export function learnCorsHost(host: string): void {
 
 // ─── Image URL detection ─────────────────────────────────────────────────
 
+/**
+ * True when `hostname` is exactly `base` or a subdomain of it. Never a bare
+ * substring: `evil-nostr.build` and `nostr.build.attacker.net` both *contain*
+ * `nostr.build` but are not it, and matching them auto-loaded media from an
+ * attacker-chosen host (an IP-leak / tracking vector).
+ */
+function hostMatches(hostname: string, base: string): boolean {
+  return hostname === base || hostname.endsWith('.' + base);
+}
+
 // Check if URL is a direct image
 export function isImageUrl(url: string): boolean {
   // Don't classify as image if it has a video extension
@@ -62,17 +72,19 @@ export function isImageUrl(url: string): boolean {
     const u = new URL(url)
     // video.nostr.build hosts videos, not images
     if (u.hostname === 'video.nostr.build') return false
-    return imageHosts.some(host => u.hostname.includes(host))
+    return imageHosts.some(host => hostMatches(u.hostname, host))
   } catch {
     return false
   }
 }
 
 /** True when the URL is on a CDN host that may serve either images or videos
- *  (used by MediaLink to try video fallback on image error) */
+ *  (used by MediaLink to try video fallback on image error). Registrable
+ *  domains, matched exact-or-subdomain — never as bare substrings. */
 export function isCdnHost(url: string): boolean {
   try {
     const h = new URL(url).hostname
-    return ['blossom.', 'nostr.build', 'cdn.sovbit', 'files.primal', 'cdn.satellite', 'void.cat', 'media.nostr.band', 'nostrmedia.com'].some(p => h.includes(p))
+    const cdnHosts = ['nostr.build', 'sovbit.host', 'primal.net', 'satellite.earth', 'void.cat', 'nostr.band', 'nostrmedia.com', 'blossom.band', 'yakihonne.com', 'f7z.io', 'ditto.pub']
+    return cdnHosts.some(base => hostMatches(h, base))
   } catch { return false }
 }

@@ -7,6 +7,7 @@
 import { useMemo } from 'react';
 import { Text, Image, StyleSheet } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
+import { optimizeMediaUrl } from '@core/imageUtils';
 
 interface EmojiNameProps {
   /** The display name text (may contain :shortcode: patterns) */
@@ -38,7 +39,11 @@ export function EmojiName({ name, event, style }: EmojiNameProps) {
       if (i % 2 === 0) {
         if (segments[i]) result.push({ type: 'text', value: segments[i] });
       } else {
-        const url = emojiMap.get(segments[i]);
+        // NIP-30 emoji URLs are attacker-controlled. Route through the shared
+        // media gate (SSRF host block + image proxy) instead of loading raw —
+        // an unsafe/private host resolves to '' and degrades to the shortcode.
+        const raw = emojiMap.get(segments[i]);
+        const url = raw ? optimizeMediaUrl(raw) : '';
         if (url) {
           result.push({ type: 'emoji', value: segments[i], url });
         } else {

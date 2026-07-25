@@ -38,7 +38,16 @@ function asFiniteNumber(value: unknown): number | null {
 export async function fetchLnurlPayInfo(endpoint: string): Promise<LnurlPayInfo> {
   if (!isSafeZapUrl(endpoint)) throw new Error('Refusing to contact that lightning address');
 
-  const response = await fetch(endpoint, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  // `redirect: 'error'` stops a 3xx from steering the fetch at an internal host
+  // (169.254.169.254, a LAN address) that isSafeZapUrl already cleared the
+  // *original* URL against — the whole point of the SSRF gate is defeated if a
+  // redirect can move the target afterward. On runtimes that ignore the option
+  // (some React Native builds follow redirects natively), the post-fetch check
+  // on the final `response.url` is the backstop.
+  const response = await fetch(endpoint, { redirect: 'error', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  if (response.redirected && !isSafeZapUrl(response.url)) {
+    throw new Error('Lightning server redirected to an unsafe host');
+  }
   if (!response.ok) throw new Error(`Lightning server returned ${response.status}`);
 
   // Read as text first: a server that answers with HTML shouldn't surface as a
@@ -107,7 +116,12 @@ export function buildInvoiceUrl(
 /** Request the invoice itself. Returns the BOLT-11 string. Throws on any problem. */
 export async function requestInvoice(invoiceUrl: string): Promise<string> {
   // Fresh timeout — the caller may have spent time signing between steps.
-  const response = await fetch(invoiceUrl, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  // Same redirect guard as fetchLnurlPayInfo: the callback was SSRF-checked, so
+  // don't let a redirect move it somewhere that wasn't.
+  const response = await fetch(invoiceUrl, { redirect: 'error', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  if (response.redirected && !isSafeZapUrl(response.url)) {
+    throw new Error('Lightning server redirected to an unsafe host');
+  }
   if (!response.ok) throw new Error(`Invoice request failed (${response.status})`);
 
   const text = await response.text();

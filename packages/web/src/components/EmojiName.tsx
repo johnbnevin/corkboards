@@ -4,6 +4,7 @@
  */
 import { useMemo } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
+import { optimizeMediaUrl } from '@/lib/imageUtils';
 
 interface EmojiNameProps {
   /** The display name text (may contain :shortcode: patterns) */
@@ -35,7 +36,11 @@ export function EmojiName({ name, event, className }: EmojiNameProps) {
       if (i % 2 === 0) {
         if (segments[i]) result.push({ type: 'text', value: segments[i] });
       } else {
-        const url = emojiMap.get(segments[i]);
+        // NIP-30 emoji URLs are attacker-controlled. Route through the shared
+        // media gate (SSRF host block + image proxy) instead of loading raw —
+        // an unsafe/private host resolves to '' and degrades to the shortcode.
+        const raw = emojiMap.get(segments[i]);
+        const url = raw ? optimizeMediaUrl(raw) : '';
         if (url) {
           result.push({ type: 'emoji', value: segments[i], url });
         } else {
@@ -64,6 +69,7 @@ export function EmojiName({ name, event, className }: EmojiNameProps) {
             title={`:${p.value}:`}
             className="inline-block h-5 w-5 object-contain align-middle mx-0.5"
             loading="lazy"
+            referrerPolicy="no-referrer"
           />
         ) : (
           <span key={i}>{p.value}</span>

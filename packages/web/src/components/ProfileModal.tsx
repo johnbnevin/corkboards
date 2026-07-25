@@ -16,7 +16,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { ProfileAbout } from '@/components/ProfileAbout'
 import { EmojiName } from '@/components/EmojiName'
 import { genUserName } from '@/lib/genUserName'
-import { optimizeAvatarUrl } from '@/lib/imageUtils'
+import { optimizeAvatarUrl, shouldRejectUrl } from '@/lib/imageUtils'
+import { applyImageProxy } from '@core/imageProxy'
 import { nip19 } from 'nostr-tools'
 import {
   Globe,
@@ -38,8 +39,12 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 
 /** Sanitizes a user-supplied banner URL for safe use in a CSS backgroundImage. */
 function sanitizeBannerUrl(url: string): string {
+  // A banner is an attacker-controlled kind-0 field like any other image: gate
+  // SSRF/private hosts and route through the image proxy (IP hiding) before it
+  // reaches a CSS background-image fetch.
+  if (shouldRejectUrl(url, 'media')) return '';
   try {
-    const parsed = new URL(url);
+    const parsed = new URL(applyImageProxy(url));
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
     return parsed.href.replace(/"/g, '%22');
   } catch { return ''; }

@@ -40,7 +40,11 @@ const MAX_EMBED_DEPTH = 3
 
 function MarkdownImg({ src, alt }: { src?: string; alt?: string }) {
   const [errored, setErrored] = useState(false)
-  if (errored || !src) {
+  // Markdown image URLs come from attacker-controlled note content — gate them
+  // through the shared SSRF/proxy path like every other inline image. A blocked
+  // or unsafe host resolves to '' and degrades to a plain link.
+  const safeSrc = src ? optimizeMediaUrl(src) : ''
+  if (errored || !safeSrc) {
     return src ? (
       <a href={src} target="_blank" rel="noopener noreferrer" className="text-primary underline break-all text-sm">
         {alt || src}
@@ -48,7 +52,7 @@ function MarkdownImg({ src, alt }: { src?: string; alt?: string }) {
     ) : null
   }
   return (
-    <SizeGuardedImage src={src} alt={alt || ''} className="max-w-full max-h-[500px] rounded-lg object-contain my-2" loading="lazy" onError={() => setErrored(true)} />
+    <SizeGuardedImage src={safeSrc} alt={alt || ''} className="max-w-full max-h-[500px] rounded-lg object-contain my-2" loading="lazy" onError={() => setErrored(true)} />
   )
 }
 

@@ -19,6 +19,7 @@ import type { FlatList as FlatListType } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useFeed, useContacts, useFeedLoadMore } from '../hooks/useFeed';
 import { FEED_PAGE_SIZE_MOBILE } from '@core/feedConstants';
+import { bumpQueryEpoch } from '@core/queryGovernor';
 // Note classification comes from @core — these were re-implemented locally here,
 // and the copies had silently fallen behind: they missed a dozen video URL
 // patterns, the ambiguous-CDN image heuristic, and NIP-25 marked-e-tag reaction
@@ -486,6 +487,13 @@ export function HomeScreen() {
   }, []);
 
   const handleTabSwitch = useCallback((tab: FeedTab) => {
+    // Discard relay work queued for the tab we're leaving. Nothing used to
+    // cancel it, so fast successive switches stacked complete fan-outs — feed
+    // query, profile prefetch, parent lookups, engagement — while only the last
+    // tab's results were ever shown. Queued work is dropped before it starts;
+    // already-open sockets finish (abandoning a handshake mid-flight wastes the
+    // work without giving the CPU back). (Mirrors web.)
+    bumpQueryEpoch();
     setActiveTab(tab);
     // Reset filters on tab switch
     setKindFilters(new Set());

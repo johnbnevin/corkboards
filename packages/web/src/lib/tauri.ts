@@ -5,6 +5,8 @@
  * All functions are no-ops when not running inside Tauri.
  */
 
+import { withQueryBudget } from '@core/queryGovernor';
+
 /** True when running inside the Tauri desktop app.
  * Checks both v1 (__TAURI__) and v2 (__TAURI_INTERNALS__) globals.
  * withGlobalTauri:true in tauri.conf.json ensures __TAURI__ is set in v2 as well. */
@@ -216,12 +218,36 @@ export async function tauriQuery(
   const allEvents: unknown[] = [];
   const seen = new Set<string>();
 
-  // The native (Rust) relay bridge forwards raw relay JSON without validating it,
-  // so — unlike the web/mobile NRelay1 path, which runs verifyEvent — desktop
-  // would otherwise render forged events (a hostile relay could inject notes,
-  // profiles, even a fake kind-3) attributed to any pubkey. Verify id-hash +
-  // schnorr signature here before trusting anything. (C1)
-  const { verifyEvent } = await import('nostr-tools/pure');
+  // ── Why there is no verifyEvent() here ──────────────────────────────────────
+  //
+  // There used to be. When the native bridge was first written, Rust forwarded
+  // raw relay JSON unvalidated, so this loop ran nostr-tools' verifyEvent on
+  // every event to stop a hostile relay injecting forged notes/profiles (C1).
+  //
+  // Rust now does that check itself, and does strictly more of it:
+  //   relay.rs `authentic_event()`  — deserialize + `event.verify()` (id hash +
+  //                                    schnorr), fail-closed on any error
+  //   relay.rs `matches_filter()`   — the event must also satisfy the REQ filter
+  //                                    we actually sent (which this JS check
+  //                                    never did — see the relay-list poisoning
+  //                                    case in `rejects_signed_but_unrequested_events`)
+  // Both run unconditionally inside `run_query`, on the path taken by BOTH
+  // `relay_subscribe` and `relay_query`, and both are locked down by tests in
+  // relay.rs (`rejects_unauthentic_events`, `rejects_signed_but_unrequested_events`,
+  // `accepts_requested_events`). Nothing reaches this callback unverified.
+  //
+  // Re-verifying here was therefore pure duplicated work — and it was not cheap.
+  // Schnorr verification in JS measures ~2.65 ms per event on a low-end 2-core
+  // laptop, and this loop is SYNCHRONOUS inside the Tauri event callback, so it
+  // blocks the main thread for the entire batch. A single 500-event query (the
+  // engagement fetch) spent well over a second of solid main-thread block
+  // re-checking signatures Rust had already checked in native code. On a 2-core
+  // machine that is the difference between a busy app and an unresponsive
+  // desktop.
+  //
+  // If the Rust checks are ever removed, restore this one — but the fix belongs
+  // in Rust, where it costs native-speed crypto on a worker thread instead of
+  // interpreted crypto on the UI thread.
 
   return new Promise<unknown[]>((resolve) => {
     let unlistenFn: (() => void) | null = null;
@@ -233,9 +259,6 @@ export async function tauriQuery(
         const e = ev as { id?: string };
         if (e.id && !seen.has(e.id)) {
           seen.add(e.id);
-          try {
-            if (!verifyEvent(ev as Parameters<typeof verifyEvent>[0])) continue;
-          } catch { continue; }
           allEvents.push(ev);
         }
       }
@@ -341,13 +364,17 @@ export async function tauriProxyWebviewUnprotected(): Promise<boolean> {
  * Query a relay via Rust tokio-tungstenite (bypasses WebKitGTK WebSocket).
  * Returns null if not in Tauri or on error.
  *
- * Like {@link tauriQuery}, every returned event is signature-verified here: the
- * Rust bridge forwards raw relay JSON, so without this check desktop would
- * accept forged events that the web/mobile NRelay1 path rejects. This one
- * matters even more than the tauriQuery path, because `fetchEvent.ts` uses it to
- * discover kind-10002 relay lists and feeds the result to `updateRelayCache()` —
- * a forged relay list would be PERSISTED and would then route every future query
- * for that author to a relay of the attacker's choosing.
+ * Like {@link tauriQuery}, events are NOT re-verified here — `relay_query` and
+ * `relay_subscribe` share the same `do_query` → `run_query` path in relay.rs,
+ * which runs `authentic_event()` (id hash + schnorr, fail-closed) and
+ * `matches_filter()` on every event before it crosses the IPC boundary. See the
+ * long note in {@link tauriQuery} for why the duplicated JS check was removed.
+ *
+ * The filter-matching half matters most on THIS path: `fetchEvent.ts` uses it to
+ * discover kind-10002 relay lists and feeds the result to `updateRelayCache()`,
+ * so a relay answering a kind-10002 request with some other validly-signed event
+ * would get a forged relay list PERSISTED. A signature check alone never caught
+ * that; `matches_filter` does (see `rejects_signed_but_unrequested_events`).
  */
 export async function tauriRelayQuery(
   url: string,
@@ -356,21 +383,13 @@ export async function tauriRelayQuery(
 ): Promise<RelayQueryResult | null> {
   if (!isTauri) return null;
   try {
-    const res = await invoke<RelayQueryResult>('relay_query', {
-      url,
-      filter,
-      timeoutMs,
-    });
+    // Governed alongside every other relay read so per-feature caps can't
+    // compose into an unbounded number of concurrent native sockets.
+    const res = await withQueryBudget(() =>
+      invoke<RelayQueryResult>('relay_query', { url, filter, timeoutMs }),
+    );
     if (!res) return null;
-    const { verifyEvent } = await import('nostr-tools/pure');
-    const events = (res.events ?? []).filter((ev) => {
-      try {
-        return verifyEvent(ev as Parameters<typeof verifyEvent>[0]);
-      } catch {
-        return false;
-      }
-    });
-    return { ...res, events };
+    return res;
   } catch (e) {
     console.warn('[tauri] relay_query failed:', e);
     return null;

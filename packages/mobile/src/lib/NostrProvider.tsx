@@ -12,6 +12,7 @@ import { mobileStorage } from '../storage/MmkvStorage';
 import { isSecureRelay } from '@core/nostrUtils';
 import { RELAY_CACHE_TTL_MS } from '@core/cacheConfig';
 import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
+import { withQueryBudget, configureQueryGovernor, defaultMaxConcurrent } from '@core/queryGovernor';
 import { getSessionSignal } from '../hooks/useSessionAbort';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS } from '@core/relayConstants';
 import { useAuth } from './AuthContext';
@@ -155,6 +156,22 @@ export function getUserRelays(): { read: string[]; write: string[] } {
 const MAX_REQUESTS_PER_SECOND = 3;
 const RATE_WINDOW_MS = 1000;
 const _relayRequestLog = new Map<string, number[]>();
+
+// ============================================================================
+// Global concurrency ceiling (parity with web NostrProvider).
+//
+// Sized from core count because the binding constraint on relay work is CPU
+// (TLS handshakes + signature verification), not bandwidth. Phones are the
+// tightest case of all, so the low-end floor matters most here. Configured at
+// module load so it is in force before the first query.
+// ============================================================================
+configureQueryGovernor({
+  maxConcurrent: defaultMaxConcurrent(
+    typeof navigator !== 'undefined'
+      ? (navigator as Navigator & { hardwareConcurrency?: number }).hardwareConcurrency
+      : undefined,
+  ),
+});
 
 function waitForRateLimit(url: string): Promise<void> {
   const now = Date.now();
@@ -335,11 +352,15 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
   const inner = new NRelay1(url, withAuth(url, opts));
   const origQuery = inner.query.bind(inner);
   const origEvent = inner.event.bind(inner);
-  inner.query = async (filters, qOpts) => {
+  // Global ceiling first, per-URL rate limit second. The rate limiter is
+  // per-relay and says nothing about total load, so many subsystems each
+  // querying distinct relays sail through it while the device opens dozens of
+  // concurrent TLS connections. The governor is what bounds that.
+  inner.query = async (filters, qOpts) => withQueryBudget(async () => {
     await waitForRateLimit(url);
     try { const r = await origQuery(filters, qOpts); recordRelaySuccess(url); return r; }
     catch (e) { recordRelayFailure(url); throw e; }
-  };
+  });
   inner.event = async (event, eOpts) => {
     await waitForRateLimit(url);
     try { await origEvent(event, eOpts); recordRelaySuccess(url); }
@@ -359,11 +380,15 @@ export function createRelayFresh(url: string, opts?: ConstructorParameters<typeo
   const inner = new NRelay1(url, withAuth(url, opts));
   const origQuery = inner.query.bind(inner);
   const origEvent = inner.event.bind(inner);
-  inner.query = async (filters, qOpts) => {
+  // Global ceiling first, per-URL rate limit second. The rate limiter is
+  // per-relay and says nothing about total load, so many subsystems each
+  // querying distinct relays sail through it while the device opens dozens of
+  // concurrent TLS connections. The governor is what bounds that.
+  inner.query = async (filters, qOpts) => withQueryBudget(async () => {
     await waitForRateLimit(url);
     try { const r = await origQuery(filters, qOpts); recordRelaySuccess(url); return r; }
     catch (e) { recordRelayFailure(url); throw e; }
-  };
+  });
   inner.event = async (event, eOpts) => {
     await waitForRateLimit(url);
     try { await origEvent(event, eOpts); recordRelaySuccess(url); }

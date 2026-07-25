@@ -8,11 +8,33 @@ import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-quer
 import { useNostr } from '../lib/NostrProvider';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { fetchEventWithOutbox } from '../lib/fetchEvent';
+import { MissCache } from '@core/missCache';
 
 const parentNoteCache = new Map<string, NostrEvent>();
-const failedFirstPass = new Set<string>();
+
+/**
+ * Negative cache for IDs the fast batch pass didn't find. (Mirrors web.)
+ *
+ * This was a plain `Set<string>` that only ever grew: an id was added when the
+ * first pass missed and removed only if a later pass found the event, so any
+ * genuinely-unreachable parent stayed in it for the life of the process. The
+ * second-pass effect below re-reads it whenever `query.data` changes — every
+ * feed update — so each of those re-armed a full second pass over every
+ * permanently missing id, forever, worsening as the feed grew.
+ *
+ * MissCache keeps the retry but makes it decay: exponential cooldown per
+ * consecutive miss, a hard attempt ceiling, and a bounded entry count.
+ */
+const parentMisses = new MissCache({
+  maxEntries: 2000,
+  baseCooldownMs: 30_000,
+  maxCooldownMs: 15 * 60_000,
+  maxAttempts: 3,
+});
 
 const MAX_CONCURRENT_POOL_QUERIES = 6;
+/** Max individual outbox lookups fired by one second pass. */
+const MAX_SECOND_PASS_PER_ROUND = 12;
 // First-pass ceiling + short second-pass delay so reply parents that the fast
 // batch query missed appear quickly instead of seconds later. (Mirrors web.)
 const FIRST_PASS_TIMEOUT_MS = 6000;
@@ -104,7 +126,12 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
         return {} as Record<string, NostrEvent | null>;
       }
 
-      const uncachedIds = uniqueIds.filter(id => !parentNoteCache.has(id));
+      // Not cached, and not inside a miss cooldown. Without the second
+      // condition the FIRST pass re-queried every known-unreachable id on every
+      // feed update too, not just the second.
+      const uncachedIds = uniqueIds.filter(
+        id => !parentNoteCache.has(id) && parentMisses.shouldRetry(id),
+      );
 
       if (uncachedIds.length > 0) {
         try {
@@ -124,9 +151,9 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
 
         for (const id of uncachedIds) {
           if (!parentNoteCache.has(id)) {
-            failedFirstPass.add(id);
+            parentMisses.recordMiss(id);
           } else {
-            failedFirstPass.delete(id);
+            parentMisses.recordHit(id);
           }
         }
       }
@@ -150,7 +177,11 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
     if (secondPassScheduled.current) return;
     if (!query.data) return;
 
-    const missing = uniqueRequests.filter(r => failedFirstPass.has(r.eventId));
+    // Only ids that have actually missed AND are out of cooldown, capped per
+    // round so a large feed can't fire one lookup per missing parent at once.
+    const missing = uniqueRequests
+      .filter(r => parentMisses.hasMissed(r.eventId) && parentMisses.shouldRetry(r.eventId))
+      .slice(0, MAX_SECOND_PASS_PER_ROUND);
     if (missing.length === 0) return;
 
     secondPassScheduled.current = true;
@@ -171,8 +202,12 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
       for (let i = 0; i < missing.length; i++) {
         if (results[i]) {
           parentNoteCache.set(missing[i].eventId, results[i]!);
-          failedFirstPass.delete(missing[i].eventId);
+          parentMisses.recordHit(missing[i].eventId);
           found++;
+        } else {
+          // Still not found — advance the backoff so the next round waits
+          // longer, and the attempt ceiling eventually stops the retries.
+          parentMisses.recordMiss(missing[i].eventId);
         }
       }
 
@@ -202,5 +237,5 @@ export function getCachedParentNote(eventId: string): NostrEvent | undefined {
 
 export function clearParentNoteCache(): void {
   parentNoteCache.clear();
-  failedFirstPass.clear();
+  parentMisses.clear();
 }

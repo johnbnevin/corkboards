@@ -44,6 +44,9 @@ function normalizeReaction(content: string): string {
   return content;
 }
 
+/** Ceiling on engagement events pulled per note (was 500 — see the query). */
+const ENGAGEMENT_LIMIT = 150;
+
 export function useNoteEngagement(eventId: string | undefined) {
   const { nostr } = useNostr();
   const { pubkey } = useAuth();
@@ -54,8 +57,12 @@ export function useNoteEngagement(eventId: string | undefined) {
     staleTime: 60_000,
     queryFn: async () => {
       if (!eventId) return EMPTY;
+      // 150, not 500: this fires once PER VISIBLE NOTE, and every returned
+      // event costs deserialization, a signature check, and a pass through the
+      // grouping loop below — all on the JS thread. The counts rendered from it
+      // are badges; nothing downstream needs hundreds of reactions per note.
       const events = await nostr.query(
-        [{ kinds: [6, 7, 9735], '#e': [eventId], limit: 500 }],
+        [{ kinds: [6, 7, 9735], '#e': [eventId], limit: ENGAGEMENT_LIMIT }],
         { signal: AbortSignal.timeout(8000) },
       );
 

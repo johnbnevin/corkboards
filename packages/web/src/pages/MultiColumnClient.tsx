@@ -90,6 +90,7 @@ import { AdvancedSettings } from '@/components/AdvancedSettings';
 import { EmojiSetEditor } from '@/components/EmojiSetEditor';
 import { useNostrBackup, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
+import { bumpQueryEpoch, getQueryEpoch, withQueryBudget, StaleEpochError } from '@core/queryGovernor';
 import { registerBackupFlush } from '@/lib/backupFlush';
 import { getOnboarded, setOnboarded, clearOnboarded, idbReady as onboardIdbReady } from '@/lib/onboardingFlag';
 import { STORAGE_KEYS } from '@/lib/storageKeys';
@@ -130,6 +131,12 @@ import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 
 
 // Feed utilities imported from feedUtils above
+
+/** Notes we ask for engagement on. Kept near a screenful — every extra id
+ *  changes the query key and forces a fresh network round trip. */
+const LAZY_ENGAGEMENT_TARGETS = 60;
+/** Ceiling on engagement events pulled per round (was 500 — see the query). */
+const LAZY_ENGAGEMENT_LIMIT = 150;
 
 // Content-filter regexes now live in @core/contentFilters, next to the predicate
 // that uses them, so web and mobile evaluate identical rules.
@@ -263,6 +270,16 @@ export function MultiColumnClient() {
   const suppressScrollTargetUntil = useRef(0);
   const setActiveTab = useCallback((tab: string) => {
     userChoseTabRef.current = true;
+    // Discard relay work queued for the tab we're leaving.
+    //
+    // Nothing used to cancel it, so clicking three tabs in quick succession
+    // stacked three complete fan-outs — feed query, profile prefetch, parent
+    // lookups, engagement — and only the last tab's results were ever shown.
+    // The other two still paid for every TLS handshake and every signature
+    // check. Bumping the epoch drops anything still QUEUED (it never runs);
+    // already-open sockets are left to finish, since abandoning a handshake
+    // mid-flight wastes the work without giving the CPU back.
+    bumpQueryEpoch();
     // Suppress scroll targets for 2s after tab switch so autofetch doesn't override
     suppressScrollTargetUntil.current = Date.now() + 2000;
     // Fast, same-session copy for in-tab reloads…
@@ -2900,10 +2917,13 @@ export function MultiColumnClient() {
   // Fires once after feed loads, single batched query, respects rate limiting.
   const lazyEngagementNoteIds = useMemo(() => {
     if (!canLoadNotes || deduplicatedNotes.length === 0) return '';
-    // Collect IDs of original notes (kind 1/30023) — these are the targets we want engagement for
+    // Collect IDs of original notes (kind 1/30023) — these are the targets we want engagement for.
+    // Only the notes that can actually be on screen: the query key is the joined
+    // id list, so a wider slice also means a NEW key (and a fresh network round
+    // trip) every time the feed shifts by one note.
     const ids = deduplicatedNotes
       .filter(n => n.kind === 1 || n.kind === 30023)
-      .slice(0, 100) // cap to avoid huge queries
+      .slice(0, LAZY_ENGAGEMENT_TARGETS)
       .map(n => n.id);
     return ids.join(',');
   }, [canLoadNotes, deduplicatedNotes]);
@@ -2913,12 +2933,32 @@ export function MultiColumnClient() {
     queryFn: async () => {
       const ids = lazyEngagementNoteIds.split(',').filter(Boolean);
       if (ids.length === 0) return [] as NostrEvent[];
-      // Single batched query for all engagement on visible notes
-      const events = await nostr.query(
-        [{ kinds: [7, 9735, 6, 16], '#e': ids, limit: 500 }],
-        { signal: AbortSignal.timeout(8000) },
-      );
-      return events;
+      // Bound to the current view: engagement badges for notes the user has
+      // already navigated away from are pure waste, so if this is still queued
+      // when they switch tabs it is dropped rather than run. Safe to cancel —
+      // nothing is persisted from it and it refetches on return.
+      const epoch = getQueryEpoch();
+      // Single batched query for all engagement on visible notes.
+      //
+      // The limit used to be 500. Engagement events are the highest-volume kind
+      // on Nostr (reactions especially), so that ceiling was routinely reached,
+      // and every returned event costs deserialization, a signature check, and a
+      // pass through mergedEngagementByTarget below — all on the main thread. It
+      // was the largest single stall in the app. This many badges never reach
+      // the screen; the cap now reflects what is actually rendered.
+      try {
+        return await withQueryBudget(
+          () => nostr.query(
+            [{ kinds: [7, 9735, 6, 16], '#e': ids, limit: LAZY_ENGAGEMENT_LIMIT }],
+            { signal: AbortSignal.timeout(8000) },
+          ),
+          { epoch },
+        );
+      } catch (err) {
+        // Superseded by a tab switch — not an error worth surfacing or retrying.
+        if (err instanceof StaleEpochError) return [] as NostrEvent[];
+        throw err;
+      }
     },
     enabled: lazyEngagementNoteIds.length > 0,
     staleTime: 5 * 60 * 1000, // 5 min — don't re-fetch constantly

@@ -7,6 +7,7 @@ import { useNostrLogin } from '@nostrify/react/login';
 import { Router, getFilterSelections, addMinimalFallbacks } from '@welshman/router';
 import type { TrustedEvent, Filter } from '@welshman/util';
 import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
+import { withQueryBudget, acquireQuerySlot, configureQueryGovernor, defaultMaxConcurrent } from '@core/queryGovernor';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
 import { isTauri, tauriQuery } from '@/lib/tauri';
@@ -33,6 +34,20 @@ const DEBUG = import.meta.env.DEV || isTauri;
 
 const MAX_REQUESTS_PER_SECOND = 3;
 const RATE_WINDOW_MS = 1000;
+
+// ============================================================================
+// Global concurrency ceiling.
+//
+// Sized from the host's core count because the binding constraint on relay work
+// is CPU (TLS handshakes + schnorr verification), not bandwidth. Configured once
+// at module load so it is in force before the first query — a provider-mount
+// effect would run too late, after the initial feed fan-out has already started.
+// ============================================================================
+configureQueryGovernor({
+  maxConcurrent: defaultMaxConcurrent(
+    typeof navigator !== 'undefined' ? navigator.hardwareConcurrency : undefined,
+  ),
+});
 
 /** Tracks timestamps of recent requests per relay URL */
 const _relayRequestLog = new Map<string, number[]>();
@@ -308,39 +323,55 @@ class RateLimitedRelay implements NRelay {
     this.inner = new NRelay1(url, merged);
   }
 
+  // Both read paths acquire a slot from the GLOBAL query governor before the
+  // per-relay rate limiter. Order matters: the rate limiter is per-URL and says
+  // nothing about total machine load, so 20 subsystems each querying 8 distinct
+  // relays would sail through it while opening 160 concurrent TLS connections.
+  // The governor is what bounds that, and it must be entered first so waiting
+  // work parks in one queue instead of 8 per-URL ones.
   async *req(
     filters: NostrFilter[],
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<NostrRelayEVENT | NostrRelayEOSE | NostrRelayCLOSED> {
-    await waitForRateLimit(this.url);
-    // Record success on the first EVENT/EOSE message rather than at generator
-    // completion — consumers that `break` on EOSE trigger generator return(),
-    // which would skip a post-loop recordRelaySuccess entirely.
-    let recorded = false;
+    // A generator holds its socket across every yield, so it holds its slot for
+    // its whole lifetime — released in `finally` so an early `break` (consumers
+    // routinely break on EOSE) still frees it.
+    const releaseSlot = await acquireQuerySlot();
     try {
-      for await (const msg of this.inner.req(filters, opts)) {
-        if (!recorded && (msg[0] === 'EVENT' || msg[0] === 'EOSE')) {
-          recorded = true;
-          recordRelaySuccess(this.url);
+      await waitForRateLimit(this.url);
+      // Record success on the first EVENT/EOSE message rather than at generator
+      // completion — consumers that `break` on EOSE trigger generator return(),
+      // which would skip a post-loop recordRelaySuccess entirely.
+      let recorded = false;
+      try {
+        for await (const msg of this.inner.req(filters, opts)) {
+          if (!recorded && (msg[0] === 'EVENT' || msg[0] === 'EOSE')) {
+            recorded = true;
+            recordRelaySuccess(this.url);
+          }
+          yield msg;
         }
-        yield msg;
+      } catch (e) {
+        recordRelayFailure(this.url);
+        throw e;
       }
-    } catch (e) {
-      recordRelayFailure(this.url);
-      throw e;
+    } finally {
+      releaseSlot();
     }
   }
 
   async query(filters: NostrFilter[], opts?: { signal?: AbortSignal }): Promise<NostrEvent[]> {
-    await waitForRateLimit(this.url);
-    try {
-      const result = await this.inner.query(filters, opts);
-      recordRelaySuccess(this.url);
-      return result;
-    } catch (e) {
-      recordRelayFailure(this.url);
-      throw e;
-    }
+    return withQueryBudget(async () => {
+      await waitForRateLimit(this.url);
+      try {
+        const result = await this.inner.query(filters, opts);
+        recordRelaySuccess(this.url);
+        return result;
+      } catch (e) {
+        recordRelayFailure(this.url);
+        throw e;
+      }
+    });
   }
 
   async event(event: NostrEvent, opts?: { signal?: AbortSignal }): Promise<void> {
@@ -818,7 +849,16 @@ function getTauriRelaysForFilter(filter: Record<string, unknown>): string[] {
   // Always include fallbacks and read-only relays (deduplicated via Set)
   FALLBACK_RELAYS.forEach(r => relaySet.add(normalizeRelayUrl(r)));
   READ_ONLY_RELAYS.forEach(r => relaySet.add(normalizeRelayUrl(r)));
-  return Array.from(relaySet).slice(0, 8);
+
+  // Deprioritise relays in failure backoff. The web path has always done this
+  // (createRelay returns a BlockedRelay that fails without opening a socket);
+  // desktop did not, so a dead relay kept costing a full DNS + TCP + TLS
+  // handshake on every single query, forever. Keep blocked relays as a tail
+  // rather than dropping them, so a transient outage can't empty the list.
+  const all = Array.from(relaySet);
+  const healthy = all.filter(r => !isRelayBlocked(r));
+  const blocked = all.filter(r => isRelayBlocked(r));
+  return [...healthy, ...blocked].slice(0, 8);
 }
 
 const NostrProvider: React.FC<NostrProviderProps> = (props) => {
@@ -919,47 +959,99 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
 
   const value = useMemo(() => {
     if (!isTauri) return { nostr: pool };
-    // In Tauri: intercept nostr.query() and route it through Rust pool_query.
-    // WebKitGTK never processes WebSocket frames — only IPC JSON arrives in JS.
-    // This removes the event-burst crash without any per-feature workarounds.
+
+    // ── Desktop: every read goes through the native Rust socket bridge ───────
+    //
+    // WebKitGTK's WebSocket implementation is the documented crash path on
+    // Linux under connection pressure, which is why `query()` was routed
+    // through Rust in the first place. But `relay()` and `group()` were left
+    // pointing at the pool, so they still opened WebKitGTK sockets — and those
+    // are not rare paths:
+    //
+    //   useAuthor      nostr.relay(url).query(...) x4 per uncached profile
+    //   useNip65Relays nostr.relay(url).query(...)
+    //   useBookmarks   nostr.relay(url)
+    //   useCustomFeed  nostr.group(feed.relays)
+    //
+    // A screenful of notes with uncached authors therefore opened ~4 WebKitGTK
+    // sockets per author, concurrently, on exactly the code path the bridge
+    // exists to avoid. Route them through the bridge too, so the desktop build
+    // has ONE socket implementation rather than two.
+    const runNativeQuery = async (
+      filters: unknown[],
+      opts: { signal?: AbortSignal } | undefined,
+      relaysFor: (filter: Record<string, unknown>) => string[],
+    ): Promise<NostrEvent[]> => {
+      // The Rust relay_subscribe command takes a single filter — run one
+      // query per filter and merge, so multi-filter callers aren't
+      // silently truncated to filters[0].
+      const list = (filters.length > 0 ? filters : [{}]) as Record<string, unknown>[];
+      const queries = Promise.all(
+        list.map(filter =>
+          // Governed: desktop previously bypassed BOTH the per-relay rate
+          // limiter and any global ceiling, so an unbounded number of
+          // relay_subscribe invocations could be in flight, each spawning a
+          // tokio task (and a fresh TLS handshake) per relay.
+          withQueryBudget(() => {
+            const relays = relaysFor(filter);
+            return tauriQuery(relays, filter, 5000) as Promise<NostrEvent[]>;
+          }),
+        ),
+      );
+      // Honor the caller's abort signal by racing it — the Rust side has
+      // its own timeout, but callers expect AbortSignal.timeout to throw.
+      const signal = opts?.signal;
+      const results = signal
+        ? await Promise.race([
+            queries,
+            new Promise<never>((_, reject) => {
+              const onAbort = () => reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+              if (signal.aborted) onAbort();
+              else signal.addEventListener('abort', onAbort, { once: true });
+            }),
+          ])
+        : await queries;
+      // Merge + dedup by event id across per-filter result sets
+      const seen = new Set<string>();
+      const merged: NostrEvent[] = [];
+      for (const events of results) {
+        for (const e of events) {
+          if (!seen.has(e.id)) {
+            seen.add(e.id);
+            merged.push(e);
+          }
+        }
+      }
+      return merged;
+    };
+
+    /** Minimal NRelay-shaped shim backed by the native bridge. */
+    const nativeRelayShim = (urls: string[]) => {
+      const healthy = urls.map(normalizeRelayUrl).filter(u => !isRelayBlocked(u));
+      // All candidates in backoff: still try them rather than returning nothing —
+      // a hard empty would surface as "profile not found" for the whole session.
+      const targets = healthy.length > 0 ? healthy : urls.map(normalizeRelayUrl);
+      return {
+        query: (filters: unknown[], opts?: { signal?: AbortSignal }) =>
+          runNativeQuery(filters, opts, () => targets),
+        // `req` streaming isn't offered by the bridge; callers that need it
+        // (the relay-browse tab) fall through to the pool via Reflect below.
+        async close() {},
+        async [Symbol.asyncDispose]() {},
+      };
+    };
+
     const tauriProxy = new Proxy(pool, {
       get(target, prop, receiver) {
         if (prop === 'query') {
-          return async (filters: unknown[], opts?: { signal?: AbortSignal }) => {
-            // The Rust relay_subscribe command takes a single filter — run one
-            // query per filter and merge, so multi-filter callers aren't
-            // silently truncated to filters[0].
-            const list = (filters.length > 0 ? filters : [{}]) as Record<string, unknown>[];
-            const queries = Promise.all(list.map(filter => {
-              const relays = getTauriRelaysForFilter(filter);
-              return tauriQuery(relays, filter, 5000) as Promise<NostrEvent[]>;
-            }));
-            // Honor the caller's abort signal by racing it — the Rust side has
-            // its own timeout, but callers expect AbortSignal.timeout to throw.
-            const signal = opts?.signal;
-            const results = signal
-              ? await Promise.race([
-                  queries,
-                  new Promise<never>((_, reject) => {
-                    const onAbort = () => reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
-                    if (signal.aborted) onAbort();
-                    else signal.addEventListener('abort', onAbort, { once: true });
-                  }),
-                ])
-              : await queries;
-            // Merge + dedup by event id across per-filter result sets
-            const seen = new Set<string>();
-            const merged: NostrEvent[] = [];
-            for (const events of results) {
-              for (const e of events) {
-                if (!seen.has(e.id)) {
-                  seen.add(e.id);
-                  merged.push(e);
-                }
-              }
-            }
-            return merged;
-          };
+          return (filters: unknown[], opts?: { signal?: AbortSignal }) =>
+            runNativeQuery(filters, opts, getTauriRelaysForFilter);
+        }
+        if (prop === 'relay') {
+          return (url: string) => nativeRelayShim([url]);
+        }
+        if (prop === 'group') {
+          return (urls: string[]) => nativeRelayShim(urls);
         }
         return Reflect.get(target, prop, receiver);
       },

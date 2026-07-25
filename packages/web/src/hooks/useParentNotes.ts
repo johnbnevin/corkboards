@@ -3,12 +3,37 @@ import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-quer
 import { useNostr } from '@/hooks/useNostr';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { fetchEventWithOutbox } from '@/lib/fetchEvent';
+import { MissCache } from '@core/missCache';
 
 // Shared cache for parent notes (persists across hook instances)
 const parentNoteCache = new Map<string, NostrEvent>();
 
-// Track IDs that failed first-pass fetch so we can retry them
-const failedFirstPass = new Set<string>();
+/**
+ * Negative cache for IDs the fast batch pass didn't find.
+ *
+ * This used to be a plain `Set<string>` that only ever grew: an id was added
+ * when the first pass missed and removed only if a later pass found the event.
+ * Any genuinely-unreachable parent — deleted, or living only on a relay we
+ * don't talk to — therefore stayed in it for the life of the process.
+ *
+ * The second-pass effect below re-reads it whenever `query.data` changes, which
+ * is every feed update: every autofetch tick, every "load newer", every tab
+ * switch. So each of those re-armed a full second pass over every permanently
+ * missing id, forever, and got worse as the feed grew. On desktop one
+ * second-pass lookup opens roughly a dozen fresh TLS connections (pool fan-out
+ * + NIP-65 discovery across all fallback relays + author relays), so a feed
+ * with a few dozen unreachable parents became a standing load generator.
+ *
+ * MissCache keeps the retry — late-arriving data must still resolve — but makes
+ * it decay: exponential cooldown per consecutive miss, a hard attempt ceiling,
+ * and a bounded entry count.
+ */
+const parentMisses = new MissCache({
+  maxEntries: 2000,
+  baseCooldownMs: 30_000,
+  maxCooldownMs: 15 * 60_000,
+  maxAttempts: 3,
+});
 
 // Limit concurrent first-pass pool queries to avoid opening too many relay connections at once.
 const MAX_CONCURRENT_POOL_QUERIES = 6;
@@ -19,6 +44,8 @@ const FIRST_PASS_TIMEOUT_MS = 6000;
 // Delay before the second (outbox-discovery) pass. Kept short so reply parents
 // that the first pass missed appear quickly instead of seconds later.
 const SECOND_PASS_DELAY_MS = 800;
+/** Max individual outbox lookups fired by one second pass. */
+const MAX_SECOND_PASS_PER_ROUND = 12;
 let _activePoolQueries = 0;
 const _poolQueryQueue: Array<() => void> = [];
 
@@ -116,8 +143,12 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
         return {} as Record<string, NostrEvent | null>;
       }
 
-      // Find which IDs need to be fetched (not in cache)
-      const uncachedIds = uniqueIds.filter(id => !parentNoteCache.has(id));
+      // Find which IDs need to be fetched: not cached, and not inside a miss
+      // cooldown. Without the second condition the *first* pass re-queried every
+      // known-unreachable id on every feed update too, not just the second.
+      const uncachedIds = uniqueIds.filter(
+        id => !parentNoteCache.has(id) && parentMisses.shouldRetry(id),
+      );
 
       // First pass: fast batch query through the pool
       if (uncachedIds.length > 0) {
@@ -139,9 +170,9 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
         // Track which IDs are still missing after pool query
         for (const id of uncachedIds) {
           if (!parentNoteCache.has(id)) {
-            failedFirstPass.add(id);
+            parentMisses.recordMiss(id);
           } else {
-            failedFirstPass.delete(id);
+            parentMisses.recordHit(id);
           }
         }
       }
@@ -166,7 +197,16 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
     if (secondPassScheduled.current) return;
     if (!query.data) return;
 
-    const missing = uniqueRequests.filter(r => failedFirstPass.has(r.eventId));
+    // Only ids that have actually missed AND are out of cooldown. An id whose
+    // cooldown is still running, or that has exhausted its attempts, is skipped
+    // — that is what stops the standing retry storm.
+    const missing = uniqueRequests
+      .filter(r => parentMisses.hasMissed(r.eventId) && parentMisses.shouldRetry(r.eventId))
+      // Bound a single pass regardless of feed size: a large feed used to fire
+      // Promise.all over every missing parent at once, and each of those opens
+      // ~a dozen sockets on desktop. Anything beyond the cap is picked up by a
+      // later pass once these resolve.
+      .slice(0, MAX_SECOND_PASS_PER_ROUND);
     if (missing.length === 0) return;
 
     secondPassScheduled.current = true;
@@ -187,8 +227,12 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
       for (let i = 0; i < missing.length; i++) {
         if (results[i]) {
           parentNoteCache.set(missing[i].eventId, results[i]!);
-          failedFirstPass.delete(missing[i].eventId);
+          parentMisses.recordHit(missing[i].eventId);
           found++;
+        } else {
+          // Still not found — advance the backoff so the next round waits
+          // longer, and the attempt ceiling eventually stops the retries.
+          parentMisses.recordMiss(missing[i].eventId);
         }
       }
 
@@ -227,5 +271,5 @@ export function getCachedParentNote(eventId: string): NostrEvent | undefined {
  */
 export function clearParentNoteCache(): void {
   parentNoteCache.clear();
-  failedFirstPass.clear();
+  parentMisses.clear();
 }

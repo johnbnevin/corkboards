@@ -17,6 +17,32 @@ use crate::proxy;
 /// so the payload per call stays small regardless of IPC protocol state.
 const BATCH_SIZE: usize = 20;
 
+/// Hard ceiling on concurrently-open relay sockets for the whole process.
+///
+/// This is the backstop under the JS-side query governor
+/// (`packages/core/src/queryGovernor.ts`). The governor bounds how many QUERIES
+/// run at once; this bounds how many SOCKETS exist at once, which is the thing
+/// that actually costs the machine — every one is a DNS lookup, a TCP
+/// handshake, and a TLS handshake (asymmetric crypto on the host CPU), and
+/// `relay_subscribe` fans a single query out to one task per relay.
+///
+/// Two independent limits because they fail independently: a JS regression that
+/// bypasses the governor should not be able to make the host process open
+/// hundreds of sockets, and Rust should not have to trust the webview to be
+/// well-behaved. On a 2-core machine the webview's main thread, its compositor,
+/// and this handshake work all contend for the same cores, so an unbounded
+/// fan-out here is felt as a frozen DESKTOP, not just a slow app.
+///
+/// Sized from the host's parallelism, with a floor that still lets the outbox
+/// model reach several relays at once.
+static RELAY_SOCKET_LIMIT: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        tokio::sync::Semaphore::new((cores * 4).clamp(8, 48))
+    });
+
 /// Hard upper bound on per-query results when JS doesn't supply a `limit`.
 /// Without this, a missing limit defaults to u64::MAX, which would let a
 /// pathological relay flood memory before EOSE arrives.
@@ -342,6 +368,27 @@ async fn do_query(url: String, filter: Value, deadline: Instant) -> RelayQueryRe
             error: Some(e),
         };
     }
+
+    // Take a socket permit before opening anything, and hold it for the whole
+    // connection. Bounded by the caller's deadline: a query that spends its
+    // entire budget queueing has nothing left to query with, and returning
+    // empty is better than opening a socket we're about to abandon.
+    let _permit = match timeout_at(deadline, RELAY_SOCKET_LIMIT.acquire()).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(_)) => {
+            // Semaphore closed — only happens at shutdown.
+            return RelayQueryResult {
+                events: vec![],
+                error: Some("relay socket limiter closed".to_string()),
+            };
+        }
+        Err(_) => {
+            return RelayQueryResult {
+                events: vec![],
+                error: Some("socket budget: timeout waiting for a slot".to_string()),
+            };
+        }
+    };
 
     // The handshake gets the same deadline as the read loop. A relay that never
     // completes its TLS/WebSocket upgrade must not consume the whole budget and
@@ -848,6 +895,32 @@ mod tests {
         let result = run_query(client, filter, tokio::time::Instant::now() - Duration::from_secs(1)).await;
         assert!(result.events.is_empty());
         drop(server);
+    }
+
+    /// The process-wide socket ceiling must actually be bounded, and bounded at
+    /// a number a low-core machine can survive. The reported whole-desktop
+    /// freeze was a 2-core laptop under an unbounded fan-out: every socket costs
+    /// a DNS + TCP + TLS handshake on the host CPU, competing with the webview's
+    /// compositor for the same two cores.
+    #[test]
+    fn socket_limit_is_bounded_and_nonzero() {
+        let permits = RELAY_SOCKET_LIMIT.available_permits();
+        assert!(permits >= 8, "must allow real outbox fan-out, got {permits}");
+        assert!(permits <= 48, "must stay bounded, got {permits}");
+    }
+
+    /// A query that cannot get a socket permit before its deadline must give up
+    /// rather than open a connection it has no budget left to use.
+    #[tokio::test]
+    async fn do_query_gives_up_when_the_deadline_has_already_passed() {
+        let result = do_query(
+            "wss://relay.example.com".to_string(),
+            serde_json::json!({ "kinds": [1] }),
+            tokio::time::Instant::now() - Duration::from_secs(1),
+        )
+        .await;
+        assert!(result.events.is_empty());
+        assert!(result.error.is_some(), "expected an error, got none");
     }
 
     /// A genuinely signed event must survive verification, or the check would

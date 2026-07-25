@@ -41,6 +41,10 @@ export * from './contentFilters';
 export * from './ipUtils';
 export * from './relayConstants';
 
+// Network load safeguards (shared ceiling + negative caching)
+export * from './queryGovernor';
+export * from './missCache';
+
 // Emoji data (shared by web and mobile)
 export * from './emojiCategories';
 export * from './defaultEmojiSet';

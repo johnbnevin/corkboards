@@ -73,7 +73,14 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     setLikePending(true);
     setLikedOverride(true);
     try {
-      const tags: string[][] = [['e', event.id], ['p', event.pubkey]];
+      // NIP-25: reacted event (last e) with a relay hint + author (p) + kind (k),
+      // plus an a-coordinate for addressable targets. Parity with web.
+      const relayHint = getRelayCache(event.pubkey)?.[0] || FALLBACK_RELAYS[0] || '';
+      const tags: string[][] = [['e', event.id, relayHint], ['p', event.pubkey], ['k', String(event.kind)]];
+      if (event.kind >= 30000 && event.kind < 40000) {
+        const d = event.tags.find(t => t[0] === 'd')?.[1] ?? '';
+        tags.push(['a', `${event.kind}:${event.pubkey}:${d}`, relayHint]);
+      }
       if (emojiTag) tags.push(emojiTag);
       const signed = await signer.signEvent({
         kind: 7,
@@ -88,7 +95,7 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
     } finally {
       setLikePending(false);
     }
-  }, [signer, likePending, nostr, queryClient, event.id, event.pubkey]);
+  }, [signer, likePending, nostr, queryClient, event.id, event.pubkey, event.kind, event.tags]);
 
   const handleLike = async () => {
     // Guard against double-publish: already liked, or a publish is in flight.

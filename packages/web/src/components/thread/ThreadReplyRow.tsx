@@ -88,7 +88,13 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
   const handleReact = useCallback((emoji: string, shortcode?: string, url?: string) => {
     if (!user) return
     const relayHint = getRelayCache(event.pubkey)?.[0] || FALLBACK_RELAYS[0] || ''
-    const tags: string[][] = [['e', event.id, relayHint], ['p', event.pubkey]]
+    // NIP-25: reacted event (last e) + author (p) + kind (k), plus a-coordinate
+    // when the target is addressable.
+    const tags: string[][] = [['e', event.id, relayHint], ['p', event.pubkey], ['k', String(event.kind)]]
+    if (event.kind >= 30000 && event.kind < 40000) {
+      const d = event.tags.find(t => t[0] === 'd')?.[1] ?? ''
+      tags.push(['a', `${event.kind}:${event.pubkey}:${d}`, relayHint])
+    }
     const content = shortcode ? `:${shortcode}:` : emoji
     if (shortcode && url) tags.push(['emoji', shortcode, url])
     publishReaction(
@@ -103,7 +109,7 @@ export const ThreadReplyRow = memo(function ThreadReplyRow({
         },
       }
     )
-  }, [user, event.id, event.pubkey, publishReaction, onReactionPublished])
+  }, [user, event.id, event.pubkey, event.kind, event.tags, publishReaction, onReactionPublished])
 
   const formatTime = (timestamp: number) => {
     const diffMs = Date.now() - timestamp * 1000

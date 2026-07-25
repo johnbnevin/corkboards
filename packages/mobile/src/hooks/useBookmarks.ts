@@ -186,7 +186,11 @@ export function useBookmarks(fetchEnabled = true) {
   // Schedule publish when bookmarkIds changes from user action.
   // Always resets the debounce timer so rapid toggles accumulate into one publish.
   useEffect(() => {
-    if (!needsPublish.current || bookmarkIds.length === 0) return;
+    // Publish after any explicit add/remove — INCLUDING removing the last one.
+    // The old `bookmarkIds.length === 0` guard meant clearing your final bookmark
+    // never published the emptied kind-10003, so the relay's stale copy resurrected
+    // it next session. needsPublish is set only by user actions, never initial load.
+    if (!needsPublish.current) return;
     needsPublish.current = false;
     if (publishTimer.current) clearTimeout(publishTimer.current);
     publishTimer.current = setTimeout(() => {

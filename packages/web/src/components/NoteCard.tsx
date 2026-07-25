@@ -609,10 +609,17 @@ export const NoteCard = React.memo(function NoteCard({
   const handleReact = useCallback((emoji: string, shortcode?: string, url?: string) => {
     if (!user) return
     const relayHint = getRelayCache(note.pubkey)?.[0] || FALLBACK_RELAYS[0] || ''
+    // NIP-25: reaction carries the reacted event (last e), its author (p), and
+    // the kind reacted to (k); an addressable target also gets an a-coordinate.
     const tags: string[][] = [
       ['e', note.id, relayHint],
       ['p', note.pubkey],
+      ['k', String(note.kind)],
     ]
+    if (note.kind >= 30000 && note.kind < 40000) {
+      const d = note.tags.find(t => t[0] === 'd')?.[1] ?? ''
+      tags.push(['a', `${note.kind}:${note.pubkey}:${d}`, relayHint])
+    }
     const content = shortcode ? `:${shortcode}:` : emoji
     if (shortcode && url) {
       tags.push(['emoji', shortcode, url])

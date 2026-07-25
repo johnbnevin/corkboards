@@ -250,8 +250,12 @@ export function useFeedPagination({
           });
 
       if (notesToTrack.length > 0) {
-        const newest = notesToTrack.reduce((max, n) => n.created_at > max ? n.created_at : max, notesToTrack[0].created_at);
-        setNewestTimestamp(prev => (prev === null || newest > prev ? newest : prev));
+        // Ignore future-dated events when anchoring "load newer": a single note
+        // with a bogus far-future created_at would otherwise pin the since-cursor
+        // ahead of every real note and silently break loading newer for the tab.
+        const nowSec = Math.floor(Date.now() / 1000) + 60; // tolerate ~1 min clock skew
+        const newest = notesToTrack.reduce((max, n) => (n.created_at <= nowSec && n.created_at > max ? n.created_at : max), 0);
+        if (newest > 0) setNewestTimestamp(prev => (prev === null || newest > prev ? newest : prev));
         setLastFetchTime(prev => prev ?? Math.floor(Date.now() / 1000));
       } else if (currentNotes.length > 0) {
         // Only RSS items present (no Nostr notes yet) — seed lastFetchTime so

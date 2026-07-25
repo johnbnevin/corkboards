@@ -297,7 +297,11 @@ export function useBookmarks(fetchEnabled = true) {
   const needsPublish = useRef(false)
 
   useEffect(() => {
-    if (!needsPublish.current || bookmarkIds.length === 0) return
+    // Publish after any explicit add/remove — INCLUDING removing the last one.
+    // The old `bookmarkIds.length === 0` guard meant clearing your final bookmark
+    // never published the emptied kind-10003, so the relay's stale copy resurrected
+    // it next session. needsPublish is set only by user actions, never initial load.
+    if (!needsPublish.current) return
     needsPublish.current = false
     debugLog('[bookmarks] Scheduling publish for', bookmarkIds.length, 'bookmarks')
     if (publishTimer.current) clearTimeout(publishTimer.current)

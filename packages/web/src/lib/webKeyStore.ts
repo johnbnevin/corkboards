@@ -209,13 +209,15 @@ interface PersistedLogin {
  * localStorage at mount and re-persists that snapshot on every state change —
  * a plaintext nsec seen at mount would keep getting rewritten.
  *
- * 1. MIGRATION — synchronously: any login in localStorage[storageKey] with a
- *    plaintext `data.nsec` is blanked and the state rewritten, so the
- *    plaintext is gone from localStorage before React renders. The captured
- *    nsecs are then encrypted into IndexedDB. If that persist fails (e.g. IDB
- *    unavailable in some private-browsing modes) the plaintext is put back for
- *    that login — availability fallback mirroring the Tauri keychain-failure
- *    path — so a reload doesn't silently lock the user out.
+ * 1. MIGRATION — any login in localStorage[storageKey] with a plaintext
+ *    `data.nsec` is captured into the in-memory session cache, encrypted into
+ *    IndexedDB, and only THEN blanked from localStorage — persist-then-blank, so
+ *    a crash mid-migration can never destroy the only copy of the key. main.tsx
+ *    awaits this before React renders (or times out and leaves the plaintext in
+ *    place for this boot). If the encrypted persist fails (e.g. IDB unavailable
+ *    in some private-browsing modes) the plaintext is left untouched — an
+ *    availability fallback mirroring the Tauri keychain-failure path — so a
+ *    reload doesn't silently lock the user out, and the next boot retries.
  * 2. SCRUB — removes the stale copy of the login state that lib/idb.ts's
  *    one-time localStorage→IndexedDB migration placed in the `corkboard` kv
  *    store (it may contain a pre-migration plaintext nsec snapshot).
@@ -241,13 +243,9 @@ export async function prepareLoginStorage(storageKey: string): Promise<void> {
     if (typeof nsec === 'string' && nsec !== '') {
       memNsec.set(entry.pubkey, nsec); // keep the session alive regardless of persist outcome
       plaintext.push({ pubkey: entry.pubkey, nsec });
-      entry.data!.nsec = '';
     } else {
       blanked.push(entry.pubkey);
     }
-  }
-  if (plaintext.length > 0) {
-    try { localStorage.setItem(storageKey, JSON.stringify(state)); } catch { /* keep going */ }
   }
 
   // ── Async phase ──
@@ -257,23 +255,37 @@ export async function prepareLoginStorage(storageKey: string): Promise<void> {
     await idbRemove(storageKey);
   } catch { /* best-effort */ }
 
+  // Persist THEN blank. Encrypt each nsec into IndexedDB and only blank the
+  // plaintext localStorage copy once its encrypted record has committed. The
+  // previous order (blank synchronously, persist afterward) left a window where a
+  // crash between the localStorage write and the IDB commit destroyed the ONLY
+  // remaining copy of the key. main.tsx awaits this before mounting the login
+  // provider — and on timeout leaves the plaintext in place for this boot — so
+  // persisting first costs nothing and never risks the account. memNsec already
+  // holds every key for the session, so a not-yet-committed account still signs,
+  // and next boot retries the migration.
+  const committed = new Set<string>();
   for (const { pubkey, nsec } of plaintext) {
-    const ok = await storeNsec(pubkey, nsec);
-    if (!ok) {
-      console.error(`[keystore] Could not encrypt nsec for ${pubkey.slice(0, 8)}… — restoring legacy localStorage entry so the account survives reload`);
-      try {
-        const cur = localStorage.getItem(storageKey);
-        const curState: unknown = cur ? JSON.parse(cur) : null;
-        if (Array.isArray(curState)) {
-          for (const entry of curState as PersistedLogin[]) {
-            if (entry?.type === 'nsec' && entry.pubkey === pubkey && entry.data && typeof entry.data === 'object') {
-              entry.data.nsec = nsec;
-            }
+    if (await storeNsec(pubkey, nsec)) committed.add(pubkey);
+    else console.error(`[keystore] Could not encrypt nsec for ${pubkey.slice(0, 8)}… — leaving the legacy localStorage entry in place so the account survives reload`);
+  }
+
+  // Rewrite localStorage once, blanking only the entries whose encrypted record
+  // committed. On failure the plaintext simply remains for the next boot to retry.
+  if (committed.size > 0) {
+    try {
+      const cur = localStorage.getItem(storageKey);
+      const curState: unknown = cur ? JSON.parse(cur) : state;
+      if (Array.isArray(curState)) {
+        for (const entry of curState as PersistedLogin[]) {
+          if (entry?.type === 'nsec' && typeof entry.pubkey === 'string' &&
+              committed.has(entry.pubkey) && entry.data && typeof entry.data === 'object') {
+            entry.data.nsec = '';
           }
-          localStorage.setItem(storageKey, JSON.stringify(curState));
         }
-      } catch { /* best-effort */ }
-    }
+        localStorage.setItem(storageKey, JSON.stringify(curState));
+      }
+    } catch { /* best-effort — plaintext remains and is retried next boot */ }
   }
 
   await Promise.all(blanked.map((pubkey) => loadNsec(pubkey)));

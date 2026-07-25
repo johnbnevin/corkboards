@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.2] - 2026-07-25
+
+### Security & privacy (cross-platform)
+- **Repost/quote impersonation (critical):** embedded kind-6/16 JSON is now signature-verified (id recompute + Schnorr) before it is rendered as an authored note. A forged embed falls back to fetching the real event through the verified transport instead of being attributed to whatever pubkey it claims.
+- **SSRF/egress:** LNURL/zap fetches refuse redirects that would escape the host-safety check; profile banners, NIP-30 emoji, and markdown images now go through the shared SSRF gate + image proxy; media host matching is exact-or-subdomain (no more `evil-nostr.build` matching `nostr.build`).
+- **Zap safety:** the returned invoice amount is verified against the approved amount before any NWC auto-pay; all zap-receipt totals use one NaN-safe BOLT-11 parser (the old ones disagreed by up to 1e8).
+- **Crypto/keys:** mobile MMKV key is a proper 16-byte key, and a transient keychain read error no longer regenerates it and orphans encrypted data; self-encryption no longer silently downgrades NIP-44 → NIP-04.
+- **Desktop:** native relay path fails closed on a corrupt proxy config; WebSocket message size is bounded; `sign_event` rejects out-of-range kinds and non-string tags; the activity log is 0600 with broader secret redaction; CSP allows `ws:` for `.onion` relays.
+- **Data-loss:** removing your last bookmark now publishes the emptied list (no more resurrection); the nsec migration persists-then-blanks so a crash can't destroy the only copy; NWC is kept out of the unencrypted settings backup; mobile logout clears cached note bodies.
+
+### Fixed (protocol)
+- Reactions carry the NIP-25 `k` tag (and `a` for addressable targets) with relay hints on every platform.
+- "Load newer" ignores future-dated events that used to freeze a tab's since-cursor.
+
 ## [0.8.1] - 2026-07-24
 
 ### Changed

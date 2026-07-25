@@ -637,7 +637,7 @@ export const NoteCard = React.memo(function NoteCard({
         onError: () => toastReaction({ title: 'Reaction failed', variant: 'destructive' }),
       }
     )
-  }, [user, note.id, note.pubkey, publishReaction, toastReaction, onReactionPublished])
+  }, [user, note.id, note.pubkey, note.kind, note.tags, publishReaction, toastReaction, onReactionPublished])
 
   // NIP-36 content warning — blur content behind a click-to-reveal gate
   const contentWarning = useMemo(() => note.tags.find(t => t[0] === 'content-warning')?.[1], [note.tags])

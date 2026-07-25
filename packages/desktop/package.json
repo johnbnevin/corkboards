@@ -1,6 +1,6 @@
 {
   "name": "@corkboards/desktop",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "private": true,
   "scripts": {
     "dev": "npm run dev -w @corkboards/web & npx @tauri-apps/cli dev --config src-tauri/tauri.conf.json",

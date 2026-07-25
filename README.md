@@ -10,9 +10,36 @@ Build social feeds by arranging posts from friends or news sources like notecard
 
 Go to [corkboards.me](https://corkboards.me) in any modern browser. That's it — nothing to install.
 
+### <a id="linux-download"></a>Download the Linux desktop app (no build needed)
+
+Prebuilt Linux packages are published with each release. Grab one from the
+[latest release](https://github.com/johnbnevin/corkboards/releases/latest) or from
+[get.corkboards.me](https://get.corkboards.me):
+
+| Format | Best for | Install |
+|---|---|---|
+| **AppImage** | Any distro, no install, no root | `chmod +x corkboards-linux-latest.AppImage && ./corkboards-linux-latest.AppImage` |
+| **.deb** | Debian, Ubuntu, Mint, Pop!\_OS | `sudo dpkg -i corkboards-linux-latest.deb` |
+| **.rpm** | Fedora, RHEL, openSUSE | `sudo rpm -i corkboards-linux-latest.rpm` |
+
+The `.deb` and `.rpm` register Corkboards in your app launcher. The AppImage runs
+straight from your Downloads folder and leaves nothing behind.
+
+> **Upgrading?** Install straight over the top — the package manager replaces the old
+> version and your data is kept. For a clean reinstall, `sudo dpkg --purge corkboards`
+> (or `sudo rpm -e corkboards`) first; that removes the program but leaves your data in
+> `~/.local/share/me.corkboards.desktop/`. Delete that folder too only if you want to
+> start over — it holds your session, settings and cached notes.
+
+**Windows and macOS** have no prebuilt downloads yet — build from source below. Those
+builds are currently untested.
+
 ### <a id="desktop"></a>Build the desktop app (Windows, macOS, or Linux)
 
 The desktop app gives you a native window with OS keychain storage for your keys. You build it from source — it takes about 5 minutes the first time.
+
+> Linux users: you don't need any of this unless you want to — see
+> [the prebuilt downloads above](#linux-download).
 
 **Step 1 — Install the prerequisites**
 

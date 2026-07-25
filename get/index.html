@@ -214,6 +214,32 @@
     }
     .toast.show { opacity: 1; }
 
+    /* Untested-build warning + confirm modal */
+    .download-card .dl-warn {
+      font-size: 0.75rem; color: var(--orange); font-weight: 600;
+      margin: 0.1rem 0 0; display: flex; align-items: center; justify-content: center; gap: 0.3rem;
+    }
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center; padding: 1.5rem;
+      z-index: 200; opacity: 0; visibility: hidden; transition: opacity 0.15s, visibility 0.15s;
+    }
+    .modal-backdrop.show { opacity: 1; visibility: visible; }
+    .modal {
+      background: var(--background); color: var(--foreground);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 1.5rem; max-width: 26rem; width: 100%; text-align: center;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.35);
+      transform: translateY(8px); transition: transform 0.15s;
+    }
+    .modal-backdrop.show .modal { transform: translateY(0); }
+    .modal h3 { font-size: 1.1rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .modal p { font-size: 0.9rem; color: var(--muted-foreground); margin-bottom: 1.25rem; }
+    .modal-actions { display: flex; gap: 0.5rem; }
+    .modal-actions .btn { flex: 1; justify-content: center; }
+    .btn-warn { background: var(--orange); color: #fff; }
+    .btn-warn:hover { background: var(--orange-hover); color: #fff; }
+
     /* Status bar — fixed bottom */
     .status-bar {
       background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
@@ -290,7 +316,7 @@
 
   <!-- Hero -->
   <header class="hero">
-    <h1 class="hero-title"><img class="hero-logo" src="Corkboards-Logo-Corky.png" alt="corkboards.me" width="764" height="159" fetchpriority="high"></h1>
+    <h1 class="hero-title"><img class="hero-logo" src="Corkboards-Logo-Corky.png?v=2" alt="corkboards.me" width="1280" height="277" fetchpriority="high"></h1>
     <p class="hero-subtitle">A customizable multi-column social feed reader built on Nostr. Pin what matters, dismiss the noise, own your identity.</p>
     <p class="hero-by">An open source app by <a href="https://noobstr.me" target="_blank" rel="noopener">noobstr.me</a></p>
     <div class="hero-actions">
@@ -327,7 +353,7 @@
               <div class="note-time">just now</div>
             </div>
           </div>
-          <div class="note-content"><p>Ready-to-run Linux builds. Windows &amp; macOS: build from source &mdash; just clone and run one command.</p></div>
+          <div class="note-content"><p>Ready-to-run Linux builds. Windows &amp; macOS: build from source &mdash; untested, but just clone and run one command.</p></div>
           <div class="note-actions" style="justify-content:center; padding-bottom:1rem; position:relative; z-index:25;">
             <div class="dl-stack">
               <a href="https://get.corkboards.me/linux-latest.AppImage" class="btn btn-primary" download onclick="event.stopPropagation()">&#x1F427; Linux AppImage</a>
@@ -336,7 +362,8 @@
                 <a href="https://get.corkboards.me/linux-latest.rpm" class="btn btn-outline" download onclick="event.stopPropagation()">.rpm</a>
               </div>
               <p class="dl-note">AppImage: <code>chmod +x</code> then run. Debian/Ubuntu &rarr; .deb, Fedora/RHEL &rarr; .rpm</p>
-              <a href="https://github.com/johnbnevin/corkboards#desktop" class="btn btn-outline" target="_blank" rel="noopener" onclick="event.stopPropagation()">Windows / macOS &mdash; Build from Source</a>
+              <p class="dl-warn">&#x26A0;&#xFE0F; Windows &amp; macOS builds are untested</p>
+              <a href="https://github.com/johnbnevin/corkboards#desktop" class="btn btn-outline" target="_blank" rel="noopener" onclick="event.stopPropagation(); return confirmUntested(this);">Windows / macOS &mdash; Build from Source</a>
             </div>
           </div>
         </div>
@@ -458,6 +485,18 @@
   <!-- Toast notification -->
   <div class="toast" id="toast"></div>
 
+  <!-- Untested-build confirmation -->
+  <div class="modal-backdrop" id="untestedModal" role="dialog" aria-modal="true" aria-labelledby="untestedTitle" aria-describedby="untestedBody" onclick="if(event.target===this) closeUntested()">
+    <div class="modal">
+      <h3 id="untestedTitle">&#x26A0;&#xFE0F; Untested build</h3>
+      <p id="untestedBody">These versions are entirely untested. Proceed anyway?</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-outline" id="untestedCancel" onclick="closeUntested()">Cancel</button>
+        <button type="button" class="btn btn-warn" onclick="proceedUntested()">Proceed anyway</button>
+      </div>
+    </div>
+  </div>
+
 
   <script>
     // --- Card data ---
@@ -541,6 +580,36 @@
         if (el) topCardOriginals[id] = { html: el.outerHTML, parent: el.parentNode, next: el.nextSibling };
       });
     })();
+
+    // ── Untested-build gate ────────────────────────────────────────────────
+    // Intercepts the Windows/macOS build link and makes the user acknowledge
+    // that those builds are unverified before sending them to the repo.
+    var untestedModal = document.getElementById('untestedModal');
+    var untestedHref = '';
+    var untestedLastFocus = null;
+
+    function confirmUntested(link) {
+      untestedHref = link.href;
+      untestedLastFocus = link;
+      untestedModal.classList.add('show');
+      document.getElementById('untestedCancel').focus();
+      return false; // block the link; proceedUntested() opens it on confirm
+    }
+
+    function closeUntested() {
+      untestedModal.classList.remove('show');
+      if (untestedLastFocus) { untestedLastFocus.focus(); untestedLastFocus = null; }
+    }
+
+    function proceedUntested() {
+      var href = untestedHref;
+      closeUntested();
+      if (href) window.open(href, '_blank', 'noopener');
+    }
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && untestedModal.classList.contains('show')) closeUntested();
+    });
 
     function shuffle(arr) {
       var a = arr.slice();

@@ -739,7 +739,7 @@ const styles = StyleSheet.create({
   header: { paddingHorizontal: 16, paddingTop: 60, paddingBottom: 8, borderBottomWidth: 0, borderBottomColor: '#404040' },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   title: { fontSize: 24, fontWeight: 'bold', color: '#f2f2f2' },
-  headerLogo: { height: 28, width: 135, alignSelf: 'flex-start' },
+  headerLogo: { height: 28, width: 129, alignSelf: 'flex-start' },
   subtitle: { fontSize: 12, color: '#b3b3b3', marginTop: 2 },
   composeBtn: {
     width: 36, height: 36, borderRadius: 18,

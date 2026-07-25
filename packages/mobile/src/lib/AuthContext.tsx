@@ -17,6 +17,7 @@ import { flushBackupBeforeSwitch } from '../lib/backupFlush';
 import { clearRelayCache, createRelay, registerAuthRelay } from './NostrProvider';
 import { isSecureRelay } from '@core/nostrUtils';
 import { clearCollapsedNotesModuleState } from '../hooks/useCollapsedNotes';
+import { clearNotesCache } from './notesCache';
 import { evictCachedProfile, clearProfileCache } from '../lib/cacheStore';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { bumpSessionEpoch } from '../hooks/useSessionAbort';
@@ -435,6 +436,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearRelayCache();
     clearCollapsedNotesModuleState();
     clearProfileCache();
+    // Cached note BODIES also have to go, or they linger in MMKV and surface
+    // under the next account that signs in (clearNotesCache had no callers).
+    await clearNotesCache().catch(() => {});
     setState({ pubkey: null, signer: null, loading: false, accounts: [] });
   }, []);
 

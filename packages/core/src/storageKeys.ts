@@ -167,7 +167,11 @@ const SHARED_BACKED_UP_KEYS = [
   STORAGE_KEYS.BROWSE_RELAYS,
   STORAGE_KEYS.RSS_FEEDS,
   STORAGE_KEYS.SAVED_MINIMIZED_NOTES,
-  STORAGE_KEYS.NWC,
+  // NOTE: NWC (wallet connection) is intentionally NOT backed up. It is a
+  // spending-capable secret and the settings backup is written UNENCRYPTED to
+  // local disk / an optional Blossom blob; a wallet URI must never flow there.
+  // (Today NWC is kept in React state only and never persisted, so this is also
+  // a guard against a future change that starts persisting it.)
   STORAGE_KEYS.SHOW_OWN_NOTES,
   STORAGE_KEYS.ACTIVE_TAB,
   STORAGE_KEYS.TAB_FILTERS,

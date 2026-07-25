@@ -45,7 +45,7 @@ export function BackupDownloadPrompt({ open, onOpenChange }: BackupDownloadPromp
             <p className="text-xs text-blue-900 dark:text-blue-300">
               <span className="font-semibold">Why download?</span> If you ever lose access to your account,
               this file restores all your corkboards.me settings — custom feeds, filters, dismissed notes,
-              RSS feeds, wallet connection, and display preferences. Everything except your follower list.
+              RSS feeds, and display preferences. Everything except your follower list.
               It won't help on other Nostr apps — it's specific to corkboards.me.
             </p>
           </div>

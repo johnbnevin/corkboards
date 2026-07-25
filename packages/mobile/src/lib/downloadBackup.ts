@@ -115,7 +115,7 @@ export async function createBackup(): Promise<{ json: string; filename: string; 
     createdAtUnix: Math.floor(Date.now() / 1000),
     stats,
     corkboardNames: names,
-    info: "This file contains all your corkboards.me settings: custom feeds, filters, dismissed notes, RSS feeds, wallet connection, and display preferences. If you ever lose access to your account, importing this file will restore everything on this site except your follower list. It won't help on other Nostr apps — it's specific to corkboards.me.",
+    info: "This file contains all your corkboards.me settings: custom feeds, filters, dismissed notes, RSS feeds, and display preferences. If you ever lose access to your account, importing this file will restore everything on this site except your follower list. It won't help on other Nostr apps — it's specific to corkboards.me.",
     settings,
   };
 

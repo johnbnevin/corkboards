@@ -18,9 +18,9 @@ Prebuilt Linux packages are published with each release. Grab one from the
 
 | Format | Best for | Install |
 |---|---|---|
-| **AppImage** | Any distro, no install, no root | `chmod +x corkboards-linux-latest.AppImage && ./corkboards-linux-latest.AppImage` |
-| **.deb** | Debian, Ubuntu, Mint, Pop!\_OS | `sudo dpkg -i corkboards-linux-latest.deb` |
-| **.rpm** | Fedora, RHEL, openSUSE | `sudo rpm -i corkboards-linux-latest.rpm` |
+| **AppImage** | Any distro, no install, no root | `chmod +x linux-latest.AppImage && ./linux-latest.AppImage` |
+| **.deb** | Debian, Ubuntu, Mint, Pop!\_OS | `sudo dpkg -i linux-latest.deb` |
+| **.rpm** | Fedora, RHEL, openSUSE | `sudo rpm -i linux-latest.rpm` |
 
 The `.deb` and `.rpm` register Corkboards in your app launcher. The AppImage runs
 straight from your Downloads folder and leaves nothing behind.

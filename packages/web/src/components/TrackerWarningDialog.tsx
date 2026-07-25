@@ -10,6 +10,7 @@ import {
   AlertDialogCancel,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { openExternal } from '@/lib/openExternal'
 
 interface TrackerWarningDialogProps {
   open: boolean
@@ -23,7 +24,7 @@ interface TrackerWarningDialogProps {
 }
 
 function openInNewTab(url: string) {
-  window.open(url, '_blank', 'noopener,noreferrer')
+  openExternal(url)
 }
 
 /**

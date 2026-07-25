@@ -14,10 +14,34 @@ import { isSecureRelay } from '@core/nostrUtils'
 import { FETCH_EVENT_CACHE_TTL_MS as CACHE_TTL_MS } from '@core/cacheConfig'
 import { isTauri, tauriRelayQuery } from '@/lib/tauri'
 
+/**
+ * Extra time every relay query gets on desktop.
+ *
+ * The two builds reach relays very differently. On web, NPool holds persistent
+ * sockets open, so a repeat query is one frame on an established connection and
+ * a 2.5 s budget is generous. On desktop every query crosses the Rust bridge to
+ * `do_query`, which performs a full DNS + TCP + TLS + WebSocket handshake for
+ * that one query and then throws the connection away — there is no pool behind
+ * it. The same millisecond budget therefore buys far less actual querying, and
+ * the shortfall lands exactly where it was reported: "failed to load event" and
+ * gray nested-content placeholders appearing far more often on Linux desktop
+ * than on web, for events that are perfectly reachable.
+ *
+ * The right long-term fix is connection reuse in Rust; until then, pay for the
+ * handshake explicitly instead of silently spending the query's budget on it.
+ */
+const CONNECT_OVERHEAD_MS = isTauri ? 2500 : 0
+
 // Cap concurrent outbox event fetches — each fetchEventWithOutbox may open several
 // fresh WebSocket connections (phase-1 hints + phase-2 author relays). Without a cap,
 // 33 missing parent notes firing simultaneously = 100+ concurrent connections → WebKit OOM.
-const MAX_CONCURRENT_OUTBOX_FETCHES = 4;
+//
+// That OOM is a WebKitGTK-WebSocket problem, and desktop doesn't use WebKit's
+// WebSockets at all — those sockets are tokio's, in the host process. Holding
+// desktop to the same cap of 4 just serialized the queue: with each fetch now
+// budgeted for a handshake, a screenful of missing parents could take the better
+// part of a minute to drain, which is what leaves placeholders grey.
+const MAX_CONCURRENT_OUTBOX_FETCHES = isTauri ? 8 : 4;
 let _activeOutboxFetches = 0;
 const _outboxFetchQueue: Array<() => void> = [];
 
@@ -83,7 +107,7 @@ export function clearEventCache(eventId?: string) {
 export async function queryRelay(
   relayUrl: string,
   filter: { ids?: string[]; kinds?: number[]; '#e'?: string[]; authors?: string[]; '#d'?: string[]; limit?: number },
-  timeoutMs = 2500,
+  timeoutMs = 2500 + CONNECT_OVERHEAD_MS,
 ): Promise<NostrEvent[]> {
   // In Tauri: use native Rust WebSocket to bypass WebKitGTK's WebSocket implementation.
   // WebKitGTK crashes with too many concurrent WebSocket connections on Linux.
@@ -129,7 +153,7 @@ async function fetchAuthorRelays(pubkey: string): Promise<string[]> {
     const discoveryRelays = [...FALLBACK_RELAYS, ...READ_ONLY_RELAYS]
     const relayLists = await Promise.all(
       discoveryRelays.map(relay =>
-        queryRelay(relay, { kinds: [10002], authors: [pubkey], limit: 1 }, 3000)
+        queryRelay(relay, { kinds: [10002], authors: [pubkey], limit: 1 }, 3000 + CONNECT_OVERHEAD_MS)
           .then(events => events[0] || null)
           .catch(() => null)
       )
@@ -188,7 +212,7 @@ async function _fetchEventWithOutboxImpl(
   const hintOnly = hints.filter(r => !poolRelays.has(r))
 
   const racePromises: Promise<NostrEvent | null>[] = [
-    nostr.query([{ ids: [eventId], limit: 1 }], { signal: AbortSignal.timeout(3000) })
+    nostr.query([{ ids: [eventId], limit: 1 }], { signal: AbortSignal.timeout(3000 + CONNECT_OVERHEAD_MS) })
       .then(events => events[0] || null)
       .catch(() => null),
     ...hintOnly.map(relay =>
@@ -198,7 +222,7 @@ async function _fetchEventWithOutboxImpl(
     ),
   ]
 
-  const raceTimeout = new Promise<NostrEvent | null>(resolve => setTimeout(() => resolve(null), 4000))
+  const raceTimeout = new Promise<NostrEvent | null>(resolve => setTimeout(() => resolve(null), 4000 + CONNECT_OVERHEAD_MS))
   let result = await Promise.race([
     ...racePromises.map(p => p.then(r => { if (r) return r; throw new Error('skip') })),
     raceTimeout,
@@ -208,7 +232,7 @@ async function _fetchEventWithOutboxImpl(
     // (M4) Hard-cap the fallback: Promise.all(racePromises) can otherwise block
     // on the slowest relay long past the 4s race timeout. Race it against the
     // same deadline so a slow relay can't hang the call.
-    const fallbackDeadline = new Promise<null>(resolve => setTimeout(() => resolve(null), 4000))
+    const fallbackDeadline = new Promise<null>(resolve => setTimeout(() => resolve(null), 4000 + CONNECT_OVERHEAD_MS))
     const all = await Promise.race([Promise.all(racePromises), fallbackDeadline])
     result = all?.find(e => e !== null) || null
   }
@@ -261,7 +285,7 @@ export async function fetchNaddrWithOutbox(
   const hintOnly = safeHints.filter(r => !poolRelays.has(r))
 
   const racePromises: Promise<NostrEvent | null>[] = [
-    nostr.query([filter], { signal: AbortSignal.timeout(3000) })
+    nostr.query([filter], { signal: AbortSignal.timeout(3000 + CONNECT_OVERHEAD_MS) })
       .then(events => events[0] || null)
       .catch(() => null),
     ...hintOnly.map(relay =>
@@ -271,7 +295,7 @@ export async function fetchNaddrWithOutbox(
     ),
   ]
 
-  const raceTimeout = new Promise<NostrEvent | null>(resolve => setTimeout(() => resolve(null), 4000))
+  const raceTimeout = new Promise<NostrEvent | null>(resolve => setTimeout(() => resolve(null), 4000 + CONNECT_OVERHEAD_MS))
   let result = await Promise.race([
     ...racePromises.map(p => p.then(r => { if (r) return r; throw new Error('skip') })),
     raceTimeout,
@@ -281,7 +305,7 @@ export async function fetchNaddrWithOutbox(
     // (M4) Hard-cap the fallback: Promise.all(racePromises) can otherwise block
     // on the slowest relay long past the 4s race timeout. Race it against the
     // same deadline so a slow relay can't hang the call.
-    const fallbackDeadline = new Promise<null>(resolve => setTimeout(() => resolve(null), 4000))
+    const fallbackDeadline = new Promise<null>(resolve => setTimeout(() => resolve(null), 4000 + CONNECT_OVERHEAD_MS))
     const all = await Promise.race([Promise.all(racePromises), fallbackDeadline])
     result = all?.find(e => e !== null) || null
   }

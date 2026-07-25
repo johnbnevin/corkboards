@@ -125,6 +125,26 @@ export async function tauriNip04Decrypt(pubkey: string, peerPubkey: string, ciph
   return res;
 }
 
+// ─── External links ──────────────────────────────────────────────────────────
+
+/**
+ * Hand a URL to the host process so the OS opens it in the default browser.
+ *
+ * Only meaningful inside Tauri. Returns false when not in Tauri (caller should
+ * fall back to `window.open`) or when the host refused the URL — Rust re-checks
+ * the scheme, so this can fail even after the caller's own check.
+ */
+export async function tauriOpenExternal(url: string): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    await invoke('open_external', { url });
+    return true;
+  } catch (e) {
+    console.warn('[tauri] open_external failed:', e);
+    return false;
+  }
+}
+
 // ─── Native Relay Query ───────────────────────────────────────────────────────
 
 interface RelayQueryResult {

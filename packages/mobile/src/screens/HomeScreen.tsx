@@ -30,6 +30,7 @@ import {
   computeNoteKindStats,
   computeHashtagCounts,
   noteMatchesHashtags,
+  noteMatchesKindFilters,
 } from '@core/noteCategories';
 import { useBulkAuthors } from '../hooks/useAuthor';
 import { useNip65Relays } from '../hooks/useNip65Relays';
@@ -45,6 +46,14 @@ import { useCustomFeedNotes } from '../hooks/useCustomFeedNotes';
 import { useFeedLimit } from '../hooks/useFeedLimit';
 import { NoteCard } from '../components/NoteCard';
 import { FeedFilters } from '../components/FeedFilters';
+import { ContentFilters } from '../components/ContentFilters';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import {
+  noteMatchesContentFilters,
+  hasActiveContentFilters as hasActiveContentFiltersFor,
+  type ContentFilterConfig,
+  type ContentFilterKey,
+} from '@core/contentFilters';
 import type { KindFilter } from '../components/NoteKindToggles';
 import { ProfileModalProvider } from '../components/ProfileModal';
 import { DeepLinkHandler } from '../components/DeepLinkHandler';
@@ -77,6 +86,22 @@ const CATEGORY_TO_FILTER: Readonly<Record<string, KindFilter>> = {
   shortNotes: 'posts', replies: 'replies', longForm: 'articles',
   videos: 'videos', images: 'images', reposts: 'reposts', reactions: 'reactions',
   highlights: 'highlights', recipes: 'recipes', other: 'posts',
+};
+
+/** Everything off — nothing hidden, no exceptions needed. Module scope so
+ *  "clear filters" resets to the same object identity it started with. */
+const DEFAULT_CONTENT_FILTERS: ContentFilterConfig = {
+  hideMinChars: 0,
+  hideOnlyEmoji: false,
+  hideOnlyMedia: false,
+  hideOnlyLinks: false,
+  hideMarkdown: false,
+  hideExactText: '',
+  allowPV: false,
+  allowGM: false,
+  allowGN: false,
+  allowEyes: false,
+  allow100: false,
 };
 
 // ============================================================================
@@ -145,6 +170,29 @@ export function HomeScreen() {
   const [kindFilters, setKindFilters] = useState<Set<KindFilter>>(new Set(['reactions']));
   const [filterMode, setFilterMode] = useState<'any' | 'strict'>('any');
   const [hashtagFilters, setHashtagFilters] = useState<Set<string>>(new Set());
+  // Content filters ("Hide notes with: …"). The panel existed on mobile but
+  // nothing consumed it, so every control in it was inert; it now runs the same
+  // @core predicate the web feed does.
+  const [contentFilterConfig, setContentFilterConfig] = useState<ContentFilterConfig>(DEFAULT_CONTENT_FILTERS);
+  const handleContentFilterChange = useCallback((key: ContentFilterKey, value: number | boolean | string) => {
+    setContentFilterConfig(prev => ({ ...prev, [key]: value }));
+  }, []);
+  // The input stays bound to the raw config so typing feels instant; the FEED
+  // reads a debounced copy. Every keystroke otherwise re-ran the whole pipeline
+  // — classify, filter, recount hashtags — across every loaded note. Built from
+  // the primitive rather than by spreading contentFilterConfig, whose identity
+  // changes on each keystroke and would defeat the debounce. (Parity with web.)
+  const debouncedHideExactText = useDebouncedValue(contentFilterConfig.hideExactText, 250);
+  const {
+    hideMinChars, hideOnlyEmoji, hideOnlyMedia, hideOnlyLinks, hideMarkdown,
+    allowPV, allowGM, allowGN, allowEyes, allow100,
+  } = contentFilterConfig;
+  const feedContentFilterConfig = useMemo<ContentFilterConfig>(() => ({
+    hideMinChars, hideOnlyEmoji, hideOnlyMedia, hideOnlyLinks, hideMarkdown,
+    hideExactText: debouncedHideExactText,
+    allowPV, allowGM, allowGN, allowEyes, allow100,
+  }), [hideMinChars, hideOnlyEmoji, hideOnlyMedia, hideOnlyLinks, hideMarkdown, debouncedHideExactText, allowPV, allowGM, allowGN, allowEyes, allow100]);
+  const hasContentFilters = hasActiveContentFiltersFor(feedContentFilterConfig);
 
   // ── Following feed ──────────────────────────────────────────────────────────
   const authors = pubkey && contacts && contacts.length > 0 ? contacts : [];
@@ -287,24 +335,21 @@ export function HomeScreen() {
     if (!events) return events;
     let result = events;
 
-    // Kind filters
+    // Kind filters — evaluated by the shared rule in @core so web and mobile
+    // agree. Loose mode keeps a note when something SPECIFIC about it is still
+    // wanted; the generic shortNotes/replies/other buckets don't count, since
+    // letting them count made "hide images" a no-op (every image post is also
+    // a short note).
     if (kindFilters.size > 0) {
-      result = result.filter(note => {
-        const cats = getNoteCategories(note, eventLookup);
-        if (filterMode === 'strict') {
-          for (const cat of cats) {
-            const f = CATEGORY_TO_FILTER[cat];
-            if (f && kindFilters.has(f)) return false;
-          }
-          return true;
-        } else {
-          for (const cat of cats) {
-            const f = CATEGORY_TO_FILTER[cat];
-            if (!f || !kindFilters.has(f)) return true;
-          }
-          return false;
-        }
-      });
+      result = result.filter(note =>
+        noteMatchesKindFilters(getNoteCategories(note, eventLookup), kindFilters, CATEGORY_TO_FILTER, filterMode)
+      );
+    }
+
+    // Content filters — same shared predicate the web feed uses.
+    if (hasContentFilters) {
+      const textLower = debouncedHideExactText.trim().toLowerCase();
+      result = result.filter(note => noteMatchesContentFilters(note, feedContentFilterConfig, textLower));
     }
 
     // Hashtag filters — only show notes whose hashtags match the selection.
@@ -340,7 +385,7 @@ export function HomeScreen() {
     });
 
     return result;
-  }, [events, kindFilters, filterMode, hashtagFilters, eventLookup, isDismissed, dismissedThreadRootSet]);
+  }, [events, kindFilters, filterMode, hashtagFilters, feedContentFilterConfig, debouncedHideExactText, hasContentFilters, eventLookup, isDismissed, dismissedThreadRootSet]);
 
   // Count dismissed notes from the deduped set (before kind/hashtag filters)
   const dismissedCount = useMemo(
@@ -359,7 +404,7 @@ export function HomeScreen() {
       .map(([tag, count]) => ({ tag, count }));
   }, [events]);
 
-  const hasActiveFilters = kindFilters.size > 0 || hashtagFilters.size > 0;
+  const hasActiveFilters = kindFilters.size > 0 || hashtagFilters.size > 0 || hasContentFilters;
 
   // ── Prefetch NIP-65 relays for contacts ─────────────────────────────────────
   useEffect(() => {
@@ -428,6 +473,7 @@ export function HomeScreen() {
   const handleClearFilters = useCallback(() => {
     setKindFilters(new Set());
     setHashtagFilters(new Set());
+    setContentFilterConfig(DEFAULT_CONTENT_FILTERS);
   }, []);
 
   const handleTabSwitch = useCallback((tab: FeedTab) => {
@@ -574,7 +620,13 @@ export function HomeScreen() {
               hashtags={hashtagData}
               hasActiveFilters={hasActiveFilters}
               onClearFilters={handleClearFilters}
-            />
+            >
+              <ContentFilters
+                config={contentFilterConfig}
+                onChange={handleContentFilterChange}
+                hasActiveFilters={hasContentFilters}
+              />
+            </FeedFilters>
           </View>
         )}
 

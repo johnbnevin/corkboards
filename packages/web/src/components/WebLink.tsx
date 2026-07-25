@@ -5,6 +5,7 @@ import { useLinkCopy } from '@/hooks/useLinkCopy'
 import { LinkCopyContextMenu } from './LinkCopyContextMenu'
 import { TrackerWarningDialog } from './TrackerWarningDialog'
 import { isSafeExternalUrl } from '@core/sanitizeUtils'
+import { openExternal } from '@/lib/openExternal'
 
 // Shared with mobile via @core/sanitizeUtils — see isSafeExternalUrl.
 const isSafeUrl = isSafeExternalUrl
@@ -36,8 +37,8 @@ export function WebLink({ url }: { url: string }) {
     copyClean()
   }
 
-  const openClean = () => window.open(cleanUrl, '_blank', 'noopener,noreferrer')
-  const openOriginal = () => window.open(url, '_blank', 'noopener,noreferrer')
+  const openClean = () => openExternal(cleanUrl)
+  const openOriginal = () => openExternal(url)
 
   return (
     <>

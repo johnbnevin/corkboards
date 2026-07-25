@@ -5,6 +5,18 @@ export function isValidEventId(id: unknown): id is string {
   return typeof id === 'string' && /^[0-9a-f]{64}$/.test(id);
 }
 
+/** Returns true only for a well-formed 64-char lowercase hex pubkey.
+ *  Same shape as an event id; kept separate so call sites read correctly. */
+export function isValidPubkey(pk: unknown): pk is string {
+  return typeof pk === 'string' && /^[0-9a-f]{64}$/.test(pk);
+}
+
+/** Accept only a ws(s) relay URL as a hint — anything else is dropped rather
+ *  than published, so a malformed hint can't propagate up a thread forever. */
+export function isValidRelayHint(url: unknown): url is string {
+  return typeof url === 'string' && /^wss?:\/\/[^\s]+$/i.test(url);
+}
+
 export interface NoteClassification {
   isReply: boolean;           // Has e-tag (replying to someone)
   isQuote: boolean;           // Has q-tag (quote repost)
@@ -131,9 +143,18 @@ export function getReferencedEventIds(event: NostrEvent): string[] {
  * - p-tags carry the immediate parent's author PLUS the parent's own p-tags. Because every
  *   reply forwards its parent's p-tags, the parent already holds the full ancestor chain, so
  *   this yields parent → grandparent → … → root author (never siblings) while reading only the
- *   parent event we already hold. Matches NIP-10's example ([a1, p1, p2, p3]).
+ *   parent event we already hold. Matches NIP-10's example ([a1, p1, p2, p3]). Clients that
+ *   build their notification feed from p-tags (most of them) therefore notify everyone in the
+ *   ancestor chain, not just the person directly replied to.
  * - Relay hints: the reply (parent) e-tag uses the caller-supplied `replyRelayHint`; the root
- *   e-tag reuses the relay hint the parent already carried on its own root tag.
+ *   e-tag reuses the relay hint the parent already carried on its own root tag. p-tags carry
+ *   hints too — the parent author gets `replyRelayHint` (it is that author's outbox relay,
+ *   which is where the caller looked it up), and forwarded participants keep whatever hint the
+ *   parent recorded for them. A hint that isn't a `ws(s)://` URL is dropped rather than
+ *   forwarded, so junk can't propagate up a thread indefinitely.
+ * - Every e-tag also carries NIP-10's optional 5th element, the referenced event's author
+ *   pubkey, so a client that can't find the event can still resolve who to attribute it to.
+ *   The root's author is only known when the parent forwarded it; otherwise it's omitted.
  *
  * @param replyTo - The event being replied to (the immediate parent).
  * @param replyRelayHint - Optional relay hint for locating the parent event.
@@ -141,20 +162,119 @@ export function getReferencedEventIds(event: NostrEvent): string[] {
  */
 export function buildReplyTags(replyTo: NostrEvent, replyRelayHint = ''): string[][] {
   const tags: string[][] = [];
+  const hint = isValidRelayHint(replyRelayHint) ? replyRelayHint : '';
   const rootTag = replyTo.tags.find(t => t[0] === 'e' && t[3] === 'root');
   const rootId = (rootTag?.[1] && isValidEventId(rootTag[1])) ? rootTag[1] : replyTo.id;
 
   if (rootId !== replyTo.id) {
-    // Forward the root's relay hint from the parent's own root tag when available.
-    tags.push(['e', rootId, rootTag?.[2] || '', 'root']);
+    // Forward the root's relay hint and (when the parent recorded it) the root
+    // author's pubkey from the parent's own root tag.
+    const rootHint = isValidRelayHint(rootTag?.[2]) ? rootTag![2] : '';
+    const rootAuthor = isValidPubkey(rootTag?.[4]) ? rootTag![4] : '';
+    tags.push(rootAuthor
+      ? ['e', rootId, rootHint, 'root', rootAuthor]
+      : ['e', rootId, rootHint, 'root']);
   }
-  tags.push(['e', replyTo.id, replyRelayHint, replyTo.id === rootId ? 'root' : 'reply']);
+  tags.push(['e', replyTo.id, hint, replyTo.id === rootId ? 'root' : 'reply', replyTo.pubkey]);
 
   // Ancestor chain: parent author first, then the parent's forwarded participants.
-  const pubkeys: string[] = [replyTo.pubkey];
+  // Each keeps a relay hint where we have one — the parent author's hint is the
+  // relay we just resolved for them; everyone else keeps the parent's recorded hint.
+  const seen = new Set<string>();
+  const participants: Array<[string, string]> = [];
+  const add = (pk: unknown, relay: unknown) => {
+    if (!isValidPubkey(pk) || seen.has(pk)) return;
+    seen.add(pk);
+    participants.push([pk, isValidRelayHint(relay) ? relay : '']);
+  };
+  add(replyTo.pubkey, hint);
   for (const t of replyTo.tags) {
-    if (t[0] === 'p' && t[1] && !pubkeys.includes(t[1])) pubkeys.push(t[1]);
+    if (t[0] === 'p') add(t[1], t[2]);
   }
-  for (const pk of pubkeys) tags.push(['p', pk]);
+  for (const [pk, relay] of participants) {
+    tags.push(relay ? ['p', pk, relay] : ['p', pk]);
+  }
+  return tags;
+}
+
+// ─── NIP-22 comments (kind 1111) ─────────────────────────────────────────────
+
+/** NIP-01 kind ranges. Duplicated here rather than importing NKinds so core
+ *  keeps @nostrify as a *type-only* peer dependency. */
+function isReplaceableKind(kind: number): boolean {
+  return kind === 0 || kind === 3 || (kind >= 10000 && kind < 20000);
+}
+function isAddressableKind(kind: number): boolean {
+  return kind >= 30000 && kind < 40000;
+}
+
+/** Resolves a relay hint for an author pubkey. Platforms pass their own relay
+ *  cache lookup; returning '' (or anything that isn't a ws(s) URL) omits the hint. */
+export type RelayHintResolver = (pubkey: string) => string | undefined;
+
+/**
+ * Build the scope tags for a NIP-22 comment (kind 1111).
+ *
+ * NIP-22 splits the reference into an uppercase *root scope* (`E`/`A`/`I` +
+ * `K` + `P`) and a lowercase *parent item* (`e`/`a`/`i` + `k` + `p`). A
+ * top-level comment repeats the root as its own parent.
+ *
+ * Every event/address/pubkey reference carries a relay hint where one is known,
+ * and `E`/`e` also carry the referenced event's author pubkey — NIP-22 specifies
+ * both, and without them a client that doesn't already hold the parent has no
+ * way to locate it or attribute it, which is what leaves comment threads showing
+ * unresolved placeholders.
+ *
+ * @param root - The event (or NIP-73 external URL) the whole thread hangs off.
+ * @param reply - The specific comment being replied to; omit for a top-level comment.
+ * @param hintFor - Optional relay-hint lookup, keyed by author pubkey.
+ */
+export function buildCommentTags(
+  root: NostrEvent | URL,
+  reply?: NostrEvent | URL,
+  hintFor?: RelayHintResolver,
+): string[][] {
+  const tags: string[][] = [];
+  const hint = (pubkey: string): string => {
+    const h = hintFor?.(pubkey);
+    return isValidRelayHint(h) ? h : '';
+  };
+
+  /** Push the event/address/external reference plus its kind and author tags.
+   *  `upper` selects the root scope (E/K/P) vs the parent item (e/k/p). */
+  const pushScope = (target: NostrEvent | URL, upper: boolean) => {
+    const [E, A, I, K, P] = upper
+      ? ['E', 'A', 'I', 'K', 'P']
+      : ['e', 'a', 'i', 'k', 'p'];
+
+    if (target instanceof URL) {
+      tags.push([I, target.toString()]);
+      // NIP-73: an external URL's "kind" is its scheme, not its hostname. (H5)
+      tags.push([K, target.protocol.replace(/:$/, '')]);
+      return;
+    }
+
+    const relay = hint(target.pubkey);
+    const d = target.tags.find(([name]) => name === 'd')?.[1] ?? '';
+    // A/P take the hint as their last element, so a blank one is simply dropped.
+    // E must keep position 3 occupied — the author pubkey lives at position 4.
+    const addr = isAddressableKind(target.kind)
+      ? `${target.kind}:${target.pubkey}:${d}`
+      : isReplaceableKind(target.kind)
+        ? `${target.kind}:${target.pubkey}:`
+        : null;
+    if (addr !== null) {
+      tags.push(relay ? [A, addr, relay] : [A, addr]);
+    } else {
+      tags.push([E, target.id, relay, target.pubkey]);
+    }
+    tags.push([K, target.kind.toString()]);
+    tags.push(relay ? [P, target.pubkey, relay] : [P, target.pubkey]);
+  };
+
+  pushScope(root, true);
+  // A top-level comment's parent IS the root — NIP-22 still requires the
+  // lowercase set, so repeat it rather than omitting it.
+  pushScope(reply ?? root, false);
   return tags;
 }

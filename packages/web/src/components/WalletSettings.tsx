@@ -77,7 +77,9 @@ export function WalletSettings() {
         <a href="https://coinos.io" target="_blank" rel="noopener noreferrer" className="text-purple-500 hover:underline">
           coinos.io
         </a>
-        {' '}&mdash; no signup required.
+        {/* Not "no signup required" — coinos does create an account for you.
+            What it doesn't ask for is identity: no KYC, no bank account. */}
+        {' '}&mdash; custodial; no ID or bank account needed.
       </p>
     </div>
   );

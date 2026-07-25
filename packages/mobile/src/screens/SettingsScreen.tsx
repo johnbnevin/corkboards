@@ -30,6 +30,7 @@ import { EmojiSetEditor } from '../components/EmojiSetEditor';
 import { EditProfileForm } from '../components/EditProfileForm';
 import { AdvancedSettings } from '../components/AdvancedSettings';
 import { RelayListManager } from '../components/RelayListManager';
+import { ScanToZapDialog } from '../components/ScanToZapDialog';
 import { useCollapsedNotes } from '../hooks/useCollapsedNotes';
 import { useBookmarks } from '../hooks/useBookmarks';
 import { useAppContext } from '../hooks/useAppContext';
@@ -101,6 +102,7 @@ export function SettingsScreen() {
   // for the setter/connect helpers used in the form below.
   const { nwcUri: _nwcUri, setNwcUri, isConnected: nwcConnected, walletRelay, disconnect: nwcDisconnect } = useNwc();
   const [nwcInput, setNwcInput] = useState('');
+  const [scanToZapVisible, setScanToZapVisible] = useState(false);
 
   // Backup
   const { status: backupStatus, message: backupMessage, checkpoints, lastBackupAgo, saveBackup, checkForBackup, restoreBackup } = useNostrBackup(pubkey ?? null, signer as NSecSigner | null);
@@ -375,8 +377,18 @@ export function SettingsScreen() {
               </TouchableOpacity>
             </>
           )}
+          {/* Pay a Lightning QR code (invoice / LNURL / address). Standalone —
+              not tied to a note, so it's a plain payment, not a NIP-57 zap. */}
+          <TouchableOpacity style={styles.button} onPress={() => setScanToZapVisible(true)}>
+            <Text style={styles.buttonText}>Scan to zap</Text>
+          </TouchableOpacity>
         </View>
       ) : null}
+
+      <ScanToZapDialog
+        visible={scanToZapVisible}
+        onClose={() => setScanToZapVisible(false)}
+      />
 
       {/* ---- Backup / Restore ---- */}
       {pubkey ? (

@@ -71,7 +71,7 @@ const ComposeDialog = lazy(async () => {
   const fresh = await import('@/components/ComposeDialog');
   return { default: fresh.ComposeDialog };
 });
-import { PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, Volume2, Smile, Loader2, SlidersHorizontal, Wifi, Server } from 'lucide-react';
+import { PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, Volume2, Smile, Loader2, SlidersHorizontal, Wifi, Server, ScanLine } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useRelayHealth } from '@/hooks/useRelayHealth';
@@ -81,6 +81,7 @@ import { useCollapsedNotes, BOOKMARK_SYNC_EVENT } from '@/hooks/useCollapsedNote
 import { useNotificationCount } from '@/hooks/useNotificationCount';
 import { useBookmarks } from '@/hooks/useBookmarks';
 import { ZapDialog } from '@/components/ZapDialog';
+import { ScanToZapDialog } from '@/components/ScanToZapDialog';
 import { WalletSettings } from '@/components/WalletSettings';
 import { EditProfileForm } from '@/components/EditProfileForm';
 import { ProfileCacheSettings } from '@/components/ProfileCacheSettings';
@@ -117,21 +118,20 @@ import { useFeedPagination } from '@/hooks/useFeedPagination';
 import { FeedGrid } from '@/components/FeedGrid';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { FeedInfoCard } from '@/components/FeedInfoCard';
-import { getNoteCategories, noteMatchesHashtags, computeHashtagCounts, computeNoteKindStats } from '@core/noteCategories';
+import { getNoteCategories, noteMatchesHashtags, noteMatchesKindFilters, computeHashtagCounts, computeNoteKindStats } from '@core/noteCategories';
+import { noteMatchesContentFilters, hasActiveContentFilters as hasActiveContentFiltersFor } from '@core/contentFilters';
 import { StatusBar } from '@/components/StatusBar';
 import { TabBar } from '@/components/TabBar';
 import { NotificationsCorkboard } from '@/components/NotificationsCorkboard';
+import { playConsolidateSound, previewConsolidateSound } from '@/lib/consolidateSound';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 
 
 
 // Feed utilities imported from feedUtils above
 
-// Content-filter regexes — hoisted to module scope so they are compiled once, not per-render
-const FILTER_EMOJI_ONLY = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}\s\uFE0F\u200D]+$/u;
-const FILTER_URL_ONLY = /^\s*(https?:\/\/\S+\s*)+$/i;
-const FILTER_MEDIA_URL = /\.(jpg|jpeg|png|gif|webp|mp4|webm|mov|ogg|svg)\b/i;
-const FILTER_HTML_PATTERN = /<\/?[a-z][\s\S]*?>/i;
-const FILTER_MD_PATTERN = /(\[.+?\]\(.+?\)|^#{1,6}\s|^\*{1,3}.+?\*{1,3}$|^[-*+]\s|!\[|^>\s|```)/m;
+// Content-filter regexes now live in @core/contentFilters, next to the predicate
+// that uses them, so web and mobile evaluate identical rules.
 const AUTO_SAVE_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes after page load — prevents overwriting good backup with empty state
 
 // Estimate note height for column balancing
@@ -634,6 +634,7 @@ export function MultiColumnClient() {
   // Zap dialog state
   const [zapTargetNote, setZapTargetNote] = useState<NostrEvent | null>(null);
   const [walletSettingsOpen, setWalletSettingsOpen] = useState(false);
+  const [scanToZapOpen, setScanToZapOpen] = useState(false);
   const [editProfileOpen, setEditProfileOpen] = useState(false);
   const [profileCacheSettingsOpen, setProfileCacheSettingsOpen] = useState(false);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
@@ -645,42 +646,7 @@ export function MultiColumnClient() {
   const [renderMarkdown, setRenderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true);
   /** Play 3 sound previews — starts slow, graduates faster (like a consolidate ramping up) */
   const previewSound = useCallback((style: string) => {
-    if (style === 'off') return;
-    try {
-      const ctx = new AudioContext();
-      void ctx.resume();
-      // Gaps: 0.25s then 0.15s — starts slow, gets faster
-      const gaps = [0, 0.25, 0.40];
-      for (let i = 0; i < 3; i++) {
-        const t = ctx.currentTime + gaps[i];
-        if (style === 'chimes') {
-          const scale = [523, 659, 880];
-          const freq = scale[i];
-          const osc = ctx.createOscillator(); osc.type = 'sine'; osc.frequency.value = freq;
-          const osc2 = ctx.createOscillator(); osc2.type = 'triangle'; osc2.frequency.value = freq * 3;
-          const g = ctx.createGain(); const g2 = ctx.createGain();
-          g.gain.setValueAtTime(0.045, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-          g2.gain.setValueAtTime(0.011, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.21);
-          osc.connect(g).connect(ctx.destination); osc2.connect(g2).connect(ctx.destination);
-          osc.start(t); osc.stop(t + 0.35); osc2.start(t); osc2.stop(t + 0.21);
-        } else {
-          // Solitaire swoosh
-          const bufLen = Math.floor(ctx.sampleRate * 0.08);
-          const buf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
-          const data = buf.getChannelData(0);
-          for (let j = 0; j < bufLen; j++) data[j] = Math.random() * 2 - 1;
-          const noise = ctx.createBufferSource(); noise.buffer = buf;
-          const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2000; hp.Q.value = 0.5;
-          const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 4000 + Math.random() * 1000; bp.Q.value = 0.7;
-          const env = ctx.createGain();
-          env.gain.setValueAtTime(0.001, t);
-          env.gain.linearRampToValueAtTime(0.1125, t + 0.015);
-          env.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
-          noise.connect(hp).connect(bp).connect(env).connect(ctx.destination);
-          noise.start(t); noise.stop(t + 0.08);
-        }
-      }
-    } catch { /* audio not available */ }
+    void previewConsolidateSound(style);
   }, []);
   const setConsolidateSound = useCallback((val: string) => {
     setConsolidateSoundRaw(val);
@@ -1237,6 +1203,11 @@ export function MultiColumnClient() {
   const hideHtml = currentTabSettings.hideHtml ?? false;
   const hideMarkdown = currentTabSettings.hideMarkdown ?? false;
   const hideExactText = currentTabSettings.hideExactText ?? '';
+  // The input stays bound to hideExactText so typing feels instant; the FEED
+  // reads the debounced copy. Every keystroke otherwise re-ran the whole
+  // pipeline — dedupe, classify, filter, sort, recount hashtags — across every
+  // loaded note, which is what made typing in this box lag.
+  const debouncedHideExactText = useDebouncedValue(hideExactText, 250);
   const showOwnNotes = currentTabSettings.showOwnNotes ?? false;
   const showPinned = currentTabSettings.showPinned ?? true;
   const showUnpinned = currentTabSettings.showUnpinned ?? true;
@@ -1250,11 +1221,25 @@ export function MultiColumnClient() {
   const filterMode: 'any' | 'strict' = currentTabSettings.filterMode ?? 'any';
   const hashtagFilters = useMemo(() => new Set<string>(currentTabSettings.hashtagFilters ?? []), [currentTabSettings]);
 
-  // Content filter config object for ContentFilters component
+  // Content filter config object — drives both the ContentFilters UI and the
+  // shared @core predicate that actually filters the feed. hideHtml has no
+  // control in the panel but is a per-tab setting, so it belongs here too;
+  // leaving it out meant the feed predicate and the UI disagreed about state.
   const contentFilterConfig = useMemo<ContentFilterConfig>(() => ({
     hideMinChars, hideOnlyEmoji, hideOnlyMedia, hideOnlyLinks,
-    hideMarkdown, hideExactText, allowPV, allowGM, allowGN, allowEyes, allow100,
-  }), [hideMinChars, hideOnlyEmoji, hideOnlyMedia, hideOnlyLinks, hideMarkdown, hideExactText, allowPV, allowGM, allowGN, allowEyes, allow100]);
+    hideMarkdown, hideHtml, hideExactText, allowPV, allowGM, allowGN, allowEyes, allow100,
+  }), [hideMinChars, hideOnlyEmoji, hideOnlyMedia, hideOnlyLinks, hideMarkdown, hideHtml, hideExactText, allowPV, allowGM, allowGN, allowEyes, allow100]);
+
+  // Same config, but carrying the debounced text — this is what the feed filters
+  // on. Built from the primitives rather than by spreading contentFilterConfig:
+  // that object's identity changes on every keystroke, so spreading it would
+  // change this one's identity too and the feed memo would re-run regardless of
+  // the debounce.
+  const feedContentFilterConfig = useMemo<ContentFilterConfig>(() => ({
+    hideMinChars, hideOnlyEmoji, hideOnlyMedia, hideOnlyLinks,
+    hideMarkdown, hideHtml, hideExactText: debouncedHideExactText,
+    allowPV, allowGM, allowGN, allowEyes, allow100,
+  }), [hideMinChars, hideOnlyEmoji, hideOnlyMedia, hideOnlyLinks, hideMarkdown, hideHtml, debouncedHideExactText, allowPV, allowGM, allowGN, allowEyes, allow100]);
 
   // Column count: per-tab from settings, separate for small/large screens
   const isSmallScreen = window.innerWidth < 768;
@@ -2331,7 +2316,7 @@ export function MultiColumnClient() {
 
 
 
-  const hasActiveContentFilters = hideMinChars > 0 || hideOnlyEmoji || hideOnlyMedia || hideOnlyLinks || hideHtml || hideMarkdown || hideExactText.length > 0;
+  const hasActiveContentFilters = hasActiveContentFiltersFor(feedContentFilterConfig);
   const hasActiveFilters = kindFilters.size > 0 || hashtagFilters.size > 0 || hasActiveContentFilters;
 
   const discoverStats = useMemo(() => computeNoteKindStats(discoveredNotes), [discoveredNotes]);
@@ -3024,33 +3009,23 @@ export function MultiColumnClient() {
       });
     }
 
-    // Kind filters — two modes:
-    // 'any' (default): show if ANY category is enabled (e.g. reaction-to-video shows if reactions OR videos on)
-    // 'strict': hide if ANY category is disabled (e.g. reaction-to-video hidden if images off, even if reactions on)
+    // Kind filters — two modes, evaluated by the shared rule in @core so web
+    // and mobile agree:
+    // 'any' (loose, default): keep a note when something SPECIFIC about it is
+    //   still wanted (a reaction to a video survives hiding reactions). The
+    //   generic shortNotes/replies/other buckets don't count as specific —
+    //   letting them count is what made "hide images" a no-op, since every
+    //   image post is also a short note.
+    // 'strict': hide if ANY of the note's categories is disabled.
     const categoryToFilter: Record<string, KindFilter> = {
       shortNotes: 'posts', replies: 'replies', longForm: 'articles',
       videos: 'videos', images: 'images', reposts: 'reposts', reactions: 'reactions',
       highlights: 'highlights', recipes: 'recipes', other: 'posts',
     };
     if (kindFilters.size > 0) {
-      filteredNotes = filteredNotes.filter(note => {
-        const cats = getNoteCategories(note, eventLookup);
-        if (filterMode === 'strict') {
-          // Strict: hide if ANY of the note's categories is filtered out
-          for (const cat of cats) {
-            const filter = categoryToFilter[cat];
-            if (filter && kindFilters.has(filter)) return false;
-          }
-          return true;
-        } else {
-          // Any (default): show if at least one category is NOT filtered out
-          for (const cat of cats) {
-            const filter = categoryToFilter[cat];
-            if (!filter || !kindFilters.has(filter)) return true;
-          }
-          return false;
-        }
-      });
+      filteredNotes = filteredNotes.filter(note =>
+        noteMatchesKindFilters(getNoteCategories(note, eventLookup), kindFilters, categoryToFilter, filterMode)
+      );
     }
 
     // Hashtag filters — only show notes whose hashtags match the selection.
@@ -3069,31 +3044,13 @@ export function MultiColumnClient() {
       });
     }
 
-    // Content filters
+    // Content filters — the predicate lives in @core/contentFilters so mobile
+    // evaluates exactly the same rules.
     if (hasActiveContentFilters) {
-      const exactLower = hideExactText.trim().toLowerCase();
-      filteredNotes = filteredNotes.filter(note => {
-        if (note.kind !== 1 && note.kind !== 7) return true;
-        const trimmed = note.content.trim();
-        if (FILTER_EMOJI_ONLY.test(trimmed)) {
-          const stripped = trimmed.replace(/[\s\uFE0F\u200D]/gu, '');
-          /* eslint-disable no-misleading-character-class */
-          if (allowPV && /^[💜🟣]+$/u.test(stripped)) return true;
-          if (allowGM && /^[☀️🌅🌄🌞🔆☕]+$/u.test(stripped)) return true;
-          if (allowGN && /^[🌙🌃🌌🌛🌜✨💤😴🛌]+$/u.test(stripped)) return true;
-          if (allowEyes && /^[👀]+$/u.test(stripped)) return true;
-          if (allow100 && /^[💯🔥]+$/u.test(stripped)) return true;
-          /* eslint-enable no-misleading-character-class */
-        }
-        if (hideMinChars > 0 && trimmed.length > 0 && trimmed.length <= hideMinChars) return false;
-        if (hideOnlyEmoji && FILTER_EMOJI_ONLY.test(trimmed)) return false;
-        if (hideOnlyMedia && FILTER_MEDIA_URL.test(trimmed) && trimmed.replace(/https?:\/\/\S+/g, '').trim().length === 0) return false;
-        if (hideOnlyLinks && FILTER_URL_ONLY.test(trimmed)) return false;
-        if (hideHtml && FILTER_HTML_PATTERN.test(trimmed)) return false;
-        if (hideMarkdown && FILTER_MD_PATTERN.test(trimmed)) return false;
-        if (exactLower && trimmed.toLowerCase() === exactLower) return false;
-        return true;
-      });
+      const textLower = debouncedHideExactText.trim().toLowerCase();
+      filteredNotes = filteredNotes.filter(note =>
+        noteMatchesContentFilters(note, feedContentFilterConfig, textLower)
+      );
     }
 
     // Sort: pinned first, then by time descending — 'me' tab only. On other
@@ -3133,7 +3090,7 @@ export function MultiColumnClient() {
     const allDismissed = deduplicatedNotes.length > 0 && finalNotes.length === 0 && !hasFiltersActive;
 
     return { notes: finalNotes, filteredHashtags: computedHashtags, hasFilteredNotes, allDismissed };
-  }, [deduplicatedNotes, eventLookup, noteClassifications, isDismissed, dismissedThreadRootSet, isOnboarding, isDiscoverTab, kindFilters, filterMode, hashtagFilters, hasActiveContentFilters, hideMinChars, hideOnlyEmoji, allowPV, allowGM, allowGN, allowEyes, allow100, hideOnlyMedia, hideOnlyLinks, hideHtml, hideMarkdown, hideExactText, pinnedIdSet, showOwnNotes, showPinned, showUnpinned, activeTab, user?.pubkey]);
+  }, [deduplicatedNotes, eventLookup, noteClassifications, isDismissed, dismissedThreadRootSet, isOnboarding, isDiscoverTab, kindFilters, filterMode, hashtagFilters, hasActiveContentFilters, feedContentFilterConfig, debouncedHideExactText, pinnedIdSet, showOwnNotes, showPinned, showUnpinned, activeTab, user?.pubkey]);
 
   // Keep allDismissed ref in sync for handleLoadMoreByCount callback
   allDismissedRef.current = allDismissed;
@@ -3341,82 +3298,10 @@ export function MultiColumnClient() {
         }
       }
     }
-    // Play consolidate sound effect
-    const style = consolidateSoundRef.current;
+    // Play consolidate sound effect. Fire-and-forget: the shared AudioContext
+    // may need resuming first, and the visual consolidate must not wait on audio.
     const actualBlanks = notes.filter((n, i) => i <= lastBlankIdx && (isCollapsedThisSession(n.id) || isSoftDismissed(n.id))).length;
-    if (actualBlanks > 0 && style !== 'off') {
-      try {
-        const ctx = new AudioContext();
-        void ctx.resume();
-        const blanks = actualBlanks;
-        const count = Math.min(blanks, 2000);
-
-        // Timing: accelerate mode starts slow (~0.25s gap) and graduates to fast.
-        // Shuffle mode uses fast uniform spacing like a card shuffle.
-        const accelerate = soundAccelerateRef.current;
-        const shuffleGap = 0.04;
-        const startGap = accelerate ? 0.25 : shuffleGap;
-        const endGap = accelerate ? (count > 1 ? Math.max(0.005, 10 / (count * count)) : startGap) : shuffleGap;
-
-        if (style === 'chimes') {
-          // Chime cascade — layered bell tones walking up a pentatonic scale
-          const scale = [523, 587, 659, 784, 880, 1047, 1175, 1319, 1568, 1760];
-          let elapsed = 0;
-          for (let i = 0; i < count; i++) {
-            const t = ctx.currentTime + elapsed;
-            const progress = count > 1 ? i / (count - 1) : 0;
-            // Ease-in: gap shrinks from startGap → endGap as progress² ramps up
-            elapsed += startGap - (startGap - endGap) * (progress ** 2);
-            const noteIdx = Math.floor(progress * (scale.length - 1));
-            const freq = scale[noteIdx] + (Math.random() - 0.5) * 10;
-            const osc1 = ctx.createOscillator(); osc1.type = 'sine'; osc1.frequency.value = freq;
-            const osc2 = ctx.createOscillator(); osc2.type = 'triangle'; osc2.frequency.value = freq * 3;
-            const osc3 = ctx.createOscillator(); osc3.type = 'sine'; osc3.frequency.value = freq * 5.2;
-            const g1 = ctx.createGain(); const g2 = ctx.createGain(); const g3 = ctx.createGain();
-            g1.gain.setValueAtTime(0.045, t); g1.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-            g2.gain.setValueAtTime(0.011, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.21);
-            g3.gain.setValueAtTime(0.004, t); g3.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
-            osc1.connect(g1).connect(ctx.destination); osc2.connect(g2).connect(ctx.destination); osc3.connect(g3).connect(ctx.destination);
-            osc1.start(t); osc1.stop(t + 0.35); osc2.start(t); osc2.stop(t + 0.21); osc3.start(t); osc3.stop(t + 0.1);
-          }
-        } else {
-          // Solitaire — one short swoosh/shuffle per 3 notes consolidated
-          // Starts slow (~0.5s gap), graduates faster
-          const swooshCount = Math.max(1, Math.ceil(blanks / 3));
-          const swooshEndGap = swooshCount > 1 ? Math.max(0.02, 10 / (swooshCount * swooshCount)) : startGap;
-          let elapsed = 0;
-          for (let i = 0; i < swooshCount; i++) {
-            const t = ctx.currentTime + elapsed;
-            const progress = swooshCount > 1 ? i / (swooshCount - 1) : 0;
-            elapsed += startGap - (startGap - swooshEndGap) * (progress ** 2);
-            // Filtered noise swoosh — longer than a click, shorter than wind
-            const bufLen = Math.floor(ctx.sampleRate * 0.08);
-            const buf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
-            const data = buf.getChannelData(0);
-            for (let j = 0; j < bufLen; j++) data[j] = (Math.random() * 2 - 1);
-            const noise = ctx.createBufferSource();
-            noise.buffer = buf;
-            // Highpass to keep it airy, not boomy
-            const hp = ctx.createBiquadFilter();
-            hp.type = 'highpass';
-            hp.frequency.value = 2000;
-            hp.Q.value = 0.5;
-            // Bandpass for body
-            const bp = ctx.createBiquadFilter();
-            bp.type = 'bandpass';
-            bp.frequency.value = 4000 + Math.random() * 1000;
-            bp.Q.value = 0.7;
-            // Envelope: quick fade in, quick fade out — "fft" shape
-            const env = ctx.createGain();
-            env.gain.setValueAtTime(0.001, t);
-            env.gain.linearRampToValueAtTime(0.1125, t + 0.015);
-            env.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
-            noise.connect(hp).connect(bp).connect(env).connect(ctx.destination);
-            noise.start(t); noise.stop(t + 0.08);
-          }
-        }
-      } catch { /* audio not available */ }
-    }
+    void playConsolidateSound(consolidateSoundRef.current, actualBlanks, soundAccelerateRef.current);
     rawConsolidate();
     if (scrollTargetId) scrollToNote(scrollTargetId);
   }, [notes, isCollapsedThisSession, isSoftDismissed, rawConsolidate, scrollToNote]);
@@ -3436,21 +3321,36 @@ export function MultiColumnClient() {
     }
   }, [scrollTargetNoteId, scrollToNote, clearScrollTarget, autofetch]);
 
-  // Auto-consolidate and/or scroll to top when autofetch brings in new notes
+  // Auto-consolidate and/or scroll to top when new notes arrive.
+  //
+  // Both toggles say "when new notes arrive", and that's what they now do. They
+  // used to additionally require autofetch to be ON, so pressing "newer" by hand
+  // — the way most people load notes — never triggered either one, which is why
+  // auto-consolidate looked broken.
+  //
+  // The blank count is read through a ref at fire time rather than captured in
+  // the closure: it's re-derived a render or two after the new notes land, and
+  // the stale value could be 0 exactly when the consolidate was wanted. The ref
+  // also keeps it out of the dep array, so the effect stops re-running (and
+  // re-baselining prevFreshCountRef) every time a note is dismissed.
+  const blankSpaceCountRef = useRef(blankSpaceCount);
+  blankSpaceCountRef.current = blankSpaceCount;
   const prevFreshCountRef = useRef(freshNoteIds.size);
   useEffect(() => {
     const prevCount = prevFreshCountRef.current;
     prevFreshCountRef.current = freshNoteIds.size;
-    // Only trigger when fresh notes increased (new notes arrived) and autofetch is on
-    if (!autofetch || freshNoteIds.size <= prevCount) return;
-    if (autoConsolidate && blankSpaceCount > 0) {
+    // Only trigger when fresh notes increased (new notes arrived)
+    if (freshNoteIds.size <= prevCount) return;
+    if (autoConsolidate) {
       // Delay slightly so DOM settles before consolidating
-      setTimeout(() => rawConsolidate(), 150);
+      setTimeout(() => {
+        if (blankSpaceCountRef.current > 0) rawConsolidate();
+      }, 150);
     }
     if (autoScrollTop) {
       setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), autoConsolidate ? 300 : 150);
     }
-  }, [freshNoteIds.size, autofetch, autoConsolidate, autoScrollTop, blankSpaceCount, rawConsolidate]);
+  }, [freshNoteIds.size, autoConsolidate, autoScrollTop, rawConsolidate]);
 
   // (findingUndismissed state + allDismissedRef declared earlier, before notes derivation)
 
@@ -3699,6 +3599,10 @@ export function MultiColumnClient() {
                     <DropdownMenuItem onClick={() => setWalletSettingsOpen(true)} className="flex items-center gap-2 cursor-pointer p-2 rounded-md">
                       <Wallet className="h-4 w-4" />
                       <span className="text-sm">Connect Wallet</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setScanToZapOpen(true)} className="flex items-center gap-2 cursor-pointer p-2 rounded-md">
+                      <ScanLine className="h-4 w-4" />
+                      <span className="text-sm">Scan to Zap</span>
                     </DropdownMenuItem>
                     {/* Switch to another logged-in account (mobile-viewport menu — the
                         desktop header uses AccountSwitcher for this). */}
@@ -4612,6 +4516,15 @@ export function MultiColumnClient() {
           note={zapTargetNote}
           open={!!zapTargetNote}
           onOpenChange={(open) => { if (!open) setZapTargetNote(null); }}
+          onOpenWalletSettings={() => setWalletSettingsOpen(true)}
+        />
+
+        {/* Scan a Lightning QR code and pay it with the connected wallet.
+            Standalone: unlike ZapDialog this isn't tied to a note or author,
+            so it's a plain payment rather than a NIP-57 zap. */}
+        <ScanToZapDialog
+          open={scanToZapOpen}
+          onOpenChange={setScanToZapOpen}
           onOpenWalletSettings={() => setWalletSettingsOpen(true)}
         />
 

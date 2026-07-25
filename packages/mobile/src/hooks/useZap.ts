@@ -8,7 +8,8 @@ import { useAuth } from '../lib/AuthContext';
 import { useAuthor } from './useAuthor';
 import { useNwc } from './useNwc';
 import { ZAP_RELAYS } from '../lib/NostrProvider';
-import { resolveZapEndpoint, isSafeZapUrl } from '@core/zap';
+import { resolveZapEndpoint } from '@core/zap';
+import { fetchLnurlPayInfo, checkSendableRange, buildInvoiceUrl, requestInvoice } from '@core/lnurlPay';
 
 export function useZap(note: NostrEvent | null) {
   const { signer } = useAuth();
@@ -39,39 +40,18 @@ export function useZap(note: NostrEvent | null) {
     try {
       const amountMsats = amountSats * 1000;
 
-      // 1. Fetch the LNURL pay info (endpoint resolved from lud16 or lud06)
-      const lnurlResponse = await fetch(zapEndpoint, { signal: AbortSignal.timeout(15000) });
-      if (!lnurlResponse.ok) throw new Error(`LNURL server returned ${lnurlResponse.status}`);
-      const lnurlText = await lnurlResponse.text();
-      let lnurlData: Record<string, unknown>;
-      try {
-        lnurlData = JSON.parse(lnurlText);
-      } catch {
-        throw new Error('LNURL server returned invalid JSON');
-      }
-      if (lnurlData.status === 'ERROR') {
-        throw new Error((lnurlData.reason as string) || 'LNURL server returned an error');
-      }
-      if (!lnurlData.callback) throw new Error('LNURL server missing callback');
-      if (lnurlData.minSendable && amountMsats < (lnurlData.minSendable as number)) {
-        throw new Error(`Minimum sendable is ${Math.ceil((lnurlData.minSendable as number) / 1000)} sats`);
-      }
-      if (lnurlData.maxSendable && amountMsats > (lnurlData.maxSendable as number)) {
-        throw new Error(`Maximum sendable is ${Math.floor((lnurlData.maxSendable as number) / 1000)} sats`);
-      }
+      // 1. Fetch + validate the LNURL pay info (endpoint resolved from lud16 or
+      //    lud06). The fetch, the JSON handling and the SSRF re-check of the
+      //    server's own callback all live in @core/lnurlPay, shared with web.
+      const info = await fetchLnurlPayInfo(zapEndpoint);
+      const rangeError = checkSendableRange(info, amountMsats);
+      if (rangeError) throw new Error(rangeError);
 
-      // 2. Build callback URL — include zap request only if server supports NIP-57
-      const callback = lnurlData.callback as string;
-      // SSRF guard: the callback comes from the (untrusted) LNURL server's JSON.
-      // Never fetch it — or POST a signed zap request to it — unless it's https
-      // and not a private/metadata host.
-      if (!isSafeZapUrl(callback)) {
-        throw new Error('LNURL server returned an unsafe callback URL');
-      }
-      const separator = callback.includes('?') ? '&' : '?';
-      let invoiceUrl = `${callback}${separator}amount=${amountMsats}`;
-
-      if (lnurlData.allowsNostr && lnurlData.nostrPubkey) {
+      // 2. Build the callback URL. A NIP-57 zap request is attached only when
+      //    the server can actually produce a zap receipt; otherwise this
+      //    degrades to a plain LNURL payment with the comment inline.
+      let extraParams: Record<string, string> | undefined;
+      if (info.allowsNostr && info.nostrPubkey) {
         const zapRequest = await signer.signEvent({
           kind: 9734,
           content: comment || '',
@@ -83,23 +63,17 @@ export function useZap(note: NostrEvent | null) {
           ],
           created_at: Math.floor(Date.now() / 1000),
         });
-        invoiceUrl += `&nostr=${encodeURIComponent(JSON.stringify(zapRequest))}`;
-      } else if (comment) {
-        const commentAllowed = (lnurlData.commentAllowed as number) || 0;
-        if (commentAllowed > 0) {
-          invoiceUrl += `&comment=${encodeURIComponent(comment.slice(0, commentAllowed))}`;
-        }
+        extraParams = { nostr: JSON.stringify(zapRequest) };
       }
+      // The comment rides in the signed zap request when there is one; passing
+      // it as well would duplicate it on servers that honour both.
+      const invoiceUrl = buildInvoiceUrl(info, amountMsats, {
+        comment: extraParams ? undefined : comment,
+        extraParams,
+      });
 
       // 3. Request invoice
-      const invoiceResponse = await fetch(invoiceUrl, { signal: AbortSignal.timeout(15000) });
-      if (!invoiceResponse.ok) throw new Error(`Invoice request failed (${invoiceResponse.status})`);
-      const invoiceData = await invoiceResponse.json();
-      if (invoiceData.status === 'ERROR') {
-        throw new Error(invoiceData.reason || 'LNURL service returned an error');
-      }
-      const bolt11 = invoiceData.pr;
-      if (!bolt11) throw new Error('No invoice returned from LNURL service');
+      const bolt11 = await requestInvoice(invoiceUrl);
 
       // 4. Pay via NWC
       await payInvoice(bolt11);

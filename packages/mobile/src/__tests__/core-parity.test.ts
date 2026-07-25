@@ -122,11 +122,13 @@ describe('host safety gates (shared with web)', () => {
 describe('NIP-10 reply tags (shared with web)', () => {
   const ID_ROOT = 'a'.repeat(64);
   const ID_PARENT = 'b'.repeat(64);
+  const PK_PARENT = '1'.repeat(64);
+  const PK_ROOT = '2'.repeat(64);
 
-  it('roots a reply to a top-level note at that note', () => {
-    const parent = ev({ kind: 1, id: ID_PARENT, pubkey: 'pk_parent' });
+  it('roots a reply to a top-level note at that note, with hint and author', () => {
+    const parent = ev({ kind: 1, id: ID_PARENT, pubkey: PK_PARENT });
     expect(buildReplyTags(parent, 'wss://hint.example').filter(t => t[0] === 'e')).toEqual([
-      ['e', ID_PARENT, 'wss://hint.example', 'root'],
+      ['e', ID_PARENT, 'wss://hint.example', 'root', PK_PARENT],
     ]);
   });
 
@@ -134,12 +136,12 @@ describe('NIP-10 reply tags (shared with web)', () => {
     const parent = ev({
       kind: 1,
       id: ID_PARENT,
-      pubkey: 'pk_parent',
-      tags: [['e', ID_ROOT, '', 'root'], ['p', 'pk_root'], ['p', 'pk_parent']],
+      pubkey: PK_PARENT,
+      tags: [['e', ID_ROOT, '', 'root'], ['p', PK_ROOT], ['p', PK_PARENT]],
     });
     expect(buildReplyTags(parent).filter(t => t[0] === 'p')).toEqual([
-      ['p', 'pk_parent'],
-      ['p', 'pk_root'],
+      ['p', PK_PARENT],
+      ['p', PK_ROOT],
     ]);
   });
 });

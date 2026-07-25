@@ -2,24 +2,15 @@ import { memo } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { usePlatformStorage } from '@/hooks/usePlatformStorage';
 import { STORAGE_KEYS } from '@/lib/storageKeys';
+import type { ContentFilterConfig, ContentFilterKey } from '@core/contentFilters';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+//
+// The shape lives in @core alongside the predicate that consumes it, so the
+// controls and the filtering can't drift apart. Re-exported here because every
+// existing import points at this module.
 
-export interface ContentFilterConfig {
-  hideMinChars: number;
-  hideOnlyEmoji: boolean;
-  hideOnlyMedia: boolean;
-  hideOnlyLinks: boolean;
-  hideMarkdown: boolean;
-  hideExactText: string;
-  allowPV: boolean;
-  allowGM: boolean;
-  allowGN: boolean;
-  allowEyes: boolean;
-  allow100: boolean;
-}
-
-export type ContentFilterKey = keyof ContentFilterConfig;
+export type { ContentFilterConfig, ContentFilterKey } from '@core/contentFilters';
 
 interface ContentFiltersProps {
   config: ContentFilterConfig;
@@ -100,9 +91,12 @@ export const ContentFilters = memo(function ContentFilters({
             ))}
           </div>
 
-          {/* Exact text match */}
+          {/* Substring match on whatever the note displays. Labelled
+              "contains" rather than "exact" because whole-content equality —
+              what it used to do — essentially never matched a real note, so the
+              field read as broken. */}
           <div className="flex items-center gap-1.5">
-            <label className="text-xs text-muted-foreground whitespace-nowrap">This exact text:</label>
+            <label className="text-xs text-muted-foreground whitespace-nowrap">Contains this text:</label>
             <input
               type="text"
               value={config.hideExactText}

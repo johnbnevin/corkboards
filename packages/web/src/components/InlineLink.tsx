@@ -3,6 +3,7 @@ import { Copy, Check, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { useLinkCopy } from '@/hooks/useLinkCopy'
 import { LinkCopyContextMenu } from './LinkCopyContextMenu'
 import { TrackerWarningDialog } from './TrackerWarningDialog'
+import { openExternal } from '@/lib/openExternal'
 
 /**
  * Inline external link (markdown `[text](url)` inside note text) with a small
@@ -21,8 +22,8 @@ export function InlineLink({ url, children }: { url: string; children: React.Rea
     copyClean()
   }
 
-  const openClean = () => window.open(cleanUrl, '_blank', 'noopener,noreferrer')
-  const openOriginal = () => window.open(url, '_blank', 'noopener,noreferrer')
+  const openClean = () => openExternal(cleanUrl)
+  const openOriginal = () => openExternal(url)
 
   return (
     <LinkCopyContextMenu

@@ -74,6 +74,29 @@ export function isBlossomUrl(url: string): boolean {
 }
 
 /**
+ * Identity key for "is this the same picture?" — for dedup only, never display.
+ *
+ * `canonicalMediaUrl` normalizes cosmetic differences (scheme, www, trailing
+ * slash) but still keys on the host, so the *same* blob mirrored to two Blossom
+ * servers reads as two files. That is the common case now that uploads are
+ * mirrored for redundancy: a note whose content links `blossom.band/<sha>.jpg`
+ * while its imeta tag names `cdn.satellite.earth/<sha>.jpg` rendered the image
+ * twice.
+ *
+ * When we know the content hash — from an explicit NIP-92 `x` field, or because
+ * the URL's last path segment IS the hash — key on the hash and the host drops
+ * out. Otherwise fall back to the URL key.
+ *
+ * @param canonical - Result of `canonicalMediaUrl(url)`, used when no hash is known.
+ */
+export function mediaIdentityKey(url: string, canonical: string, sha256?: string): string {
+  if (sha256 && /^[0-9a-f]{64}$/i.test(sha256)) return `sha256:${sha256.toLowerCase()}`;
+  const ref = extractBlossomRef(url);
+  if (ref) return `sha256:${ref.hash}`;
+  return canonical;
+}
+
+/**
  * Build blob URLs for a given sha256 hash on every server, in priority order.
  * The hash-first primitive: works regardless of what the primary URL's path
  * looked like, so a note that records the sha256 (NIP-92 `x`) can fall back

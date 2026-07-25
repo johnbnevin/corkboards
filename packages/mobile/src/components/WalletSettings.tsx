@@ -12,9 +12,9 @@ import {
   TouchableOpacity,
   StyleSheet,
   Alert,
-  Linking,
 } from 'react-native';
 import { useNwc } from '../hooks/useNwc';
+import { openExternal } from '../lib/openExternal';
 
 export function WalletSettings() {
   const { setNwcUri, isConnected, walletRelay, disconnect } = useNwc();
@@ -104,11 +104,13 @@ export function WalletSettings() {
         Need a wallet?{' '}
         <Text
           style={styles.helpLink}
-          onPress={() => Linking.openURL('https://coinos.io')}
+          onPress={() => openExternal('https://coinos.io')}
         >
           coinos.io
         </Text>
-        {' \u2014 no signup required.'}
+        {/* Not "no signup required" \u2014 coinos does create an account for you.
+            What it doesn't ask for is identity: no KYC, no bank account. */}
+        {' \u2014 custodial; no ID or bank account needed.'}
       </Text>
     </View>
   );

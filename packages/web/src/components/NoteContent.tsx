@@ -10,7 +10,7 @@ import { MARKDOWN_INDICATORS_PATTERN } from '@/lib/markdownDetect'
 import { canonicalMediaUrl } from '@core/sanitizeUtils'
 import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr'
 import { optimizeMediaUrl } from '@/lib/imageUtils'
-import { parseImetaTag, type ImetaData } from '@core/blossom'
+import { parseImetaTag, mediaIdentityKey, type ImetaData } from '@core/blossom'
 import { InlineLink } from './InlineLink'
 import { useHashtagAction } from '@/contexts/hashtagAction'
 import { WebLink } from './WebLink'
@@ -200,26 +200,63 @@ function getImetaData(event: NostrEvent): { posters: Map<string, string>; videoU
       imageUrls.push(url)
     }
   }
-  // Dedupe by canonical URL — a note may carry duplicate/near-duplicate imeta
-  // tags (some clients emit the same file twice), which would otherwise render
-  // the media multiple times.
+  // Dedupe by content identity — a note may carry duplicate/near-duplicate imeta
+  // tags (some clients emit the same file twice, or list two mirrors of it),
+  // which would otherwise render the media multiple times.
+  const keyOf = (url: string) => mediaKey(url, imetaMeta.get(url)?.sha256)
   return {
     posters,
-    videoUrls: dedupeByCanonical(videoUrls),
-    imageUrls: dedupeByCanonical(imageUrls),
+    videoUrls: dedupeBy(videoUrls, keyOf),
+    imageUrls: dedupeBy(imageUrls, keyOf),
     imetaMeta,
   }
 }
 
-/** Keep the first occurrence of each canonical URL, preserving order. */
-function dedupeByCanonical(urls: string[]): string[] {
+/**
+ * Dedup key for a media URL. Prefers the blob's sha256 (from the imeta `x`
+ * field or a content-addressed path) so the same file mirrored across Blossom
+ * servers counts once; falls back to the canonical URL otherwise.
+ */
+function mediaKey(url: string, sha256?: string): string {
+  return mediaIdentityKey(url, canonicalMediaUrl(url), sha256)
+}
+
+/** Keep the first occurrence of each key, preserving order. */
+function dedupeBy(urls: string[], keyOf: (url: string) => string): string[] {
   const seen = new Set<string>()
   const out: string[] = []
   for (const url of urls) {
-    const key = canonicalMediaUrl(url)
+    const key = keyOf(url)
     if (!seen.has(key)) { seen.add(key); out.push(url) }
   }
   return out
+}
+
+/**
+ * Drop repeat references to the same media inside a single note's content.
+ *
+ * Authors and clients quite regularly emit the same picture twice — a URL in
+ * the body plus the same URL appended by an upload widget, a markdown
+ * `![](url)` alongside the bare link, or two mirrors of one Blossom blob. All
+ * of those rendered as two copies of the image stacked on top of each other.
+ * Only *media* parts are folded; the surrounding text is untouched, so nothing
+ * the author actually wrote disappears.
+ */
+function dropRepeatedMedia(parts: ContentPart[]): ContentPart[] {
+  const seen = new Set<string>()
+  let duplicate = false
+  const out: ContentPart[] = []
+  for (const part of parts) {
+    if (part.type === 'media') {
+      const key = mediaKey(part.value)
+      if (seen.has(key)) { duplicate = true; continue }
+      seen.add(key)
+    }
+    out.push(part)
+  }
+  // Preserve referential identity when there was nothing to drop — this feeds
+  // memoized derivations downstream.
+  return duplicate ? out : parts
 }
 
 export function NoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, depth = 0, renderMarkdown = true }: NoteContentProps) {
@@ -239,7 +276,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
 
   const content = useMemo(() => {
     const parts = parseContent(event.content, renderMarkdown);
-    if (emojiMap.size === 0) return parts;
+    if (emojiMap.size === 0) return dropRepeatedMedia(parts);
     // Replace :shortcode: in text parts with emoji parts.
     // Markdown parts are left intact — MarkdownText handles emoji rendering
     // internally so markdown formatting (bold, italic, etc.) isn't broken.
@@ -261,7 +298,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
         }
       }
     }
-    return expanded;
+    return dropRepeatedMedia(expanded);
   }, [event.content, emojiMap, renderMarkdown])
 
   // Build poster map and media URL sets from imeta tags (NIP-92)
@@ -273,16 +310,18 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
 
   // (P7) Derive imeta media not already shown inline — memoized so the Set +
   // filters don't rebuild on every render (inputs are already memoized).
-  // Compare by CANONICAL url so the same file referenced in both the content and
-  // an imeta tag (differing by trailing slash, http/https, tracking params, …)
-  // isn't rendered twice.
+  // Compare by content IDENTITY, not URL: the same file referenced in both the
+  // content and an imeta tag may differ by trailing slash, http/https, tracking
+  // params — or by host entirely, when the blob has been mirrored to a second
+  // Blossom server. Any of those rendered the image twice.
   const { missingImages, missingVideos } = useMemo(() => {
-    const contentUrls = new Set(content.filter(p => p.type === 'media').map(p => canonicalMediaUrl(p.value)))
+    const contentKeys = new Set(content.filter(p => p.type === 'media').map(p => mediaKey(p.value)))
+    const notInContent = (url: string) => !contentKeys.has(mediaKey(url, imetaMeta.get(url)?.sha256))
     return {
-      missingImages: imetaImageUrls.filter(url => !contentUrls.has(canonicalMediaUrl(url))),
-      missingVideos: imetaVideoUrls.filter(url => !contentUrls.has(canonicalMediaUrl(url))),
+      missingImages: imetaImageUrls.filter(notInContent),
+      missingVideos: imetaVideoUrls.filter(notInContent),
     }
-  }, [content, imetaImageUrls, imetaVideoUrls])
+  }, [content, imetaImageUrls, imetaVideoUrls, imetaMeta])
 
   // Group consecutive image media parts for horizontal layout
   const groupedContent = useMemo(() => {

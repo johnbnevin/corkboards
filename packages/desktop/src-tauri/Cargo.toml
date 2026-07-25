@@ -27,3 +27,8 @@ futures-util = "0.3"
 # Used by signer.rs to sign events and do NIP-04/44 encryption inside Rust so
 # the nsec (read from the OS keychain) never crosses the IPC boundary into JS.
 nostr = { version = "0.44.3", default-features = false, features = ["std", "nip04", "nip44"] }
+
+[dev-dependencies]
+# The relay read loop is async and its regression test drives both ends of a
+# socket, so the test harness needs a runtime and #[tokio::test].
+tokio = { version = "1", features = ["macros", "rt", "time", "io-util"] }

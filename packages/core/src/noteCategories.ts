@@ -128,9 +128,29 @@ export function hasImageContent(note: NostrEvent): boolean {
   return false;
 }
 
+/**
+ * Per-event category cache.
+ *
+ * `getNoteCategories` is the hot path of the whole feed: it runs for every note
+ * on every filter recompute, once more for the kind-count stats, and again for
+ * the filter chips — and for a repost it JSON-parses the embedded event each
+ * time. On a few thousand notes that is the difference between a feed that
+ * responds to a click and one that stalls.
+ *
+ * A WeakMap keyed on the event object is safe because events are immutable and
+ * are dropped from the map as soon as the feed releases them. The one input
+ * that ISN'T the event is `lookup`, so an entry records whether the answer
+ * depended on a target we couldn't resolve; those are recomputed next time in
+ * case the target has since arrived.
+ */
+const categoryCache = new WeakMap<NostrEvent, { cats: Set<string>; resolved: boolean }>();
+
 // Classify a note into ALL applicable categories (a note can be in multiple).
 // E.g. a reaction to a video counts as both a reaction and a video.
 export function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrEvent>): Set<string> {
+  const cached = categoryCache.get(event);
+  if (cached && cached.resolved) return cached.cats;
+
   const cats = new Set<string>();
   const repostedKind = event.kind === 16 ? parseInt(event.tags.find(t => t[0] === 'k')?.[1] || '0', 10) : 0;
 
@@ -197,14 +217,115 @@ export function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrE
   if (event.kind === 1068) cats.add('shortNotes');
 
   if (cats.size === 0) cats.add('other');
+  // "Resolved" means nothing about this answer is still waiting on data: either
+  // the note referenced no other event, or we found the one it referenced.
+  categoryCache.set(event, { cats, resolved: !targetId || !!targetEvent });
   return cats;
+}
+
+// ─── Text-filter helpers ─────────────────────────────────────────────────────
+
+/**
+ * The text a note actually shows the reader, for text-matching filters.
+ *
+ * A repost's own `content` is a JSON blob, and long-form posts carry a title in
+ * their tags that reads as part of the note. Matching against the raw `content`
+ * field alone meant the "hide notes containing this text" filter silently did
+ * nothing for either — and, because reposts are JSON, it could match on
+ * incidental substrings like `"kind"` or a pubkey.
+ */
+export function noteDisplayText(note: NostrEvent): string {
+  if (note.kind === 6 || note.kind === 16) {
+    const embedded = parseEmbeddedRepost(note.content);
+    // A repost with an unparseable body displays nothing of its own.
+    return embedded ? embedded.content : '';
+  }
+  const title = note.tags.find(t => t[0] === 'title')?.[1];
+  const summary = note.tags.find(t => t[0] === 'summary')?.[1];
+  return [title, summary, note.content].filter(Boolean).join('\n');
+}
+
+// ─── Kind-filter evaluation ──────────────────────────────────────────────────
+
+/**
+ * Categories that describe the *envelope* rather than the content: every kind-1
+ * note is one of `shortNotes`/`replies`, and `other` is the fallback bucket.
+ *
+ * They matter for the loose-mode rule below. Because they're near-universal
+ * they were rescuing almost everything: an image post is categorized as BOTH
+ * `images` and `shortNotes`, so hiding "images" left `shortNotes` un-hidden and
+ * the note stayed on screen. Only reactions and replies — the two kinds that
+ * carry *no* other category — ever actually disappeared, which is precisely the
+ * "only replies and reactions work" behaviour that was reported.
+ */
+const GENERIC_CATEGORIES = new Set(['shortNotes', 'replies', 'other']);
+
+export type KindFilterMode = 'any' | 'strict';
+
+/**
+ * Decide whether a note survives the note-kind toggles.
+ *
+ * @param cats - The note's categories, from {@link getNoteCategories}.
+ * @param hidden - Filter names the user has toggled OFF (i.e. wants hidden).
+ * @param categoryToFilter - Maps a category name to the filter name that governs it.
+ * @param mode - `'strict'` hides a note if ANY of its categories is hidden.
+ *   `'any'` (loose, the default) keeps a note when something specific about it
+ *   is still wanted — e.g. a reaction to a video stays when reactions are hidden
+ *   but videos aren't. Generic categories can't provide that rescue; they only
+ *   speak for a note that has nothing more specific to say about itself.
+ * @returns true to keep the note.
+ */
+export function noteMatchesKindFilters(
+  cats: Set<string>,
+  hidden: ReadonlySet<string>,
+  categoryToFilter: Readonly<Record<string, string>>,
+  mode: KindFilterMode,
+): boolean {
+  if (hidden.size === 0) return true;
+
+  if (mode === 'strict') {
+    for (const cat of cats) {
+      const filter = categoryToFilter[cat];
+      if (filter && hidden.has(filter)) return false;
+    }
+    return true;
+  }
+
+  let hasSpecific = false;
+  let specificWanted = false;
+  let genericWanted = false;
+  for (const cat of cats) {
+    const filter = categoryToFilter[cat];
+    const wanted = !filter || !hidden.has(filter);
+    if (GENERIC_CATEGORIES.has(cat)) {
+      if (wanted) genericWanted = true;
+    } else {
+      hasSpecific = true;
+      if (wanted) specificWanted = true;
+    }
+  }
+  // A note that is only "a post" or "a reply" is judged on that; anything with a
+  // real content category is judged on those categories alone.
+  return hasSpecific ? specificWanted : genericWanted;
 }
 
 // ─── Hashtag extraction helpers ──────────────────────────────────────────────
 // Used by both hashtag filtering and hashtag count computation.
 
+/**
+ * Per-event hashtag caches. Both extractors scan the note's tags and run a
+ * regex over its full content; between hashtag filtering, the chip counts and
+ * the spam verdict they run several times per note per feed recompute, and
+ * neither depends on anything but the (immutable) event.
+ */
+const hashtagCache = new WeakMap<NostrEvent, Set<string>>();
+const repostHashtagCache = new WeakMap<NostrEvent, Set<string>>();
+
 /** Extract hashtags from a note's tags and content. */
 export function getNoteHashtags(note: NostrEvent): Set<string> {
+  const cached = hashtagCache.get(note);
+  if (cached) return cached;
+
   const tags = new Set<string>();
   for (const t of note.tags) {
     if (t[0] === 't' && t[1]) tags.add(t[1].toLowerCase());
@@ -212,12 +333,15 @@ export function getNoteHashtags(note: NostrEvent): Set<string> {
   for (const match of note.content.matchAll(/#([a-zA-Z]\w*)/g)) {
     tags.add(match[1].toLowerCase());
   }
+  hashtagCache.set(note, tags);
   return tags;
 }
 
 /** Extract hashtags from a repost's embedded JSON content. */
 export function getRepostHashtags(note: NostrEvent): Set<string> {
   if ((note.kind !== 6 && note.kind !== 16) || !note.content) return new Set();
+  const cached = repostHashtagCache.get(note);
+  if (cached) return cached;
   try {
     const embedded = JSON.parse(note.content);
     const tags = new Set<string>();
@@ -233,8 +357,15 @@ export function getRepostHashtags(note: NostrEvent): Set<string> {
         tags.add(match[1].toLowerCase());
       }
     }
+    repostHashtagCache.set(note, tags);
     return tags;
-  } catch { return new Set(); }
+  } catch {
+    // Cache the empty answer too — an unparseable body won't become parseable,
+    // and without this every pass re-attempts the JSON.parse.
+    const empty = new Set<string>();
+    repostHashtagCache.set(note, empty);
+    return empty;
+  }
 }
 
 /** Check if a note matches any of the selected hashtag filters. */

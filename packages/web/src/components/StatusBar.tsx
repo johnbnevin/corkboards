@@ -340,7 +340,7 @@ export function StatusBar({
                 ? 'bg-green-600 hover:bg-green-700 text-white border-green-600'
                 : 'border-gray-300 text-gray-700 hover:bg-gray-50'
             }`}
-            title="Auto-consolidate blank spaces when new notes arrive"
+            title="Auto-consolidate blank spaces when new notes arrive (autofetch or manual)"
           >
             {autoConsolidate && <Check className="h-2.5 w-2.5" />}
             <Layers className="h-2.5 w-2.5" />
@@ -580,7 +580,7 @@ export function StatusBar({
                   ? 'bg-green-600 hover:bg-green-700 text-white border-green-600'
                   : 'border-gray-300 text-gray-700 hover:bg-gray-50'
               }`}
-              title="Auto-consolidate blank spaces when new notes arrive"
+              title="Auto-consolidate blank spaces when new notes arrive (autofetch or manual)"
             >
               {autoConsolidate && <Check className="h-2.5 w-2.5" />}
               <Layers className="h-2.5 w-2.5" />

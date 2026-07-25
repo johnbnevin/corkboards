@@ -61,6 +61,7 @@
     "embla-carousel-react": "^8.3.0",
     "idb": "^8.0.3",
     "input-otp": "^1.2.4",
+    "jsqr": "^1.4.0",
     "nostr-login": "^1.7.12",
     "nostr-tools": "^2.13.0",
     "qrcode": "^1.5.4",

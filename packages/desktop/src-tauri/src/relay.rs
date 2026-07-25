@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 use tokio_tungstenite::{
     client_async, connect_async,
     tungstenite::{client::IntoClientRequest, Message},
@@ -48,7 +48,7 @@ pub async fn relay_subscribe(
     timeout_ms: Option<u64>,
 ) -> Result<(), String> {
     let ms = timeout_ms.unwrap_or(5000);
-    let dur = Duration::from_millis(ms);
+    let deadline = Instant::now() + Duration::from_millis(ms);
     let limit = filter
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -70,20 +70,17 @@ pub async fn relay_subscribe(
             let sender = tx.clone();
             let url_for_log = url.clone();
             tokio::spawn(async move {
-                match tokio::time::timeout(dur, do_query(url, f)).await {
-                    Ok(result) => {
-                        if let Some(err) = result.error {
-                            eprintln!("[relay {url_for_log}] error: {err}");
-                        }
-                        for ev in result.events {
-                            // send() awaits when the channel is full — applies backpressure
-                            if sender.send(ev).await.is_err() {
-                                break; // receiver dropped
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        eprintln!("[relay {url_for_log}] timeout after {ms}ms");
+                // do_query enforces the deadline internally and returns whatever
+                // it received before it — a slow relay's events are kept rather
+                // than thrown away with the cancelled future.
+                let result = do_query(url, f, deadline).await;
+                if let Some(err) = result.error {
+                    eprintln!("[relay {url_for_log}] error: {err} (budget {ms}ms)");
+                }
+                for ev in result.events {
+                    // send() awaits when the channel is full — applies backpressure
+                    if sender.send(ev).await.is_err() {
+                        break; // receiver dropped
                     }
                 }
             })
@@ -146,13 +143,9 @@ pub async fn relay_query(
     timeout_ms: Option<u64>,
 ) -> RelayQueryResult {
     let ms = timeout_ms.unwrap_or(8000);
-    match timeout(Duration::from_millis(ms), do_query(url, filter)).await {
-        Ok(result) => result,
-        Err(_) => RelayQueryResult {
-            events: vec![],
-            error: Some("timeout".to_string()),
-        },
-    }
+    // Deadline passed down rather than wrapped around: on expiry we want the
+    // events this relay already sent, not an empty result.
+    do_query(url, filter, Instant::now() + Duration::from_millis(ms)).await
 }
 
 /// True when an IPv4 address is anything other than public unicast.
@@ -342,7 +335,7 @@ const MAX_EVENTS_PER_QUERY: usize = 5000;
 /// uses `tokio_tungstenite::connect_async` directly. The proxy check happens
 /// per query so toggling the setting takes effect on the next connection
 /// without an app restart.
-async fn do_query(url: String, filter: Value) -> RelayQueryResult {
+async fn do_query(url: String, filter: Value, deadline: Instant) -> RelayQueryResult {
     if let Err(e) = validate_relay_url(&url) {
         return RelayQueryResult {
             events: vec![],
@@ -350,12 +343,19 @@ async fn do_query(url: String, filter: Value) -> RelayQueryResult {
         };
     }
 
+    // The handshake gets the same deadline as the read loop. A relay that never
+    // completes its TLS/WebSocket upgrade must not consume the whole budget and
+    // leave nothing for the callers waiting behind it.
     match proxy::current_proxy() {
-        Some(proxy_url) => match connect_via_proxy(&url, &proxy_url).await {
-            Ok(ws) => run_query(ws, filter).await,
-            Err(e) => RelayQueryResult {
+        Some(proxy_url) => match timeout_at(deadline, connect_via_proxy(&url, &proxy_url)).await {
+            Ok(Ok(ws)) => run_query(ws, filter, deadline).await,
+            Ok(Err(e)) => RelayQueryResult {
                 events: vec![],
                 error: Some(format!("proxy connect: {e}")),
+            },
+            Err(_) => RelayQueryResult {
+                events: vec![],
+                error: Some("proxy connect: timeout".to_string()),
             },
         },
         None => {
@@ -368,11 +368,15 @@ async fn do_query(url: String, filter: Value) -> RelayQueryResult {
                     error: Some("proxy required but not configured — refusing direct connection".to_string()),
                 };
             }
-            match connect_async(url.as_str()).await {
-                Ok((ws, _)) => run_query(ws, filter).await,
-                Err(e) => RelayQueryResult {
+            match timeout_at(deadline, connect_async(url.as_str())).await {
+                Ok(Ok((ws, _))) => run_query(ws, filter, deadline).await,
+                Ok(Err(e)) => RelayQueryResult {
                     events: vec![],
                     error: Some(format!("connect: {e}")),
+                },
+                Err(_) => RelayQueryResult {
+                    events: vec![],
+                    error: Some("connect: timeout".to_string()),
                 },
             }
         }
@@ -496,7 +500,18 @@ impl AsyncWrite for ProxiedStream {
     }
 }
 
-async fn run_query<S>(mut ws: WebSocketStream<S>, filter: Value) -> RelayQueryResult
+/// Read a relay's response until EOSE/CLOSED, the event cap, or `deadline`.
+///
+/// The deadline lives HERE, around the read loop, rather than around the whole
+/// query. Wrapping the outer future meant that when a slow relay hadn't sent
+/// EOSE in time, the future was dropped and every event it HAD already
+/// delivered went with it — the relay contributed nothing at all. The web build
+/// never behaved that way: NRelay1 streams events as they arrive and its
+/// timeout only closes the socket, so whatever arrived is kept. That asymmetry
+/// is the biggest reason desktop showed "failed to load event" and unresolved
+/// grey placeholders far more often than web for events that were, in fact,
+/// delivered. On expiry we now stop reading and return the partial page.
+async fn run_query<S>(mut ws: WebSocketStream<S>, filter: Value, deadline: Instant) -> RelayQueryResult
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -524,7 +539,15 @@ where
 
     let mut events: Vec<Value> = vec![];
 
-    while let Some(msg_result) = ws.next().await {
+    loop {
+        // `next()` alone would block past the deadline on a relay that has gone
+        // quiet without closing.
+        let msg_result = match timeout_at(deadline, ws.next()).await {
+            Ok(Some(m)) => m,
+            // Stream ended, or the deadline passed — either way, return what we
+            // collected rather than discarding it.
+            Ok(None) | Err(_) => break,
+        };
         let msg = match msg_result {
             Ok(m) => m,
             Err(_) => break,
@@ -739,6 +762,92 @@ mod tests {
                 "expected {filter_json} to match the event",
             );
         }
+    }
+
+    // ── Deadline handling ───────────────────────────────────────────────────
+
+    /// Build a client-side `WebSocketStream` over an in-memory duplex, plus the
+    /// raw server end so a test can script exactly what the "relay" sends.
+    async fn ws_pair() -> (
+        WebSocketStream<tokio::io::DuplexStream>,
+        WebSocketStream<tokio::io::DuplexStream>,
+    ) {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        (client, server)
+    }
+
+    fn signed_note(keys: &nostr::Keys, text: &str) -> Value {
+        use nostr::prelude::*;
+        let event = EventBuilder::text_note(text)
+            .sign_with_keys(keys)
+            .expect("sign");
+        serde_json::from_str(&event.as_json()).expect("serialize")
+    }
+
+    /// The regression that made desktop look so much worse than web: a relay
+    /// that delivers events but is slow to send EOSE. The deadline used to wrap
+    /// the whole query future, so when it fired the future was dropped and every
+    /// event already received went with it — the relay contributed nothing.
+    #[tokio::test]
+    async fn keeps_events_from_a_relay_that_never_sends_eose() {
+        use nostr::prelude::*;
+        let keys = Keys::generate();
+        let (client, mut server) = ws_pair().await;
+
+        // Relay sends three matching events, then goes quiet forever.
+        for text in ["one", "two", "three"] {
+            let frame = serde_json::json!(["EVENT", "q", signed_note(&keys, text)]);
+            server
+                .send(Message::Text(frame.to_string()))
+                .await
+                .expect("send");
+        }
+
+        let filter = serde_json::json!({ "kinds": [1], "authors": [keys.public_key().to_hex()] });
+        let result = run_query(client, filter, tokio::time::Instant::now() + Duration::from_millis(300)).await;
+
+        assert_eq!(result.events.len(), 3, "partial results must survive the deadline");
+        assert!(result.error.is_none());
+        drop(server);
+    }
+
+    /// EOSE still ends the read immediately rather than waiting out the budget.
+    #[tokio::test]
+    async fn returns_as_soon_as_eose_arrives() {
+        use nostr::prelude::*;
+        let keys = Keys::generate();
+        let (client, mut server) = ws_pair().await;
+
+        let frame = serde_json::json!(["EVENT", "q", signed_note(&keys, "only")]);
+        server.send(Message::Text(frame.to_string())).await.expect("send");
+        server
+            .send(Message::Text(serde_json::json!(["EOSE", "q"]).to_string()))
+            .await
+            .expect("send");
+
+        let started = std::time::SystemTime::now();
+        let filter = serde_json::json!({ "kinds": [1] });
+        let result = run_query(client, filter, tokio::time::Instant::now() + Duration::from_secs(30)).await;
+
+        assert_eq!(result.events.len(), 1);
+        assert!(
+            started.elapsed().expect("clock") < Duration::from_secs(5),
+            "EOSE should end the read, not the 30s budget",
+        );
+        drop(server);
+    }
+
+    /// A deadline that has already passed yields nothing, but must not hang.
+    #[tokio::test]
+    async fn an_expired_deadline_returns_immediately() {
+        let (client, server) = ws_pair().await;
+        let filter = serde_json::json!({ "kinds": [1] });
+        let result = run_query(client, filter, tokio::time::Instant::now() - Duration::from_secs(1)).await;
+        assert!(result.events.is_empty());
+        drop(server);
     }
 
     /// A genuinely signed event must survive verification, or the check would

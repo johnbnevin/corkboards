@@ -134,8 +134,8 @@ export const NoteKindToggles = memo(function NoteKindToggles({
             </TooltipTrigger>
             <TooltipContent side="top" className="max-w-[220px] text-xs">
               {filterMode === 'strict'
-                ? 'Strict: hides notes if ANY type is toggled off.'
-                : 'Loose: shows notes if ANY type is toggled on.'}
+                ? 'Strict: hides a note if ANY of its types is toggled off.'
+                : 'Loose: keeps a note if any of its specific types is still on — a reaction to a video survives hiding reactions.'}
             </TooltipContent>
           </Tooltip>
         </>

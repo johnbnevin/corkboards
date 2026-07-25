@@ -1,11 +1,13 @@
 mod keychain;
 mod logger;
+mod opener;
 mod proxy;
 mod relay;
 mod signer;
 
 use keychain::{keychain_store, keychain_delete};
 use logger::{write_log, clear_log};
+use opener::open_external;
 use proxy::{
     get_proxy, set_proxy, get_proxy_required, set_proxy_required, proxy_load_failed,
     proxy_webview_unprotected,
@@ -86,6 +88,7 @@ pub fn run() {
             nip44_decrypt,
             nip04_encrypt,
             nip04_decrypt,
+            open_external,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

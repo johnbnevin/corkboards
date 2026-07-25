@@ -4,7 +4,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createHead, UnheadProvider } from '@unhead/react/client';
 import { InferSeoMetaPlugin } from '@unhead/addons';
-import { Suspense } from 'react';
+import { Suspense, useEffect } from 'react';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import NostrProvider from '@/components/NostrProvider';
 import { Toaster } from "@/components/ui/toaster";
@@ -15,6 +15,7 @@ import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
 import { NwcProvider } from '@/hooks/useNwc';
 import AppRouter from './AppRouter';
+import { installDesktopLinkInterceptor } from '@/lib/openExternal';
 
 const head = createHead({
   plugins: [
@@ -45,6 +46,12 @@ const defaultConfig: AppConfig = {
 };
 
 export function App() {
+  // Desktop only: route plain `<a href="http…">` clicks to the OS browser. The
+  // webview can't open them itself, so without this every external link in the
+  // app is inert (or, for untargeted anchors, navigates the app away from
+  // itself). No-op in a normal browser.
+  useEffect(() => installDesktopLinkInterceptor(), []);
+
   return (
     <UnheadProvider head={head}>
       <AppProvider storageKey="corkboard:app-config" defaultConfig={defaultConfig}>

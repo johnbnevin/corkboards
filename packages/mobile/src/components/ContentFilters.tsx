@@ -14,22 +14,13 @@ import {
 } from 'react-native';
 
 // ---- Types ----
+//
+// The shape lives in @core alongside the predicate that consumes it, so the
+// controls and the filtering can't drift apart.
 
-export interface ContentFilterConfig {
-  hideMinChars: number;
-  hideOnlyEmoji: boolean;
-  hideOnlyMedia: boolean;
-  hideOnlyLinks: boolean;
-  hideMarkdown: boolean;
-  hideExactText: string;
-  allowPV: boolean;
-  allowGM: boolean;
-  allowGN: boolean;
-  allowEyes: boolean;
-  allow100: boolean;
-}
+import type { ContentFilterConfig, ContentFilterKey } from '@core/contentFilters';
 
-export type ContentFilterKey = keyof ContentFilterConfig;
+export type { ContentFilterConfig, ContentFilterKey };
 
 interface ContentFiltersProps {
   config: ContentFilterConfig;
@@ -104,7 +95,7 @@ export const ContentFilters = React.memo(function ContentFilters({
 
           {/* Exact text match */}
           <View style={styles.charRow}>
-            <Text style={styles.label}>This exact text:</Text>
+            <Text style={styles.label}>Contains this text:</Text>
             <TextInput
               style={styles.textInput}
               value={config.hideExactText}

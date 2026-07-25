@@ -24,7 +24,7 @@ import { useAuthor } from '../hooks/useAuthor';
 import { useNostr } from '../lib/NostrProvider';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { optimizeMediaUrl } from '@core/imageUtils';
-import { parseImetaTag, resolveMediaSources, type ImetaData } from '@core/blossom';
+import { parseImetaTag, resolveMediaSources, mediaIdentityKey, type ImetaData } from '@core/blossom';
 import { MediaLink } from './MediaLink';
 import { TrackerWarningDialog } from './TrackerWarningDialog';
 import { openExternal } from '../lib/openExternal';
@@ -297,21 +297,33 @@ function getImetaMedia(event: import('@nostrify/nostrify').NostrEvent): { videoU
     if (mime.startsWith('video/') || VIDEO_EXT.test(url)) videoUrls.push(url);
     else if (mime.startsWith('image/') || IMAGE_EXT_IMETA.test(url)) imageUrls.push(url);
   }
-  // Dedupe by canonical URL — duplicate/near-duplicate imeta tags (some clients
-  // emit the same file twice) would otherwise render the media multiple times.
+  // Dedupe by content identity — duplicate/near-duplicate imeta tags (some
+  // clients emit the same file twice, or list two mirrors of it) would
+  // otherwise render the media multiple times.
+  const keyOf = (url: string) => mediaKey(url, imetaMeta.get(url)?.sha256);
   return {
-    videoUrls: dedupeByCanonical(videoUrls),
-    imageUrls: dedupeByCanonical(imageUrls),
+    videoUrls: dedupeBy(videoUrls, keyOf),
+    imageUrls: dedupeBy(imageUrls, keyOf),
     imetaMeta,
   };
 }
 
-/** Keep the first occurrence of each canonical URL, preserving order. */
-function dedupeByCanonical(urls: string[]): string[] {
+/**
+ * Dedup key for a media URL. Prefers the blob's sha256 (from the imeta `x`
+ * field or a content-addressed path) so the same file mirrored across Blossom
+ * servers counts once; falls back to the canonical URL otherwise.
+ * Keep in sync with web's NoteContent.
+ */
+function mediaKey(url: string, sha256?: string): string {
+  return mediaIdentityKey(url, canonicalMediaUrl(url), sha256);
+}
+
+/** Keep the first occurrence of each key, preserving order. */
+function dedupeBy(urls: string[], keyOf: (url: string) => string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const url of urls) {
-    const key = canonicalMediaUrl(url);
+    const key = keyOf(url);
     if (!seen.has(key)) { seen.add(key); out.push(url); }
   }
   return out;
@@ -642,8 +654,16 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
   const inlineParts: ContentPart[] = [];
   const mediaParts: ContentPart[] = [];
 
+  // Fold repeat references to the same media. Authors and clients regularly
+  // emit one picture twice — a URL in the body plus the same URL appended by an
+  // upload widget, or two mirrors of one Blossom blob — which rendered as two
+  // stacked copies. Text parts are untouched.
+  const seenMedia = new Set<string>();
   for (const part of parts) {
     if (part.type === 'image' || part.type === 'video' || part.type === 'youtube') {
+      const key = mediaKey(part.value);
+      if (seenMedia.has(key)) continue;
+      seenMedia.add(key);
       mediaParts.push(part);
     } else {
       inlineParts.push(part);
@@ -702,13 +722,15 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
           and video (kinds 21/22/34235/34236) events keep media in imeta with an
           empty/caption content field, so without this they'd render blank. */}
       {(imetaVideoUrls.length > 0 || imetaImageUrls.length > 0) && (() => {
-        // Compare by CANONICAL url so a file referenced both in the content and
-        // an imeta tag (differing by trailing slash, http/https, …) isn't
-        // rendered twice.
-        const contentUrls = new Set(mediaParts.map(p => canonicalMediaUrl(p.value)));
+        // Compare by content IDENTITY, not URL: a file referenced both in the
+        // content and an imeta tag may differ by trailing slash, http/https —
+        // or by host entirely, when the blob is mirrored to a second Blossom
+        // server. Any of those rendered the image twice.
+        const contentKeys = new Set(mediaParts.map(p => mediaKey(p.value)));
+        const notInContent = (url: string) => !contentKeys.has(mediaKey(url, imetaMeta.get(url)?.sha256));
         return (
           <>
-            {imetaImageUrls.filter(url => !contentUrls.has(canonicalMediaUrl(url))).map(url => {
+            {imetaImageUrls.filter(notInContent).map(url => {
               const m = imetaMeta.get(url);
               return (
                 <View key={`imeta-img-${url}`} style={styles.mediaContainer}>
@@ -716,7 +738,7 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
                 </View>
               );
             })}
-            {imetaVideoUrls.filter(url => !contentUrls.has(canonicalMediaUrl(url))).map(url => (
+            {imetaVideoUrls.filter(notInContent).map(url => (
               <View key={`imeta-vid-${url}`} style={styles.mediaContainer}>
                 <InlineVideo url={url} />
               </View>

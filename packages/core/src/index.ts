@@ -33,8 +33,11 @@ export * from './cryptoUtils';
 export * from './imageUtils';
 export * from './blossom';
 export * from './zap';
+export * from './lightningTarget';
+export * from './lnurlPay';
 export * from './contactList';
 export * from './feedAlgorithms';
+export * from './contentFilters';
 export * from './ipUtils';
 export * from './relayConstants';
 

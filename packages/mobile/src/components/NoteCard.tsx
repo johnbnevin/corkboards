@@ -21,6 +21,7 @@ import { formatTimeAgo } from '@core/formatTimeAgo';
 import { genUserName } from '@core/genUserName';
 import { useIsDeletedAuthor } from '../contexts/deletedAuthors';
 import { visibleLength, findVisibleCutoff } from '@core/textTruncation';
+import { verifyEmbeddedEvent } from '../lib/embeddedEvent';
 
 // ============================================================================
 // Repost author name — shows the actual author for reposts
@@ -112,20 +113,13 @@ export function NoteCard({
   const isRepost = event.kind === 6;
   const [expanded, setExpanded] = useState(false);
 
-  // For reposts, parse the inner event
+  // For reposts, parse the inner event — signature-verified before we attribute
+  // it to the author it claims. NIP-18 puts attacker-controlled JSON in a kind-6
+  // `content`; an unverified embed must never drive the avatar/name/profile link.
+  // A forged/malformed embed falls back to the wrapper rather than impersonating.
   const displayEvent = useMemo(() => {
     if (!isRepost) return event;
-    try {
-      const inner = JSON.parse(event.content);
-      if (
-        inner &&
-        inner.id &&
-        inner.pubkey &&
-        typeof inner.kind === 'number' &&
-        typeof inner.content === 'string'
-      ) return inner as NostrEvent;
-    } catch { /* not JSON */ }
-    return event;
+    return verifyEmbeddedEvent(event.content) ?? event;
   }, [event, isRepost]);
 
   const { data: repostAuthorData } = useAuthor(event.pubkey);

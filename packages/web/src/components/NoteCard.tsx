@@ -30,6 +30,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { getRelayCache, FALLBACK_RELAYS } from '@/components/NostrProvider'
 import { useToast } from '@/hooks/useToast'
 import { EmojiName } from '@/components/EmojiName'
+import { verifyEmbeddedEvent } from '@/lib/embeddedEvent'
 
 // (B4) Named constants extracted from inline magic numbers
 /** Character limit for the "more from this author" note previews (discover tab) */
@@ -166,16 +167,13 @@ function ExpandableContent({ event, className, blurMedia, inModalContext, onView
   const [expanded, setExpanded] = useState(() => expandedEventIds.has(event.id))
 
   // Resolve JSON-embedded events (some clients embed quoted posts as JSON in content)
-  // so we never truncate or display raw JSON strings
+  // so we never truncate or display raw JSON strings. The embedded JSON is
+  // attacker-controlled, so it is signature-verified before we render it as an
+  // authored note — an unverifiable blob falls back to the wrapper event rather
+  // than being attributed to whatever pubkey it claims.
   const resolvedEvent = useMemo(() => {
     if (!event.content.startsWith('{')) return event
-    try {
-      const parsed = JSON.parse(event.content)
-      if (typeof parsed.content === 'string' && typeof parsed.pubkey === 'string' && typeof parsed.kind === 'number') {
-        return parsed as NostrEvent
-      }
-    } catch { /* not JSON */ }
-    return event
+    return verifyEmbeddedEvent(event.content) ?? event
   }, [event])
 
   const visLen = visibleLength(resolvedEvent.content)
@@ -725,27 +723,14 @@ export const NoteCard = React.memo(function NoteCard({
     reactedToAuthor?.metadata?.name ||
     (reactedToProfileLoading ? '' : (reactedToEvent?.pubkey ? genUserName(reactedToEvent.pubkey) : ''))
 
-  // For reposts, try to parse the embedded event from content.
-  // Unwrap nested reposts (kind 16 → kind 6 → kind 1) to find the original note.
+  // For reposts, parse the embedded event from content, verifying each
+  // envelope's signature and unwrapping nested reposts (kind 16 → 6 → 1) to the
+  // innermost authored note. A forged/malformed embed returns null, so the code
+  // below falls back to fetching the real event by its e-tag id through the
+  // verified transport — the embedded JSON is never trusted to name its author.
   const parsedRepost = useMemo(() => {
     if (!isRepost) return null
-    let content = note.content
-    for (let depth = 0; depth < 3; depth++) {
-      if (!content || !content.startsWith('{')) return null
-      try {
-        const parsed = JSON.parse(content)
-        if (parsed.content === undefined || !parsed.pubkey) return null
-        // If the parsed event is itself a repost, unwrap one more level
-        if (parsed.kind === 6 || parsed.kind === 16) {
-          content = parsed.content
-          continue
-        }
-        return parsed as NostrEvent
-      } catch {
-        return null
-      }
-    }
-    return null
+    return verifyEmbeddedEvent(note.content)
   }, [isRepost, note.content])
 
   // If content didn't contain the event, fetch it via the e tag.

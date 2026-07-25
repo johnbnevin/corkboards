@@ -277,6 +277,51 @@ export function noteDisplayText(note: NostrEvent, resolve?: EventResolver): stri
   return [title, summary, current.content].filter(Boolean).join('\n');
 }
 
+/**
+ * Unwrap a repost's embedded JSON to the innermost authored event, verifying
+ * each envelope's signature along the way.
+ *
+ * NIP-18 puts "the stringified JSON of the reposted note" in a kind-6/16
+ * `content`, and some clients embed a quoted note as JSON the same way. That
+ * payload is fully attacker-controlled: nothing stops a hostile relay handing
+ * you a signed kind-6 whose embedded JSON claims `pubkey` = someone famous.
+ * `parseEmbeddedRepost` only shape-checks it, so a caller that renders the
+ * result as an authored note (avatar, display name, profile link) is trusting
+ * an unsigned blob — an impersonation primitive.
+ *
+ * This is the gate every render path must go through. Core carries no crypto
+ * dependency by design, so the signature check is injected: web and mobile pass
+ * nostr-tools' `verifyEvent` (id-recompute + Schnorr). Any level that is
+ * malformed OR fails verification collapses the whole thing to null, and the
+ * caller falls back to fetching the real event by id through the verified
+ * transport. `verify` is wrapped so a throwing verifier is treated as "invalid"
+ * rather than crashing the feed render.
+ */
+export function unwrapVerifiedRepost(
+  content: string | undefined | null,
+  verify: (event: NostrEvent) => boolean,
+  maxDepth: number = MAX_REPOST_UNWRAP,
+): NostrEvent | null {
+  let current = content;
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const parsed = parseEmbeddedRepost(current);
+    if (!parsed) return null;
+    let ok = false;
+    try {
+      ok = verify(parsed);
+    } catch {
+      ok = false;
+    }
+    if (!ok) return null;
+    if (parsed.kind === 6 || parsed.kind === 16) {
+      current = parsed.content;
+      continue;
+    }
+    return parsed;
+  }
+  return null;
+}
+
 // ─── Kind-filter evaluation ──────────────────────────────────────────────────
 
 /**

@@ -3,7 +3,7 @@
   "version": "0.8.1",
   "private": true,
   "scripts": {
-    "dev": "cd ../.. && npx vite --port 8080 & npx @tauri-apps/cli dev --config src-tauri/tauri.conf.json",
+    "dev": "npm run dev -w @corkboards/web & npx @tauri-apps/cli dev --config src-tauri/tauri.conf.json",
     "build": "cd ../.. && npm run build && npx @tauri-apps/cli build --config packages/desktop/src-tauri/tauri.conf.json"
   }
 }

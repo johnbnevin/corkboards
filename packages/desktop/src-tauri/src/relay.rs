@@ -6,12 +6,24 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{timeout_at, Instant};
 use tokio_tungstenite::{
-    client_async, connect_async,
-    tungstenite::{client::IntoClientRequest, Message},
+    client_async_with_config, connect_async_with_config,
+    tungstenite::{client::IntoClientRequest, protocol::WebSocketConfig, Message},
     WebSocketStream,
 };
 
 use crate::proxy;
+
+/// Cap incoming WebSocket messages/frames. tungstenite defaults to 64 MiB, so
+/// without this a hostile relay could make `MAX_EVENTS_PER_QUERY` bound the event
+/// COUNT while a single 64 MiB frame still blows up memory. A Nostr event is tiny;
+/// 4 MiB is a generous ceiling for even a large one.
+fn ws_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(4 << 20),
+        max_frame_size: Some(4 << 20),
+        ..Default::default()
+    }
+}
 
 /// Events per emit call — each app.emit() uses webkit_web_view_run_javascript,
 /// so the payload per call stays small regardless of IPC protocol state.
@@ -409,13 +421,18 @@ async fn do_query(url: String, filter: Value, deadline: Instant) -> RelayQueryRe
             // Kill-switch: when the user requires the proxy, never silently fall
             // back to a direct clearnet connection — that would leak their IP and
             // full Nostr filter. Fail the query instead.
-            if proxy::proxy_required() {
+            //
+            // Also fail CLOSED when the proxy config failed to load: a corrupt or
+            // unreadable proxy.json means `proxy_required()` defaulted to false, so
+            // we cannot prove the user did NOT require the proxy. Assume they did
+            // rather than silently downgrading a Tor-only user to clearnet.
+            if proxy::proxy_required() || proxy::proxy_load_failed() {
                 return RelayQueryResult {
                     events: vec![],
-                    error: Some("proxy required but not configured — refusing direct connection".to_string()),
+                    error: Some("proxy required but not available — refusing direct connection".to_string()),
                 };
             }
-            match timeout_at(deadline, connect_async(url.as_str())).await {
+            match timeout_at(deadline, connect_async_with_config(url.as_str(), Some(ws_config()), false)).await {
                 Ok(Ok((ws, _))) => run_query(ws, filter, deadline).await,
                 Ok(Err(e)) => RelayQueryResult {
                     events: vec![],
@@ -490,7 +507,7 @@ async fn connect_via_proxy(
         ProxiedStream::Plain(Box::new(socks_stream))
     };
 
-    let (ws, _) = client_async(req, stream)
+    let (ws, _) = client_async_with_config(req, stream, Some(ws_config()))
         .await
         .map_err(|e| format!("ws handshake: {e}"))?;
     Ok(ws)
@@ -630,6 +647,10 @@ where
         }
     }
 
+    // NIP-01: ask the relay to close the subscription before we drop the socket,
+    // so it stops matching/streaming for "q" instead of learning of the teardown
+    // only from the TCP close.
+    let _ = ws.send(Message::Text(serde_json::json!(["CLOSE", "q"]).to_string())).await;
     let _ = ws.close(None).await;
     RelayQueryResult { events, error: None }
 }

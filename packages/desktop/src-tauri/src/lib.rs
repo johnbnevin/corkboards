@@ -58,8 +58,8 @@ pub fn run() {
             // so the settings UI can warn instead of the user silently going
             // unprotected. (We still open the window: refusing to start would leave
             // them no way to fix the setting.)
+            proxy::set_webview_proxied(webview_proxied);
             let unprotected = proxy::proxy_required() && !webview_proxied;
-            proxy::set_webview_unprotected(unprotected);
             if unprotected {
                 eprintln!(
                     "[setup] WARNING: proxy is REQUIRED but the WebView could not be proxied — \

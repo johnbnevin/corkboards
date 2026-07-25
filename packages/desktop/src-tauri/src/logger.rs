@@ -19,6 +19,18 @@ fn ensure_dir(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Restrict the log to owner read/write (0600) on unix. The activity log holds
+/// metadata — RSS feed URLs, query windows, relay behaviour — that shouldn't be
+/// world-readable to other local users; the default umask often leaves it 0644.
+/// No-op on non-unix (Windows ACLs already restrict the app-data dir).
+#[cfg(unix)]
+fn restrict_perms(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_perms(_path: &std::path::Path) {}
+
 /// Defense-in-depth: scrub unambiguous secrets before they touch the plaintext
 /// log file. We redact bech32 `nsec1`/`ncryptsec1` keys and `secret=` params.
 /// Bare 64-hex is intentionally NOT redacted — pubkeys and event ids share that
@@ -27,6 +39,30 @@ fn redact_secrets(input: &str) -> String {
     let mut out = redact_bech32(input, "ncryptsec1");
     out = redact_bech32(&out, "nsec1");
     out = redact_secret_param(&out);
+    out = redact_json_secret(&out);
+    out
+}
+
+/// Redact a JSON-serialized `"secret":"…"` (or `"secret": "…"`) value. NWC and
+/// similar configs serialize the same secret as JSON, which the `secret=`
+/// query-string pass in redact_secret_param misses.
+fn redact_json_secret(input: &str) -> String {
+    let mut out = input.to_string();
+    for needle in ["\"secret\":\"", "\"secret\": \""] {
+        let mut result = String::with_capacity(out.len());
+        let mut rest = out.as_str();
+        while let Some(pos) = rest.find(needle) {
+            // Keep everything up to and including the needle (ends at the value's
+            // opening quote), replace the value up to the next quote, keep the rest.
+            result.push_str(&rest[..pos + needle.len()]);
+            result.push_str("[REDACTED]");
+            let after = &rest[pos + needle.len()..];
+            let end = after.find('"').unwrap_or(after.len());
+            rest = &after[end..];
+        }
+        result.push_str(rest);
+        out = result;
+    }
     out
 }
 
@@ -85,6 +121,7 @@ pub fn write_log(message: String) -> Result<(), String> {
         .append(true)
         .open(&path)
         .map_err(|e| e.to_string())?;
+    restrict_perms(&path);
     writeln!(file, "{}", redact_secrets(&message)).map_err(|e| e.to_string())
 }
 
@@ -92,5 +129,7 @@ pub fn write_log(message: String) -> Result<(), String> {
 pub fn clear_log() -> Result<(), String> {
     let path = log_path().ok_or_else(|| "no data dir".to_string())?;
     ensure_dir(&path)?;
-    std::fs::write(&path, "=== Corkboards log start ===\n").map_err(|e| e.to_string())
+    std::fs::write(&path, "=== Corkboards log start ===\n").map_err(|e| e.to_string())?;
+    restrict_perms(&path);
+    Ok(())
 }

@@ -28,10 +28,17 @@ fn keys_for(pubkey: &str) -> Result<Keys, String> {
 pub fn sign_event(pubkey: String, unsigned: Value) -> Result<Value, String> {
     let keys = keys_for(&pubkey)?;
 
-    let kind = unsigned
+    // Nostr kinds are 0..=65535 (NIP-01). Reject an out-of-range kind rather than
+    // truncating with `as u16`: 65536 would silently sign as kind 0, an event
+    // different from what the caller asked for.
+    let kind_u64 = unsigned
         .get("kind")
         .and_then(|v| v.as_u64())
-        .ok_or("missing kind")? as u16;
+        .ok_or("missing kind")?;
+    if kind_u64 > u16::MAX as u64 {
+        return Err(format!("kind {kind_u64} out of range (0..=65535)"));
+    }
+    let kind = kind_u64 as u16;
     let content = unsigned
         .get("content")
         .and_then(|v| v.as_str())
@@ -41,15 +48,15 @@ pub fn sign_event(pubkey: String, unsigned: Value) -> Result<Value, String> {
     let mut tags: Vec<Tag> = Vec::new();
     if let Some(arr) = unsigned.get("tags").and_then(|v| v.as_array()) {
         for t in arr {
-            let parts: Vec<String> = t
-                .as_array()
-                .map(|inner| {
-                    inner
-                        .iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Reject a non-string tag element rather than silently dropping it:
+            // signing a tag array that differs from what the caller sent means the
+            // id/sig cover data the caller never approved.
+            let inner = t.as_array().ok_or("tag is not an array")?;
+            let mut parts: Vec<String> = Vec::with_capacity(inner.len());
+            for x in inner {
+                let s = x.as_str().ok_or("tag element is not a string")?;
+                parts.push(s.to_string());
+            }
             if !parts.is_empty() {
                 tags.push(Tag::parse(parts).map_err(|e| format!("bad tag: {e}"))?);
             }

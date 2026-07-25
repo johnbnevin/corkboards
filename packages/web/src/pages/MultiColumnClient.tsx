@@ -2711,13 +2711,26 @@ export function MultiColumnClient() {
         : baseNotes;
     }
 
-    // Collect deletion requests (kind 5) — build set of deleted event IDs
+    // Collect deletion requests (kind 5) — build set of deleted event IDs.
+    //
+    // NIP-09 requires a client to verify that each event referenced by an `e`
+    // tag has the SAME pubkey as the deletion request, before hiding it. Relays
+    // generally cannot perform this check and are explicitly not authoritative.
+    // Without it, anyone can publish `{kind:5, tags:[["e","<someone else's
+    // note>"]]}` and censor arbitrary notes out of this feed.
+    const authorByNoteId = new Map<string, string>();
+    for (const note of allNotes) authorByNoteId.set(note.id, note.pubkey);
+
     const deletedNoteIds = new Set<string>();
     for (const note of allNotes) {
-      if (note.kind === 5) {
-        for (const tag of note.tags) {
-          if (tag[0] === 'e') deletedNoteIds.add(tag[1]);
-        }
+      if (note.kind !== 5) continue;
+      for (const tag of note.tags) {
+        if (tag[0] !== 'e' || !tag[1]) continue;
+        // Honour the request only when the target is provably the requester's
+        // own event. If we don't hold the target we cannot validate, so we
+        // don't hide it — and nothing is lost, because the filter below only
+        // acts on notes present in `allNotes` anyway.
+        if (authorByNoteId.get(tag[1]) === note.pubkey) deletedNoteIds.add(tag[1]);
       }
     }
 

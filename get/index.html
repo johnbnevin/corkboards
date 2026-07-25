@@ -10,7 +10,7 @@
   <meta property="og:description" content="Download corkboards.me — a customizable multi-column social feed reader built on Nostr.">
   <meta property="og:url" content="https://get.corkboards.me">
   <title>Get corkboards.me</title>
-  <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48dGV4dCB5PSIuOWVtIiBmb250LXNpemU9IjkwIj7wn46KPC90ZXh0Pjwvc3ZnPg==">
+  <link rel="icon" href="Corkboards-favicon.png">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -67,6 +67,7 @@
     .hero { text-align: center; padding: 4rem 1.5rem 2rem; }
     .hero-title { font-size: 2.5rem; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 0.25rem; }
     .hero-title span { color: var(--purple); }
+    .hero-logo { display: block; width: 100%; max-width: 440px; height: auto; margin: 0 auto 0.5rem; }
     .hero-subtitle { color: var(--muted-foreground); font-size: 1.1rem; max-width: 540px; margin: 0 auto 0.75rem; }
     .hero-by { font-size: 0.85rem; color: var(--muted-foreground); margin-bottom: 2rem; }
     .hero-by a { color: var(--purple); }
@@ -278,6 +279,7 @@
 
     @media (max-width: 640px) {
       .hero-title { font-size: 1.75rem; }
+      .hero-logo { max-width: 300px; }
       .hero-subtitle { font-size: 1rem; }
       .hero { padding: 2.5rem 1rem 1.5rem; }
       .status-bar { gap: 0.5rem; padding: 0.4rem 0.5rem; font-size: 0.7rem; }
@@ -288,7 +290,7 @@
 
   <!-- Hero -->
   <header class="hero">
-    <h1 class="hero-title">&#x1F4CC; <span>corkboards</span>.me</h1>
+    <h1 class="hero-title"><img class="hero-logo" src="Corkboards-Logo-Corky.png" alt="corkboards.me" width="764" height="159" fetchpriority="high"></h1>
     <p class="hero-subtitle">A customizable multi-column social feed reader built on Nostr. Pin what matters, dismiss the noise, own your identity.</p>
     <p class="hero-by">An open source app by <a href="https://noobstr.me" target="_blank" rel="noopener">noobstr.me</a></p>
     <div class="hero-actions">

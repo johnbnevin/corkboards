@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.1] - 2026-07-24
+
+### Changed
+- Version aligned to **0.8.1** across all packages (core, web, desktop, mobile), Tauri, and Cargo. Mobile keeps its `b` suffix (`0.8.1b`). Release numbers track deployments, not commit labels: 0.8.0 was the last deployment, so this — the first deployment since — is 0.8.1. The `v0.8.1`–`v0.8.5` prefixes in intervening commit messages were development markers and were never shipped.
+
+### Included since 0.8.0
+- Zap without a wallet via QR; word filter now reads inside reposts.
+- Scan-to-zap; shared content-filter and LNURL core modules; cross-platform parity pass.
+- Security audit: 5 critical/high data-loss and forgery fixes across all platforms; audit findings register (167 confirmed findings, 147 parity gaps).
+- SSRF/URL hardening, desktop relay guards, mobile autofetch fixes, core dedupe.
+- README refresh: features + NIP table (custom emoji, Blossom redundancy, link shields, NIP-99 storefronts; removed DMs).
+- get.corkboards.me: direct Linux download links for AppImage/.deb/.rpm.
+
 ## [0.8.0] - 2026-07-24
 
 ### Changed

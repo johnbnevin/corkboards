@@ -2,7 +2,7 @@
   "expo": {
     "name": "Corkboards",
     "slug": "corkboards",
-    "version": "0.8.0b",
+    "version": "0.8.1b",
     "scheme": "corkboards",
     "orientation": "portrait",
     "icon": "./assets/icon.png",

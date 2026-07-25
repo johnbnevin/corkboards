@@ -99,6 +99,11 @@
     .download-card .platform-icon { font-size: 2rem; margin-bottom: 0.5rem; }
     .download-card p { font-size: 0.85rem; color: var(--muted-foreground); margin-bottom: 1rem; }
     .download-card .btn { width: 100%; justify-content: center; margin-top: auto; }
+    .download-card .dl-stack { display: flex; flex-direction: column; gap: 0.5rem; width: 100%; margin-top: auto; }
+    .download-card .dl-stack .btn { margin-top: 0; }
+    .download-card .dl-row { display: flex; gap: 0.5rem; width: 100%; }
+    .download-card .dl-row .btn { flex: 1; width: auto; padding-left: 0.75rem; padding-right: 0.75rem; }
+    .download-card .dl-note { font-size: 0.75rem; color: var(--muted-foreground); margin: 0.1rem 0 0; }
 
     /* Section */
     section { padding: 2.5rem 0; }
@@ -320,9 +325,17 @@
               <div class="note-time">just now</div>
             </div>
           </div>
-          <div class="note-content"><p>Windows, macOS &amp; Linux. Build from source &mdash; just clone and run one command.</p></div>
-          <div class="note-actions" style="justify-content:center; padding-bottom:1rem;">
-            <a href="https://github.com/johnbnevin/corkboards#desktop" class="btn btn-primary" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="position:relative; z-index:25;">Build Instructions</a>
+          <div class="note-content"><p>Ready-to-run Linux builds. Windows &amp; macOS: build from source &mdash; just clone and run one command.</p></div>
+          <div class="note-actions" style="justify-content:center; padding-bottom:1rem; position:relative; z-index:25;">
+            <div class="dl-stack">
+              <a href="https://get.corkboards.me/linux-latest.AppImage" class="btn btn-primary" download onclick="event.stopPropagation()">&#x1F427; Linux AppImage</a>
+              <div class="dl-row">
+                <a href="https://get.corkboards.me/linux-latest.deb" class="btn btn-outline" download onclick="event.stopPropagation()">.deb</a>
+                <a href="https://get.corkboards.me/linux-latest.rpm" class="btn btn-outline" download onclick="event.stopPropagation()">.rpm</a>
+              </div>
+              <p class="dl-note">AppImage: <code>chmod +x</code> then run. Debian/Ubuntu &rarr; .deb, Fedora/RHEL &rarr; .rpm</p>
+              <a href="https://github.com/johnbnevin/corkboards#desktop" class="btn btn-outline" target="_blank" rel="noopener" onclick="event.stopPropagation()">Windows / macOS &mdash; Build from Source</a>
+            </div>
           </div>
         </div>
         <div class="note-card download-card" id="card-dl-2">

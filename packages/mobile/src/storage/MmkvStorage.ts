@@ -68,14 +68,26 @@ export function isStorageHealthy(): boolean {
 }
 
 /**
- * Generate a 32-byte random hex string (64 chars) for use as the MMKV
- * encryption key. Uses crypto.getRandomValues which is polyfilled by
- * react-native-get-random-values in App.tsx.
+ * Generate the MMKV encryption key.
+ *
+ * MMKV caps the encryption key at 16 bytes and silently truncates anything
+ * longer to its first 16 bytes. The previous key was a 64-char hex string, so
+ * MMKV saw only its first 16 ASCII hex chars = 8 bytes = 64 bits of real
+ * entropy. This generates a proper 16-byte key as 16 printable-ASCII characters
+ * (each a single UTF-8 byte, ~6.5 bits each → ~105 bits total), which is MMKV's
+ * documented correct usage and puts entropy in every one of the 16 bytes.
+ *
+ * Existing installs keep whatever key is already in their keychain (it is read
+ * and used as-is below), so this changes new installs only — no re-keying and no
+ * data loss for anyone already running. Uses crypto.getRandomValues, polyfilled
+ * by react-native-get-random-values in App.tsx.
  */
 function generateEncryptionKey(): string {
-  const bytes = new Uint8Array(32);
+  const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  // Map each byte into printable ASCII 33..126 so the string is reliably 16
+  // single-byte characters (no multi-byte UTF-8 that would change the length).
+  return Array.from(bytes).map(b => String.fromCharCode(33 + (b % 94))).join('');
 }
 
 /**
@@ -94,6 +106,7 @@ export function prepareSecureStorage(): Promise<void> {
   _prepareDone = (async () => {
     try {
       let key: string | null = null;
+      let keychainReadErrored = false;
       // 1) Try to retrieve existing key from keychain.
       try {
         const creds = await Keychain.getGenericPassword({
@@ -103,13 +116,26 @@ export function prepareSecureStorage(): Promise<void> {
           key = creds.password;
         }
       } catch (e) {
-        // If keychain read itself errors (rare — locked device, no biometry
-        // available, etc.) we'll fall through to generate one.
-        console.warn('[MmkvStorage] Keychain read failed, will generate fresh key:', e);
+        keychainReadErrored = true;
+        console.warn('[MmkvStorage] Keychain read failed:', e);
       }
 
-      // 2) No key yet — generate and store.
-      if (!key || key.length !== 64) {
+      // CRITICAL: never regenerate a key we merely FAILED to read. Generating a
+      // fresh key here would open MMKV with the wrong key and orphan every
+      // existing encrypted record — permanent data loss from a transient keychain
+      // hiccup (locked device, dismissed biometry prompt). If the read errored and
+      // returned nothing, bail into the degraded fallback below WITHOUT touching
+      // the stored key or the encrypted instance, so the data survives until the
+      // keychain recovers on a later launch. The user is warned via mmkvInitError.
+      if (keychainReadErrored && !key) {
+        throw new Error('Keychain temporarily unavailable — not regenerating the key (would orphan encrypted data). Will retry next launch.');
+      }
+
+      // 2) Only when the keychain genuinely holds no key (first run) do we create
+      //    one. A key that IS present is used as-is regardless of format:
+      //    second-guessing a stored key's length and regenerating is the same
+      //    data-loss trap as regenerating on a read error.
+      if (!key) {
         key = generateEncryptionKey();
         await Keychain.setGenericPassword(KEYCHAIN_USERNAME, key, {
           service: KEYCHAIN_SERVICE,

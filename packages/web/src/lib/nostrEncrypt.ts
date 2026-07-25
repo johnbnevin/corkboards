@@ -60,6 +60,9 @@ export function rawKeyToHex(raw: Uint8Array): string {
 /** Convert hex string back to raw AES key bytes. */
 export function hexToRawKey(hex: string): Uint8Array {
   if (hex.length % 2 !== 0) throw new Error('Invalid hex: odd length');
+  // parseInt('1g', 16) returns 1, not NaN, so the per-nibble isNaN check below
+  // silently accepts a wrong byte. Reject non-hex up front instead.
+  if (!/^[0-9a-f]*$/i.test(hex)) throw new Error('Invalid hex: non-hex characters');
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < hex.length; i += 2) {
     const byte = parseInt(hex.slice(i, i + 2), 16);
@@ -90,16 +93,15 @@ export async function encryptForSelf(
   const encrypted = await aesEncrypt(key, plaintext);
   const keyHex = rawKeyToHex(raw);
 
-  // Wrap AES key via signer (prefer NIP-44, fallback NIP-04)
-  let wrappedKey: string;
-  let signerMethod: 'nip44' | 'nip04';
-  try {
-    wrappedKey = await signer.nip44!.encrypt(pubkey, keyHex);
-    signerMethod = 'nip44';
-  } catch {
-    wrappedKey = await signer.nip04!.encrypt(pubkey, keyHex);
-    signerMethod = 'nip04';
-  }
+  // NIP-44 v2 only on the write path. No silent downgrade to deprecated NIP-04
+  // in a catch: a transient nip44 failure (a dismissed NIP-46 prompt, a signer
+  // timeout) is retryable and must surface — quietly persisting a weaker NIP-04
+  // wrap and publicly tagging it 'nip04' is exactly the "less-private fallback
+  // needs consent, not a catch block" anti-pattern. NIP-04 stays on the *decrypt*
+  // side below, only to unwrap legacy events written before this migration.
+  if (!signer.nip44) throw new Error('Signer does not support NIP-44 encryption');
+  const wrappedKey = await signer.nip44.encrypt(pubkey, keyHex);
+  const signerMethod: 'nip44' | 'nip04' = 'nip44';
 
   return { content: encrypted, wrappedKey, signerMethod };
 }

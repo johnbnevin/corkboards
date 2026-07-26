@@ -372,7 +372,7 @@ export function DiscoverScreen() {
         />
         <Text style={[styles.emptyText, { marginTop: 20 }]}>Follow some people to discover new content</Text>
         {viewingProfile && (
-          <Modal visible animationType="slide">
+          <Modal visible animationType="slide" onRequestClose={() => setViewingProfile(null)}>
             <ProfileScreen pubkey={viewingProfile} onBack={() => setViewingProfile(null)} />
           </Modal>
         )}
@@ -498,7 +498,7 @@ export function DiscoverScreen() {
 
       {/* Profile modal (from onboarding search) */}
       {viewingProfile && (
-        <Modal visible animationType="slide">
+        <Modal visible animationType="slide" onRequestClose={() => setViewingProfile(null)}>
           <ProfileScreen pubkey={viewingProfile} onBack={() => setViewingProfile(null)} />
         </Modal>
       )}

@@ -314,7 +314,7 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
       />
 
       {/* Quote compose modal */}
-      <Modal visible={quoting} animationType="slide">
+      <Modal visible={quoting} animationType="slide" onRequestClose={() => setQuoting(false)}>
         <ComposeScreen
           onClose={() => setQuoting(false)}
           quotedEvent={{ id: event.id, pubkey: event.pubkey, tags: event.tags, content: event.content, kind: event.kind }}

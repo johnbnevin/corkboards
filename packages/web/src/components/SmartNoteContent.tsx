@@ -3,7 +3,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import { visibleLength } from '@core/textTruncation';
 import { hasHtmlContent, sanitizeHtml } from '@/lib/sanitize';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
-import { contentHasAssumedMarkdown } from '@/lib/markdownDetect';
+import { contentHasAssumedMarkdown } from '@core/markdownDetect';
 import { NoteContent } from './NoteContent';
 import { ListingCard } from './ListingCard';
 import { MediaLink } from './MediaLink';

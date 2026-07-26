@@ -20,6 +20,7 @@ import { Platform } from 'react-native';
 import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS, getBlobRejectingServers, clearBlobRejectingServer } from '../hooks/useNostrBackup';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { setImageProxyTemplate, validateImageProxyTemplate } from '@core/imageProxy';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 
 const LEGACY_PROXY_URL_KEY = '__proxy_url__';
 const IMAGE_PROXY_KEY = 'corkboard:image-proxy-template';
@@ -80,6 +81,8 @@ export function AdvancedSettings({
   onToggleRelayWrite,
 }: AdvancedSettingsProps) {
   const [section, setSection] = useState<'main' | 'relays' | 'blossom' | 'network'>(initialSection);
+  // Render-markdown display setting — same key web uses; read by NoteContent.
+  const [renderMarkdown, setRenderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true);
 
   // Sync with external section changes (e.g., opened from settings shortcut).
   // The v7 set-state-in-effect warning is a known false positive for this
@@ -245,6 +248,18 @@ export function AdvancedSettings({
           {publicBookmarks
             ? 'Your saved notes are visible to others'
             : 'Your saved notes are encrypted and private'}
+        </Text>
+      </TouchableOpacity>
+
+      {/* Render markdown */}
+      <TouchableOpacity style={styles.settingRow} onPress={() => setRenderMarkdown(!renderMarkdown)}>
+        <Text style={styles.settingTitle}>
+          {renderMarkdown ? '✓ ' : ''}Render Markdown
+        </Text>
+        <Text style={styles.settingHint}>
+          {renderMarkdown
+            ? 'Notes show bold, italics, and other markdown formatting'
+            : 'Notes show raw markdown text'}
         </Text>
       </TouchableOpacity>
 

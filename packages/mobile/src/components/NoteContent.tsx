@@ -28,6 +28,9 @@ import { parseImetaTag, resolveMediaSources, mediaIdentityKey, type ImetaData } 
 import { MediaLink } from './MediaLink';
 import { TrackerWarningDialog } from './TrackerWarningDialog';
 import { openExternal } from '../lib/openExternal';
+import { contentHasAssumedMarkdown } from '@core/markdownDetect';
+import { InlineMarkdown } from './MarkdownText';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56; // card padding
@@ -585,6 +588,11 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
   // WebLink renders inside a <Text> where a Modal child isn't valid.
   const [trackerPrompt, setTrackerPrompt] = useState<TrackerPromptInfo | null>(null);
 
+  // Global "Render markdown" setting (Advanced settings), on by default and
+  // shared by key with web ('corkboard:render-markdown'). Text runs that look
+  // like markdown get inline emphasis; everything else renders raw.
+  const [renderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true);
+
   // NIP-30 custom emoji map: shortcode → image URL
   const emojiMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -677,7 +685,9 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
         {inlineParts.map((part, i) => {
           switch (part.type) {
             case 'text':
-              return <Text key={i}>{part.value}</Text>;
+              return renderMarkdown && contentHasAssumedMarkdown(part.value)
+                ? <InlineMarkdown key={i} text={part.value} />
+                : <Text key={i}>{part.value}</Text>;
             case 'profile':
               return <ProfileMention key={i} pubkey={part.pubkey!} />;
             case 'note':

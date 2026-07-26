@@ -73,6 +73,11 @@ export function SettingsScreen() {
     STORAGE_KEYS.AUTOFETCH_SMALL,
     false,
   );
+  // Jump to the top when new notes arrive (shares web's AUTO_SCROLL_TOP key).
+  const [autoScrollTop, setAutoScrollTop] = usePlatformStorage<boolean>(
+    STORAGE_KEYS.AUTO_SCROLL_TOP,
+    false,
+  );
 
   // Auth UI state
   const [nsecInput, setNsecInput] = useState('');
@@ -455,6 +460,8 @@ export function SettingsScreen() {
           onAutofetchEnabledChange={setAutofetchEnabled}
           autofetchIntervalSecs={autofetchInterval}
           onAutofetchIntervalChange={setAutofetchInterval}
+          autoScrollTop={autoScrollTop}
+          onAutoScrollTopChange={setAutoScrollTop}
           avatarSizeLimit={avatarSizeLimit}
           onAvatarSizeLimitChange={setAvatarSizeLimit}
           imageSizeLimit={imageSizeLimit}

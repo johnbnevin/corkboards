@@ -129,6 +129,7 @@ export function HomeScreen() {
   // unlike an id diff. Reset on tab change so entering a board doesn't flash.
   const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
   const newestSeenRef = useRef<number | null>(null);
+  const prevFreshSizeRef = useRef(0);
   const { limit } = useFeedLimit();
 
   // ── UI state ────────────────────────────────────────────────────────────────
@@ -300,6 +301,8 @@ export function HomeScreen() {
   // AUTOFETCH_SMALL. Foreground/in-flight gating lives in the hook.
   const [autofetchEnabled] = usePlatformStorage<boolean>(STORAGE_KEYS.AUTOFETCH_SMALL, false);
   const [autofetchIntervalSecs] = usePlatformStorage<number>(STORAGE_KEYS.AUTOFETCH_INTERVAL_SECS, 120);
+  // Opt-in: jump to the top when new notes arrive (pairs with fresh highlighting).
+  const [autoScrollTop] = usePlatformStorage<boolean>(STORAGE_KEYS.AUTO_SCROLL_TOP, false);
   useAutoFetch({
     enabled: !!autofetchEnabled,
     intervalSecs: autofetchIntervalSecs,
@@ -480,6 +483,16 @@ export function HomeScreen() {
     }
   }, [filteredEvents]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Auto-scroll to top when the fresh set grows (opt-in). Mirrors web's
+  // freshNoteIds-growth scroll trigger.
+  useEffect(() => {
+    const grew = freshIds.size > prevFreshSizeRef.current;
+    prevFreshSizeRef.current = freshIds.size;
+    if (grew && autoScrollTop) {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    }
+  }, [freshIds, autoScrollTop]);
 
   // Detect deleted/vanished authors (NIP-09 profile deletion / NIP-62 vanish)
   // across the feed's visible authors in one batched query, provided via context.

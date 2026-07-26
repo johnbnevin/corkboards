@@ -25,6 +25,9 @@ interface ThroughputSettingsProps {
   onAutofetchEnabledChange: (v: boolean) => void;
   autofetchIntervalSecs: number;
   onAutofetchIntervalChange: (v: number) => void;
+  /** Jump the feed to the top when new notes arrive. */
+  autoScrollTop: boolean;
+  onAutoScrollTopChange: (v: boolean) => void;
   avatarSizeLimit: SizeLimitOption;
   onAvatarSizeLimitChange: (v: SizeLimitOption) => void;
   imageSizeLimit: SizeLimitOption;
@@ -67,6 +70,8 @@ export function ThroughputSettings({
   onAutofetchEnabledChange,
   autofetchIntervalSecs,
   onAutofetchIntervalChange,
+  autoScrollTop,
+  onAutoScrollTopChange,
   avatarSizeLimit,
   onAvatarSizeLimitChange,
   imageSizeLimit,
@@ -107,6 +112,18 @@ export function ThroughputSettings({
           ]}
           value={autofetchIntervalSecs}
           onChange={(v) => onAutofetchIntervalChange(Number(v))}
+        />
+      )}
+
+      {autofetchEnabled && (
+        <OptionRow
+          label="Scroll to top on new notes"
+          options={[
+            { value: 'off', label: 'Off' },
+            { value: 'on', label: 'On' },
+          ]}
+          value={autoScrollTop ? 'on' : 'off'}
+          onChange={(v) => onAutoScrollTopChange(v === 'on')}
         />
       )}
 

@@ -6,7 +6,7 @@
 export function BrandIcon({ className = 'h-5 w-5' }: { className?: string }) {
   return (
     <img
-      src="/Corkboards-favicon.png?v=4"
+      src="/Corkboards-favicon.png?v=5"
       alt="Corkboards"
       className={className}
       draggable={false}

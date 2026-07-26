@@ -8,25 +8,25 @@
   "description": "A customizable multi-column pinned note social feed reader and profile creator built on nostr. Zap bitcoin to creators and receive bitcoin for posts others find valuable.",
   "icons": [
     {
-      "src": "/Corkboards-favicon.png?v=4",
+      "src": "/Corkboards-favicon.png?v=5",
       "sizes": "128x128",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/Corkboards-icon-192.png?v=1",
+      "src": "/Corkboards-icon-192.png?v=2",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/Corkboards-icon-512.png?v=1",
+      "src": "/Corkboards-icon-512.png?v=2",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/Corkboards-maskable-512.png?v=1",
+      "src": "/Corkboards-maskable-512.png?v=2",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"

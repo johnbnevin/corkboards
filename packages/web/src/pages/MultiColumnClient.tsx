@@ -2996,10 +2996,18 @@ export function MultiColumnClient() {
     for (const ev of lazyEngagement) {
       const targetId = ev.tags.find(t => t[0] === 'e')?.[1];
       if (!targetId) continue;
-      let entry = merged.get(targetId);
-      if (!entry) { entry = { reactions: [], reposts: [], zaps: [] }; merged.set(targetId, entry); }
       let seen = seenByTarget.get(targetId);
+      let entry = merged.get(targetId);
       if (!seen) {
+        // First lazy event for this target this pass: CLONE the entry and its
+        // arrays before we push. `new Map(engagementByTarget)` only shallow-copied
+        // the map, so the entries are still shared with the source — mutating them
+        // in place both corrupted the original map and left NoteCard's
+        // reference-equality memo blind to the new engagement (same object ref).
+        entry = entry
+          ? { reactions: [...entry.reactions], reposts: [...entry.reposts], zaps: [...entry.zaps] }
+          : { reactions: [], reposts: [], zaps: [] };
+        merged.set(targetId, entry);
         seen = new Set<string>();
         for (const r of entry.reactions) seen.add(r.id);
         for (const r of entry.reposts) seen.add(r.id);
@@ -3008,9 +3016,9 @@ export function MultiColumnClient() {
       }
       if (seen.has(ev.id)) continue;
       seen.add(ev.id);
-      if (ev.kind === 7) entry.reactions.push(ev);
-      else if (ev.kind === 9735) entry.zaps.push(ev);
-      else if (ev.kind === 6 || ev.kind === 16) entry.reposts.push(ev);
+      if (ev.kind === 7) entry!.reactions.push(ev);
+      else if (ev.kind === 9735) entry!.zaps.push(ev);
+      else if (ev.kind === 6 || ev.kind === 16) entry!.reposts.push(ev);
     }
     return merged;
   }, [engagementByTarget, lazyEngagement]);

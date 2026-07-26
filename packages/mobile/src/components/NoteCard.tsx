@@ -100,6 +100,12 @@ interface NoteCardProps {
    *  actions and honor the soft-dismissed / collapsed placeholders. Off in
    *  thread/saved views where those don't apply. */
   showCollapseActions?: boolean;
+  /** Pinned-note ids (NIP-51 kind 10001), provided by the screen so the pin
+   *  hook runs once per screen rather than once per card. When set, the card
+   *  shows the pin affordance + pinned styling. */
+  pinnedSet?: Set<string>;
+  /** Toggle a note's pin state. Presence enables the action-bar pin button. */
+  onTogglePin?: (id: string) => void;
 }
 
 export function NoteCard({
@@ -115,6 +121,8 @@ export function NoteCard({
   hashtagTaggedOnly = false,
   hashtagTaggedLabel,
   showCollapseActions = false,
+  pinnedSet,
+  onTogglePin,
 }: NoteCardProps) {
   const isRepost = event.kind === 6;
   const [expanded, setExpanded] = useState(false);
@@ -127,6 +135,10 @@ export function NoteCard({
     if (!isRepost) return event;
     return verifyEmbeddedEvent(event.content) ?? event;
   }, [event, isRepost]);
+
+  // Pinned state (NIP-51) is keyed on the displayed note — the inner note for a
+  // repost — so pinning from a repost card pins the actual content.
+  const pinned = !!pinnedSet?.has(displayEvent.id);
 
   const { data: repostAuthorData } = useAuthor(event.pubkey);
   const { data } = useAuthor(displayEvent.pubkey);
@@ -188,7 +200,7 @@ export function NoteCard({
 
   return (
     <TouchableOpacity
-      style={[styles.card, isFresh && styles.freshCard, isDeletedAuthor && styles.deletedCard]}
+      style={[styles.card, isFresh && styles.freshCard, pinned && styles.pinnedCard, isDeletedAuthor && styles.deletedCard]}
       onPress={() => onViewThread?.(displayEvent.id)}
       activeOpacity={0.8}
     >
@@ -251,6 +263,13 @@ export function NoteCard({
         </View>
       </View>
 
+      {/* Pinned-to-board flag (NIP-51 kind 10001) */}
+      {pinned && (
+        <View style={styles.pinnedFlag}>
+          <Text style={styles.pinnedFlagText}>📌 Pinned to your board</Text>
+        </View>
+      )}
+
       {/* Note content */}
       <NoteContent event={truncatedEvent} numberOfLines={isLong && !expanded && !mediaFilterActive ? 12 : undefined} />
 
@@ -279,6 +298,8 @@ export function NoteCard({
         onReply={() => onReply?.(displayEvent)}
         isBookmarked={isBookmarked}
         onToggleBookmark={onToggleBookmark}
+        isPinned={pinned}
+        onTogglePin={onTogglePin ? () => onTogglePin(displayEvent.id) : undefined}
       />
     </TouchableOpacity>
   );
@@ -352,6 +373,24 @@ const styles = StyleSheet.create({
   freshCard: {
     borderColor: '#a855f7',
     borderWidth: 1.5,
+    backgroundColor: '#2c2540', // subtle purple tint, mirrors web's bg-purple-950/30
+  },
+  pinnedCard: {
+    borderColor: '#f97316',
+    borderWidth: 1.5,
+  },
+  pinnedFlag: {
+    alignSelf: 'flex-start',
+    marginBottom: 8,
+    backgroundColor: '#3a2a1a',
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  pinnedFlagText: {
+    color: '#f97316',
+    fontSize: 10,
+    fontWeight: '600',
   },
   deletedCard: {
     opacity: 0.7,

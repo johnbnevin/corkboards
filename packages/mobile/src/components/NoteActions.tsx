@@ -22,12 +22,15 @@ interface NoteActionsProps {
   onReply?: () => void;
   isBookmarked?: boolean;
   onToggleBookmark?: () => void;
+  /** NIP-51 pin state; when `onTogglePin` is provided the pin button renders. */
+  isPinned?: boolean;
+  onTogglePin?: () => void;
   /** Called after a deletion request is published, so the parent can optimistically
    *  remove the card. Optional — deletion still publishes without it. */
   onDeleted?: () => void;
 }
 
-export function NoteActions({ event, onReply, isBookmarked = false, onToggleBookmark, onDeleted }: NoteActionsProps) {
+export function NoteActions({ event, onReply, isBookmarked = false, onToggleBookmark, isPinned = false, onTogglePin, onDeleted }: NoteActionsProps) {
   const { nostr } = useNostr();
   const { pubkey, signer } = useAuth();
   const queryClient = useQueryClient();
@@ -298,6 +301,17 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
           <Text style={styles.icon}>🔗</Text>
         </TouchableOpacity>
 
+        {/* Pin to your board (NIP-51 kind 10001) — faded when not pinned. */}
+        {onTogglePin ? (
+          <TouchableOpacity
+            style={styles.action}
+            onPress={() => requireAuth(() => onTogglePin())}
+            accessibilityLabel={isPinned ? 'Unpin from your board' : 'Pin to your board'}
+          >
+            <Text style={[styles.icon, !isPinned && styles.pinInactive]}>📌</Text>
+          </TouchableOpacity>
+        ) : null}
+
         {/* Zap button — shown when author has a lightning address (lud16 or lud06) */}
         {canZap ? (
           <TouchableOpacity
@@ -358,6 +372,7 @@ const styles = StyleSheet.create({
   zapIcon: { color: '#f59e0b' },
   activeZap: { color: '#f59e0b', fontWeight: '700' },
   deleteIcon: { color: '#ef4444' },
+  pinInactive: { opacity: 0.4 },
   count: { fontSize: 12, color: '#b3b3b3' },
   // Grouped emoji reaction chips (mirrors web's ReactionBadges)
   reactionChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },

@@ -38,6 +38,7 @@ import { useNip65Relays } from '../hooks/useNip65Relays';
 import { useMuteList } from '../hooks/useMuteList';
 import { useBookmarks } from '../hooks/useBookmarks';
 import { useCollapsedNotes } from '../hooks/useCollapsedNotes';
+import { usePinnedNotes } from '../hooks/usePinnedNotes';
 import { useAuth } from '../lib/AuthContext';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { usePlatformStorage } from '../hooks/usePlatformStorage';
@@ -119,6 +120,15 @@ export function HomeScreen() {
   const { mutedPubkeys } = useMuteList();
   const { isBookmarked, toggleBookmark } = useBookmarks();
   const { isDismissed, dismissedThreadRootSet } = useCollapsedNotes();
+  // Pin hook runs once per screen; the set + toggler are threaded into each card.
+  const { pinnedSet, togglePin } = usePinnedNotes();
+
+  // Fresh-note highlighting (parity with web's freshNoteIds). Mobile refetches
+  // the whole list, so we track a per-tab newest-created_at baseline and mark
+  // anything newer than it as fresh — immune to older notes pulled by load-more,
+  // unlike an id diff. Reset on tab change so entering a board doesn't flash.
+  const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
+  const newestSeenRef = useRef<number | null>(null);
   const { limit } = useFeedLimit();
 
   // ── UI state ────────────────────────────────────────────────────────────────
@@ -448,6 +458,29 @@ export function HomeScreen() {
     }
   }, [filteredEvents, prefetchFromNotes]);
 
+  // ── Fresh-note highlighting ─────────────────────────────────────────────────
+  /* eslint-disable react-hooks/set-state-in-effect -- fresh set is derived from
+     data-arrival over time (diffed against a ref baseline), which needs an effect. */
+  // Reset the baseline when switching tabs so a board doesn't open all-fresh.
+  useEffect(() => {
+    newestSeenRef.current = null;
+    setFreshIds(prev => (prev.size ? new Set() : prev));
+  }, [activeTab]);
+  // Mark notes newer than the last-settled baseline as fresh.
+  useEffect(() => {
+    const evs = filteredEvents;
+    if (!evs || evs.length === 0) return;
+    let currentMax = 0;
+    for (const e of evs) if (e.created_at > currentMax) currentMax = e.created_at;
+    if (newestSeenRef.current === null) { newestSeenRef.current = currentMax; return; } // first paint: baseline only
+    if (currentMax > newestSeenRef.current) {
+      const cutoff = newestSeenRef.current;
+      newestSeenRef.current = currentMax;
+      setFreshIds(new Set(evs.filter(e => e.created_at > cutoff).map(e => e.id)));
+    }
+  }, [filteredEvents]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   // Detect deleted/vanished authors (NIP-09 profile deletion / NIP-62 vanish)
   // across the feed's visible authors in one batched query, provided via context.
   const visibleAuthors = useMemo(
@@ -554,11 +587,14 @@ export function HomeScreen() {
           mediaFilterActive={mediaFilterActive}
           hashtagTaggedOnly={hashtagTaggedOnly}
           hashtagTaggedLabel={hashtagTaggedLabel}
+          isFresh={freshIds.has(item.id)}
+          pinnedSet={pinnedSet}
+          onTogglePin={togglePin}
           showCollapseActions
         />
       );
     },
-    [handleReply, isBookmarked, toggleBookmark, mediaFilterActive, activeHashtags],
+    [handleReply, isBookmarked, toggleBookmark, mediaFilterActive, activeHashtags, freshIds, pinnedSet, togglePin],
   );
 
   // ── Loading state ───────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef, useTransition, lazy, Suspense } from 'react';
 import { RSS_PUBKEY } from '@core/rss';
+import { parseFeedSource as parseFeedSourceCore } from '@core/feedSource';
 import { useSeoMeta } from '@unhead/react';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostr } from '@/hooks/useNostr';
@@ -1382,40 +1383,17 @@ export function MultiColumnClient() {
   const [feedHashtags, setFeedHashtags] = useState<Set<string>>(new Set());
 
   /** Parse raw input into a feed source type + value, or null if unrecognized. */
-  const parseFeedSource = useCallback((raw: string): { type: 'relay' | 'rss' | 'pubkey' | 'hashtag'; value: string; platform?: string; label?: string; httpsUpgraded?: boolean } | null => {
-    const input = raw.trim();
-    if (!input) return null;
-
-    // Hashtags: #bitcoin or just bitcoin (if it looks like a tag)
-    if (input.startsWith('#') && input.length > 1 && /^#[\w]+$/.test(input)) {
-      return { type: 'hashtag', value: input.slice(1).toLowerCase() };
-    }
-
-    if (input.startsWith('wss://') || input.startsWith('ws://')) {
-      return { type: 'relay', value: input };
-    }
-    if (input.startsWith('https://')) {
-      return { type: 'rss', value: input };
-    }
-    // Feeds are fetched via an HTTPS-only proxy — upgrade http→https automatically.
-    if (input.startsWith('http://')) {
-      return { type: 'rss', value: 'https://' + input.slice('http://'.length), httpsUpgraded: true };
-    }
-    // Bare domain/URL without protocol — auto-prepend https://
-    if (input.includes('.') && !input.startsWith('npub') && !input.startsWith('nprofile')) {
-      return { type: 'rss', value: 'https://' + input };
-    }
+  // Shared with mobile via @core/feedSource — nip19 is injected so core stays
+  // dependency-free. Keeps the corkboard builder's source classification identical
+  // across platforms.
+  const parseFeedSource = useCallback((raw: string) => parseFeedSourceCore(raw, (input) => {
     try {
       const decoded = nip19.decode(input);
-      if (decoded.type === 'npub') return { type: 'pubkey', value: decoded.data as string };
-      if (decoded.type === 'nprofile') return { type: 'pubkey', value: (decoded.data as { pubkey: string }).pubkey };
-    } catch {
-      if (input.length === 64 && /^[a-f0-9]+$/.test(input)) {
-        return { type: 'pubkey', value: input };
-      }
-    }
+      if (decoded.type === 'npub') return decoded.data as string;
+      if (decoded.type === 'nprofile') return (decoded.data as { pubkey: string }).pubkey;
+    } catch { /* not an npub/nprofile */ }
     return null;
-  }, []);
+  }), []);
 
   /** Add raw input as a feed source (updates state). Supports comma-separated values. Returns true if at least one was recognized. */
   const addFeedSource = useCallback((raw: string): boolean => {
@@ -1438,10 +1416,6 @@ export function MultiColumnClient() {
         // Notify when we upgraded http:// → https:// (feeds load via an HTTPS-only proxy)
         if (parsed.httpsUpgraded) {
           toast({ title: 'Changed to HTTPS', description: "Feeds load over a secure (HTTPS) proxy, so we switched http:// to https://. If this feed doesn't load, it may only be served over plain HTTP." });
-        }
-        // Notify when a social media URL was auto-converted
-        if (parsed.platform) {
-          toast({ title: `${parsed.platform} detected`, description: `Converted to RSS feed for ${parsed.label}` });
         }
         // Pre-check RSS validity in background (via proxy to avoid CORS)
         import('@core/feedConstants').then(({ RSS_PROXY }) => {

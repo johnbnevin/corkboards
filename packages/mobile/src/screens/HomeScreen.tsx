@@ -48,6 +48,7 @@ import { useFeedLimit } from '../hooks/useFeedLimit';
 import { NoteCard } from '../components/NoteCard';
 import { FeedFilters } from '../components/FeedFilters';
 import { ContentFilters } from '../components/ContentFilters';
+import { CorkboardBuilderModal, type CorkboardDraft } from '../components/CorkboardBuilderModal';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { getCachedEvent } from '../lib/fetchEvent';
 import {
@@ -133,6 +134,23 @@ export function HomeScreen() {
   // ── Tab / feed switching ────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useLocalStorage<FeedTab>('home:active-tab', 'following');
   const [customFeeds, setCustomFeeds] = useLocalStorage<CustomFeed[]>('nostr-custom-feeds', []);
+
+  // Corkboard builder (create/edit a board from npubs/#hashtags/relays/RSS).
+  const [builderVisible, setBuilderVisible] = useState(false);
+  const [editingFeed, setEditingFeed] = useState<CustomFeed | null>(null);
+  const [builderKey, setBuilderKey] = useState(0);
+  const openNewBoard = useCallback(() => { setEditingFeed(null); setBuilderKey(k => k + 1); setBuilderVisible(true); }, []);
+  const openEditBoard = useCallback((feed: CustomFeed) => { setEditingFeed(feed); setBuilderKey(k => k + 1); setBuilderVisible(true); }, []);
+  const handleSaveBoard = useCallback((draft: CorkboardDraft) => {
+    setCustomFeeds(prev => (prev.some(f => f.id === draft.id)
+      ? prev.map(f => (f.id === draft.id ? draft : f))
+      : [...prev, draft]));
+    setActiveTab(`feed:${draft.id}`);
+  }, [setCustomFeeds, setActiveTab]);
+  const handleDeleteBoard = useCallback((id: string) => {
+    setCustomFeeds(prev => prev.filter(f => f.id !== id));
+    setActiveTab(cur => (cur === `feed:${id}` ? 'following' : cur));
+  }, [setCustomFeeds, setActiveTab]);
 
   // Hashtag → "open in a new corkboard?" prompt (parity with web). Deeply-nested
   // NoteContent requests this via HashtagActionContext; we confirm, then create
@@ -606,11 +624,16 @@ export function HomeScreen() {
           >
             {tabs.map(tab => {
               const isActive = tab.key === activeTab;
+              const customFeed = tab.key.startsWith('feed:')
+                ? customFeeds.find(f => `feed:${f.id}` === tab.key)
+                : undefined;
               return (
                 <TouchableOpacity
                   key={tab.key}
                   style={[styles.tab, isActive && styles.tabActive]}
                   onPress={() => handleTabSwitch(tab.key)}
+                  onLongPress={customFeed ? () => openEditBoard(customFeed) : undefined}
+                  delayLongPress={350}
                   activeOpacity={0.7}
                 >
                   <Text style={[styles.tabText, isActive && styles.tabTextActive]} numberOfLines={1}>
@@ -619,6 +642,14 @@ export function HomeScreen() {
                 </TouchableOpacity>
               );
             })}
+            <TouchableOpacity
+              style={[styles.tab, styles.tabAdd]}
+              onPress={openNewBoard}
+              activeOpacity={0.7}
+              accessibilityLabel="New corkboard"
+            >
+              <Text style={styles.tabAddText}>＋ Board</Text>
+            </TouchableOpacity>
           </ScrollView>
         </View>
 
@@ -731,6 +762,18 @@ export function HomeScreen() {
             />
           )}
         </Modal>
+
+        {/* ── Corkboard builder ──────────────────────────────────────── */}
+        <CorkboardBuilderModal
+          visible={builderVisible}
+          resetKey={builderKey}
+          onClose={() => setBuilderVisible(false)}
+          onSave={handleSaveBoard}
+          onDelete={handleDeleteBoard}
+          editingFeed={editingFeed
+            ? { ...editingFeed, hashtags: editingFeed.hashtags ?? [] }
+            : null}
+        />
       </View>
     </ProfileModalProvider>
     </DeletedAuthorsContext.Provider>
@@ -783,6 +826,17 @@ const styles = StyleSheet.create({
   },
   tabTextActive: {
     color: '#fff',
+    fontWeight: '600',
+  },
+  tabAdd: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#555',
+    borderStyle: 'dashed',
+  },
+  tabAddText: {
+    fontSize: 13,
+    color: '#a855f7',
     fontWeight: '600',
   },
 

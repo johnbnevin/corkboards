@@ -658,6 +658,14 @@ export function MultiColumnClient() {
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [advancedSection, setAdvancedSection] = useState<'main' | 'relays' | 'blossom'>('main');
   const [emojiSetsOpen, setEmojiSetsOpen] = useState(false);
+  // Stable callbacks so FeedGrid's React.memo (its heavy props — columns,
+  // engagement — are already memoized) isn't defeated by a fresh function
+  // identity on every parent render. Without these, an unrelated re-render (a
+  // StatusBar timer tick, a filter toggle) re-runs the entire feed body.
+  const noopCallback = useCallback(() => {}, []);
+  const handleOpenEmojiSets = useCallback(() => setEmojiSetsOpen(true), []);
+  const handleZapClick = useCallback((note: NostrEvent) => setZapTargetNote(note), []);
+  const handleRepostClick = useCallback((note: NostrEvent) => openRepost(note), [openRepost]);
   const [consolidateSound, setConsolidateSoundRaw] = useLocalStorage<string>('corkboard:consolidate-sound', 'solitaire');
   const [soundAccelerate, setSoundAccelerate] = useLocalStorage<boolean>('corkboard:sound-accelerate', false);
   const [collapseReactions, setCollapseReactions] = useLocalStorage<boolean>('corkboard:collapse-reactions', true);
@@ -3427,6 +3435,16 @@ export function MultiColumnClient() {
     return cols;
   }, [notes, columnCount]);
 
+  // Feed stats for the StatusBar, memoized. It was an inline IIFE in the JSX,
+  // so it recomputed an O(deduplicatedNotes) scan AND allocated a fresh object on
+  // every render (including every StatusBar timer tick), defeating the bar's memo.
+  const feedStats = useMemo(() => {
+    const visible = notes.length;
+    const dismissed = deduplicatedNotes.filter(n => isDismissed(n.id)).length;
+    const filtered = hasActiveFilters ? Math.max(0, deduplicatedNotes.length - notes.length - dismissed) : 0;
+    return { total: visible + dismissed + filtered, visible, dismissed, filtered };
+  }, [notes, deduplicatedNotes, isDismissed, hasActiveFilters]);
+
   const isLoading = isLoadingUserNotes || isLoadingFriendNotes || isLoadingRelayNotes || isLoadingCustomFeed || (isDiscoverTab && isLoadingDiscover && discoveredNotes.length === 0 && (!isOnboarding || isLoadingOnboardSeed)) || (isAllFollowsTab && isLoadingAllFollows);
 
   // Logout splash — must come before !user check so it stays visible after
@@ -4396,17 +4414,17 @@ export function MultiColumnClient() {
           isLoadingNewer={isLoadingNewer}
           blankSpaceCount={blankSpaceCount}
           revealMoreTick={revealMoreTick}
-          onLoadNewer={isSavedTab ? () => {} : loadNewerNotes}
-          onLoadMore={isSavedTab ? () => {} : handleLoadMore}
+          onLoadNewer={isSavedTab ? noopCallback : loadNewerNotes}
+          onLoadMore={isSavedTab ? noopCallback : handleLoadMore}
           onConsolidate={consolidate}
           onThreadClick={openThread}
           onComment={openThreadAndReply}
           onOpenThread={openThread}
           activeHashtags={isCustomFeedTab ? activeHashtags : undefined}
-          onOpenEmojiSets={() => setEmojiSetsOpen(true)}
+          onOpenEmojiSets={handleOpenEmojiSets}
           onPinClick={handlePinNote}
-          onZapClick={(note) => setZapTargetNote(note)}
-          onRepost={(note) => openRepost(note)}
+          onZapClick={handleZapClick}
+          onRepost={handleRepostClick}
           onPinToBoard={handlePinToBoard}
           onDeleteNote={handleDeleteNote}
           onReactionPublished={handleReactionPublished}
@@ -4434,8 +4452,8 @@ export function MultiColumnClient() {
         {/* Status Bar with inline buttons */}
         {/* Compute stats based on active tab — notifications have their own data source */}
         <StatusBar
-          onLoadNewer={isSavedTab ? () => {} : loadNewerNotes}
-          onLoadMoreByCount={isSavedTab ? () => {} : handleLoadMoreByCount}
+          onLoadNewer={isSavedTab ? noopCallback : loadNewerNotes}
+          onLoadMoreByCount={isSavedTab ? noopCallback : handleLoadMoreByCount}
           onConsolidate={consolidate}
           onSave={() => { setShowBackupConfirm(true); checkRemoteBackup(true); }}
           onRestore={() => remoteBackup ? setShowRestoreConfirm(true) : checkRemoteBackup(true)}
@@ -4443,13 +4461,7 @@ export function MultiColumnClient() {
           loadingMessage={loadingMessage}
           blankSpaceCount={blankSpaceCount}
           multiplier={feedLimitMultiplier}
-          indexedDbStats={isNotificationsTab ? notifStats : (() => {
-            const visible = notes.length;
-            const dismissed = deduplicatedNotes.filter(n => isDismissed(n.id)).length;
-            const filtered = hasActiveFilters ? Math.max(0, deduplicatedNotes.length - notes.length - dismissed) : 0;
-            const total = visible + dismissed + filtered;
-            return { total, visible, dismissed, filtered };
-          })()}
+          indexedDbStats={isNotificationsTab ? notifStats : feedStats}
           backupStatus={backupStatus}
           _hasChanges={hasChanges}
           isSavedTab={isSavedTab}
@@ -4529,7 +4541,7 @@ export function MultiColumnClient() {
           onReactionPublished={handleReactionPublished}
           onReplyPublished={handleComposePublished}
           autoReplyTo={autoReplyNoteRef.current}
-          onOpenEmojiSets={() => setEmojiSetsOpen(true)}
+          onOpenEmojiSets={handleOpenEmojiSets}
           onNavigateThread={(id) => setThreadEventId(id)}
         />
 
@@ -4558,7 +4570,7 @@ export function MultiColumnClient() {
                 repostEvent={composeRepostEvent || undefined}
                 onPublished={handleComposePublished}
                 onRepostWithComment={handleRepostWithComment}
-                onOpenEmojiSets={() => setEmojiSetsOpen(true)}
+                onOpenEmojiSets={handleOpenEmojiSets}
               />
             </Suspense>
           </ErrorBoundary>

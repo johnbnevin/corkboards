@@ -12,7 +12,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "eslint",
-    "test": "tsc --noEmit && eslint && echo 'Core checks passed!'"
+    "test": "tsc --noEmit && eslint && vitest run && echo 'Core checks passed!'"
   },
   "peerDependencies": {
     "@nostrify/nostrify": ">=0.48.0"

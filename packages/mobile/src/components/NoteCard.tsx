@@ -22,6 +22,7 @@ import { genUserName } from '@core/genUserName';
 import { useIsDeletedAuthor } from '../contexts/deletedAuthors';
 import { visibleLength, findVisibleCutoff } from '@core/textTruncation';
 import { verifyEmbeddedEvent } from '../lib/embeddedEvent';
+import { useCollapsedNotes } from '../hooks/useCollapsedNotes';
 
 // ============================================================================
 // Repost author name — shows the actual author for reposts
@@ -95,6 +96,10 @@ interface NoteCardProps {
   hashtagTaggedOnly?: boolean;
   /** The specific hashtag the note is tagged-but-not-mentioned for. */
   hashtagTaggedLabel?: string;
+  /** Feed context: show the save-for-later (green) + dismiss (red) corner
+   *  actions and honor the soft-dismissed / collapsed placeholders. Off in
+   *  thread/saved views where those don't apply. */
+  showCollapseActions?: boolean;
 }
 
 export function NoteCard({
@@ -109,6 +114,7 @@ export function NoteCard({
   mediaFilterActive = false,
   hashtagTaggedOnly = false,
   hashtagTaggedLabel,
+  showCollapseActions = false,
 }: NoteCardProps) {
   const isRepost = event.kind === 6;
   const [expanded, setExpanded] = useState(false);
@@ -146,12 +152,58 @@ export function NoteCard({
     return { ...displayEvent, content: displayEvent.content.slice(0, cutoff).trimEnd() + '...' };
   }, [displayEvent, isLong, expanded, mediaFilterActive]);
 
+  // Save-for-later / dismiss (feed only). The engine + feed dismiss-filter
+  // already exist; this adds the on-card affordance, matching web and the
+  // mobile NotificationCard. Keyed on the feed item (event.id), which is what
+  // the feed filter checks.
+  const { isCollapsed, toggleCollapsed, dismiss, isSoftDismissed, canUndoDismiss, undoDismiss } = useCollapsedNotes();
+  const softDismissed = showCollapseActions && isSoftDismissed(event.id);
+  const collapsed = showCollapseActions && isCollapsed(event.id);
+
+  if (softDismissed) {
+    const canUndo = canUndoDismiss(event.id);
+    return (
+      <TouchableOpacity
+        style={styles.placeholder}
+        onPress={canUndo ? () => undoDismiss(event.id) : undefined}
+        disabled={!canUndo}
+      >
+        <Text style={styles.placeholderText}>{canUndo ? 'undo' : 'dismissed'}</Text>
+      </TouchableOpacity>
+    );
+  }
+  if (collapsed) {
+    return (
+      <TouchableOpacity style={styles.placeholder} onPress={() => toggleCollapsed(event.id)}>
+        <Text style={styles.placeholderText}>saved for later</Text>
+      </TouchableOpacity>
+    );
+  }
+
   return (
     <TouchableOpacity
       style={[styles.card, isFresh && styles.freshCard, isDeletedAuthor && styles.deletedCard]}
       onPress={() => onViewThread?.(displayEvent.id)}
       activeOpacity={0.8}
     >
+      {showCollapseActions && (
+        <View style={styles.cornerRow} pointerEvents="box-none">
+          <TouchableOpacity
+            style={styles.saveCorner}
+            onPress={() => toggleCollapsed(event.id)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <View style={styles.greenTriangle} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.dismissCorner}
+            onPress={() => dismiss(event.id)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <View style={styles.redTriangle} />
+          </TouchableOpacity>
+        </View>
+      )}
       {isDeletedAuthor && (
         <Text style={styles.deletedNotice}>⊘ This user deleted their account.</Text>
       )}
@@ -235,6 +287,47 @@ const styles = StyleSheet.create({
     padding: 14,
     borderWidth: 1,
     borderColor: '#404040',
+  },
+  placeholder: {
+    backgroundColor: 'transparent',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#404040',
+    borderStyle: 'dashed',
+    minHeight: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+  },
+  placeholderText: { color: '#666', fontSize: 11 },
+  cornerRow: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    zIndex: 10,
+  },
+  saveCorner: { width: 36, height: 36 },
+  dismissCorner: { width: 36, height: 36, alignItems: 'flex-end' },
+  greenTriangle: {
+    width: 0,
+    height: 0,
+    borderTopWidth: 36,
+    borderRightWidth: 36,
+    borderTopColor: '#22c55e',
+    borderRightColor: 'transparent',
+    borderTopLeftRadius: 10,
+  },
+  redTriangle: {
+    width: 0,
+    height: 0,
+    borderTopWidth: 36,
+    borderLeftWidth: 36,
+    borderTopColor: '#ef4444',
+    borderLeftColor: 'transparent',
+    borderTopRightRadius: 10,
   },
   taggedFlag: {
     alignSelf: 'flex-start',

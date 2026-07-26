@@ -536,6 +536,7 @@ export function HomeScreen() {
           mediaFilterActive={mediaFilterActive}
           hashtagTaggedOnly={hashtagTaggedOnly}
           hashtagTaggedLabel={hashtagTaggedLabel}
+          showCollapseActions
         />
       );
     },

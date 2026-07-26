@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { NostrLoginProvider } from '@nostrify/react/login';
 import NostrProvider from '@/components/NostrProvider';
 import { AppProvider } from '@/components/AppProvider';
+import { CollapsedNotesProvider } from '@/hooks/useCollapsedNotes';
 import { AppConfig } from '@/contexts/AppContext';
 
 interface TestAppProps {
@@ -37,7 +38,9 @@ export function TestApp({ children }: TestAppProps) {
           <NostrLoginProvider storageKey='test-login'>
             <NostrProvider>
               <BrowserRouter>
-                {children}
+                <CollapsedNotesProvider>
+                  {children}
+                </CollapsedNotesProvider>
               </BrowserRouter>
             </NostrProvider>
           </NostrLoginProvider>

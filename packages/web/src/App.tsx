@@ -14,6 +14,7 @@ import { NostrLoginProvider } from '@nostrify/react/login';
 import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
 import { NwcProvider } from '@/hooks/useNwc';
+import { CollapsedNotesProvider } from '@/hooks/useCollapsedNotes';
 import AppRouter from './AppRouter';
 import { installDesktopLinkInterceptor } from '@/lib/openExternal';
 
@@ -64,7 +65,9 @@ export function App() {
                     <Toaster />
                     <GlobalLightbox />
                     <Suspense fallback={<div className="flex items-center justify-center h-screen" />}>
-                      <AppRouter />
+                      <CollapsedNotesProvider>
+                        <AppRouter />
+                      </CollapsedNotesProvider>
                     </Suspense>
                   </TooltipProvider>
                 </ErrorBoundary>

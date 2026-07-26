@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useEffect, useRef, useState } from 'react'
+import { useCallback, useMemo, useEffect, useRef, useState, createContext, useContext, createElement, type ReactNode } from 'react'
 import { useLocalStorage } from './useLocalStorage'
 
 const MAX_COLLAPSED_NOTES = 10000 // Keep memory bounded
@@ -86,7 +86,7 @@ export function clearCollapsedNotesModuleState(): void {
  */
 const MAX_DISMISSED_THREAD_ROOTS = 2000
 
-export function useCollapsedNotes() {
+function useCollapsedNotesState() {
   const [collapsedIds, setCollapsedIds] = useLocalStorage<string[]>('collapsed-notes', [])
   const [dismissedIds, setDismissedIds] = useLocalStorage<string[]>('dismissed-notes', [])
   // Thread roots the user dismissed via "dismiss all associated". Persisted so
@@ -364,7 +364,11 @@ export function useCollapsedNotes() {
     }
   }, [setDismissedIds])
 
-  return {
+  // Memoized so the single provider below hands a stable value to every consumer
+  // — it changes only when the underlying state does, not on every provider
+  // re-render. All the fields below are either useCallback-stable or the state
+  // arrays/sets themselves.
+  return useMemo(() => ({
     isCollapsed,
     isCollapsedThisSession,
     isDismissed,
@@ -390,5 +394,37 @@ export function useCollapsedNotes() {
     collapsedCount: collapsedIds.length,
     dismissedCount: dismissedIds.length,
     softDismissedCount: softDismissedIds.length,
-  }
+  }), [
+    isCollapsed, isCollapsedThisSession, isDismissed, isSoftDismissed, toggleCollapsed, collapse, expand,
+    dismiss, undoDismiss, canUndoDismiss, isBatchTrigger, consolidate, dismissMultiple, dismissThreadRoots,
+    isDismissedThreadRoot, dismissedThreadRootSet, dismissAllCollapsed, clearAll, clearDismissed, undismissMany,
+    collapsedIds, dismissedIds, softDismissedIds,
+  ])
+}
+
+export type CollapsedNotesValue = ReturnType<typeof useCollapsedNotesState>
+
+const CollapsedNotesContext = createContext<CollapsedNotesValue | null>(null)
+
+/**
+ * Provides ONE shared collapsed/dismissed/saved-notes store for the whole app.
+ *
+ * Before this, every NoteCard (and each notification/saved card) called
+ * useCollapsedNotes() directly — so each card parsed 3 persisted arrays, rebuilt
+ * 4 Sets, and registered 6 window listeners. A feed of hundreds of cards did all
+ * of that hundreds of times over on mount and again whenever the lists changed.
+ * The heavy work now happens once here; cards read the result cheaply via
+ * context. The soft-dismiss / undo / session-collapsed state was already
+ * module-level and shared, so behavior is unchanged — only the per-card cost is
+ * gone.
+ */
+export function CollapsedNotesProvider({ children }: { children: ReactNode }) {
+  const value = useCollapsedNotesState()
+  return createElement(CollapsedNotesContext.Provider, { value }, children)
+}
+
+export function useCollapsedNotes(): CollapsedNotesValue {
+  const ctx = useContext(CollapsedNotesContext)
+  if (!ctx) throw new Error('useCollapsedNotes must be used within a CollapsedNotesProvider')
+  return ctx
 }

@@ -172,6 +172,33 @@ function wrapRequest<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+/**
+ * Run writes on a fresh readwrite transaction and resolve only when the
+ * transaction COMMITS (`oncomplete`), not merely when the request succeeds.
+ *
+ * `request.onsuccess` fires before the transaction commits, and a quota/abort at
+ * commit time rolls the write back on disk. Waiting on onsuccess (as wrapRequest
+ * does) would report that failed write as a success — so memCache, the
+ * `consecutiveWriteFailures` health counter, and the cross-tab broadcast would
+ * all record a value that never reached disk, and `serializeBackup` (which reads
+ * memCache) could then persist it as real. Rejects on abort/error, including a
+ * synchronous throw from put/delete (e.g. DataError) that never reaches onabort.
+ */
+function writeAndCommit(database: IDBDatabase, run: (store: IDBObjectStore) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const store = tx(database, 'readwrite');
+    const transaction = store.transaction;
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = () => reject(transaction.error ?? new Error('idb transaction aborted'));
+    transaction.onerror = () => reject(transaction.error ?? new Error('idb transaction error'));
+    try {
+      run(store);
+    } catch (e) {
+      reject(e instanceof Error ? e : new Error(String(e)));
+    }
+  });
+}
+
 export async function idbGet(key: string): Promise<string | null> {
   if (!idbAvailable) return memCache.get(key) ?? null;
   const database = await getDb();
@@ -189,10 +216,10 @@ export async function idbSet(key: string, value: string): Promise<void> {
   }
   try {
     const database = await getDb();
-    await wrapRequest(tx(database, 'readwrite').put(value, key));
-    // Only mirror to memCache on confirmed disk success — prevents memCache
-    // from diverging from disk when writes fail. Readers fall through to
-    // idbGet (which reads disk) when a key isn't in memCache.
+    await writeAndCommit(database, (store) => { store.put(value, key); });
+    // Mirror to memCache only after the transaction COMMITS (see writeAndCommit)
+    // — never on a bare onsuccess that a commit-time abort could still roll back.
+    // Readers fall through to idbGet (which reads disk) when a key isn't cached.
     memCache.set(key, value);
     consecutiveWriteFailures = 0;
     broadcastChange({ type: 'set', key, value });
@@ -202,7 +229,7 @@ export async function idbSet(key: string, value: string): Promise<void> {
     dbPromise = null;
     try {
       const database = await getDb();
-      await wrapRequest(tx(database, 'readwrite').put(value, key));
+      await writeAndCommit(database, (store) => { store.put(value, key); });
       memCache.set(key, value);
       consecutiveWriteFailures = 0;
       broadcastChange({ type: 'set', key, value });
@@ -220,7 +247,7 @@ export async function idbRemove(key: string): Promise<void> {
   memCache.delete(key);
   if (!idbAvailable) return;
   const database = await getDb();
-  await wrapRequest(tx(database, 'readwrite').delete(key));
+  await writeAndCommit(database, (store) => { store.delete(key); });
   broadcastChange({ type: 'remove', key });
 }
 
@@ -228,7 +255,7 @@ export async function idbClear(): Promise<void> {
   memCache.clear();
   if (!idbAvailable) return;
   const database = await getDb();
-  await wrapRequest(tx(database, 'readwrite').clear());
+  await writeAndCommit(database, (store) => { store.clear(); });
   // Close the connection so deleteDatabase() won't be blocked
   database.close();
   db = null;

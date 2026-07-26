@@ -44,6 +44,7 @@ import { NConnectSigner, NSecSigner } from '@nostrify/nostrify';
 import { createRelayDirect } from '@/components/NostrProvider';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { idbSetSync, idbClear, idbKeys } from '@/lib/idb';
+import { IMAGE_PROXY_TEMPLATE_KEY } from '@/lib/imageProxySettings';
 import { clearNotesCache } from '@/lib/notesCache';
 import { clearCache as clearProfileCacheDb, clearMemCache as clearProfileMemCache } from '@/lib/cacheStore';
 import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
@@ -398,7 +399,14 @@ export function useLoginActions() {
       }
 
       log('Clearing localStorage...');
+      // Preserve the image-proxy template across the wipe: it's a device-level
+      // IP-hiding preference, not account data, and silently reverting it to off
+      // on logout would strip the user's chosen privacy protection for the next
+      // (even logged-out) session. Re-applied right after the clear.
+      let preservedImageProxy: string | null = null;
+      try { preservedImageProxy = localStorage.getItem(IMAGE_PROXY_TEMPLATE_KEY); } catch { /* */ }
       localStorage.clear();
+      if (preservedImageProxy) { try { localStorage.setItem(IMAGE_PROXY_TEMPLATE_KEY, preservedImageProxy); } catch { /* */ } }
       log('Clearing sessionStorage...');
       sessionStorage.clear();
 

@@ -235,15 +235,17 @@ export function usePinnedNotes() {
     persistPendingRef.current = true;
     setPinnedIds(newIds);
 
-    // Set optimistic pin list cache (prevents relay refetch from reverting)
+    // Set optimistic pin list cache (prevents relay refetch from reverting).
+    // Carry relayHints forward: publishPinList reads them from this cache, so
+    // dropping them here would strip every pin's relay hint on the NEXT pin/unpin.
     queryClient.setQueryData(['pinned-notes', pubkey],
-      { ids: newIds, status: newIds.length > 0 ? 'found' as const : 'none' as const });
+      { ids: newIds, status: newIds.length > 0 ? 'found' as const : 'none' as const, relayHints: pinListResult?.relayHints ?? {} });
 
     await publishPinList(newIds);
 
     // After relay confirms, refetch events to pick up newly pinned notes
     queryClient.invalidateQueries({ queryKey: ['pinned-note-events'] });
-  }, [pubkey, signer, pinnedIds, publishPinList, queryClient]);
+  }, [pubkey, signer, pinnedIds, publishPinList, queryClient, pinListResult?.relayHints]);
 
   return {
     pinnedIds,

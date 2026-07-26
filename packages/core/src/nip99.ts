@@ -69,8 +69,15 @@ export function parseListing(event: NostrEvent): ParsedListing {
 
   // Gamma image tags: ['image', url, dimensions?, order?]. Sort by the order
   // field when present so galleries render in the merchant's intended order.
+  // A non-numeric order field yields NaN from parseInt, and a comparator that
+  // returns NaN produces an implementation-defined (garbage, and in some engines
+  // throwing) sort — coerce it to 0 so ordering stays well-defined.
+  const imageOrder = (t: string[]): number => {
+    const n = parseInt(t[3] || '0', 10);
+    return Number.isFinite(n) ? n : 0;
+  };
   const imageTags = event.tags.filter(t => t[0] === 'image' && typeof t[1] === 'string' && t[1]);
-  imageTags.sort((a, b) => (parseInt(a[3] || '0', 10)) - (parseInt(b[3] || '0', 10)));
+  imageTags.sort((a, b) => imageOrder(a) - imageOrder(b));
   const images = imageTags.map(t => t[1]);
   if (images.length === 0) {
     // Fall back to the first imeta (NIP-92) url for listings that use imeta.

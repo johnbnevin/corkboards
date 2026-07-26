@@ -20,9 +20,12 @@ interface NoteActionsProps {
   onReply?: () => void;
   isBookmarked?: boolean;
   onToggleBookmark?: () => void;
+  /** Called after a deletion request is published, so the parent can optimistically
+   *  remove the card. Optional — deletion still publishes without it. */
+  onDeleted?: () => void;
 }
 
-export function NoteActions({ event, onReply, isBookmarked = false, onToggleBookmark }: NoteActionsProps) {
+export function NoteActions({ event, onReply, isBookmarked = false, onToggleBookmark, onDeleted }: NoteActionsProps) {
   const { nostr } = useNostr();
   const { pubkey, signer } = useAuth();
   const queryClient = useQueryClient();
@@ -184,6 +187,44 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
 
   const reactionGroups = engagement?.reactionGroups ?? [];
 
+  // Only the author can request deletion of their own note.
+  const isOwnNote = !!pubkey && event.pubkey === pubkey;
+
+  // NIP-09: publish a kind-5 deletion request for the user's own note. Framed as
+  // a *request* — relays may refuse and copies others already fetched can persist
+  // — so we never claim the note is gone. Parity with web's DeleteNoteButton
+  // ({ kind: 5, content: 'Deleted by author', tags: [['e', id]] }).
+  const handleDelete = useCallback(() => {
+    if (!signer) return;
+    Alert.alert(
+      'Request deletion?',
+      'This asks relays to delete your note (NIP-09). Relays may refuse, and copies others already downloaded can persist.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Request deletion',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const signed = await signer.signEvent({
+                kind: 5,
+                content: 'Deleted by author',
+                tags: [['e', event.id], ['k', String(event.kind)]],
+                created_at: Math.floor(Date.now() / 1000),
+              });
+              await nostr.event(signed);
+              queryClient.invalidateQueries({ queryKey: ['note-engagement', event.id] });
+              onDeleted?.();
+              Alert.alert('Deletion requested', 'Your note’s deletion request was published to relays.');
+            } catch {
+              Alert.alert('Deletion failed', 'Could not publish the deletion request. Please try again.');
+            }
+          },
+        },
+      ],
+    );
+  }, [signer, nostr, queryClient, event.id, event.kind, onDeleted]);
+
   return (
     <>
       {reactionGroups.length > 0 && (
@@ -251,6 +292,17 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
             {(engagement?.zapCount ?? 0) > 0 && <Text style={[styles.count, styles.zapIcon, zapped && styles.activeZap]}>{engagement?.zapCount}</Text>}
           </TouchableOpacity>
         ) : null}
+
+        {/* Request deletion (NIP-09) — only on the user's own notes. */}
+        {isOwnNote ? (
+          <TouchableOpacity
+            style={styles.action}
+            onPress={handleDelete}
+            accessibilityLabel="Request deletion from relays"
+          >
+            <Text style={[styles.icon, styles.deleteIcon]}>🗑</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {/* Zap dialog — the same one the thread and saved screens use */}
@@ -289,6 +341,7 @@ const styles = StyleSheet.create({
   activeBookmark: { color: '#f97316' },
   zapIcon: { color: '#f59e0b' },
   activeZap: { color: '#f59e0b', fontWeight: '700' },
+  deleteIcon: { color: '#ef4444' },
   count: { fontSize: 12, color: '#b3b3b3' },
   // Grouped emoji reaction chips (mirrors web's ReactionBadges)
   reactionChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },

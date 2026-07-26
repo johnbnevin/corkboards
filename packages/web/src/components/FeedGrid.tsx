@@ -5,7 +5,7 @@
  * Extracted from MultiColumnClient.tsx to keep that file manageable.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { RSS_PUBKEY } from '@core/rss';
 import { hashtagFeedVerdict } from '@core/noteCategories';
 import { type NostrEvent } from '@nostrify/nostrify';
@@ -220,6 +220,10 @@ export const FeedGrid = React.memo(function FeedGrid({
   activeHashtags,
   onOpenEmojiSets,
 }: FeedGridProps) {
+  // Membership test for the pin badge — a Set avoids an O(notes × pins)
+  // `.includes()` scan inside the per-note render loop below.
+  const pinnedNoteIdSet = useMemo(() => new Set(pinnedNoteIds), [pinnedNoteIds]);
+
   // ── Incremental rendering: render a small batch first, add more on scroll ──
   const maxColLength = Math.max(...columns.map(c => c.length), 0);
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_PER_COL);
@@ -443,7 +447,7 @@ export const FeedGrid = React.memo(function FeedGrid({
                         hashtagTaggedOnly={hashtagTaggedOnly}
                         hashtagTaggedLabel={hashtagTaggedOnly ? activeHashtags.find(tag => hashtagFeedVerdict(note, tag) === 'tagged-only') : undefined}
                         note={note}
-                        isPinned={pinnedNoteIds.includes(note.id)}
+                        isPinned={pinnedNoteIdSet.has(note.id)}
                         showPinButton={activeTab === 'me'}
                         onPinClick={() => onPinClick(note.id)}
                         onThreadClick={() => onThreadClick(note.id)}

@@ -30,6 +30,7 @@ import { useDiscover } from '../hooks/useDiscover';
 import { useContacts } from '../hooks/useFeed';
 import { useMuteList } from '../hooks/useMuteList';
 import { useBookmarks } from '../hooks/useBookmarks';
+import { usePinnedNotes } from '../hooks/usePinnedNotes';
 import { useBulkAuthors } from '../hooks/useAuthor';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { useNostrBackup } from '../hooks/useNostrBackup';
@@ -203,6 +204,7 @@ export function DiscoverScreen() {
   const { data: contacts } = useContacts(pubkey ?? undefined);
   const { mutedPubkeys } = useMuteList();
   const { isBookmarked, toggleBookmark } = useBookmarks();
+  const { pinnedSet, togglePin } = usePinnedNotes();
   const { saveBackup } = useNostrBackup(pubkey, signer);
   useBulkAuthors();
   const flatListRef = useRef<FlatListType<NostrEvent>>(null);
@@ -348,9 +350,11 @@ export function DiscoverScreen() {
         event={item}
         isBookmarked={isBookmarked(item.id)}
         onToggleBookmark={() => toggleBookmark(item.id)}
+        pinnedSet={pinnedSet}
+        onTogglePin={togglePin}
       />
     ),
-    [isBookmarked, toggleBookmark],
+    [isBookmarked, toggleBookmark, pinnedSet, togglePin],
   );
 
   if (!pubkey) {

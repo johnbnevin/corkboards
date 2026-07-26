@@ -2943,14 +2943,19 @@ export function MultiColumnClient() {
   // Fires once after feed loads, single batched query, respects rate limiting.
   const lazyEngagementNoteIds = useMemo(() => {
     if (!canLoadNotes || deduplicatedNotes.length === 0) return '';
-    // Collect IDs of original notes (kind 1/30023) — these are the targets we want engagement for.
-    // Only the notes that can actually be on screen: the query key is the joined
-    // id list, so a wider slice also means a NEW key (and a fresh network round
-    // trip) every time the feed shifts by one note.
+    // Collect IDs of the original notes (kind 1/30023) currently in view — the
+    // targets we want engagement for. This joined list IS the query key, so we
+    // sort it: the key then depends on the SET of visible target notes, not their
+    // order. A feed re-sort (very common — time ordering shifts on every arrival)
+    // that doesn't change WHICH notes are visible now reuses the cached result
+    // instead of minting a new key, firing a fresh relay query, and leaking the
+    // old cache entry. The relay treats `#e` as a set, so sorting doesn't change
+    // what's fetched.
     const ids = deduplicatedNotes
       .filter(n => n.kind === 1 || n.kind === 30023)
       .slice(0, LAZY_ENGAGEMENT_TARGETS)
       .map(n => n.id);
+    ids.sort();
     return ids.join(',');
   }, [canLoadNotes, deduplicatedNotes]);
 
@@ -2988,7 +2993,10 @@ export function MultiColumnClient() {
     },
     enabled: lazyEngagementNoteIds.length > 0,
     staleTime: 5 * 60 * 1000, // 5 min — don't re-fetch constantly
-    gcTime: 10 * 60 * 1000,
+    // Short GC: whenever the visible set changes the key changes and the old
+    // entry goes inactive. A long gcTime piled those orphaned entries up in
+    // memory; 2 min still covers a quick scroll-back to the same set.
+    gcTime: 2 * 60 * 1000,
   });
 
   // Merge lazy-fetched engagement into the engagement map

@@ -34,13 +34,37 @@ export function useMuteList(fetchEnabled = true) {
     staleTime: 5 * 60_000,
   });
 
-  // Extract muted pubkeys from p-tags
+  // NIP-51 private section: mutes other clients encrypted into `content`
+  // (NIP-44, to self). Decrypt them so a privately-muted person is actually
+  // hidden here too — not just the public p-tags. Failure (no nip44, bad
+  // ciphertext) degrades to public-only rather than throwing.
+  const { data: privateMutedPubkeys } = useQuery({
+    queryKey: ['mute-list-private', user?.pubkey, muteEvent?.id],
+    queryFn: async (): Promise<string[]> => {
+      if (!user?.pubkey || !muteEvent?.content || !user.signer.nip44) return [];
+      try {
+        const decrypted = await user.signer.nip44.decrypt(user.pubkey, muteEvent.content);
+        const tags = JSON.parse(decrypted) as string[][];
+        return tags.filter(t => t[0] === 'p' && t[1]).map(t => t[1]);
+      } catch {
+        return [];
+      }
+    },
+    enabled: !!user?.pubkey && !!muteEvent?.content,
+    staleTime: 5 * 60_000,
+  });
+
+  // Muted pubkeys = public p-tags ∪ decrypted private p-tags.
   const mutedPubkeys = useMemo(() => {
-    if (!muteEvent) return new Set<string>();
-    return new Set(
-      muteEvent.tags.filter(t => t[0] === 'p').map(t => t[1]),
-    );
-  }, [muteEvent]);
+    const set = new Set<string>();
+    if (muteEvent) {
+      for (const t of muteEvent.tags) if (t[0] === 'p' && t[1]) set.add(t[1]);
+    }
+    if (privateMutedPubkeys) {
+      for (const pk of privateMutedPubkeys) set.add(pk);
+    }
+    return set;
+  }, [muteEvent, privateMutedPubkeys]);
 
   const isMuted = useCallback(
     (pubkey: string) => mutedPubkeys.has(pubkey),

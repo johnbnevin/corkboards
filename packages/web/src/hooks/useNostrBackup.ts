@@ -1654,6 +1654,15 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
     setMessage('Restoring from checkpoint...');
 
+    // Pause auto-save for the whole restore. Writing the checkpoint's rows into
+    // IDB is multi-step and non-atomic, so a visibilitychange/beforeunload
+    // auto-save firing mid-restore would upload the HALF-restored state as the
+    // canonical cloud autosave and clobber the good backup. autoSaveBackup()
+    // already skips while isRestoring is set — loadRemoteBackup set this flag but
+    // this checkpoint path (auto-restore, idle-return, manual restore) never did.
+    // Set it AFTER the intentional pre-restore save above, or that save would be
+    // skipped and the newer current state lost.
+    isRestoring.current = true;
     try {
       // Try the original Blossom URL first, then fall back to other servers using the hash
       let encryptedData: string | null = null;
@@ -1724,6 +1733,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       log('Checkpoint restore failed: ' + msg, 'error');
       setStatus('restore-error');
       setMessage('Restore failed: ' + msg);
+    } finally {
+      // Restore writes are done (or failed) — let auto-save resume. The 3s
+      // 'restored'→'idle' status flash above is only cosmetic; data safety is
+      // governed by this ref, which autoSaveBackup checks.
+      isRestoring.current = false;
     }
   }, [user, log, autoSaveBackup]);
 

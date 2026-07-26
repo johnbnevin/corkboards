@@ -81,13 +81,18 @@ import { useCollapsedNotes, BOOKMARK_SYNC_EVENT } from '@/hooks/useCollapsedNote
 import { useNotificationCount } from '@/hooks/useNotificationCount';
 import { useBookmarks } from '@/hooks/useBookmarks';
 import { ZapDialog } from '@/components/ZapDialog';
-import { ScanToZapDialog } from '@/components/ScanToZapDialog';
+// Lazy — the QR scanner (jsQR) and its camera UI aren't needed until the user
+// opens scan-to-zap, so keep them out of the initial chunk.
+const ScanToZapDialog = lazy(() => import('@/components/ScanToZapDialog').then(m => ({ default: m.ScanToZapDialog })));
 import { WalletSettings } from '@/components/WalletSettings';
 import { EditProfileForm } from '@/components/EditProfileForm';
 import { ProfileCacheSettings } from '@/components/ProfileCacheSettings';
 import { ThroughputSettings } from '@/components/ThroughputSettings';
-import { AdvancedSettings } from '@/components/AdvancedSettings';
-import { EmojiSetEditor } from '@/components/EmojiSetEditor';
+// Lazy — the Advanced settings panel (relay/Blossom managers) and the emoji-set
+// editor (emoji picker + data) are opened rarely and on explicit action, so defer
+// their chunks past first paint.
+const AdvancedSettings = lazy(() => import('@/components/AdvancedSettings').then(m => ({ default: m.AdvancedSettings })));
+const EmojiSetEditor = lazy(() => import('@/components/EmojiSetEditor').then(m => ({ default: m.EmojiSetEditor })));
 import { useNostrBackup, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 import { bumpQueryEpoch, getQueryEpoch, withQueryBudget, StaleEpochError } from '@core/queryGovernor';
@@ -4605,11 +4610,17 @@ export function MultiColumnClient() {
         {/* Scan a Lightning QR code and pay it with the connected wallet.
             Standalone: unlike ZapDialog this isn't tied to a note or author,
             so it's a plain payment rather than a NIP-57 zap. */}
-        <ScanToZapDialog
-          open={scanToZapOpen}
-          onOpenChange={setScanToZapOpen}
-          onOpenWalletSettings={() => setWalletSettingsOpen(true)}
-        />
+        {/* Mounted only while open so the lazy chunk (jsQR scanner) loads on
+            first use rather than at startup. */}
+        {scanToZapOpen && (
+          <Suspense fallback={null}>
+            <ScanToZapDialog
+              open={scanToZapOpen}
+              onOpenChange={setScanToZapOpen}
+              onOpenWalletSettings={() => setWalletSettingsOpen(true)}
+            />
+          </Suspense>
+        )}
 
         {/* Customize Profile Dialog */}
         <Dialog open={editProfileOpen} onOpenChange={setEditProfileOpen}>
@@ -4671,6 +4682,7 @@ export function MultiColumnClient() {
               <DialogTitle>Advanced</DialogTitle>
               <DialogDescription className="sr-only">Advanced settings and account management</DialogDescription>
             </DialogHeader>
+            <Suspense fallback={<div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>}>
             <AdvancedSettings
               dismissedCount={dismissedCount}
               onClearDismissed={() => { clearDismissed(); setAdvancedSettingsOpen(false); }}
@@ -4689,6 +4701,7 @@ export function MultiColumnClient() {
               renderMarkdown={renderMarkdown}
               onToggleRenderMarkdown={() => setRenderMarkdown(!renderMarkdown)}
             />
+            </Suspense>
           </DialogContent>
         </Dialog>
 
@@ -4699,7 +4712,9 @@ export function MultiColumnClient() {
               <DialogTitle>Emoji Sets</DialogTitle>
               <DialogDescription className="sr-only">Manage custom emoji sets for reactions</DialogDescription>
             </DialogHeader>
-            <EmojiSetEditor />
+            <Suspense fallback={<div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>}>
+              <EmojiSetEditor />
+            </Suspense>
           </DialogContent>
         </Dialog>
 

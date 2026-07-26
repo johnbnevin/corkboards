@@ -156,9 +156,15 @@ export function NoteCard({
   // already exist; this adds the on-card affordance, matching web and the
   // mobile NotificationCard. Keyed on the feed item (event.id), which is what
   // the feed filter checks.
-  const { isCollapsed, toggleCollapsed, dismiss, isSoftDismissed, canUndoDismiss, undoDismiss } = useCollapsedNotes();
+  const { isCollapsed, toggleCollapsed, dismiss, dismissThreadRoots, isSoftDismissed, canUndoDismiss, undoDismiss } = useCollapsedNotes();
   const softDismissed = showCollapseActions && isSoftDismissed(event.id);
   const collapsed = showCollapseActions && isCollapsed(event.id);
+  // Long-pressing dismiss hides the whole thread: mark its NIP-10 root (or this
+  // note when it is the root) as a dismissed thread root so members that arrive
+  // later are filtered too, then dismiss this card.
+  const threadRoot = event.tags.find(t => t[0] === 'e' && t[3] === 'root')?.[1]
+    ?? event.tags.find(t => t[0] === 'e' && t[1])?.[1]
+    ?? event.id;
 
   if (softDismissed) {
     const canUndo = canUndoDismiss(event.id);
@@ -198,6 +204,8 @@ export function NoteCard({
           <TouchableOpacity
             style={styles.dismissCorner}
             onPress={() => dismiss(event.id)}
+            onLongPress={() => { dismissThreadRoots([threadRoot]); dismiss(event.id); }}
+            delayLongPress={350}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
             <View style={styles.redTriangle} />

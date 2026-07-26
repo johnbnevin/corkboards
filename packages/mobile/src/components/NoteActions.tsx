@@ -6,6 +6,8 @@ import { useState, useCallback } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, Modal } from 'react-native';
 import { useQueryClient } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
+import { nip19 } from 'nostr-tools';
+import * as Clipboard from 'expo-clipboard';
 import { useNostr, getRelayCache, getUserRelays, FALLBACK_RELAYS } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 import { ComposeScreen } from '../screens/ComposeScreen';
@@ -190,6 +192,16 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
   // Only the author can request deletion of their own note.
   const isOwnNote = !!pubkey && event.pubkey === pubkey;
 
+  // Copy the note's NIP-19 id (note1…) — no auth needed, it's a public id.
+  const handleCopyId = useCallback(async () => {
+    try {
+      await Clipboard.setStringAsync(nip19.noteEncode(event.id));
+      Alert.alert('Copied', 'Note ID copied to clipboard');
+    } catch {
+      Alert.alert('Copy failed', 'Could not copy the note ID');
+    }
+  }, [event.id]);
+
   // NIP-09: publish a kind-5 deletion request for the user's own note. Framed as
   // a *request* — relays may refuse and copies others already fetched can persist
   // — so we never claim the note is gone. Parity with web's DeleteNoteButton
@@ -280,6 +292,10 @@ export function NoteActions({ event, onReply, isBookmarked = false, onToggleBook
           <Text style={[styles.icon, isBookmarked && styles.activeBookmark]}>
             {isBookmarked ? '★' : '☆'}
           </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.action} onPress={handleCopyId} accessibilityLabel="Copy note ID">
+          <Text style={styles.icon}>🔗</Text>
         </TouchableOpacity>
 
         {/* Zap button — shown when author has a lightning address (lud16 or lud06) */}

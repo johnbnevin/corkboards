@@ -84,10 +84,25 @@ function InlineNoteLinkContent({
   const visLen = useMemo(() => visibleLength(event.content), [event.content])
   const isLongContent = visLen > 125
 
-  // When media is fully enabled, always show full content so media URLs aren't truncated away
+  // When media is fully enabled, render the FULL content rather than a
+  // character-truncated copy, so media URLs aren't cut away before MediaLink
+  // ever sees them.
   const effectiveExpanded = !blurMedia || isExpanded
 
-  const handleToggle = () => setIsExpanded(!isExpanded)
+  // ...but full content is not the same as unbounded content. A long reply
+  // quoted inside another note was rendering at its full height with no spoiler
+  // at all, because this branch conflated "show the whole string" with "the
+  // user asked to expand it". Only a real expand (`isExpanded`) should remove
+  // the height cap; otherwise the content is clipped with a Show more, exactly
+  // like SmartNoteContent does for top-level notes.
+  const needsSpoiler = effectiveExpanded && !isExpanded && isLongContent
+
+  // stopPropagation: the whole card opens the thread on click, so without it
+  // "Show more"/"Show less" expanded the note AND navigated away from it.
+  const handleToggle = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setIsExpanded(v => !v)
+  }
 
   const handleViewThread = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -132,13 +147,18 @@ function InlineNoteLinkContent({
           <ListingCard event={event} bare blurMedia={blurMedia} inModalContext onViewThread={onViewThread} />
         ) : effectiveExpanded ? (
           <>
-            <NoteContent event={event} className="text-sm" blurMedia={blurMedia} inModalContext onViewThread={onViewThread} depth={depth} />
-            {isExpanded && (
+            <div className={needsSpoiler ? 'relative max-h-48 overflow-hidden' : undefined}>
+              <NoteContent event={event} className="text-sm" blurMedia={blurMedia} inModalContext onViewThread={onViewThread} depth={depth} />
+              {needsSpoiler && (
+                <div className="absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-card to-transparent pointer-events-none" />
+              )}
+            </div>
+            {(isExpanded || needsSpoiler) && (
               <button
                 className="text-xs text-primary mt-1 hover:underline relative z-10"
                 onClick={handleToggle}
               >
-                Show less
+                {isExpanded ? 'Show less' : 'Show more'}
               </button>
             )}
           </>

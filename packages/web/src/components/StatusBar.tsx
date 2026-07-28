@@ -35,6 +35,8 @@ interface StatusBarProps {
   onColumnCountChange?: (count: number) => void;
   isColumnPending?: boolean;
   isNotificationsTab?: boolean;
+  /** True while a tab/column transition is in flight — pauses the countdown. */
+  transitionPending?: boolean;
   onLoadMoreNotifications?: (count: number) => void;
   hasMoreNotifications?: boolean;
   onLoadNewerNotifications?: () => void;
@@ -70,6 +72,7 @@ export function StatusBar({
   newestTimestamp,
   autofetch = false,
   autofetchIntervalSecs = 120,
+  transitionPending = false,
   lastAutofetchTime = 0,
   onToggleAutofetch,
   autoConsolidate = false,
@@ -100,9 +103,18 @@ export function StatusBar({
   const isRestoring = backupStatus === 'restoring' || backupStatus === 'checking';
   const _hasError = backupStatus === 'save-error' || backupStatus === 'restore-error';
 
-  // Autofetch countdown: ticks every second, shows remaining time after 15s
+  // Autofetch countdown: ticks every second, shows remaining time after 15s.
+  //
+  // Paused while a tab/column transition is pending. This is a cosmetic timer,
+  // but a state update every second is a default-priority update, and those
+  // INTERRUPT an in-flight React transition and make it start over. On a large
+  // feed the tab-switch render takes longer than a second, so the countdown
+  // could restart it indefinitely — the switch never landed and the CPU spun
+  // re-rendering work that was thrown away every tick. A frozen countdown for
+  // the moment a switch takes is a much better trade.
   const [countdownSecs, setCountdownSecs] = useState<number | null>(null);
   useEffect(() => {
+    if (transitionPending) return;
     if (!autofetch || !lastAutofetchTime) { setCountdownSecs(null); return; }
     const tick = () => {
       const elapsed = Math.floor((Date.now() - lastAutofetchTime) / 1000);
@@ -112,7 +124,7 @@ export function StatusBar({
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [autofetch, lastAutofetchTime, autofetchIntervalSecs]);
+  }, [autofetch, lastAutofetchTime, autofetchIntervalSecs, transitionPending]);
 
   // Auto-expand when loading or when there are important actions available
   const shouldAutoExpand = isLoading || blankSpaceCount > 0 || isSaving || isRestoring;

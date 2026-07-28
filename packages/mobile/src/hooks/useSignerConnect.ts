@@ -149,13 +149,17 @@ export function useSignerConnect(_type: 'amber') {
         // as an unhandled rejection.
         bunkerPromise.catch(() => {});
 
-        // Hand the URI to the signer only once we're listening. Bounded at 3s so
-        // a slow signalling relay can't stall the hand-off forever — that
-        // fallback is no worse than the old unconditional behaviour.
+        // Hand the URI to the signer only once we're listening.
+        //
+        // Bounded at 8s so a dead relay set cannot stall the hand-off forever —
+        // but no tighter, because giving up early is exactly what loses the
+        // connect response: kind 24133 is ephemeral, so if the signer answers
+        // before a relay is carrying our REQ, nothing stored it and the login
+        // has to be repeated. Cold handshakes on a slow device outlast 3s.
         let subsLiveTimer: ReturnType<typeof setTimeout> | undefined;
         await Promise.race([
           subsLive,
-          new Promise<void>((resolve) => { subsLiveTimer = setTimeout(resolve, 3000); }),
+          new Promise<void>((resolve) => { subsLiveTimer = setTimeout(resolve, 8000); }),
         ]);
         clearTimeout(subsLiveTimer);
         if (signal.aborted) throw new Error('aborted');

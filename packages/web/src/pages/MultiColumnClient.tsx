@@ -3463,7 +3463,10 @@ export function MultiColumnClient() {
   soundAccelerateRef.current = soundAccelerate;
 
   // Consolidate wrapper: find the first visible note after the last blank, then consolidate and scroll
-  const consolidate = useCallback(() => {
+  const consolidate = useCallback((opts?: { scroll?: boolean }) => {
+    // `opts` is optional because this is also wired straight to onClick, where
+    // it arrives as a MouseEvent — which has no `scroll`, so the default holds.
+    const shouldScroll = opts?.scroll !== false;
     // Find the last blank note's index, then the first real note after it
     let lastBlankIdx = -1;
     for (let i = 0; i < notes.length; i++) {
@@ -3486,7 +3489,7 @@ export function MultiColumnClient() {
     const actualBlanks = notes.filter((n, i) => i <= lastBlankIdx && (isCollapsedThisSession(n.id) || isSoftDismissed(n.id))).length;
     void playConsolidateSound(consolidateSoundRef.current, actualBlanks, soundAccelerateRef.current);
     rawConsolidate();
-    if (scrollTargetId) scrollToNote(scrollTargetId);
+    if (shouldScroll && scrollTargetId) scrollToNote(scrollTargetId);
   }, [notes, isCollapsedThisSession, isSoftDismissed, rawConsolidate, scrollToNote]);
 
   // Scroll to oldest newly loaded note after fetch completes
@@ -3518,6 +3521,10 @@ export function MultiColumnClient() {
   // re-baselining prevFreshCountRef) every time a note is dismissed.
   const blankSpaceCountRef = useRef(blankSpaceCount);
   blankSpaceCountRef.current = blankSpaceCount;
+  // Read through a ref so this effect doesn't re-run (and re-baseline
+  // prevFreshCountRef) every time `consolidate`'s identity changes.
+  const consolidateRef = useRef(consolidate);
+  consolidateRef.current = consolidate;
   const prevFreshCountRef = useRef(freshNoteIds.size);
   useEffect(() => {
     const prevCount = prevFreshCountRef.current;
@@ -3525,15 +3532,21 @@ export function MultiColumnClient() {
     // Only trigger when fresh notes increased (new notes arrived)
     if (freshNoteIds.size <= prevCount) return;
     if (autoConsolidate) {
-      // Delay slightly so DOM settles before consolidating
+      // Delay slightly so DOM settles before consolidating.
+      //
+      // Goes through `consolidate`, not `rawConsolidate`: the sound lives in
+      // the wrapper, so auto-consolidate — the way most consolidates actually
+      // happen when the toggle is on — was silent. Scrolling stays off here so
+      // the feed doesn't jump under someone who is reading; autoScrollTop below
+      // still applies when the user asked for it.
       setTimeout(() => {
-        if (blankSpaceCountRef.current > 0) rawConsolidate();
+        if (blankSpaceCountRef.current > 0) consolidateRef.current({ scroll: false });
       }, 150);
     }
     if (autoScrollTop) {
       setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), autoConsolidate ? 300 : 150);
     }
-  }, [freshNoteIds.size, autoConsolidate, autoScrollTop, rawConsolidate]);
+  }, [freshNoteIds.size, autoConsolidate, autoScrollTop]);
 
   // (findingUndismissed state + allDismissedRef declared earlier, before notes derivation)
 
@@ -4330,7 +4343,14 @@ export function MultiColumnClient() {
           </div>
         }>
         {/* Dim content during tab transition to mask the brief flash of stale content */}
-        <div className={isTabPending ? 'opacity-50 pointer-events-none transition-opacity duration-150' : undefined}>
+        {/* Dim while a tab transition is in flight — but never block input.
+            `pointer-events-none` here turned a slow render into a frozen app:
+            a transition is interruptible, so any default-priority update (the
+            status bar's 1s autofetch countdown, for one) restarts it, and on a
+            large feed the render never finished before the next interrupt.
+            isTabPending stayed true, and with it the input block — the feed
+            still scrolled and still repainted, but nothing could be clicked. */}
+        <div className={isTabPending ? 'opacity-50 transition-opacity duration-150' : undefined}>
 
         {/* Per-tab info / filter card */}
         <div className="mt-4">
@@ -4581,6 +4601,7 @@ export function MultiColumnClient() {
            newestTimestamp={lastFetchTime}
           autofetch={autofetch}
           autofetchIntervalSecs={autofetchIntervalSecs}
+          transitionPending={isTabPending || isColumnPending}
           lastAutofetchTime={lastAutofetchTime}
           onToggleAutofetch={() => setAutofetch(prev => !prev)}
           autoConsolidate={autoConsolidate}

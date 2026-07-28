@@ -95,6 +95,18 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
   }, []);
 
   const login = useLoginActions();
+
+  // Open the NIP-46 signalling sockets as soon as the login screen is on
+  // screen. The QR flow can't hand out its URI until a relay is carrying our
+  // subscription (kind 24133 is ephemeral — a response published before then is
+  // lost, which is what made the QR login need two attempts). Doing the
+  // handshakes now means they finish while the user is reading this screen,
+  // instead of racing them against a scan.
+  useEffect(() => {
+    login.prewarmConnectRelays();
+    // once per mount — the sockets are cached and kept open from here
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const { mutateAsync: publishEvent, isPending: isPublishing } = useNostrPublish();
 
   const isDialog = !!onClose;

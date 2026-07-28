@@ -143,6 +143,41 @@ export function useLoginActions() {
       addLogin(login);
     },
 
+    /**
+     * Open the signalling relay sockets ahead of time.
+     *
+     * The QR flow cannot hand out its URI until a relay is actually carrying our
+     * REQ — kind 24133 is ephemeral, so a connect response published before the
+     * subscription is live is gone for good. `nostrconnect()` waits for that,
+     * but the wait is bounded (a dead relay set must not hang the screen), and
+     * on a slow machine three cold TCP+TLS+WebSocket handshakes can outlast the
+     * bound. Then the QR appears anyway, a quick scan beats the subscription,
+     * and the user has to do the whole thing twice.
+     *
+     * Calling this when the login screen opens moves those handshakes into the
+     * seconds the user spends reading the screen and reaching for their phone,
+     * so by the time they ask for the QR the sockets are already up and the
+     * subscription goes out immediately. Safe to call repeatedly:
+     * `createRelayDirect` caches per URL+options, and these sockets are opened
+     * with `idleTimeout: false` precisely so they stay put.
+     */
+    prewarmConnectRelays(): void {
+      for (const url of NOSTRCONNECT_RELAYS) {
+        try {
+          const relay = createRelayDirect(url, { backoff: false, idleTimeout: false });
+          // NRelay1 connects lazily, so touching it isn't enough — a cheap REQ
+          // forces the socket open. It's aborted immediately; the connection
+          // stays in the cache for the real subscription.
+          const ac = new AbortController();
+          const sub = relay.req([{ kinds: [24133], limit: 0 }], { signal: ac.signal });
+          void (async () => {
+            try { for await (const _ of sub) break; } catch { /* prewarm only */ }
+          })();
+          setTimeout(() => ac.abort(), 2000);
+        } catch { /* one relay failing to warm is not an error */ }
+      }
+    },
+
     // Generate nostrconnect URI and wait for signer response (QR code flow)
     // Returns the URI immediately via onUri callback, then resolves when signer responds
     async nostrconnect(signal: AbortSignal, onUri: (uri: string) => void): Promise<void> {
@@ -248,10 +283,14 @@ export function useLoginActions() {
       // Bounded: a relay set that never answers must not block the QR forever,
       // so after 3s we show it anyway and take our chances — no worse than the
       // old behaviour, and only reachable when every signalling relay is slow.
+      // 8s, not 3s: with `prewarmConnectRelays` the sockets are normally already
+      // open and this resolves instantly, so the bound only matters when the
+      // relays really are slow — and there, giving up early is what produced the
+      // missed response in the first place.
       let subsLiveTimer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         subsLive,
-        new Promise<void>((resolve) => { subsLiveTimer = setTimeout(resolve, 3000); }),
+        new Promise<void>((resolve) => { subsLiveTimer = setTimeout(resolve, 8000); }),
       ]);
       clearTimeout(subsLiveTimer);
       if (signal.aborted) throw new Error('aborted');

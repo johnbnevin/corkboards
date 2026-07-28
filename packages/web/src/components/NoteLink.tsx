@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { nip19 } from 'nostr-tools'
 import { useNostr } from '@/hooks/useNostr'
 import { useAuthor } from '@/hooks/useAuthor'
@@ -18,6 +18,12 @@ import { ListingCard } from '@/components/ListingCard'
 import { visibleLength, truncateForPreview } from '@/lib/textTruncation'
 import { fetchEventWithOutbox, fetchNaddrWithOutbox, getCachedEvent, setCachedEvent } from '@/lib/fetchEvent'
 import { registerUnresolved, clearUnresolved } from '@/lib/failedNotes'
+
+/** Hard deadline for one reference lookup. Past this the card reports a real
+ *  state instead of shimmering indefinitely. */
+const LOOKUP_TIMEOUT_MS = 12000
+/** React Query retries inside a single mount; the sweep retries across time. */
+const LOOKUP_RETRIES = 2
 import { CopyEventIdButton } from '@/components/NoteCard'
 import type { NostrEvent } from '@nostrify/nostrify'
 
@@ -187,7 +193,7 @@ function InlineNoteLinkContent({
   )
 }
 
-function NoteLinkSkeleton() {
+function NoteLinkSkeleton({ attempt }: { attempt?: number }) {
   return (
     <Card className="mb-2">
       <CardHeader className="pb-2 flex flex-row items-center gap-3">
@@ -200,19 +206,38 @@ function NoteLinkSkeleton() {
       <CardContent className="pt-0">
         <Skeleton className="h-4 w-full mb-2" />
         <Skeleton className="h-4 w-3/4" />
+        {/* Say what is happening. An unlabelled shimmer lasting as long as the
+            lookup does reads as a hang, not as progress. */}
+        <p className="mt-2 text-[10px] text-muted-foreground/70">
+          {attempt && attempt > 0
+            ? `Looking for this note — attempt ${attempt + 1}…`
+            : 'Looking for this note…'}
+        </p>
       </CardContent>
     </Card>
   )
 }
 
-function NoteLinkNotFound({ onRetry, isFetching, debugInfo, fullDebugInfo }: { onRetry?: () => void; isFetching?: boolean; debugInfo?: string; fullDebugInfo?: string }) {
+function NoteLinkNotFound({ onRetry, isFetching, attempts, debugInfo, fullDebugInfo }: { onRetry?: () => void; isFetching?: boolean; attempts?: number; debugInfo?: string; fullDebugInfo?: string }) {
   const [showModal, setShowModal] = useState(false)
   return (
     <>
       <Card className="mb-2 bg-muted/50 border-dashed">
         <CardContent className="p-4 flex items-center justify-between">
           <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-            <span className="text-muted-foreground text-sm">{isFetching ? 'Retrying…' : 'Referenced note not found'}</span>
+            {/* State, not mystery: whether a lookup is in flight, how many have
+                been made, and that the app keeps trying on its own. */}
+            <span className="text-muted-foreground text-sm">
+              {isFetching
+                ? (attempts ? `Searching relays — attempt ${attempts + 1}…` : 'Searching relays…')
+                : 'Referenced note not found'}
+            </span>
+            {!isFetching && (
+              <span className="text-[10px] text-muted-foreground/60">
+                {attempts ? `tried ${attempts} time${attempts === 1 ? '' : 's'} · ` : ''}
+                retrying automatically
+              </span>
+            )}
             {debugInfo && (
               <button
                 className="text-[10px] text-muted-foreground/50 font-mono text-left hover:text-muted-foreground/80 truncate transition-colors"
@@ -256,12 +281,23 @@ function NoteLinkNotFound({ onRetry, isFetching, debugInfo, fullDebugInfo }: { o
 
 export function NoteLink({ noteId, inlineMode: _inlineMode = false, onViewThread, blurMedia, depth = 0 }: NoteLinkProps) {
   const { nostr } = useNostr()
-  const queryClient = useQueryClient()
+  // (the retry now goes through refetch() rather than invalidating by key)
   const eventInfo = getEventIdFromIdentifier(noteId)
 
-  const { data: event, isLoading, isFetching } = useQuery({
+  const { data: event, isLoading, isFetching, failureCount, refetch } = useQuery({
     queryKey: ['note', noteId],
+    retry: LOOKUP_RETRIES,
+    retryDelay: (attempt) => Math.min(2000 * 2 ** attempt, 15000),
     queryFn: async () => {
+      // Bound the WHOLE lookup. fetchEventWithOutbox has no overall deadline —
+      // it can sit on a relay that accepts the connection and never answers, so
+      // the query never settles and the card shimmers grey forever. Worse, the
+      // retry sweep only counts a reference as unresolved once its query has
+      // SETTLED, so a permanently-pending lookup was invisible to the very
+      // mechanism meant to rescue it. Everything below races this deadline.
+      const deadline = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('lookup timed out')), LOOKUP_TIMEOUT_MS))
+      return Promise.race([deadline, (async () => {
       // Handle note1 and nevent1 (by event ID)
       if (eventInfo.id) {
         // Anything already resolved by another path (most often the thread
@@ -285,25 +321,32 @@ export function NoteLink({ noteId, inlineMode: _inlineMode = false, onViewThread
           return viaPool
         }
 
-        return fetchEventWithOutbox(eventInfo.id, nostr, {
+        const viaOutbox = await fetchEventWithOutbox(eventInfo.id, nostr, {
           hints: eventInfo.relays,
           authorPubkey: eventInfo.pubkey,
         })
+        if (viaOutbox) {
+          setCachedEvent(viaOutbox.id, viaOutbox)
+          return viaOutbox
+        }
       }
 
       // Handle naddr1 (by kind, pubkey, and d-tag)
       if (eventInfo.kind && eventInfo.pubkey && eventInfo.identifier) {
-        return fetchNaddrWithOutbox(
+        const viaAddr = await fetchNaddrWithOutbox(
           eventInfo.kind, eventInfo.pubkey, eventInfo.identifier,
           nostr, eventInfo.relays,
         )
+        if (viaAddr) return viaAddr
       }
 
-      return null
+      // Not found is an ERROR, not a successful null. React Query then owns the
+      // backoff, and `failureCount` becomes real state the card can show
+      // instead of an unexplained shimmer.
+      throw new Error('not found on any relay')
+      })()])
     },
     staleTime: 5 * 60 * 1000,
-    retry: 1,
-    retryDelay: 4000,
   })
 
   // The unresolved registry mutates a module-level set — a side effect, so it
@@ -316,17 +359,22 @@ export function NoteLink({ noteId, inlineMode: _inlineMode = false, onViewThread
   // threshold is only meaningful if references that scrolled away or resolved
   // stop being counted.
   useEffect(() => {
-    if (isLoading) return
     if (event) {
       clearUnresolved(noteId)
       return
     }
+    // Register even while still loading. The previous `if (isLoading) return`
+    // meant a lookup that never settled was never counted as unresolved — so
+    // the retry sweep, whose whole job is rescuing these, could not see the
+    // worst cases. With the deadline above every lookup settles, but counting
+    // from the start is correct regardless: the reference IS unresolved on
+    // screen right now, which is what the sweep's threshold is about.
     registerUnresolved(noteId)
     return () => clearUnresolved(noteId)
   }, [isLoading, event, noteId])
 
   if (isLoading) {
-    return <NoteLinkSkeleton />
+    return <NoteLinkSkeleton attempt={failureCount} />
   }
 
   if (!event) {
@@ -347,7 +395,7 @@ export function NoteLink({ noteId, inlineMode: _inlineMode = false, onViewThread
     if (eventInfo.relays?.length) fullParts.push(`relays:\n${eventInfo.relays.join('\n')}`)
     fullParts.push(`noteId: ${noteId}`)
     const fullDebugInfo = fullParts.join('\n')
-    return <NoteLinkNotFound onRetry={() => queryClient.invalidateQueries({ queryKey: ['note', noteId] })} isFetching={isFetching} debugInfo={debugInfo} fullDebugInfo={fullDebugInfo} />
+    return <NoteLinkNotFound onRetry={() => { void refetch() }} isFetching={isFetching} attempts={failureCount} debugInfo={debugInfo} fullDebugInfo={fullDebugInfo} />
   }
 
   // Always use inline expand/collapse — no page navigation

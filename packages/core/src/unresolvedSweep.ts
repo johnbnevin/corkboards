@@ -7,8 +7,14 @@
  * and the actual refetch; this owns the rules.
  */
 
-/** How often the sweep may run on its own. */
-export const SWEEP_INTERVAL_MS = 30_000
+/** How often the sweep may run on its own.
+ *
+ *  Was 30s. Tightened because the sweep was effectively idle: references whose
+ *  lookup never settled were never registered as unresolved, so the cases most
+ *  in need of a retry were the ones it could not see. With registration fixed
+ *  the sweep has real work to do, and 15s is still far below the cost of one
+ *  lookup. */
+export const SWEEP_INTERVAL_MS = 15_000
 
 /**
  * Minimum unresolved references before a sweep is worth doing.
@@ -26,9 +32,10 @@ export const MIN_UNRESOLVED_TO_SWEEP = 2
  * Uncapped, a page holding hundreds of unresolved references would fire that
  * many lookups at once and re-create the socket starvation the desktop relay
  * lanes exist to prevent — the sweep would then be the reason the next batch
- * fails. The remainder is picked up by the following sweep.
+ * fails. The remainder is picked up by the following sweep. Raised from 20 to
+ * 40 alongside the shorter interval; the stagger below still spreads them.
  */
-export const MAX_PER_SWEEP = 20
+export const MAX_PER_SWEEP = 40
 
 /** Gap between individual retries within a sweep, so they don't burst. */
 export const SWEEP_STAGGER_MS = 500

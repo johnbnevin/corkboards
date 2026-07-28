@@ -19,7 +19,7 @@ import { SizeGuardedImage } from './SizeGuardedImage';
 import { NoteContent } from './NoteContent';
 import { formatTimeAgo } from '@core/formatTimeAgo';
 import { genUserName } from '@core/genUserName';
-import { visibleLength, findVisibleCutoff } from '@core/textTruncation';
+import { visibleLength, truncateForPreview } from '@core/textTruncation';
 
 // ---- Type config ----
 
@@ -58,7 +58,7 @@ function ExpandableContent({ event }: { event: NostrEvent }) {
     if (expanded || !canExpand) return event;
     return {
       ...event,
-      content: event.content.slice(0, findVisibleCutoff(event.content, 150)).trimEnd() + '\u2026',
+      content: truncateForPreview(event.content, 150),
     };
   }, [event, expanded, canExpand]);
 

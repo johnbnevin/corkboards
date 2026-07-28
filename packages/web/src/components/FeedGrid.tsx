@@ -270,14 +270,29 @@ export const FeedGrid = React.memo(function FeedGrid({
   // put. The window only ever grows within a feed, and `perColLimit` bounds it.
   const prevFirstColumnIds = useRef<readonly (string | undefined)[]>([]);
   const prevTabRef = useRef(activeTab);
+  // Set on a tab switch, cleared once the new tab's notes have actually landed.
+  // While it's set, head changes are the feed being replaced, not a prepend.
+  const needsBaselineRef = useRef(false);
   useEffect(() => {
     const cur = columns.map(col => col[0]?.id);
     const prev = prevFirstColumnIds.current;
 
     if (activeTab !== prevTabRef.current) {
       prevTabRef.current = activeTab;
-      prevFirstColumnIds.current = cur;
+      needsBaselineRef.current = true;
       setRenderLimit(Math.min(INITIAL_RENDER_PER_COL, perColLimit));
+    }
+
+    // Re-baseline on the first render after a switch where columns actually
+    // hold the new tab's notes. `columns` lags the activeTab flip by a render,
+    // so baselining at the flip latched the OUTGOING tab's head ids — and the
+    // first prepend after every switch then computed shift=0, because a head
+    // from a different feed is never found in these columns.
+    if (needsBaselineRef.current) {
+      if (cur.some(Boolean)) {
+        prevFirstColumnIds.current = cur;
+        needsBaselineRef.current = false;
+      }
       return;
     }
 
@@ -310,9 +325,18 @@ export const FeedGrid = React.memo(function FeedGrid({
   // the current renderLimit and, because the column-first ids don't change, the
   // reset effect above never fires for them). Runs only on the tick change, so
   // lazy rendering stays in effect for normal scrolling.
+  //
+  // Floored at INITIAL_RENDER_PER_COL. `maxColLength` is whatever the columns
+  // held when the tick fired, which is 0 when the feed is currently empty (all
+  // dismissed) and stale-small when the tick lands a render before the notes
+  // do. Setting the window to that used to be self-healing — the old code reset
+  // to INITIAL on the next head change — but the window now only grows within a
+  // tab, so a 0 latched here would render nothing until the sentinel happened
+  // to fire. Never go below what a fresh tab would show.
   useEffect(() => {
     if (!revealMoreTick) return; // 0 / undefined = initial mount, nothing to reveal
-    setRenderLimit(Math.min(maxColLength, perColLimit));
+    const floor = Math.min(INITIAL_RENDER_PER_COL, perColLimit);
+    setRenderLimit(Math.max(floor, Math.min(maxColLength || floor, perColLimit)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revealMoreTick]);
 
@@ -335,8 +359,16 @@ export const FeedGrid = React.memo(function FeedGrid({
     return () => observer.disconnect();
   }, [canLoadMore, renderLimit, maxColLength, perColLimit]);
 
-  // Slice columns to only render up to renderLimit (capped by the global budget)
-  const visibleColumns = columns.map(col => col.slice(0, Math.min(renderLimit, perColLimit)));
+  // Slice columns to only render up to renderLimit (capped by the global budget).
+  //
+  // Floored as well as capped: the window only grows within a tab now, so any
+  // path that latched a too-small value would otherwise render an all-but-empty
+  // grid over a full `columns` and stay that way. Whenever there is data, show
+  // at least what a freshly-opened tab shows.
+  const effectiveLimit = maxColLength > 0
+    ? Math.max(Math.min(INITIAL_RENDER_PER_COL, perColLimit), Math.min(renderLimit, perColLimit))
+    : Math.min(renderLimit, perColLimit);
+  const visibleColumns = columns.map(col => col.slice(0, effectiveLimit));
 
   // Detect when notes rearrange (new notes prepended / order changes) and briefly
   // suppress pointer events so the user doesn't misclick during layout shift.

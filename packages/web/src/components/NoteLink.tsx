@@ -15,9 +15,9 @@ import { ExternalLink, RotateCw } from 'lucide-react'
 
 import { NoteContent } from '@/components/NoteContent'
 import { ListingCard } from '@/components/ListingCard'
-import { visibleLength, findVisibleCutoff } from '@/lib/textTruncation'
+import { visibleLength, truncateForPreview } from '@/lib/textTruncation'
 import { fetchEventWithOutbox, fetchNaddrWithOutbox } from '@/lib/fetchEvent'
-import { registerFailedNote } from '@/lib/failedNotes'
+import { registerUnresolved, clearUnresolved } from '@/lib/failedNotes'
 import { CopyEventIdButton } from '@/components/NoteCard'
 import type { NostrEvent } from '@nostrify/nostrify'
 
@@ -61,7 +61,7 @@ function getEventIdFromIdentifier(identifier: string): { id?: string; kind?: num
   return {}
 }
 
-// visibleLength and findVisibleCutoff imported from @/lib/textTruncation
+// visibleLength and truncateForPreview imported from @/lib/textTruncation
 
 /** Inline expandable content */
 function InlineNoteLinkContent({
@@ -146,7 +146,7 @@ function InlineNoteLinkContent({
           <>
             <NoteContent
               event={visLen > 125
-                ? { ...event, content: event.content.slice(0, findVisibleCutoff(event.content, 125)).trimEnd() + '…' }
+                ? { ...event, content: truncateForPreview(event.content, 125) }
                 : event}
               className="text-sm text-muted-foreground"
               blurMedia={blurMedia}
@@ -265,11 +265,23 @@ export function NoteLink({ noteId, inlineMode: _inlineMode = false, onViewThread
     retryDelay: 4000,
   })
 
-  // registerFailedNote mutates a module-level set — a side effect, so it belongs
-  // in an effect, not the render body. Under StrictMode/concurrent rendering a
-  // render can be thrown away and re-run, which double-registered the note.
+  // The unresolved registry mutates a module-level set — a side effect, so it
+  // belongs in an effect, not the render body. Under StrictMode/concurrent
+  // rendering a render can be thrown away and re-run, which double-registered
+  // the note.
+  //
+  // Registration is now symmetric: clear on resolve AND on unmount, so the
+  // registry counts what is unresolved ON SCREEN. The retry sweep's "2 or more"
+  // threshold is only meaningful if references that scrolled away or resolved
+  // stop being counted.
   useEffect(() => {
-    if (!isLoading && !event) registerFailedNote(noteId)
+    if (isLoading) return
+    if (event) {
+      clearUnresolved(noteId)
+      return
+    }
+    registerUnresolved(noteId)
+    return () => clearUnresolved(noteId)
   }, [isLoading, event, noteId])
 
   if (isLoading) {

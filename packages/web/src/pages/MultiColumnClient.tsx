@@ -77,7 +77,7 @@ import { PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pi
 import { useTheme } from '@/hooks/useTheme';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useRelayHealth } from '@/hooks/useRelayHealth';
-import { useRetryFailedNotes } from '@/hooks/useRetryFailedNotes';
+import { useUnresolvedRetry } from '@/hooks/useUnresolvedRetry';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from '@/components/ui/dropdown-menu';
 import { useCollapsedNotes, BOOKMARK_SYNC_EVENT } from '@/hooks/useCollapsedNotes';
 import { useNotificationCount } from '@/hooks/useNotificationCount';
@@ -105,7 +105,7 @@ import { STORAGE_KEYS } from '@/lib/storageKeys';
 import { useAccountIsolation } from '@/hooks/useAccountIsolation';
 import { useAutoRestoreGuard } from '@/hooks/useAutoRestoreGuard';
 import { useScrollPersistence } from '@/hooks/useScrollPersistence';
-import { useIdleAutoRestoreCheck } from '@/hooks/useIdleAutoRestoreCheck';
+import { useCloudSync } from '@/hooks/useCloudSync';
 import { useKeychainHealth } from '@/hooks/useKeychainHealth';
 import { useAutoFetch } from '@/hooks/useAutoFetch';
 import { useAccountSwitchEffect } from '@/hooks/useAccountSwitchEffect';
@@ -789,7 +789,7 @@ export function MultiColumnClient() {
   }, [addBookmark, removeBookmark]);
 
   // Nostr backup/restore
-  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, getCheckpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
+  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, getCheckpoints: _getCheckpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
 
   // Startup diagnostic log — emits once per user session
   useEffect(() => {
@@ -975,16 +975,23 @@ export function MultiColumnClient() {
     cooldownMs: AUTO_SAVE_COOLDOWN_MS,
   });
 
-  // Idle-return cloud-backup check — extracted into useIdleAutoRestoreCheck.
-  // Suggests (never silently applies) a restore when returning from 5+ min idle
-  // and the cloud has substantially more progress than local.
+  // Cross-device sync. Checks on load, on return to the foreground, and on an
+  // interval, and merges whenever the cloud is NEWER — not when it happens to
+  // have more dismissed notes than we do.
+  //
+  // The old rule (useIdleAutoRestoreCheck: 5+ minutes idle AND 5+ more
+  // dismissed) was a proxy for "is it safe to overwrite local with this",
+  // because restore was an overwrite. It is a merge now, so the only question
+  // left is which state is newer. A merge that would REMOVE something local
+  // still isn't applied silently — it leaves the restore prompt standing.
   const [autoRestoreTarget, setAutoRestoreTarget] = useState<{ checkpoint: typeof checkpoints[0]; reason: string } | null>(null);
-  useIdleAutoRestoreCheck({
+  useCloudSync({
     enabled: !!user,
+    backupStatus,
     checkRemoteBackup,
-    getCheckpoints,
-    dismissedCount,
-    onSuggestRestore: setAutoRestoreTarget,
+    remoteTimestamp: remoteBackup?.timestamp ?? null,
+    lastBackupTs,
+    loadRemoteBackup,
   });
 
   // Visible 5-second countdown then auto-fire the restore — extracted hook
@@ -1119,8 +1126,10 @@ export function MultiColumnClient() {
   // Relay health — manual only, triggered from settings menu
   const { relayHealth: _relayHealth, checkAllRelays: _checkAllRelays, activeRelays: _activeRelays } = useRelayHealth();
 
-  // After page load settles, retry any referenced notes that failed on first attempt
-  useRetryFailedNotes();
+  // Retry references that are on screen and unresolved — on a 30s cadence and
+  // on every fetch of new notes (see the loadNewer wrapper below). Both go
+  // through one scheduler so the two triggers can't overlap.
+  const { sweep: sweepUnresolved } = useUnresolvedRetry();
 
 
 
@@ -2473,6 +2482,17 @@ export function MultiColumnClient() {
     batchProgressCallbackRef.current = _paginationSetBatchProgressInternal;
   }, [_paginationSetBatchProgressInternal]);
 
+  // Fetching new notes is also the right moment to re-attempt anything on
+  // screen that never resolved: whatever was wrong — a slow relay, a socket
+  // budget that was momentarily exhausted — has usually passed by the time the
+  // next fetch runs, and the user is already looking at the result. The sweep's
+  // own guards (threshold, in-flight, interval, hidden) decide whether it
+  // actually does anything, so this is safe to call on every fetch.
+  const loadNewerAndRetry = useCallback(() => {
+    void loadNewerNotes();
+    sweepUnresolved();
+  }, [loadNewerNotes, sweepUnresolved]);
+
   // Autofetch extracted into useAutoFetch — interval, visibility gating,
   // and tab-switch re-trigger all live there. Three relay-storm bugs traced
   // to inline autofetch; centralizing makes regressions less likely.
@@ -2481,7 +2501,7 @@ export function MultiColumnClient() {
     intervalSecs: autofetchIntervalSecs,
     activeTab,
     isLoadingAny: isLoadingMore || isLoadingNewer,
-    loadNewer: loadNewerNotes,
+    loadNewer: loadNewerAndRetry,
   });
 
   // Track when RSS should be refetched (for load more functionality)
@@ -4278,7 +4298,7 @@ export function MultiColumnClient() {
                 setShowAddFriendDialog(true);
               }}
               onDeleteFeed={(feedId) => setDeleteFeedId(feedId)}
-              onRefreshTab={loadNewerNotes}
+              onRefreshTab={loadNewerAndRetry}
             />
             <div className="absolute top-0 left-0 flex">
               <button
@@ -4506,7 +4526,7 @@ export function MultiColumnClient() {
           isLoadingNewer={isLoadingNewer}
           blankSpaceCount={blankSpaceCount}
           revealMoreTick={revealMoreTick}
-          onLoadNewer={isSavedTab ? noopCallback : loadNewerNotes}
+          onLoadNewer={isSavedTab ? noopCallback : loadNewerAndRetry}
           onLoadMore={isSavedTab ? noopCallback : handleLoadMore}
           onConsolidate={consolidate}
           onThreadClick={openThread}
@@ -4544,7 +4564,7 @@ export function MultiColumnClient() {
         {/* Status Bar with inline buttons */}
         {/* Compute stats based on active tab — notifications have their own data source */}
         <StatusBar
-          onLoadNewer={isSavedTab ? noopCallback : loadNewerNotes}
+          onLoadNewer={isSavedTab ? noopCallback : loadNewerAndRetry}
           onLoadMoreByCount={isSavedTab ? noopCallback : handleLoadMoreByCount}
           onConsolidate={consolidate}
           onSave={() => { setShowBackupConfirm(true); checkRemoteBackup(true); }}

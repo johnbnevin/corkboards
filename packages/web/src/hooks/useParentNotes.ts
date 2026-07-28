@@ -290,3 +290,17 @@ export function clearParentNoteCache(): void {
   parentNoteCache.clear();
   parentMisses.clear();
 }
+
+/**
+ * Forget one id's miss history so the next lookup actually goes to the relays.
+ *
+ * The retry sweep (useUnresolvedRetry) needs this: an id that has missed a few
+ * times is inside its exponential cooldown, or has spent its attempt budget, so
+ * re-querying would be answered from the negative cache with the same "not
+ * found" — a sweep that looks like it ran and changed nothing. An explicit
+ * retry is new information (the relay set or the socket budget may have
+ * recovered), so it resets the decay for that id only.
+ */
+export function forgetParentMiss(eventId: string): void {
+  parentMisses.recordHit(eventId);
+}

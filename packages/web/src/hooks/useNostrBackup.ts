@@ -28,7 +28,20 @@ import { fnv1a32 } from '@core/hashCore';
 import { randomUuid } from '@core/cryptoUtils';
 import { formatTimeAgo } from '@/lib/formatTimeAgo';
 import { debugLog, debugWarn } from '@/lib/debug';
-import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy } from '@/lib/idb';
+import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy, withoutTombstoneRecording } from '@/lib/idb';
+import {
+  mergeState,
+  STATE_FORMAT_VERSION,
+  type StateSnapshot,
+  type MergeResult,
+  type TombstoneMap,
+} from '@core/stateMerge';
+import {
+  getTombstones,
+  mergeInTombstones,
+  serializeTombstones,
+  TOMBSTONE_STORAGE_KEY,
+} from '@core/tombstones';
 import {
   importAesKey, aesDecrypt, hexToRawKey, encryptForSelf,
 } from '@/lib/nostrEncrypt';
@@ -340,20 +353,131 @@ interface RelayResult {
   error?: string;
 }
 
-// Serialize all backed-up keys from IDB cache into a JSON string
+/**
+ * Serialize all backed-up keys, plus the metadata a merge needs.
+ *
+ * v5 wraps the flat key map in an envelope carrying `savedAt` and the removal
+ * log. Both are what let the other device MERGE this snapshot instead of
+ * replacing its own state with it: `savedAt` orders the two sides, tombstones
+ * say which absences are deliberate. A v4 blob (a bare key map) still restores
+ * — see `parseBackup` — it just can't contribute removals.
+ */
 function serializeBackup(): string {
-  const data: Record<string, string | null> = {};
+  const keys: Record<string, string | null> = {};
   for (const key of BACKED_UP_KEYS) {
-    data[key] = idbGetSync(key);
+    keys[key] = idbGetSync(key);
   }
-  return JSON.stringify(data);
+  return JSON.stringify({
+    v: STATE_FORMAT_VERSION,
+    savedAt: Math.floor(Date.now() / 1000),
+    keys,
+    tombstones: getTombstones(),
+  });
+}
+
+/**
+ * Read either format. v4 blobs are a bare `{key: value}` map with no timestamp;
+ * they get `savedAt: 0` so any v5 snapshot is treated as newer, which is right
+ * — a v4 blob predates this build.
+ */
+function parseBackup(json: string): StateSnapshot {
+  const parsed = JSON.parse(json);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'keys' in parsed) {
+    const env = parsed as { savedAt?: number; keys: Record<string, string | null>; tombstones?: TombstoneMap };
+    return {
+      keys: env.keys ?? {},
+      savedAt: typeof env.savedAt === 'number' ? env.savedAt : 0,
+      tombstones: env.tombstones ?? {},
+    };
+  }
+  return { keys: parsed as Record<string, string | null>, savedAt: 0, tombstones: {} };
+}
+
+/** The local side of a merge, read straight out of the cache. */
+function localSnapshot(): StateSnapshot {
+  const keys: Record<string, string | null> = {};
+  for (const key of BACKED_UP_KEYS) keys[key] = idbGetSync(key);
+  return {
+    keys,
+    savedAt: parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10),
+    tombstones: getTombstones(),
+  };
 }
 
 // Write backup data back to IDB - returns promise that resolves when all writes complete.
 // Uses idbSet (async, awaited) for persistence guarantee before page reload,
 // plus idbSetSync dispatches sync events so useLocalStorage hooks update in-flight.
+/**
+ * MERGE a cloud snapshot into local state (was: overwrite local with it).
+ *
+ * The old wholesale replace is why restore had to be fenced off behind "only
+ * when local looks empty" and "only when the cloud has 5+ more dismissed" — run
+ * unguarded, it could delete work. A merge cannot: id sets union, corkboards
+ * merge per board, and removals are carried by tombstones rather than by
+ * absence. So this can run whenever the cloud is newer, which is what makes a
+ * second device actually pick up where the first left off.
+ *
+ * Returns what changed, so the caller can tell the difference between a silent
+ * additive merge and one that would drop something the user has locally.
+ */
+async function mergeBackupIntoLocal(
+  json: string,
+  log?: (msg: string) => void,
+  opts?: { dryRun?: boolean },
+): Promise<{ restored: number; removals: MergeResult['removals'] }> {
+  const remote = parseBackup(json);
+  const result = mergeState(localSnapshot(), remote);
+
+  // Dry run: answer "would this take anything away?" without touching storage,
+  // so the caller can apply a purely additive merge silently and ask first when
+  // it would not be.
+  if (opts?.dryRun) {
+    return { restored: result.changedKeys.length, removals: result.removals };
+  }
+
+  // The merged values are authoritative — recording removals off them would
+  // tombstone ids the merge deliberately dropped and make them unrestorable.
+  const writes: Promise<void>[] = [];
+  let restored = 0;
+  withoutTombstoneRecording(() => {
+    for (const key of result.changedKeys) {
+      const value = result.keys[key];
+      if (!(BACKED_UP_KEYS as readonly string[]).includes(key)) continue;
+      if (value === null || value === undefined) {
+        idbRemoveSync(key);
+        continue;
+      }
+      idbSetSync(key, value);
+      writes.push(idbSet(key, value));
+      restored++;
+    }
+  });
+
+  // Adopt the union of both logs so this device now enforces the other's
+  // deletions too, and persist it.
+  mergeInTombstones(result.tombstones);
+  withoutTombstoneRecording(() => {
+    idbSetSync(TOMBSTONE_STORAGE_KEY, serializeTombstones());
+  });
+
+  for (const key of result.changedKeys) {
+    const value = result.keys[key];
+    if (value === null || value === undefined) continue;
+    if (!(BACKED_UP_KEYS as readonly string[]).includes(key)) continue;
+    window.dispatchEvent(
+      new CustomEvent('idb-storage-sync', {
+        detail: { key, value: (() => { try { return JSON.parse(value); } catch { return value; } })() },
+      })
+    );
+  }
+
+  await Promise.all(writes);
+  log?.(`Merged: ${restored} keys changed, ${result.removals.length} keys had removals`);
+  return { restored, removals: result.removals };
+}
+
 async function deserializeBackup(json: string, log?: (msg: string) => void): Promise<number> {
-  const data: Record<string, string | null> = JSON.parse(json);
+  const data: Record<string, string | null> = parseBackup(json).keys;
   const writes: Promise<void>[] = [];
   let restored = 0;
 
@@ -1426,7 +1550,17 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   }, [user, queryAll, log, deviceId]);
 
   // Load remote backup
-  const loadRemoteBackup = useCallback(async () => {
+  /**
+   * Pull the cloud state in.
+   *
+   * `silent` keeps the UI out of restoring/restored states — a background sync
+   * should not look like a restore. `askOnRemovals` computes the merge first
+   * and, if it would drop anything this device has, applies NOTHING and leaves
+   * the remote-backup prompt standing so the user decides. A purely additive
+   * merge needs no confirmation: it cannot lose anything.
+   */
+  const loadRemoteBackup = useCallback(async (opts?: { silent?: boolean; askOnRemovals?: boolean }) => {
+    const silent = opts?.silent ?? false;
     if (!user || !remoteBackup) {
       log('Restore skipped: ' + (!user ? 'no user' : 'no remote backup'));
       return;
@@ -1437,8 +1571,10 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     }
     _backupMutex.restoring = true;
 
-    setStatus('restoring');
-    setMessage('Restoring backup...');
+    if (!silent) {
+      setStatus('restoring');
+      setMessage('Restoring backup...');
+    }
 
     try {
       const pubkey = user.pubkey;
@@ -1619,13 +1755,31 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         throw new Error('Backup data is corrupt. Make a fresh backup from your computer first, then restore.');
       }
 
-      const restoredCount = await deserializeBackup(fullJson, log);
+      // MERGE, not replace. This is the automatic cloud-restore path, so it has
+      // to be safe to run whenever the cloud is ahead — union the id sets, keep
+      // both devices' corkboards, and let tombstones carry deletions. A replace
+      // here is what forced the old "only when local looks empty" gate.
+      if (opts?.askOnRemovals) {
+        const preview = await mergeBackupIntoLocal(fullJson, undefined, { dryRun: true });
+        if (preview.removals.length > 0) {
+          const count = preview.removals.reduce((n, r) => n + r.ids.length, 0);
+          log(`Sync paused: merge would remove ${count} item(s) — leaving it for the user to confirm`);
+          if (!silent) { setStatus('found'); setMessage('A newer backup is available'); }
+          return;
+        }
+      }
+
+      const { restored: restoredCount, removals } = await mergeBackupIntoLocal(fullJson, log);
 
       log(`Written to IDB: ${restoredCount} keys`);
+      if (removals.length > 0) {
+        log(`Applied removals from another device: ${removals.map(r => `${r.key}×${r.ids.length}`).join(', ')}`);
+      }
 
       idbSetSync(LAST_BACKUP_TS_KEY, String(backup.timestamp));
       idbSetSync(LAST_CHUNK_COUNT_KEY, String(backup.chunks));
       setLastBackupTs(backup.timestamp);
+      const wasSilent = silent;
 
       // Store snapshot of restored data for change detection
       const snapshot: Record<string, string> = {};
@@ -1639,11 +1793,18 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         idbSet('corkboard:active-user-pubkey', user.pubkey),
       ]);
 
-      setStatus('restored');
-      setMessage(`Restored ${restoredCount} keys`);
-      log('Restore complete');
-      // Resume auto-save after a brief flash of "restored" status
-      setTimeout(() => setStatus('idle'), 3000);
+      if (wasSilent) {
+        // A background sync leaves no trace in the UI beyond the data arriving.
+        setStatus('idle');
+        setRemoteBackup(null);
+        log(`Background sync merged ${restoredCount} keys`);
+      } else {
+        setStatus('restored');
+        setMessage(`Restored ${restoredCount} keys`);
+        log('Restore complete');
+        // Resume auto-save after a brief flash of "restored" status
+        setTimeout(() => setStatus('idle'), 3000);
+      }
     } catch (err) {
       const errMsg = err instanceof Error
         ? (err.message || (err as DOMException).name || err.constructor.name)

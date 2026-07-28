@@ -964,7 +964,7 @@ mod tests {
     #[test]
     fn accepts_public_relays() {
         for url in [
-            "wss://relay.damus.io",
+            "wss://relay.nostr.net",
             "wss://nos.lol",
             "wss://relay.nostr.net/",
             "wss://[2606:4700:4700::1111]",
@@ -983,8 +983,8 @@ mod tests {
     /// service address authenticates and encrypts the endpoint by itself.
     #[test]
     fn enforces_wss_except_for_onion() {
-        assert!(validate_relay_url("ws://relay.damus.io").is_err());
-        assert!(validate_relay_url("wss://relay.damus.io").is_ok());
+        assert!(validate_relay_url("ws://relay.nostr.net").is_err());
+        assert!(validate_relay_url("wss://relay.nostr.net").is_ok());
         assert!(validate_relay_url("ws://abcdefghij234567.onion").is_ok());
         assert!(validate_relay_url("wss://abcdefghij234567.onion").is_ok());
         // The onion exemption must not extend to a lookalike domain.
@@ -994,8 +994,8 @@ mod tests {
     #[test]
     fn rejects_non_websocket_schemes() {
         for url in [
-            "http://relay.damus.io",
-            "https://relay.damus.io",
+            "http://relay.nostr.net",
+            "https://relay.nostr.net",
             "file:///etc/passwd",
             "socks5://127.0.0.1:9050",
             "not a url",

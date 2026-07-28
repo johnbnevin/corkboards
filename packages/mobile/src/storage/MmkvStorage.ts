@@ -27,6 +27,13 @@
 import { createMMKV, type MMKV } from 'react-native-mmkv';
 import * as Keychain from 'react-native-keychain';
 import type { KVStorage } from '@core/storage';
+import {
+  isMergeClassifiedKey,
+  recordRemovalsFromWrite,
+  serializeTombstones,
+  loadTombstones,
+  TOMBSTONE_STORAGE_KEY,
+} from '@core/tombstones';
 
 const KEYCHAIN_SERVICE = 'me.corkboards.mmkv';
 const KEYCHAIN_USERNAME = 'mmkv-encryption-key';
@@ -61,6 +68,47 @@ export async function openEncryptedShard(id: string): Promise<MMKV> {
 // ─── Persistence health tracking (parity with web's isIdbHealthy) ───────────
 let consecutiveWriteFailures = 0;
 const MAX_WRITE_FAILURES_BEFORE_UNHEALTHY = 3;
+
+// ─── Tombstone recording ────────────────────────────────────────────────────
+//
+// Every write to a merge-classified key is diffed against its previous value so
+// removals are recorded automatically — see @core/tombstones for why this is
+// derived here rather than called from each removal site. Suppressed while a
+// merge is being applied: the merge result is authoritative, and diffing it
+// would tombstone ids the merge legitimately dropped. Mirrors web's idb.ts.
+let suppressTombstones = false;
+let tombstonesLoaded = false;
+
+/** Run `fn` without recording removals. Used by the merge/restore apply path. */
+export function withoutTombstoneRecording<T>(fn: () => T): T {
+  const prev = suppressTombstones;
+  suppressTombstones = true;
+  try { return fn(); } finally { suppressTombstones = prev; }
+}
+
+function recordRemovalsForWrite(key: string, next: string | null): void {
+  if (suppressTombstones) return;
+  if (key === TOMBSTONE_STORAGE_KEY || !isMergeClassifiedKey(key)) return;
+  try {
+    if (!tombstonesLoaded) {
+      loadTombstones(readThroughBuffer(TOMBSTONE_STORAGE_KEY) ?? null);
+      tombstonesLoaded = true;
+    }
+    const removed = recordRemovalsFromWrite(
+      key,
+      readThroughBuffer(key) ?? null,
+      next,
+      Math.floor(Date.now() / 1000),
+    );
+    if (removed.length === 0) return;
+    withoutTombstoneRecording(() => {
+      writeThroughBuffer(TOMBSTONE_STORAGE_KEY, serializeTombstones());
+    });
+  } catch {
+    // Never let bookkeeping break a write.
+  }
+}
+
 
 /** Returns true if storage writes are succeeding. Auto-save should check this. */
 export function isStorageHealthy(): boolean {
@@ -330,6 +378,7 @@ export const mobileStorage: KVStorage = {
   },
   setSync(key: string, value: string): void {
     try {
+      recordRemovalsForWrite(key, value);
       writeThroughBuffer(key, value);
       consecutiveWriteFailures = 0;
     } catch (err) {
@@ -341,6 +390,9 @@ export const mobileStorage: KVStorage = {
     }
   },
   removeSync(key: string): void {
+    // Deleting a merge-classified key removes everything in it, so every id it
+    // held needs a tombstone or the next merge restores the lot.
+    recordRemovalsForWrite(key, null);
     writeThroughBuffer(key, null);
   },
 

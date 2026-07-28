@@ -222,7 +222,16 @@ export function useCustomFeedNotesCache({
 }: UseCustomFeedNotesCacheOptions) {
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
-  const hasInitialized = useRef(false);
+  /**
+   * Feed ids already hydrated from the persisted cache — a SET, not a boolean.
+   *
+   * This hook is mounted once and `feedId` changes as the user switches
+   * corkboards. With a single flag, only the FIRST board visited ever got its
+   * persisted notes back; every other board depended on React Query still
+   * holding data or on a fresh fetch landing, and showed an empty state when
+   * neither did. Mirrors web's useCustomFeedNotesCache — keep the two in step.
+   */
+  const hydratedFeedIds = useRef<Set<string>>(new Set());
 
   const baseWindowSeconds = useMemo(() => {
     return baseTimeWindow(pubkeys.length);
@@ -287,16 +296,23 @@ export function useCustomFeedNotesCache({
     refetchOnReconnect: false,
   });
 
-  // Initialize from MMKV cache on first load
+  // Hydrate this feed from the MMKV cache — once per feed, not once per mount,
+  // so switching boards shows what is already on disk instead of an empty state.
   useEffect(() => {
-    if (!hasInitialized.current && isCustomFeedCacheLoaded()) {
-      const cached = getCustomFeedNotesFromMemory(feedId);
-      if (cached.length > 0) {
-        if (__DEV__) console.log(`[customFeedCache] Initializing feed ${feedId} with ${cached.length} cached notes`);
-        queryClient.setQueryData(queryKey, cached);
-      }
-      hasInitialized.current = true;
+    if (!feedId || hydratedFeedIds.current.has(feedId)) return;
+    if (!isCustomFeedCacheLoaded()) return;
+    // Don't clobber a live result with an older persisted one.
+    const existing = queryClient.getQueryData<NostrEvent[]>(queryKey);
+    if (existing && existing.length > 0) {
+      hydratedFeedIds.current.add(feedId);
+      return;
     }
+    const cached = getCustomFeedNotesFromMemory(feedId);
+    if (cached.length > 0) {
+      if (__DEV__) console.log(`[customFeedCache] Hydrating feed ${feedId} with ${cached.length} cached notes`);
+      queryClient.setQueryData(queryKey, cached);
+    }
+    hydratedFeedIds.current.add(feedId);
   }, [queryClient, queryKey, feedId]);
 
   // Load older notes for this custom feed

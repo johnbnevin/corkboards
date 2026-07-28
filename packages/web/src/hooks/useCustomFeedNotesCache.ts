@@ -41,7 +41,19 @@ export function useCustomFeedNotesCache({
 }: UseCustomFeedNotesCacheOptions) {
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
-  const hasInitialized = useRef(false);
+  /**
+   * Feed ids already hydrated from the persisted cache — a SET, not a boolean.
+   *
+   * This hook is mounted once for the life of the app and `feedId` changes as
+   * the user switches corkboards. With a single `hasInitialized` flag, only the
+   * FIRST corkboard visited ever got its persisted notes back; every other board
+   * depended on React Query still holding data (10 min gcTime) or on a fresh
+   * network fetch landing. When neither did — coming back to a board after a
+   * while, or on a cold cache — the board showed the "No notes found" empty
+   * state despite having notes on disk, and a second attempt "fixed" it because
+   * by then the fetch had completed.
+   */
+  const hydratedFeedIds = useRef<Set<string>>(new Set());
 
   // Base look-back window. Small corkboards (few authors) look back FAR further:
   // a handful of people may post only a few times a day, so a 1-hour window
@@ -149,16 +161,25 @@ export function useCustomFeedNotesCache({
     refetchOnReconnect: false,
   });
 
-  // Initialize from cache on first load
+  // Hydrate this feed from the persisted cache — once per feed, not once per
+  // mount. Runs on every feedId/queryKey change, so switching boards shows the
+  // notes already on disk immediately instead of an empty state until the
+  // network answers.
   useEffect(() => {
-    if (!hasInitialized.current && isCustomFeedCacheLoaded()) {
-      const cached = getCustomFeedNotesFromMemory(feedId);
-      if (cached.length > 0) {
-        debugLog(`[customFeedCache] Initializing feed ${feedId} with ${cached.length} cached notes`);
-        queryClient.setQueryData(queryKey, cached);
-      }
-      hasInitialized.current = true;
+    if (!feedId || hydratedFeedIds.current.has(feedId)) return;
+    if (!isCustomFeedCacheLoaded()) return;
+    // Don't clobber a live result with an older persisted one.
+    const existing = queryClient.getQueryData<NostrEvent[]>(queryKey);
+    if (existing && existing.length > 0) {
+      hydratedFeedIds.current.add(feedId);
+      return;
     }
+    const cached = getCustomFeedNotesFromMemory(feedId);
+    if (cached.length > 0) {
+      debugLog(`[customFeedCache] Hydrating feed ${feedId} with ${cached.length} cached notes`);
+      queryClient.setQueryData(queryKey, cached);
+    }
+    hydratedFeedIds.current.add(feedId);
   }, [queryClient, queryKey, feedId]);
 
   // Load older notes for this custom feed

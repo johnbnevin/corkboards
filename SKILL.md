@@ -221,9 +221,11 @@ wss://relay.ditto.pub
 wss://relay.primal.net
 wss://nos.lol
 wss://relay.nostr.net
-wss://relay.damus.io
+wss://purplepag.es
 
-**Note on software diversity:** four of these five run **strfry**; only relay.ditto.pub differs (ditto-relay). Redundant hosts running identical software are a *correlated* failure — one strfry-specific bug, behavior change, or filter quirk hits 80% of these at once. Host count is not the same as implementation diversity. If resilience matters more than familiarity for your use case, mix in a khatru, nostr-rs-relay, or Ditto-based relay rather than adding a fifth strfry.
+**Note on software diversity:** most of these run **strfry**; relay.ditto.pub differs (ditto-relay). Redundant hosts running identical software are a *correlated* failure — one strfry-specific bug, behavior change, or filter quirk hits most of them at once. Host count is not the same as implementation diversity. If resilience matters more than familiarity for your use case, mix in a khatru, nostr-rs-relay, or Ditto-based relay rather than adding another strfry.
+
+**Not listed:** `relay.damus.io` — it is being shut down. Do not add it to defaults, examples, or tests.
 
 ## Nostr Archives / Indexers
 For cheap and fast statistics, such as zap totals, follower totals, or for an efficient first notecheck before outbox searches:

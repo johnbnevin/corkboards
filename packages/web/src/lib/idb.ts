@@ -6,7 +6,15 @@
  * - Synchronous in-memory cache populated after `idbReady` resolves
  * - BroadcastChannel for cross-tab cache invalidation
  * - One-time migration from localStorage on first run
+ * - Removal (tombstone) recording for merge-classified keys
  */
+import {
+  isMergeClassifiedKey,
+  recordRemovalsFromWrite,
+  serializeTombstones,
+  loadTombstones,
+  TOMBSTONE_STORAGE_KEY,
+} from '@core/tombstones';
 
 const DB_NAME = 'corkboard';
 const STORE_NAME = 'kv';
@@ -334,10 +342,52 @@ export function idbHasSync(key: string): boolean {
   return uncached;
 }
 
+// ─── Tombstone recording ────────────────────────────────────────────────────
+//
+// Every write to a merge-classified key is diffed against its previous value so
+// removals are recorded automatically (see @core/tombstones for why this is
+// derived rather than called from each removal site). Suppressed while applying
+// a merge: the merge result is authoritative, and diffing it would tombstone
+// ids the merge legitimately dropped — which would then suppress them forever.
+let suppressTombstones = false;
+
+/** Run `fn` without recording removals. Used by the merge/restore apply path. */
+export function withoutTombstoneRecording<T>(fn: () => T): T {
+  const prev = suppressTombstones;
+  suppressTombstones = true;
+  try { return fn(); } finally { suppressTombstones = prev; }
+}
+
+let tombstonesLoaded = false;
+
+function recordRemovals(key: string, next: string | null): void {
+  if (suppressTombstones) return;
+  if (key === TOMBSTONE_STORAGE_KEY || !isMergeClassifiedKey(key)) return;
+  if (!tombstonesLoaded) {
+    loadTombstones(memCache.get(TOMBSTONE_STORAGE_KEY) ?? null);
+    tombstonesLoaded = true;
+  }
+  const removed = recordRemovalsFromWrite(
+    key,
+    memCache.get(key) ?? null,
+    next,
+    Math.floor(Date.now() / 1000),
+  );
+  if (removed.length === 0) return;
+  // Persist the log itself without re-entering this path.
+  withoutTombstoneRecording(() => {
+    const serialized = serializeTombstones();
+    memCache.set(TOMBSTONE_STORAGE_KEY, serialized);
+    idbSet(TOMBSTONE_STORAGE_KEY, serialized).catch(err =>
+      console.warn('[idb] failed to persist tombstones', err));
+  });
+}
+
 /** Synchronous write – updates cache immediately and schedules IDB write.
  *  `origin` (see `nextWriteOrigin`) is echoed back on the sync event so the
  *  writer can skip re-applying a value it already has. */
 export function idbSetSync(key: string, value: string, origin?: string): void {
+  recordRemovals(key, value);
   // Only skip memCache for the same blacklist used at init. A size threshold
   // here would create a sync/IDB read mismatch — idbGetSync would return null
   // for a value that exists on disk, silently breaking every reader.
@@ -368,6 +418,9 @@ export function idbPrimeCache(key: string, value: string): void {
 
 /** Synchronous delete – removes from cache immediately and schedules IDB write. */
 export function idbRemoveSync(key: string): void {
+  // Deleting a merge-classified key removes everything in it, so every id it
+  // held needs a tombstone — otherwise the next merge restores the lot.
+  recordRemovals(key, null);
   memCache.delete(key);
   idbRemove(key).catch(console.warn);
   dispatchSyncEvent(key, null);

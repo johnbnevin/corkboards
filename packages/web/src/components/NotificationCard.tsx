@@ -18,7 +18,7 @@ import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SmartNoteContent } from '@/components/SmartNoteContent';
 import { NoteContent } from '@/components/NoteContent';
-import { visibleLength, findVisibleCutoff } from '@/lib/textTruncation';
+import { visibleLength, truncateForPreview } from '@/lib/textTruncation';
 import { ClickableProfile } from '@/components/ProfileModal';
 import { CopyEventIdButton } from '@/components/NoteCard';
 import { genUserName } from '@/lib/genUserName';
@@ -43,7 +43,7 @@ function setNotifCapturedHeight(noteId: string, height: number): void {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// visibleLength and findVisibleCutoff imported from @/lib/textTruncation
+// visibleLength and truncateForPreview imported from @/lib/textTruncation
 
 /** Expandable note content — truncates at 150 chars with show-more */
 function ExpandableContent({
@@ -77,7 +77,7 @@ function ExpandableContent({
     <div>
       <NoteContent
         event={visLen > 150
-          ? { ...event, content: event.content.slice(0, findVisibleCutoff(event.content, 150)).trimEnd() + '…' }
+          ? { ...event, content: truncateForPreview(event.content, 150) }
           : event}
         className={className}
         blurMedia

@@ -15,7 +15,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { SmartNoteContent } from '@/components/SmartNoteContent'
 import { NoteContent } from '@/components/NoteContent'
-import { visibleLength, findVisibleCutoff } from '@/lib/textTruncation'
+import { visibleLength, truncateForPreview } from '@/lib/textTruncation'
 import { ClickableProfile, profileModalState, PROFILE_ACTION_FOLLOW } from '@/components/ProfileModal'
 import { genUserName } from '@/lib/genUserName'
 import { useIsDeletedAuthor } from '@/contexts/deletedAuthors'
@@ -155,7 +155,7 @@ function DeleteNoteButton({ onDelete }: { onDelete: () => void }) {
   );
 }
 
-// visibleLength and findVisibleCutoff imported from @/lib/textTruncation
+// visibleLength and truncateForPreview imported from @/lib/textTruncation
 
 /** Expandable nested content: shows 125 visible chars with "show more" spoiler */
 // Module-level set of expanded event IDs — survives component unmount/remount
@@ -194,7 +194,7 @@ function ExpandableContent({ event, className, blurMedia, inModalContext, onView
     <div>
       <NoteContent
         event={visLen > 125
-          ? { ...resolvedEvent, content: resolvedEvent.content.slice(0, findVisibleCutoff(resolvedEvent.content, 125)).trimEnd() + '…' }
+          ? { ...resolvedEvent, content: truncateForPreview(resolvedEvent.content, 125) }
           : resolvedEvent}
         className={className}
         blurMedia={blurMedia}

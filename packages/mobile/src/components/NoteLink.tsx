@@ -6,7 +6,7 @@
  *
  * Mobile equivalent of packages/web/src/components/NoteLink.tsx.
  */
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -16,12 +16,13 @@ import {
 import { nip19 } from 'nostr-tools';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { registerUnresolved, clearUnresolved } from '@core/failedNotes';
 import { useAuthor } from '../hooks/useAuthor';
 import { useNostr } from '../lib/NostrProvider';
 import { NoteContent } from './NoteContent';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { genUserName } from '@core/genUserName';
-import { visibleLength, findVisibleCutoff } from '@core/textTruncation';
+import { visibleLength, truncateForPreview } from '@core/textTruncation';
 
 function getEventIdFromIdentifier(identifier: string): {
   id?: string;
@@ -78,7 +79,7 @@ function InlineNoteLinkContent({
     if (isExpanded || visLen <= 125) return event;
     return {
       ...event,
-      content: event.content.slice(0, findVisibleCutoff(event.content, 125)).trimEnd() + '...',
+      content: truncateForPreview(event.content, 125),
     };
   }, [event, isExpanded, visLen]);
 
@@ -190,6 +191,20 @@ export function NoteLink({ noteId, onViewThread }: NoteLinkProps) {
     retry: 1,
     retryDelay: 4000,
   });
+
+  // Track this reference in the unresolved registry so the retry sweep can see
+  // it. Symmetric — cleared on resolve and on unmount — because the sweep's
+  // "2 or more unresolved" threshold is only meaningful if references that
+  // resolved or scrolled away stop being counted. Mirrors web's NoteLink.
+  useEffect(() => {
+    if (isLoading) return;
+    if (event) {
+      clearUnresolved(noteId);
+      return;
+    }
+    registerUnresolved(noteId);
+    return () => clearUnresolved(noteId);
+  }, [isLoading, event, noteId]);
 
   if (isLoading) {
     return <NoteLinkSkeleton />;

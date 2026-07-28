@@ -43,6 +43,7 @@ import { useAuth } from '../lib/AuthContext';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { usePlatformStorage } from '../hooks/usePlatformStorage';
 import { useAutoFetch } from '../hooks/useAutoFetch';
+import { useUnresolvedRetry } from '../hooks/useUnresolvedRetry';
 import { STORAGE_KEYS } from '../lib/storageKeys';
 import { useCustomFeedNotes } from '../hooks/useCustomFeedNotes';
 import { useFeedLimit } from '../hooks/useFeedLimit';
@@ -318,12 +319,22 @@ export function HomeScreen() {
   const [autofetchIntervalSecs] = usePlatformStorage<number>(STORAGE_KEYS.AUTOFETCH_INTERVAL_SECS, 120);
   // Opt-in: jump to the top when new notes arrive (pairs with fresh highlighting).
   const [autoScrollTop] = usePlatformStorage<boolean>(STORAGE_KEYS.AUTO_SCROLL_TOP, false);
+  // Fetching new notes is also the right moment to re-attempt anything on
+  // screen that never resolved — whatever was wrong has usually passed by then.
+  // The sweep's own guards (threshold, in-flight, interval, backgrounded)
+  // decide whether it does anything, so calling it on every fetch is safe.
+  const { sweep: sweepUnresolved } = useUnresolvedRetry();
+  const loadNewerAndRetry = useCallback(() => {
+    void refetch();
+    sweepUnresolved();
+  }, [refetch, sweepUnresolved]);
+
   useAutoFetch({
     enabled: !!autofetchEnabled,
     intervalSecs: autofetchIntervalSecs,
     activeTab,
     isLoadingAny: isFetching || isLoadingMore || customLoadingMore,
-    loadNewer: refetch,
+    loadNewer: loadNewerAndRetry,
   });
 
   // ── Mute + deduplicate ──────────────────────────────────────────────────────

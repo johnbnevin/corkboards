@@ -10,7 +10,7 @@ Read this when feeds look empty, replies are missing, or you're deciding which r
 
 | Type | What it does | Use it for |
 |---|---|---|
-| **General public** | Accepts most kinds from anyone. `nos.lol`, `relay.damus.io` | Bootstrap, discovery, broad reach. Never assume retention |
+| **General public** | Accepts most kinds from anyone. `nos.lol`, `relay.nostr.net` | Bootstrap, discovery, broad reach. Never assume retention |
 | **Paid / restricted** | `payment_required` or `restricted_writes`. `nostr.wine`, `nostr.land` | Reliability, retention, less spam. Read NIP-11 `fees` first |
 | **Indexer** | Optimized for kind 0 profiles and kind 10002 relay lists | Bootstrapping the outbox model — resolve *who writes where*, then leave |
 | **Search** | NIP-50 `search` filter. Ditto Relay (OpenSearch-backed) | Full-text queries. Most relays don't support search at all |

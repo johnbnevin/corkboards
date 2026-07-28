@@ -161,7 +161,6 @@ export function useLoginActions() {
 
       const uri = `nostrconnect://${clientPubkey}?${params.toString()}`;
       tauriLog(`[nip46] nostrconnect URI generated, relays: ${connectRelays.join(', ')}`);
-      onUri(uri);
 
       // Inner abort controller — aborted as soon as we get a valid connect response,
       // which cleanly closes all 3 relay subscriptions. Without this, abandoned
@@ -180,8 +179,13 @@ export function useLoginActions() {
       );
       tauriLog(`[nip46] subscriptions opened on ${connectRelays.length} relays, waiting for response...`);
 
+      // Resolves once a relay has actually answered our REQ (EOSE, or an event).
+      // See the `onUri` call below for why the QR waits on this.
+      let markSubsLive: () => void = () => {};
+      const subsLive = new Promise<void>((resolve) => { markSubsLive = resolve; });
+
       // Race all relays for the signer's connect response
-      const result = await new Promise<{ bunkerPubkey: string; relayIndex: number }>((resolve, reject) => {
+      const resultPromise = new Promise<{ bunkerPubkey: string; relayIndex: number }>((resolve, reject) => {
         let resolved = false;
         connectAbort.signal.addEventListener('abort', () => { if (!resolved) reject(new Error('aborted')); });
 
@@ -191,6 +195,8 @@ export function useLoginActions() {
           (async () => {
             try {
               for await (const msg of sub) {
+                // Any frame means this relay processed our REQ.
+                markSubsLive();
                 tauriLog(`[nip46] ${relayUrl}: msg[0]=${msg[0]}`);
                 if (resolved) return;
                 if (msg[0] === 'CLOSED') continue;
@@ -223,6 +229,35 @@ export function useLoginActions() {
           })();
         }
       });
+      // Attached now so a relay failure between here and the await below can't
+      // surface as an unhandled rejection; the real await is a few lines down.
+      resultPromise.catch(() => {});
+
+      // Only NOW show the QR.
+      //
+      // kind 24133 is in the ephemeral range (20000-29999), so relays do not
+      // store it. The URI used to be handed out before these subscriptions
+      // existed, which left a window — three TCP+TLS+WS handshakes wide, and
+      // wider still on a cold DNS cache or a slow webview — where a user who
+      // scanned promptly had their signer publish the connect response into
+      // relays that were not yet carrying our REQ. Nothing stored it, nothing
+      // replayed it, and the flow sat on "waiting for signer" until the user
+      // gave up and started again. The second attempt then worked, because the
+      // sockets were warm. That is the "I have to do the QR login twice" bug.
+      //
+      // Bounded: a relay set that never answers must not block the QR forever,
+      // so after 3s we show it anyway and take our chances — no worse than the
+      // old behaviour, and only reachable when every signalling relay is slow.
+      let subsLiveTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        subsLive,
+        new Promise<void>((resolve) => { subsLiveTimer = setTimeout(resolve, 3000); }),
+      ]);
+      clearTimeout(subsLiveTimer);
+      if (signal.aborted) throw new Error('aborted');
+      onUri(uri);
+
+      const result = await resultPromise;
 
       // Use the relay that got the response for the NConnectSigner
       const signer = new NConnectSigner({

@@ -1,28 +1,61 @@
 /**
- * Deferred retry queue for note IDs that failed to load.
+ * Live registry of referenced notes that are on screen but have not resolved.
  *
- * When a relay doesn't have a referenced note at fetch time (e.g. a reply
- * references a parent that hasn't propagated yet), the note ID is registered
- * here. After the page settles, MultiColumnClient drains the queue and
- * retries via a targeted relay query.
+ * A note reference (a quoted note, a thread parent, an naddr) can fail to load
+ * because the relay holding it was slow, briefly unreachable, or — on the
+ * desktop build — because a feed fan-out had taken every socket permit. None of
+ * those are permanent, so the reference is worth retrying.
  *
- * This is a write-once-then-drain queue: `getFailedNoteIds()` returns all
- * accumulated IDs and clears the set in one atomic operation (drain-on-read).
+ * ## Why a live set and not a drain-on-read queue
+ *
+ * This used to be write-once-then-drain: `getFailedNoteIds()` returned the
+ * accumulated ids AND cleared the set, and a single 15-second timer on page load
+ * was its only consumer. So every unresolved reference got exactly one retry,
+ * ever — anything that failed after that moment, or failed the retry itself,
+ * stayed a grey placeholder until the app was reloaded.
+ *
+ * A repeating sweep needs to answer a different question: how many references
+ * are unresolved *right now*. Draining destroys that answer, and clearing on
+ * unmount is what keeps it about the current page rather than about everything
+ * the session has ever seen. So entries live until the reference resolves or
+ * leaves the screen, and reads are non-destructive.
  */
 
-const failedNoteIds = new Set<string>()
-
-/** Register a note ID for deferred retry. Idempotent — duplicates are ignored. */
-export function registerFailedNote(noteId: string): void {
-  failedNoteIds.add(noteId)
-}
+const unresolvedIds = new Set<string>()
 
 /**
- * Drain and return all accumulated failed note IDs.
- * The internal set is cleared after this call — each ID is only retried once.
+ * Bound on tracked ids. The set is unmount-scoped, so it should stay near the
+ * count of on-screen references — but a leak here would be silent and would feed
+ * an ever-growing retry sweep, so cap it and drop the oldest.
  */
-export function getFailedNoteIds(): string[] {
-  const ids = Array.from(failedNoteIds)
-  failedNoteIds.clear()
-  return ids
+const MAX_UNRESOLVED = 500
+
+/** Mark a note reference as on screen and unresolved. Idempotent. */
+export function registerUnresolved(noteId: string): void {
+  if (!noteId || unresolvedIds.has(noteId)) return
+  if (unresolvedIds.size >= MAX_UNRESOLVED) {
+    const oldest = unresolvedIds.values().next().value
+    if (oldest !== undefined) unresolvedIds.delete(oldest)
+  }
+  unresolvedIds.add(noteId)
+}
+
+/** Mark a reference as resolved, or gone from the screen. Idempotent. */
+export function clearUnresolved(noteId: string): void {
+  unresolvedIds.delete(noteId)
+}
+
+/** Ids currently unresolved on screen. Non-destructive — safe to poll. */
+export function getUnresolvedIds(): string[] {
+  return Array.from(unresolvedIds)
+}
+
+/** How many references are unresolved right now. */
+export function unresolvedCount(): number {
+  return unresolvedIds.size
+}
+
+/** Drop everything (logout, data wipe, feed replaced). */
+export function clearAllUnresolved(): void {
+  unresolvedIds.clear()
 }

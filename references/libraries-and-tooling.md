@@ -244,7 +244,7 @@ Docs: https://docs.soapbox.pub · Ditto resources, Nostr 101, self-hosting: http
 ```bash
 curl -sSL https://raw.githubusercontent.com/fiatjaf/nak/master/install.sh | sh
 
-nak req -k 31923 wss://relay.damus.io    # query events by kind
+nak req -k 31923 wss://relay.nostr.net     # query events by kind
 nak event -k 1 -c "test" <relay-url>     # publish a test event
 nak decode nevent1...                    # decode NIP-19 identifier
 nak encode npub <hex-pubkey>             # encode to npub

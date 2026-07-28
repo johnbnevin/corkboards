@@ -153,6 +153,12 @@ function VideoPlayer({ sources: rawSources, poster: rawPoster }: { sources: stri
         className="w-full max-h-[500px] rounded-lg"
         preload="metadata"
         poster={poster}
+        // The card behind this opens the thread on click. Without stopping the
+        // bubble, pressing play also navigated: the video started AND the
+        // thread view opened over it. Only clicks on the note *outside* the
+        // player should open the thread.
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
       />
     </div>
   )
@@ -548,7 +554,11 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
         href={url}
         target="_blank"
         rel="noopener noreferrer"
-        className="my-2 flex items-center gap-3 p-3 bg-muted/50 hover:bg-muted rounded-lg border transition-colors"
+        // `overflow-hidden` (not `flow-root`, which would fight `flex` for the
+        // display property) establishes a formatting context so this box sits
+        // beside NoteCard's floated avatar rather than drawing through it —
+        // block-level boxes don't shrink to avoid floats, only line boxes do.
+        className="my-2 overflow-hidden flex items-center gap-3 p-3 bg-muted/50 hover:bg-muted rounded-lg border transition-colors"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">

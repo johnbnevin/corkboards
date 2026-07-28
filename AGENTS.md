@@ -321,7 +321,7 @@ function useSpecificRelay() {
   const { nostr } = useNostr();
 
   // Connect to a specific relay
-  const relay = nostr.relay('wss://relay.damus.io');
+  const relay = nostr.relay('wss://relay.nostr.net');
 
   // Query from this specific relay only
   const events = await relay.query([{ kinds: [1], limit: 20 }], { signal });
@@ -343,7 +343,7 @@ function useRelayGroup() {
 
   // Create a group of specific relays
   const relayGroup = nostr.group([
-    'wss://relay.damus.io',
+    'wss://relay.nostr.net',
     'wss://relay.nostr.band',
     'wss://nos.lol'
   ]);
@@ -852,7 +852,7 @@ const defaultConfig: AppConfig = {
     relays: [
       { url: 'wss://relay.ditto.pub', read: true, write: true },
       { url: 'wss://relay.nostr.band', read: true, write: true },
-      { url: 'wss://relay.damus.io', read: true, write: true },
+      { url: 'wss://relay.nostr.net', read: true, write: true },
     ],
     updatedAt: 0,
   },

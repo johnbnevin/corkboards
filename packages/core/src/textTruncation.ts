@@ -72,3 +72,27 @@ export function findVisibleCutoff(content: string, targetChars: number): number 
 
   return i
 }
+
+/**
+ * Truncate for a preview, ending with an ellipsis that cannot corrupt the last
+ * token.
+ *
+ * The ellipsis must be separated from the text. Callers used to do
+ * `slice(...).trimEnd() + '…'`, and because `findVisibleCutoff` deliberately
+ * extends the cut to the END of a URL, the result was routinely
+ * `https://host/abc.jpg…` — one token, no whitespace. Every downstream check is
+ * anchored to the end of the URL (`/\.(jpg|png|…)$/` on the pathname), so the
+ * glued ellipsis made a perfectly good image URL stop being recognized as
+ * media: it rendered as a raw link, and — because the content no longer
+ * contained a media URL to dedup against — the note's NIP-92 `imeta` copy of
+ * the very same image was then appended as "not already shown inline". One
+ * image, two renderings of it, in every truncated/nested preview.
+ *
+ * A space before the ellipsis is enough: the URL token ends at whitespace
+ * exactly as it does in untruncated content.
+ */
+export function truncateForPreview(content: string, targetChars: number): string {
+  const cut = findVisibleCutoff(content, targetChars)
+  if (cut >= content.length) return content
+  return content.slice(0, cut).trimEnd() + ' …'
+}

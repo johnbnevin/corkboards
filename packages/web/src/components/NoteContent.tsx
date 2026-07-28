@@ -7,6 +7,7 @@ import { ProfileLink } from './ProfileLink'
 import { MediaLink } from './MediaLink'
 import { isImageUrl } from '@/lib/mediaUtils'
 import { MARKDOWN_INDICATORS_PATTERN } from '@core/markdownDetect'
+import { useLocalStorage } from '@/hooks/useLocalStorage'
 import { canonicalMediaUrl } from '@core/sanitizeUtils'
 import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr'
 import { optimizeMediaUrl } from '@/lib/imageUtils'
@@ -263,7 +264,15 @@ function dropRepeatedMedia(parts: ContentPart[]): ContentPart[] {
   return duplicate ? out : parts
 }
 
-export function NoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, depth = 0, renderMarkdown = true }: NoteContentProps) {
+export function NoteContent({ event, className, inModalContext = false, onViewThread, blurMedia = false, depth = 0, renderMarkdown }: NoteContentProps) {
+  // Markdown rendering follows the user's setting at EVERY call site, not just
+  // the ones that go through SmartNoteContent. This used to default to `true`,
+  // so a quoted/nested note rendered markdown regardless of the global toggle
+  // while the note containing it obeyed it — two different answers on one
+  // screen. SmartNoteContent still passes an explicit value (it also folds in
+  // the per-note "show original" toggle), and that continues to win.
+  const [globalRenderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true)
+  const effectiveRenderMarkdown = renderMarkdown ?? globalRenderMarkdown
   // When present (inside the main client), hashtag taps prompt to open a new
   // corkboard instead of navigating away. Absent elsewhere → plain navigation.
   const hashtagAction = useHashtagAction()
@@ -279,7 +288,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
   }, [event.tags]);
 
   const content = useMemo(() => {
-    const parts = parseContent(event.content, renderMarkdown);
+    const parts = parseContent(event.content, effectiveRenderMarkdown);
     if (emojiMap.size === 0) return dropRepeatedMedia(parts);
     // Replace :shortcode: in text parts with emoji parts.
     // Markdown parts are left intact — MarkdownText handles emoji rendering
@@ -303,7 +312,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
       }
     }
     return dropRepeatedMedia(expanded);
-  }, [event.content, emojiMap, renderMarkdown])
+  }, [event.content, emojiMap, effectiveRenderMarkdown])
 
   // Build poster map and media URL sets from imeta tags (NIP-92)
   const { posters: imetaPosters, videoUrls: imetaVideoUrls, imageUrls: imetaImageUrls, imetaMeta } = useMemo(() => getImetaData(event), [event])

@@ -102,7 +102,7 @@ describe('host safety gates (shared with web)', () => {
   });
 
   it('allows real public hosts', () => {
-    expect(isUnsafeHost('relay.damus.io')).toBe(false);
+    expect(isUnsafeHost('relay.nostr.net')).toBe(false);
     expect(isUnsafeHost('1.1.1.1')).toBe(false);
   });
 

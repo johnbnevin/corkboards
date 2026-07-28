@@ -71,23 +71,20 @@ export function useSignerConnect(_type: 'amber') {
 
       const connectUri = `nostrconnect://${clientPubkey}?${params.toString()}`;
 
-      if (Platform.OS === 'android') {
-        // Amber isn't on the Play Store — when it isn't installed, send users to
-        // the Zap Store (the Nostr-native Android app store that distributes it)
-        // rather than a dead Play Store listing.
-        const fallback = encodeURIComponent('https://zapstore.dev');
-        await Linking.openURL(
-          `intent://${clientPubkey}?${params.toString()}#Intent;scheme=nostrconnect;package=com.greenart7c3.nostrsigner;S.browser_fallback_url=${fallback};end`
-        );
-      } else {
-        await Linking.openURL(connectUri);
-      }
-
       // Listen for the NIP-46 connect response on EVERY signalling relay.
       // Same treatment as AuthContext's bunker relays: go through createRelay so
       // the connection carries the NIP-42 AUTH handler (a raw NRelay1 has none,
       // so an AUTH-gated signalling relay would silently return nothing and the
       // connect flow would hang), and register it as a deliberate connection.
+      //
+      // This happens BEFORE the deep link, not after. kind 24133 is in the
+      // ephemeral range (20000-29999), so relays do not store it: handing the
+      // URI to Amber first left a window — three TCP+TLS+WS handshakes wide —
+      // in which Amber could publish its connect response into relays that were
+      // not yet carrying our REQ. Nothing stored it, nothing replayed it, and
+      // the login sat waiting until the user gave up and tried again, which
+      // worked because the sockets were warm by then. Mirrors web's
+      // nostrconnect() flow; keep the two in step.
       const connections = SIGNALLING_RELAYS.map((url) => {
         registerAuthRelay(url);
         return { url, relay: createRelay(url, { backoff: false }) };
@@ -100,9 +97,13 @@ export function useSignerConnect(_type: 'amber') {
       const connectAbort = new AbortController();
       signal.addEventListener('abort', () => connectAbort.abort());
 
+      // Resolves once a relay has actually answered our REQ (EOSE, or an event).
+      let markSubsLive: () => void = () => {};
+      const subsLive = new Promise<void>((resolve) => { markSubsLive = resolve; });
+
       let winner: { url: string; relay: NRelay1 } | null = null;
       try {
-        const bunkerPubkey = await new Promise<string>((resolve, reject) => {
+        const bunkerPromise = new Promise<string>((resolve, reject) => {
           let resolved = false;
           let finished = 0;
           signal.addEventListener('abort', () => { if (!resolved) reject(new Error('aborted')); });
@@ -115,6 +116,8 @@ export function useSignerConnect(_type: 'amber') {
                   { signal: connectAbort.signal },
                 );
                 for await (const msg of sub) {
+                  // Any frame means this relay processed our REQ.
+                  markSubsLive();
                   if (resolved) return;
                   if (msg[0] === 'EVENT') {
                     const event = msg[2];
@@ -142,6 +145,34 @@ export function useSignerConnect(_type: 'amber') {
             })();
           }
         });
+        // Attached now so a relay failure before the await below can't surface
+        // as an unhandled rejection.
+        bunkerPromise.catch(() => {});
+
+        // Hand the URI to the signer only once we're listening. Bounded at 3s so
+        // a slow signalling relay can't stall the hand-off forever — that
+        // fallback is no worse than the old unconditional behaviour.
+        let subsLiveTimer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          subsLive,
+          new Promise<void>((resolve) => { subsLiveTimer = setTimeout(resolve, 3000); }),
+        ]);
+        clearTimeout(subsLiveTimer);
+        if (signal.aborted) throw new Error('aborted');
+
+        if (Platform.OS === 'android') {
+          // Amber isn't on the Play Store — when it isn't installed, send users to
+          // the Zap Store (the Nostr-native Android app store that distributes it)
+          // rather than a dead Play Store listing.
+          const fallback = encodeURIComponent('https://zapstore.dev');
+          await Linking.openURL(
+            `intent://${clientPubkey}?${params.toString()}#Intent;scheme=nostrconnect;package=com.greenart7c3.nostrsigner;S.browser_fallback_url=${fallback};end`
+          );
+        } else {
+          await Linking.openURL(connectUri);
+        }
+
+        const bunkerPubkey = await bunkerPromise;
 
         // Sign over the relay that actually answered; close the rest.
         const winning = winner as unknown as { url: string; relay: NRelay1 };

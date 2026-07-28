@@ -58,6 +58,21 @@ export interface RemoteCheckpoint {
 }
 
 const D_TAG_PREFIX = 'corkboard:backup';
+import {
+  mergeState,
+  STATE_FORMAT_VERSION,
+  type StateSnapshot,
+  type MergeResult,
+  type TombstoneMap,
+} from '@core/stateMerge';
+import {
+  getTombstones,
+  mergeInTombstones,
+  serializeTombstones,
+  TOMBSTONE_STORAGE_KEY,
+} from '@core/tombstones';
+import { withoutTombstoneRecording } from '../storage/MmkvStorage';
+
 const LAST_BACKUP_TS_KEY = STORAGE_KEYS.LAST_BACKUP_TS;
 const CHECKPOINTS_KEY = STORAGE_KEYS.REMOTE_CHECKPOINTS;
 
@@ -264,24 +279,75 @@ function savedNoteCount(): number {
   return new Set([...collapsed, ...bookmarks]).size;
 }
 
+/**
+ * Serialize all backed-up keys, plus the metadata a merge needs (v5).
+ * Mirrors packages/web/src/hooks/useNostrBackup.ts — keep the two in step, or
+ * a snapshot written on one platform can't be merged correctly on the other.
+ */
 function serializeBackup(): string {
-  const data: Record<string, string | null> = {};
+  const keys: Record<string, string | null> = {};
   for (const key of BACKED_UP_KEYS) {
-    data[key] = mobileStorage.getSync(key);
+    keys[key] = mobileStorage.getSync(key);
   }
-  return JSON.stringify(data);
+  return JSON.stringify({
+    v: STATE_FORMAT_VERSION,
+    savedAt: Math.floor(Date.now() / 1000),
+    keys,
+    tombstones: getTombstones(),
+  });
 }
 
-function deserializeBackup(json: string): void {
-  const data: Record<string, string | null> = JSON.parse(json);
-  for (const [key, value] of Object.entries(data)) {
-    if (!(BACKED_UP_KEYS as readonly string[]).includes(key)) continue;
-    if (value === null || value === undefined) {
-      mobileStorage.removeSync(key);
-    } else {
-      mobileStorage.setSync(key, value);
-    }
+/** Read either format. A v4 blob is a bare key map with no timestamp. */
+function parseBackup(json: string): StateSnapshot {
+  const parsed = JSON.parse(json);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'keys' in parsed) {
+    const env = parsed as { savedAt?: number; keys: Record<string, string | null>; tombstones?: TombstoneMap };
+    return {
+      keys: env.keys ?? {},
+      savedAt: typeof env.savedAt === 'number' ? env.savedAt : 0,
+      tombstones: env.tombstones ?? {},
+    };
   }
+  return { keys: parsed as Record<string, string | null>, savedAt: 0, tombstones: {} };
+}
+
+function localSnapshot(): StateSnapshot {
+  const keys: Record<string, string | null> = {};
+  for (const key of BACKED_UP_KEYS) keys[key] = mobileStorage.getSync(key);
+  return {
+    keys,
+    savedAt: parseInt(mobileStorage.getSync(LAST_BACKUP_TS_KEY) || '0', 10),
+    tombstones: getTombstones(),
+  };
+}
+
+/**
+ * MERGE a cloud snapshot into local state (was: overwrite local with it).
+ *
+ * Id sets union, corkboards merge per board, deletions travel as tombstones —
+ * so this is safe to run whenever the cloud is ahead, which is what lets a
+ * second device pick up where the first left off. See @core/stateMerge.
+ */
+function mergeBackupIntoLocal(json: string): { changed: number; removals: MergeResult['removals'] } {
+  const result = mergeState(localSnapshot(), parseBackup(json));
+
+  // The merged values are authoritative — recording removals off them would
+  // tombstone ids the merge deliberately dropped.
+  withoutTombstoneRecording(() => {
+    for (const key of result.changedKeys) {
+      if (!(BACKED_UP_KEYS as readonly string[]).includes(key)) continue;
+      const value = result.keys[key];
+      if (value === null || value === undefined) mobileStorage.removeSync(key);
+      else mobileStorage.setSync(key, value);
+    }
+  });
+
+  mergeInTombstones(result.tombstones);
+  withoutTombstoneRecording(() => {
+    mobileStorage.setSync(TOMBSTONE_STORAGE_KEY, serializeTombstones());
+  });
+
+  return { changed: result.changedKeys.length, removals: result.removals };
 }
 
 function getPublishRelays(pubkey: string): string[] {
@@ -834,8 +900,8 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       log('Decrypted successfully');
 
       setMessage('Restoring settings…');
-      deserializeBackup(json);
-      log('Settings restored');
+      const { changed, removals } = mergeBackupIntoLocal(json);
+      log(`Settings merged: ${changed} keys changed, ${removals.length} with removals`);
 
       setStatus('restored');
       setMessage('Backup restored! Restart the app to apply all settings.');

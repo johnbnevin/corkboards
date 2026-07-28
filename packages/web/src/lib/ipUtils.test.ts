@@ -27,7 +27,7 @@ describe('ipv4ToInt', () => {
   });
   it('returns null for hostnames', () => {
     expect(ipv4ToInt('example.com')).toBeNull();
-    expect(ipv4ToInt('relay.damus.io')).toBeNull();
+    expect(ipv4ToInt('relay.nostr.net')).toBeNull();
   });
 });
 
@@ -111,7 +111,7 @@ describe('normalizeRelay', () => {
     expect(normalizeRelay('https://nos.lol')).toBe('wss://nos.lol/');
   });
   it('leaves an already-canonical wss URL alone', () => {
-    expect(normalizeRelay('wss://relay.damus.io/')).toBe('wss://relay.damus.io/');
+    expect(normalizeRelay('wss://relay.nostr.net/')).toBe('wss://relay.nostr.net/');
   });
   it('never emits a non-wss scheme for hostile input', () => {
     for (const bad of ['javascript:alert(1)', 'data:text/html,x', 'file:///etc/passwd']) {
@@ -137,7 +137,7 @@ describe('isUnsafeHost — SSRF-encoding bypass coverage', () => {
   for (const h of unsafe) {
     it(`flags ${h}`, () => expect(isUnsafeHost(h)).toBe(true));
   }
-  const safe = ['example.com', 'relay.damus.io', '1.1.1.1', '8.8.8.8'];
+  const safe = ['example.com', 'relay.nostr.net', '1.1.1.1', '8.8.8.8'];
   for (const h of safe) {
     it(`allows ${h}`, () => expect(isUnsafeHost(h)).toBe(false));
   }
@@ -267,11 +267,11 @@ describe('isSecureRelay', () => {
     expect(isSecureRelay('wss://[::1]')).toBe(false);
   });
   it('accepts normal wss relays', () => {
-    expect(isSecureRelay('wss://relay.damus.io')).toBe(true);
+    expect(isSecureRelay('wss://relay.nostr.net')).toBe(true);
     expect(isSecureRelay('wss://nos.lol')).toBe(true);
   });
   it('rejects non-wss', () => {
-    expect(isSecureRelay('ws://relay.damus.io')).toBe(false);
-    expect(isSecureRelay('https://relay.damus.io')).toBe(false);
+    expect(isSecureRelay('ws://relay.nostr.net')).toBe(false);
+    expect(isSecureRelay('https://relay.nostr.net')).toBe(false);
   });
 });

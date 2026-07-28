@@ -53,7 +53,13 @@ export function WebLink({ url }: { url: string }) {
           interactive content nested inside <a> is invalid HTML and browsers
           reparent it, which broke the buttons' own click handling. They're
           layered over the card instead, with pr-16 reserving their space. */}
-      <div className="relative mb-2">
+      {/* `flow-root` establishes a block formatting context so this card sits
+          BESIDE the floated avatar instead of underneath it. NoteCard floats a
+          120px avatar and lets the note text wrap around it — but only line
+          boxes shrink to avoid a float; a block-level box like this one is laid
+          out at x=0 regardless, so on a short note (where the avatar is taller
+          than the text) the preview rendered straight through the avatar. */}
+      <div className="relative mb-2 flow-root">
         <a
           href={url}
           target="_blank"

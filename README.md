@@ -13,7 +13,7 @@ Go to [corkboards.me](https://corkboards.me) in any modern browser. That's it �
 ### <a id="linux-download"></a>Download the Linux desktop app (no build needed)
 
 Prebuilt Linux packages are published with each release. Grab one from the
-[latest release](https://github.com/johnbnevin/corkboards/releases/latest) or from
+[latest release](https://git.jbnco.co/npub1v89nr2zax8ef0ceyu9te0sjyqv3newa3e82m0rd4kye3ekeyhv2sqf30cc/corkboards/releases/latest) or from
 [get.corkboards.me](https://get.corkboards.me):
 
 | Format | Best for | Install |
@@ -53,14 +53,14 @@ You need two things installed on your computer: **Node.js** and **Rust**. If you
 Open a terminal (Terminal on macOS/Linux, PowerShell on Windows) and run:
 
 ```bash
-git clone https://github.com/johnbnevin/corkboards.git
+git clone https://git.jbnco.co/npub1v89nr2zax8ef0ceyu9te0sjyqv3newa3e82m0rd4kye3ekeyhv2sqf30cc/corkboards.git
 cd corkboards
 npm install
 ```
 
 > **Note:** Clone into a folder you own (like your home directory). Cloning into system directories like `/opt` or `/usr/local` will cause permission errors during the build.
 
-If you don't have `git`, you can also download the source as a zip from [the GitHub page](https://github.com/johnbnevin/corkboards) — click the green "Code" button, then "Download ZIP". Unzip it, open a terminal in that folder, and run `npm install`.
+If you don't have `git`, you can also download the source as a zip from [the project page](https://git.jbnco.co/npub1v89nr2zax8ef0ceyu9te0sjyqv3newa3e82m0rd4kye3ekeyhv2sqf30cc/corkboards). Unzip it, open a terminal in that folder, and run `npm install`.
 
 **Step 3 — Build it**
 

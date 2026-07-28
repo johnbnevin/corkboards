@@ -30,3 +30,22 @@ export const IDLE_AUTO_RESTORE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 
 /** Backup-checked flag — how long the "already checked this user" sticks. */
 export const BACKUP_CHECKED_FLAG_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * How often a device looks for a newer cloud snapshot while in the foreground.
+ *
+ * Shared by web (useCloudSync) and mobile (AutoSaveManager) so the two ends
+ * cannot drift apart — a sync cadence is only meaningful as a pair.
+ *
+ * 60s matches what comparable schedule-based sync apps use (Standard Notes,
+ * Bitwarden): poll on foreground plus a short interval, with only push-capable
+ * apps going faster. One check is a single small relay query for one
+ * addressable event. Paired with the 30s auto-save debounce, a change on one
+ * device shows up on the other inside roughly a minute and a half worst case.
+ */
+export const CLOUD_SYNC_INTERVAL_MS = 60 * 1000;
+
+/** Floor between two sync attempts however they were triggered — low enough
+ *  that returning to the app feels immediate, high enough that app-switching
+ *  cannot hammer the relays. */
+export const CLOUD_SYNC_MIN_GAP_MS = 20 * 1000;

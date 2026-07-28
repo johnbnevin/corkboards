@@ -14,6 +14,7 @@ import { useAuth } from '../lib/AuthContext';
 import { useNostrBackup } from '../hooks/useNostrBackup';
 import { registerBackupFlush } from '../lib/backupFlush';
 import { mobileStorage } from '../storage/MmkvStorage';
+import { CLOUD_SYNC_INTERVAL_MS, CLOUD_SYNC_MIN_GAP_MS } from '@core/cacheConfig';
 
 const MIN_SAVE_INTERVAL_MS = 30_000;
 
@@ -30,6 +31,21 @@ export function AutoSaveManager() {
 
   const lastHiddenRef = useRef(0);
   const idleCheckDoneRef = useRef(false);
+  const syncInFlightRef = useRef(false);
+  const lastSyncAtRef = useRef(0);
+
+  /** Look for a newer cloud snapshot. Guarded so the interval and the
+   *  foreground handler cannot pile up on each other. `force` skips the gap
+   *  check for a genuine long-idle return. */
+  const syncNow = useCallback((force: boolean) => {
+    if (syncInFlightRef.current) return;
+    if (!force && Date.now() - lastSyncAtRef.current < CLOUD_SYNC_MIN_GAP_MS) return;
+    syncInFlightRef.current = true;
+    lastSyncAtRef.current = Date.now();
+    checkForBackup()
+      .catch(e => { if (__DEV__) console.warn('[AutoSave] backup check failed:', e); })
+      .finally(() => { syncInFlightRef.current = false; });
+  }, [checkForBackup]);
 
   // Expose the backup flush so AuthContext.switchAccount can flush pending cloud
   // backup for the departing account before swapping (parity with logout).
@@ -99,26 +115,30 @@ export function AutoSaveManager() {
           }, 2500);
         }
 
-        if (awayMs >= 5 * 60 * 1000 && !idleCheckDoneRef.current) {
-          idleCheckDoneRef.current = true;
-          // Auto-restore check after 5+ min in background
-          if (__DEV__) console.log(`[AutoSave] back from ${Math.round(awayMs / 60000)}min idle, checking for newer backup`);
-          checkForBackup().then(() => {
-            // If checkpoints were found, auto-restore the best one
-            // (checkpoints state will update on next render)
-          }).catch(e => {
-            if (__DEV__) console.warn('[AutoSave] idle restore check failed:', e);
-          });
-        }
+        // Check for a newer backup on EVERY return to the foreground, not only
+        // after 5+ minutes away. The old threshold meant a phone picked up a
+        // desktop's save only if it had been backgrounded for five minutes
+        // first — so switching between the two never propagated anything, which
+        // is the "phone never says newer found" report. The gap guard in
+        // syncNow keeps this from firing on every app-switch.
+        syncNow(awayMs >= 5 * 60 * 1000);
+        if (awayMs >= 5 * 60 * 1000) idleCheckDoneRef.current = true;
       }
     };
+
+    // Poll for a newer cloud snapshot while the app is in the foreground, at the
+    // same cadence web uses (shared constant, so the two ends stay in step).
+    const syncInterval = setInterval(() => {
+      if (AppState.currentState === 'active') syncNow(false);
+    }, CLOUD_SYNC_INTERVAL_MS);
 
     const subscription = AppState.addEventListener('change', handleAppState);
     return () => {
       clearInterval(pollInterval);
+      clearInterval(syncInterval);
       subscription.remove();
     };
-  }, [pubkey, signer, triggerIfReady, autoSaveBackup, hasUnsavedChanges, checkForBackup]);
+  }, [pubkey, signer, triggerIfReady, autoSaveBackup, hasUnsavedChanges, checkForBackup, syncNow]);
 
   // Auto-restore best checkpoint when checkForBackup finds newer ones after idle return.
   // Critical guard: never silently restore over existing local data. lastBackupTs starts

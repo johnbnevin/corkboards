@@ -16,7 +16,38 @@ It exists because most Nostr knowledge in training data is out of date: NIP-04 i
 
 That order governs **facts, not judgment**. The Cypherpunk Defaults and Judgment Calls in `SKILL.md` are stated positions; a newer source does not override them. If a correction would touch a principle, reflect a genuine disagreement among Nostr devs, or involve discretion, **ask rather than changing it**.
 
-`SKILL.md` is also published at https://github.com/johnbnevin/ai-coding-agent-skill-document-for-nostr-projects — keep the copies here in sync with it.
+`SKILL.md` is also published at https://git.jbnco.co (Nostr ngit) — keep the copies here in sync with it. The GitHub mirror at https://github.com/johnbnevin/ai-coding-agent-skill-document-for-nostr-projects is frozen and carries a migration notice; do not update it.
+
+## Source Hosting — ngit, not GitHub
+
+Publishing moved off GitHub to **Nostr ngit**, served at **git.jbnco.co**, after
+Microsoft/GitHub removed bitchat software under Indian government pressure. All
+11 active GitHub repos now carry a migration notice in their README and repo
+description, and are frozen.
+
+**Push to ngit. Never push to GitHub.** That covers branches, PRs, releases and
+issue comments — the GitHub remotes are historical mirrors now, and pushing there
+undoes the point of the move.
+
+**Never push at all unless the user asks.** Committing locally stays the default,
+for ngit exactly as it was for GitHub. "Always push to ngit" means ngit is the
+destination *when* a push is requested — not that pushes happen on their own.
+
+Remotes in this repo:
+
+| remote | URL |
+|---|---|
+| `origin` | `nostr://npub1v89nr2zax8ef0ceyu9te0sjyqv3newa3e82m0rd4kye3ekeyhv2sqf30cc/corkboards` |
+| `github-archive` | the old GitHub URL, kept for history — do not push |
+
+The repo is already announced via NIP-34 (kind 30617), clone URL
+`https://git.jbnco.co/npub1v89.../corkboards.git`. `ngit` and `git-remote-nostr`
+are installed at `~/.local/bin`.
+
+**Signing is via a NIP-46 bunker**, not a local nsec — ngit will use the
+configured bunker connection to sign the NIP-34 events (announcements, patches,
+PRs, issues, status). If ngit prompts for a signer, that is what it wants; do not
+substitute a raw key.
 
 ## Cross-Platform Changes
 

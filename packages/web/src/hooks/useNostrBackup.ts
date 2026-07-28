@@ -187,28 +187,57 @@ export function setBlossomServersUpdatedAt(ts: number): void {
  * but are useless for the text/octet-stream backup blob, so we skip them on save
  * and surface them in Settings with a "consider removing" prompt.
  */
-export function getBlobRejectingServers(): Set<string> {
+/**
+ * How long a server stays flagged after rejecting a backup blob.
+ *
+ * Flags used to be PERMANENT. One 415 — or anything misread as one, including a
+ * transient proxy error — and that server was excluded from every future save
+ * for the life of the profile, with nothing in the UI to say so. Over time the
+ * flagged set grows and `getActiveBlossomServers` can whittle a healthy list of
+ * eight servers down to the one that is actually broken, at which point every
+ * save fails while the settings screen still shows eight. Servers get fixed and
+ * reconfigured; the flag has to be able to expire.
+ */
+const BLOB_REJECT_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Flag records: server -> when it was flagged. Legacy arrays are read as
+ *  "flagged just now" so an upgrade doesn't resurrect a stale blacklist. */
+function readBlobRejectRecords(): Map<string, number> {
   const stored = idbGetSync(BLOSSOM_BLOB_REJECTS_KEY);
-  if (!stored) return new Set();
+  if (!stored) return new Map();
   try {
-    const arr = JSON.parse(stored);
-    return Array.isArray(arr) ? new Set(arr.map(normalizeServer)) : new Set();
-  } catch { return new Set(); }
+    const parsed = JSON.parse(stored);
+    if (Array.isArray(parsed)) {
+      const now = Date.now();
+      return new Map(parsed.map((s: string) => [normalizeServer(s), now]));
+    }
+    if (parsed && typeof parsed === 'object') {
+      return new Map(Object.entries(parsed as Record<string, number>)
+        .map(([k, v]) => [normalizeServer(k), Number(v) || 0]));
+    }
+  } catch { /* fall through */ }
+  return new Map();
+}
+
+export function getBlobRejectingServers(): Set<string> {
+  const now = Date.now();
+  const live = new Set<string>();
+  for (const [server, at] of readBlobRejectRecords()) {
+    if (now - at < BLOB_REJECT_TTL_MS) live.add(server);
+  }
+  return live;
 }
 
 export function markBlobRejectingServer(url: string): void {
-  const set = getBlobRejectingServers();
-  const norm = normalizeServer(url);
-  if (!set.has(norm)) {
-    set.add(norm);
-    idbSetSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(Array.from(set)));
-  }
+  const records = readBlobRejectRecords();
+  records.set(normalizeServer(url), Date.now());
+  idbSetSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(Object.fromEntries(records)));
 }
 
 export function clearBlobRejectingServer(url: string): void {
-  const set = getBlobRejectingServers();
-  if (set.delete(normalizeServer(url))) {
-    idbSetSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(Array.from(set)));
+  const records = readBlobRejectRecords();
+  if (records.delete(normalizeServer(url))) {
+    idbSetSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(Object.fromEntries(records)));
   }
 }
 
@@ -229,7 +258,13 @@ function getActiveBlossomServers(): string[] {
   const all = getBlossomServers();
   const rejects = getBlobRejectingServers();
   const usable = all.filter(s => !rejects.has(normalizeServer(s)));
-  return usable.length > 0 ? usable : all;
+  const flagged = all.filter(s => rejects.has(normalizeServer(s)));
+  // Flagged servers go to the BACK of the queue rather than being dropped. The
+  // upload stops as soon as it has enough copies, so a healthy server list never
+  // reaches them — but if the healthy ones are down, trying a maybe-broken
+  // server beats reporting "no servers" while the user is looking at eight of
+  // them in settings.
+  return [...usable, ...flagged];
 }
 
 /**
@@ -279,7 +314,15 @@ async function uploadBlobWithRedundancy(
 }
 
 /** Result of an auto-save attempt — lets callers show accurate messaging. */
-export type AutoSaveResult = 'saved' | 'skipped' | 'no-servers' | 'error';
+/**
+ * `blocked` is distinct from `skipped` on purpose. A skip is benign — nothing to
+ * save, or a save already running. A block is a protective guard refusing to
+ * overwrite the cloud because local data looks smaller than the last backup.
+ * Both used to return 'skipped', so a device whose guard was tripping sat with a
+ * red indicator and no toast, saving nothing, indefinitely — which is the exact
+ * data-loss scenario the guard exists to prevent, just moved to the other end.
+ */
+export type AutoSaveResult = 'saved' | 'skipped' | 'blocked' | 'no-servers' | 'error';
 
 export type BackupStatus =
   | 'idle'
@@ -975,7 +1018,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     // If IDB writes have been failing, memCache may not reflect what's on disk.
     if (!isIdbHealthy()) {
       debugWarn('[backup]', 'Auto-save blocked: IDB writes are failing — protecting cloud backup');
-      return 'skipped';
+      return 'blocked';
     }
 
     // Guard: don't save if the data is essentially empty (no feeds, no dismissed, no collapsed).
@@ -1002,19 +1045,19 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         const currDismissed = countArrayJson(dismissed);
         if (prev.dismissed > 20 && currDismissed < prev.dismissed * 0.5) {
           debugWarn('[backup]', `Auto-save blocked: dismissed notes dropped from ${prev.dismissed} to ${currDismissed} — IDB may be partially cleared`);
-          return 'skipped';
+          return 'blocked';
         }
 
         const currFeeds = countArrayJson(feeds);
         if (prev.feeds > 0 && currFeeds === 0) {
           debugWarn('[backup]', 'Auto-save blocked: custom feeds dropped to zero — IDB may be partially cleared');
-          return 'skipped';
+          return 'blocked';
         }
 
         const currCollapsed = countArrayJson(collapsed);
         if (prev.collapsed > 10 && currCollapsed < prev.collapsed * 0.5) {
           debugWarn('[backup]', `Auto-save blocked: saved notes dropped from ${prev.collapsed} to ${currCollapsed} — IDB may be partially cleared`);
-          return 'skipped';
+          return 'blocked';
         }
       } catch { /* ignore parse errors — don't block save on unexpected format */ }
     }
@@ -1159,7 +1202,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     // Only filter user-blocked relays, NOT rate-limit backoff — backup queries
     // are critical for login and must try every relay even if it failed recently.
     const activeRelayUrls = relayUrls.filter(url => !isRelayBlocked(url));
-    log(`  Checking up to ${activeRelayUrls.length} relays for ${label} (sequential, stop on first result)`);
+    log(`  Checking ${activeRelayUrls.length} relays for ${label}${_checkAll ? ' (all, newest wins)' : ` (stop after ${minRelaysWithResults} with results)`}`);
 
     const seen = new Set<string>();
     const allEvents: NostrEvent[] = [];
@@ -1189,15 +1232,30 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     // data (unless checkAll). This avoids opening connections to relays that are
     // down when another works, while still sampling more than one source when
     // the caller needs a newest-wins comparison.
-    let relaysWithResults = 0;
-    for (const url of activeRelayUrls) {
-      if (overallAbort.signal.aborted) break;
-      const events = await queryRelay(url);
-      if (events.length > 0) relaysWithResults++;
-      for (const ev of events) {
-        if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
+    if (_checkAll) {
+      // Ask EVERY relay, in parallel, and keep everything. Required whenever the
+      // caller picks by max(created_at): a replaceable event can be stale on any
+      // given relay, and the relays that answer FASTEST are not the ones that
+      // are freshest. Sampling the first few responders is how a lagging relay's
+      // old manifest gets treated as current. One tiny event per relay, so the
+      // cost of asking all of them is a few hundred ms in parallel.
+      const results = await Promise.all(activeRelayUrls.map(queryRelay));
+      for (const events of results) {
+        for (const ev of events) {
+          if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
+        }
       }
-      if (!_checkAll && relaysWithResults >= minRelaysWithResults) break;
+    } else {
+      let relaysWithResults = 0;
+      for (const url of activeRelayUrls) {
+        if (overallAbort.signal.aborted) break;
+        const events = await queryRelay(url);
+        if (events.length > 0) relaysWithResults++;
+        for (const ev of events) {
+          if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
+        }
+        if (relaysWithResults >= minRelaysWithResults) break;
+      }
     }
 
     clearTimeout(overallTimeout);
@@ -1365,14 +1423,16 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         { kinds: [30078], authors: [pubkey], '#d': [`${D_TAG_PREFIX}:auto`], limit: 1 },
         'autosave manifest',
         undefined,
-        false,
-        10000,
+        // ALL relays, not a sample. `bestManifestEvent` below picks
+        // max(created_at), and that is only correct if every relay was asked:
+        // sampling the first 3 responders meant a lagging relay's stale manifest
+        // could win simply by being quick, which then fed a stale timestamp to
+        // the newer-backup check and stale counts to the auto-save regression
+        // guard — the guard would refuse to save because "local looks smaller
+        // than the backup", comparing against a backup that was not the newest.
+        true,
+        12000,
         5000,
-        // Sample up to 3 relays before choosing. `bestManifestEvent` below picks
-        // max(created_at), which is only meaningful with more than one candidate:
-        // stopping at the first responder meant a lagging relay's stale manifest
-        // could be restored over newer local data. (M7c)
-        3,
       );
       const manifestEvents = allEvents; // relay already filtered by d-tag
       log(`Total: ${manifestEvents.length} autosave manifest events`);
@@ -1392,6 +1452,34 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         ev.created_at > best.created_at ? ev : best
       );
       log(`Found backup event (created_at: ${bestManifestEvent.created_at})`);
+
+      // Heal the divergence instead of only routing around it.
+      //
+      // Relays disagree because a publish failed on some of them at save time
+      // and nothing ever retried, so one relay can sit on a months-old manifest
+      // forever. Reading all relays and taking the newest (above) makes THIS
+      // read correct; mirroring the winner back to the laggards makes every
+      // future read correct, on every device.
+      //
+      // Cheap on purpose: the event is ALREADY SIGNED, so this re-publishes the
+      // same bytes — no signer round-trip, which matters when signing goes
+      // through a NIP-46 bunker. A couple of KB per lagging relay, fire and
+      // forget, and only when the relays actually disagree.
+      const staleManifest = manifestEvents.some(ev => ev.created_at < bestManifestEvent.created_at)
+        || manifestEvents.length < _backupRelaysUsed.size;
+      if (staleManifest) {
+        const { primary, fallback } = getPublishRelays(pubkey);
+        const targets = [...primary, ...fallback];
+        log(`  Manifest differs across relays — mirroring the newest to ${targets.length}`);
+        void (async () => {
+          for (const url of targets) {
+            const relay = createRelayFresh(normalizeRelay(url), { backoff: false });
+            try { await relay.event(bestManifestEvent, { signal: AbortSignal.timeout(8000) }); }
+            catch { /* a relay that won't take it is exactly the case we can't fix here */ }
+            finally { try { relay.close(); } catch { /* */ } }
+          }
+        })();
+      }
 
       // Store the raw manifest event for later use
       manifestEventRef.current = bestManifestEvent;

@@ -26,12 +26,10 @@
  */
 import { useCallback, useEffect, useRef } from 'react';
 import { debugLog } from '@/lib/debug';
+import { CLOUD_SYNC_INTERVAL_MS, CLOUD_SYNC_MIN_GAP_MS } from '@core/cacheConfig';
 
-/** How often to look for a newer cloud state while the app is open. */
-export const CLOUD_SYNC_INTERVAL_MS = 3 * 60 * 1000;
-
-/** Floor between two syncs, however they were triggered. */
-const MIN_SYNC_GAP_MS = 60 * 1000;
+// Cadence lives in @core/cacheConfig so web and mobile cannot drift apart.
+export { CLOUD_SYNC_INTERVAL_MS } from '@core/cacheConfig';
 
 export interface UseCloudSyncOptions {
   /** Whether a user is logged in. */
@@ -71,7 +69,7 @@ export function useCloudSync({
     if (document.visibilityState === 'hidden') return;
     // Never race a restore or a save that's already running.
     if (cur.backupStatus === 'restoring' || cur.backupStatus === 'checking') return;
-    if (Date.now() - lastSyncAt.current < MIN_SYNC_GAP_MS) return;
+    if (Date.now() - lastSyncAt.current < CLOUD_SYNC_MIN_GAP_MS) return;
 
     inFlight.current = true;
     lastSyncAt.current = Date.now();

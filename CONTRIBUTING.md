@@ -14,7 +14,7 @@ Corkboards is built with cypherpunk sensibilities:
 Prerequisites: Node.js 22+, npm 10+
 
 ```bash
-git clone https://github.com/johnbnevin/corkboards.git
+git clone https://git.jbnco.co/npub1v89nr2zax8ef0ceyu9te0sjyqv3newa3e82m0rd4kye3ekeyhv2sqf30cc/corkboards.git
 cd corkboards
 npm install
 npm run dev    # Web dev server on port 3000

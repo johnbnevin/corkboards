@@ -97,9 +97,21 @@ export function useAutoSaveTrigger({
         if (result === 'saved') {
           setBackupIndicator('saved');
         } else if (result === 'skipped') {
-          // Benign — nothing worth saving yet, or a protective guard tripped.
-          // Not a failure; stay silent (this used to show a false "save failed").
-          debugLog('[AutoSave] skipped (no changes or protective guard)');
+          // Genuinely benign: nothing to save, or a save already running.
+          debugLog('[AutoSave] skipped (nothing to save)');
+        } else if (result === 'blocked') {
+          // A protective guard refused to overwrite the cloud because local data
+          // looks smaller than the last backup. That is the right call, but it
+          // must not be silent: it used to share the 'skipped' path, so a device
+          // in this state showed a red indicator, no toast, and never saved
+          // again — losing exactly the changes the guard was protecting.
+          debugWarn('[AutoSave] blocked by a protective guard — surfacing to the user');
+          setBackupIndicator('unsaved');
+          toast({
+            title: 'Auto-save paused',
+            description: 'Local data looks smaller than your last backup, so auto-save is holding off to avoid overwriting it. Use Save now in the backup menu to save anyway.',
+            variant: 'destructive',
+          });
         } else if (result === 'no-servers') {
           debugWarn('[AutoSave] every Blossom server failed/rejected the backup');
           toast({

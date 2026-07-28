@@ -52,6 +52,33 @@ function getContext(): AudioContext | null {
 }
 
 /**
+ * Unlock the audio context on the first real user gesture.
+ *
+ * Auto-consolidate fires from a TIMER, and a timer callback is not a user
+ * gesture — WebKit (which the desktop build runs on) will not resume a
+ * suspended AudioContext outside one, so `readyContext()` returned null and the
+ * burst was dropped. Every consolidate was silent for anyone using the
+ * auto-consolidate toggle, which is most of them.
+ *
+ * Having a gesture happen *earlier* in the session isn't enough either: the
+ * context has to be resumed DURING one. So resume once, on the first pointer or
+ * key event, and from then on the context is `running` and timer-driven bursts
+ * schedule normally. Listeners are `once` and passive — this costs one event.
+ */
+let unlockArmed = false;
+function armAudioUnlock(): void {
+  if (unlockArmed || typeof window === 'undefined') return;
+  unlockArmed = true;
+  const unlock = () => {
+    const c = getContext();
+    if (c && c.state === 'suspended') void c.resume().catch(() => {});
+  };
+  for (const evt of ['pointerdown', 'keydown', 'touchstart'] as const) {
+    window.addEventListener(evt, unlock, { once: true, passive: true, capture: true });
+  }
+}
+
+/**
  * Resume the shared context and hand back a clock we can safely schedule on.
  *
  * Returns null when the context can't be resumed — typically because no user
@@ -184,12 +211,20 @@ function scheduleSuspend(afterSeconds: number): void {
  * Async only because the context may need resuming first; callers fire and
  * forget. Never throws.
  */
+// Arm at module load, not on first use: the first consolidate is exactly the
+// one that would otherwise be silent, and by then the gesture that could have
+// unlocked the context has already passed.
+armAudioUnlock();
+
 export async function playConsolidateSound(
   style: ConsolidateSoundStyle,
   blanks: number,
   accelerate: boolean,
 ): Promise<void> {
   if (style === 'off' || blanks <= 0) return;
+  // Make sure a gesture-driven unlock is pending for the next attempt, even if
+  // this one is about to be dropped for want of a resumed context.
+  armAudioUnlock();
   // Nothing to hear in a background tab, and scheduling there just queues audio
   // that fires when the user comes back.
   if (typeof document !== 'undefined' && document.hidden) return;

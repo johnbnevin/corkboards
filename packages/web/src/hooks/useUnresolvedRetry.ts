@@ -25,7 +25,6 @@ import {
 } from '@core/unresolvedSweep';
 import { getUnresolvedIds, unresolvedCount } from '@/lib/failedNotes';
 import { forgetParentMiss } from '@/hooks/useParentNotes';
-import { clearEventCache } from '@/lib/fetchEvent';
 import { debugLog } from '@/lib/debug';
 
 export interface UseUnresolvedRetryResult {
@@ -58,12 +57,22 @@ export function useUnresolvedRetry(): UseUnresolvedRetryResult {
 
     batch.forEach((noteId, i) => {
       timersRef.current.push(setTimeout(() => {
-        // Drop the negative caches first. Without this the refetch is answered
-        // by the miss cache / event cache with the same "not found" it recorded
-        // last time, and the sweep is a no-op that looks like a working retry.
+        // Drop the NEGATIVE cache only. `forgetParentMiss` clears the decayed
+        // miss record so the lookup actually goes back out to the relays.
+        //
+        // Deliberately NOT clearing the event cache: it holds HITS, not misses,
+        // and the entry is very often exactly what makes the retry succeed —
+        // the thread view caches events it resolved, and the feed's NoteLink
+        // reads that cache first. Clearing it threw away the one piece of
+        // evidence that the note exists, so a retry after opening the thread
+        // put the app straight back to "not found".
         forgetParentMiss(noteId);
-        clearEventCache(noteId);
         queryClient.invalidateQueries({ queryKey: ['note', noteId] });
+        // Replied-to parents live under a different key than quoted notes, and
+        // the key is a signature of the whole request set rather than one id —
+        // so this invalidates the family by prefix. Cheap: with the miss decay
+        // cleared above, the refetch only re-queries ids that are still absent.
+        queryClient.invalidateQueries({ queryKey: ['parent-notes'] });
         // Release the guard after the last one is dispatched.
         if (i === batch.length - 1) inFlightRef.current = false;
       }, i * SWEEP_STAGGER_MS));

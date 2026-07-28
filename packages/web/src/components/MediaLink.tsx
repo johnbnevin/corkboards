@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
 import { Iframe } from '@/components/ui/iframe'
+import { isTauri, tauriOpenExternal } from '@/lib/tauri'
 import { LightboxTrigger } from '@/components/ui/lightbox'
 import { SizeGuardedImage } from '@/components/SizeGuardedImage'
 import { ExternalLink, UtensilsCrossed, Film, AlertCircle } from 'lucide-react'
@@ -605,12 +606,30 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
   // behind click-to-load — no request reaches the provider until the user clicks.
   // (Twitch additionally never sends our parent hostname before the click.)
   if (!embedRevealed) {
+    // YouTube can't be framed by the desktop build. Its player validates the
+    // embedding origin, and the Tauri webview's origin is a custom scheme, not
+    // an https:// origin YouTube recognises — so it refuses with error 153
+    // ("Video player configuration error") regardless of referrer policy. The
+    // referrer fix above is still required, it just isn't sufficient here.
+    // Hand the video to the real browser instead of framing a dead player.
+    const isYouTube = /(^|\.)youtube(-nocookie)?\.com$/.test((() => {
+      try { return new URL(embed.url).hostname } catch { return '' }
+    })());
+    const openExternally = isTauri && isYouTube;
     return (
       <div
         className="w-full h-9 flex items-center justify-center cursor-pointer bg-muted/60 hover:bg-muted border-b border-border/30 transition-colors"
-        onClick={(e) => { e.stopPropagation(); setEmbedRevealed(true); }}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (openExternally) { void tauriOpenExternal(url); return; }
+          setEmbedRevealed(true);
+        }}
       >
-        <span className="text-xs text-muted-foreground">Click to load {getEmbedProviderName(embed.url)}</span>
+        <span className="text-xs text-muted-foreground">
+          {openExternally
+            ? `Open ${getEmbedProviderName(embed.url)} in browser`
+            : `Click to load ${getEmbedProviderName(embed.url)}`}
+        </span>
       </div>
     )
   }

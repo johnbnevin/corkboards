@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef, useTransition, lazy, Suspense } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, useTransition, lazy, Suspense } from 'react';
 import { RSS_PUBKEY } from '@core/rss';
 import { parseFeedSource as parseFeedSourceCore } from '@core/feedSource';
 import { useSeoMeta } from '@unhead/react';
@@ -2489,6 +2489,8 @@ export function MultiColumnClient() {
   // own guards (threshold, in-flight, interval, hidden) decide whether it
   // actually does anything, so this is safe to call on every fetch.
   const loadNewerAndRetry = useCallback(() => {
+    // Arm scroll anchoring for the prepend this is about to cause (see below).
+    anchorPendingRef.current = true;
     void loadNewerNotes();
     sweepUnresolved();
   }, [loadNewerNotes, sweepUnresolved]);
@@ -3519,6 +3521,38 @@ export function MultiColumnClient() {
   // the stale value could be 0 exactly when the consolidate was wanted. The ref
   // also keeps it out of the dep array, so the effect stops re-running (and
   // re-baselining prevFreshCountRef) every time a note is dismissed.
+  // ── Keep the reading position still while notes are inserted above ────────
+  //
+  // Chrome implements CSS scroll anchoring; WebKit does not, and the desktop
+  // build is WebKit. So every autofetch that prepends notes pushes whatever the
+  // user was reading down the page by exactly the height of what arrived —
+  // scrollTop is unchanged, but the content under it is not. Turning off
+  // "scroll to top when new notes arrive" stopped the app from jumping to the
+  // top; it did nothing about this, because this is the browser moving the
+  // content rather than the app moving the scroll.
+  //
+  // Correct it by hand: remember the document height at each commit, and when a
+  // commit that follows a "load newer" is taller, scroll down by the difference
+  // so the same pixels stay under the viewport.
+  const anchorPendingRef = useRef(false);
+  const lastDocHeightRef = useRef(0);
+  useLayoutEffect(() => {
+    const height = document.documentElement.scrollHeight;
+    const prev = lastDocHeightRef.current;
+    lastDocHeightRef.current = height;
+    if (!anchorPendingRef.current) return;
+    if (!prev || height <= prev) return;      // nothing was added yet
+    anchorPendingRef.current = false;
+    // At the very top the user is watching for new arrivals — leave them there.
+    if (window.scrollY < 40) return;
+    // autoScrollTop means they asked to be taken to the top; don't fight it.
+    if (autoScrollTopRef.current) return;
+    window.scrollBy({ top: height - prev, behavior: 'instant' as ScrollBehavior });
+  });
+
+  const autoScrollTopRef = useRef(autoScrollTop);
+  autoScrollTopRef.current = autoScrollTop;
+
   const blankSpaceCountRef = useRef(blankSpaceCount);
   blankSpaceCountRef.current = blankSpaceCount;
   // Read through a ref so this effect doesn't re-run (and re-baseline

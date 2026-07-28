@@ -218,6 +218,12 @@ export function useLoginActions() {
       // See the `onUri` call below for why the QR waits on this.
       let markSubsLive: () => void = () => {};
       const subsLive = new Promise<void>((resolve) => { markSubsLive = resolve; });
+      // Rejects only if EVERY relay's subscription ends without ever answering,
+      // i.e. there is genuinely nothing listening — as opposed to "slow".
+      let markAllDead: () => void = () => {};
+      const allDead = new Promise<void>((resolve) => { markAllDead = resolve; });
+      let liveCount = 0;
+      let deadCount = 0;
 
       // Race all relays for the signer's connect response
       const resultPromise = new Promise<{ bunkerPubkey: string; relayIndex: number }>((resolve, reject) => {
@@ -231,6 +237,7 @@ export function useLoginActions() {
             try {
               for await (const msg of sub) {
                 // Any frame means this relay processed our REQ.
+                liveCount++;
                 markSubsLive();
                 tauriLog(`[nip46] ${relayUrl}: msg[0]=${msg[0]}`);
                 if (resolved) return;
@@ -260,6 +267,8 @@ export function useLoginActions() {
               tauriLog(`[nip46] ${relayUrl}: subscription ended`);
             } catch (e) {
               tauriLog(`[nip46] ${relayUrl}: subscription error: ${e}`);
+            } finally {
+              if (++deadCount === subs.length && liveCount === 0) markAllDead();
             }
           })();
         }
@@ -283,17 +292,35 @@ export function useLoginActions() {
       // Bounded: a relay set that never answers must not block the QR forever,
       // so after 3s we show it anyway and take our chances — no worse than the
       // old behaviour, and only reachable when every signalling relay is slow.
-      // 8s, not 3s: with `prewarmConnectRelays` the sockets are normally already
-      // open and this resolves instantly, so the bound only matters when the
-      // relays really are slow — and there, giving up early is what produced the
-      // missed response in the first place.
+      // Wait for readiness or failure — NOT for a clock.
+      //
+      // Every previous version of this raced the wait against a timeout and
+      // showed the QR anyway when it expired. That guarantees the exact bug it
+      // was meant to prevent: a scannable code we are not yet listening for,
+      // and kind 24133 is ephemeral so the answer is unrecoverable. It bit
+      // hardest on the first run after an install, where an empty webview
+      // profile means cold DNS, cold TLS and no HSTS cache, and the handshakes
+      // outlast any bound worth having.
+      //
+      // So the QR appears when a relay has actually answered our REQ. If every
+      // relay instead ends without answering there is nothing to wait for and
+      // we fail loudly. The long stop is a backstop against a socket that
+      // neither answers nor closes, not a routine path.
       let subsLiveTimer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([
-        subsLive,
-        new Promise<void>((resolve) => { subsLiveTimer = setTimeout(resolve, 8000); }),
+      const outcome = await Promise.race([
+        subsLive.then(() => 'live' as const),
+        allDead.then(() => 'dead' as const),
+        new Promise<'stalled'>((resolve) => { subsLiveTimer = setTimeout(() => resolve('stalled'), 30000); }),
       ]);
       clearTimeout(subsLiveTimer);
       if (signal.aborted) throw new Error('aborted');
+      if (outcome !== 'live') {
+        tauriLog(`[nip46] no relay accepted the subscription (${outcome})`);
+        connectAbort.abort();
+        throw new Error(
+          'Could not reach any signer relay. Check your connection and try again.',
+        );
+      }
       onUri(uri);
 
       const result = await resultPromise;

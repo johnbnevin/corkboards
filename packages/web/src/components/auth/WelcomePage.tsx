@@ -464,7 +464,16 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
             </Button>
           </div>
         )}
-        {connectWaiting && <p className="text-xs text-center text-muted-foreground animate-pulse">Waiting for signer to respond...</p>}
+        {/* Two distinct phases now: the QR is withheld until a relay has
+            accepted our subscription, so before it appears we are connecting,
+            not waiting on the user's signer. Saying so keeps the first run
+            after an install — where the handshakes are slowest — from looking
+            like a hung screen. */}
+        {connectWaiting && (
+          <p className="text-xs text-center text-muted-foreground animate-pulse">
+            {qrDataUrl ? 'Waiting for signer to respond...' : 'Connecting to signer relays...'}
+          </p>
+        )}
         {connectError && <p className="text-xs text-red-500 text-center">{connectError}</p>}
       </div>
       <div className="relative">

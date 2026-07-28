@@ -4,6 +4,7 @@ import { useNostr } from '@/hooks/useNostr';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { fetchEventWithOutbox } from '@/lib/fetchEvent';
 import { MissCache } from '@core/missCache';
+import { registerUnresolved, clearUnresolved } from '@core/failedNotes';
 
 // Shared cache for parent notes (persists across hook instances).
 //
@@ -194,10 +195,21 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
         }
       }
 
-      // Build result map from cache
+      // Build result map from cache, and tell the retry sweep about anything
+      // still missing.
+      //
+      // The sweep's registry was populated only by NoteLink — i.e. quoted notes
+      // in a note's CONTENT. Replied-to parents live on this path instead, so
+      // they were never swept: once `parentMisses` spent its three attempts the
+      // id was retired and the preview stayed blank for the rest of the session,
+      // no matter how many notes arrived afterwards. That is exactly the
+      // "replied-to note never renders, even after a retry" case. Registering
+      // here puts parents under the same periodic retry as quoted notes, and
+      // the sweep clears their miss decay before re-querying.
       const result: Record<string, NostrEvent | null> = {};
       for (const id of uniqueIds) {
         result[id] = parentNoteCache.get(id) || null;
+        if (result[id]) clearUnresolved(id); else registerUnresolved(id);
       }
       return result;
     },

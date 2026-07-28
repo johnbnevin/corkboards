@@ -16,7 +16,7 @@ import { ExternalLink, RotateCw } from 'lucide-react'
 import { NoteContent } from '@/components/NoteContent'
 import { ListingCard } from '@/components/ListingCard'
 import { visibleLength, truncateForPreview } from '@/lib/textTruncation'
-import { fetchEventWithOutbox, fetchNaddrWithOutbox } from '@/lib/fetchEvent'
+import { fetchEventWithOutbox, fetchNaddrWithOutbox, getCachedEvent, setCachedEvent } from '@/lib/fetchEvent'
 import { registerUnresolved, clearUnresolved } from '@/lib/failedNotes'
 import { CopyEventIdButton } from '@/components/NoteCard'
 import type { NostrEvent } from '@nostrify/nostrify'
@@ -264,6 +264,27 @@ export function NoteLink({ noteId, inlineMode: _inlineMode = false, onViewThread
     queryFn: async () => {
       // Handle note1 and nevent1 (by event ID)
       if (eventInfo.id) {
+        // Anything already resolved by another path (most often the thread
+        // view, which fetches the same event and caches it) is the answer.
+        const cached = getCachedEvent(eventInfo.id)
+        if (cached) return cached
+
+        // NPool FIRST, then fetchEventWithOutbox — the same order the thread
+        // view uses. That order is not cosmetic: opening the thread on a note
+        // whose quoted parent shows "not found" in the feed reliably resolves
+        // it, because NPool's reqRouter fans out across author relays plus the
+        // fallbacks, and fetchEventWithOutbox alone does not reach the same
+        // set. The feed was strictly weaker than the thread at finding exactly
+        // the events the feed is asking about.
+        const [viaPool] = await nostr.query(
+          [{ ids: [eventInfo.id], limit: 1 }],
+          { signal: AbortSignal.timeout(6000) },
+        ).catch(() => [])
+        if (viaPool) {
+          setCachedEvent(viaPool.id, viaPool)
+          return viaPool
+        }
+
         return fetchEventWithOutbox(eventInfo.id, nostr, {
           hints: eventInfo.relays,
           authorPubkey: eventInfo.pubkey,

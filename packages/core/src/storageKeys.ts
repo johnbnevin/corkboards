@@ -28,6 +28,17 @@ export const STORAGE_KEYS = {
   SAVED_MINIMIZED_NOTES: 'saved-minimized-notes',
 
   // Corkboard settings (shared)
+  //
+  // APP_CONFIG holds theme, relay metadata and the client-tag opt-in. It was
+  // written straight from AppProvider with an inline storageKey and never
+  // existed here — and since BACKED_UP_KEYS is derived from these constants,
+  // the entire settings config was silently excluded from every backup. A fresh
+  // install restored notes and boards but reverted every option to defaults.
+  APP_CONFIG: 'corkboard:app-config',
+  // These three were likewise written as inline literals at their call sites.
+  COLLAPSE_REACTIONS: 'corkboard:collapse-reactions',
+  CONSOLIDATE_SOUND: 'corkboard:consolidate-sound',
+  SOUND_ACCELERATE: 'corkboard:sound-accelerate',
   NWC: 'corkboard:nwc',
   SHOW_OWN_NOTES: 'corkboard:show-own-notes',
   ACTIVE_TAB: 'corkboard:active-tab',
@@ -165,6 +176,10 @@ export function removePlatformSetting(storage: KVStorage, platform: Platform, ba
 // ─── Shared keys (content/account, same across all platforms) ───────────────
 
 const SHARED_BACKED_UP_KEYS = [
+  STORAGE_KEYS.APP_CONFIG,
+  STORAGE_KEYS.COLLAPSE_REACTIONS,
+  STORAGE_KEYS.CONSOLIDATE_SOUND,
+  STORAGE_KEYS.SOUND_ACCELERATE,
   STORAGE_KEYS.CUSTOM_FEEDS,
   STORAGE_KEYS.COLLAPSED_NOTES,
   STORAGE_KEYS.DISMISSED_NOTES,

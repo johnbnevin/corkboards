@@ -37,6 +37,29 @@ export function useAccountIsolation(pubkey: string | undefined): void {
       const activePubkey = getActiveUserPubkey();
       if (activePubkey === pubkey) return;
 
+      // No PREVIOUS account means nothing to isolate from — record the marker
+      // and carry on. This is the first login on a fresh profile, and reloading
+      // there is not just unnecessary, it actively breaks the login:
+      //
+      // the login lands, this effect fires, the page reloads, and the user is
+      // put back on the login screen while the app re-bootstraps its signer.
+      // It looks exactly like a failed login, so they do it again — and the
+      // second attempt "works" only because the marker now matches and no
+      // reload happens. That is the "QR login always takes two tries on a fresh
+      // install" report, and the debug log confirmed the first attempt had
+      // already succeeded (secret matched, user resolved, bookmarks decrypted)
+      // before the reload threw it away.
+      //
+      // The reload's purpose is to kill subscriptions belonging to the account
+      // being switched AWAY from. With no such account there is nothing to
+      // kill. Any data stashed under this pubkey from an earlier session is
+      // still restored by switchActiveUser below.
+      if (!activePubkey) {
+        switchActiveUser(activePubkey, pubkey);
+        try { await idbSet(ACTIVE_USER_KEY, pubkey); } catch { /* best-effort */ }
+        return;
+      }
+
       // Loop-breaker: perform at most one isolation switch+reload per pubkey per
       // tab session. Even if the marker write below fails to persist before the
       // reload, this guarantees we never reload more than once for this account.

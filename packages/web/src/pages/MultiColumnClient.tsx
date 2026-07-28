@@ -698,10 +698,10 @@ export function MultiColumnClient() {
   const handleOpenEmojiSets = useCallback(() => setEmojiSetsOpen(true), []);
   const handleZapClick = useCallback((note: NostrEvent) => setZapTargetNote(note), []);
   const handleRepostClick = useCallback((note: NostrEvent) => openRepost(note), [openRepost]);
-  const [consolidateSound, setConsolidateSoundRaw] = useLocalStorage<string>('corkboard:consolidate-sound', 'solitaire');
-  const [soundAccelerate, setSoundAccelerate] = useLocalStorage<boolean>('corkboard:sound-accelerate', false);
-  const [collapseReactions, setCollapseReactions] = useLocalStorage<boolean>('corkboard:collapse-reactions', true);
-  const [renderMarkdown, setRenderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true);
+  const [consolidateSound, setConsolidateSoundRaw] = useLocalStorage<string>(STORAGE_KEYS.CONSOLIDATE_SOUND, 'solitaire');
+  const [soundAccelerate, setSoundAccelerate] = useLocalStorage<boolean>(STORAGE_KEYS.SOUND_ACCELERATE, false);
+  const [collapseReactions, setCollapseReactions] = useLocalStorage<boolean>(STORAGE_KEYS.COLLAPSE_REACTIONS, true);
+  const [renderMarkdown, setRenderMarkdown] = useLocalStorage<boolean>(STORAGE_KEYS.RENDER_MARKDOWN, true);
   /** Play 3 sound previews — starts slow, graduates faster (like a consolidate ramping up) */
   const previewSound = useCallback((style: string) => {
     void previewConsolidateSound(style);

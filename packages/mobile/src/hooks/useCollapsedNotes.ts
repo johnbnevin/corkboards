@@ -241,6 +241,21 @@ export function useCollapsedNotes() {
   const softDismissedSet = useMemo(() => new Set(softDismissedIds), [softDismissedIds]);
   const dismissedThreadRootSet = useMemo(() => new Set(dismissedThreadRoots), [dismissedThreadRoots]);
 
+  // Repair lists damaged by the old consolidate: a note cannot be both
+  // saved-for-later and dismissed, so anything in both is a saved note that
+  // consolidate wrongly dismissed. Un-dismiss it. No-op once the cause is
+  // fixed, and `dismiss()` un-saves first, so a deliberate dismissal of a saved
+  // note never lands here either. Mirrors web.
+  useEffect(() => {
+    if (collapsedIds.length === 0 || dismissedIds.length === 0) return;
+    const saved = new Set(collapsedIds);
+    const wronglyDismissed = dismissedIds.filter(id => saved.has(id));
+    if (wronglyDismissed.length === 0) return;
+    if (__DEV__) console.log(`[collapsedNotes] restoring ${wronglyDismissed.length} saved notes consolidate had dismissed`);
+    const remove = new Set(wronglyDismissed);
+    setDismissedIds(prev => prev.filter(id => !remove.has(id)));
+  }, [collapsedIds, dismissedIds, setDismissedIds]);
+
   // Auto-cleanup on mount — one-shot via hasCleanedUp.current, so the v7
   // set-state-in-effect warning here is a false positive (no cascade possible).
   useEffect(() => {
@@ -348,8 +363,13 @@ export function useCollapsedNotes() {
   const consolidate = useCallback(() => {
     if (_softDismissedSet.size === 0 && collapsedIds.length === 0) return;
     const softSnapshot = [..._softDismissedSet];
+    // Saved-for-later notes are NOT dismissed. This used to spread
+    // `...collapsedIds` in as well, so every consolidate marked the entire
+    // saved list as dismissed — notes the user deliberately kept, removed from
+    // the feed permanently. Clearing _sessionCollapsedIds below already removes
+    // their blank placeholders, which was the actual goal. Mirrors web.
     setDismissedIds(prev => {
-      const unique = [...new Set([...prev, ...softSnapshot, ...collapsedIds])];
+      const unique = [...new Set([...prev, ...softSnapshot])];
       return unique.length > MAX_DISMISSED_NOTES ? unique.slice(-MAX_DISMISSED_NOTES) : unique;
     });
     _softDismissedSet = new Set();

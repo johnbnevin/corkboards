@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { STORAGE_KEYS } from '@core/storageKeys';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { visibleLength } from '@core/textTruncation';
 import { hasHtmlContent, sanitizeHtml } from '@/lib/sanitize';
@@ -41,7 +42,7 @@ export function SmartNoteContent({ event, className, inModalContext = false, onV
   // Global "Render markdown" setting (Advanced Settings), on by default, plus a
   // per-note override so the user can see the raw text when the markdown
   // heuristic misfires (kind-1 notes are plain text by protocol).
-  const [globalRenderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true);
+  const [globalRenderMarkdown] = useLocalStorage<boolean>(STORAGE_KEYS.RENDER_MARKDOWN, true);
   const [showOriginal, setShowOriginal] = useState(false);
 
   // NIP-94 file metadata (kind 1063) — the file lives in the `url` tag, not the

@@ -1,4 +1,5 @@
 import React, { useMemo, memo, useState } from 'react'
+import { STORAGE_KEYS } from '@core/storageKeys';
 import { type NostrEvent } from '@nostrify/nostrify'
 import { cn } from '@/lib/utils'
 import { Link } from '@/components/ui/link'
@@ -271,7 +272,7 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
   // while the note containing it obeyed it — two different answers on one
   // screen. SmartNoteContent still passes an explicit value (it also folds in
   // the per-note "show original" toggle), and that continues to win.
-  const [globalRenderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true)
+  const [globalRenderMarkdown] = useLocalStorage<boolean>(STORAGE_KEYS.RENDER_MARKDOWN, true)
   const effectiveRenderMarkdown = renderMarkdown ?? globalRenderMarkdown
   // When present (inside the main client), hashtag taps prompt to open a new
   // corkboard instead of navigating away. Absent elsewhere → plain navigation.

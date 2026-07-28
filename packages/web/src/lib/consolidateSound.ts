@@ -31,6 +31,13 @@ const MAX_BURST_SECONDS = 1.5;
  *  noise anyway, and each one is a handful of Web Audio nodes. */
 const MAX_VOICES = 96;
 
+/** How long to wait for a suspended context to resume before giving up. */
+const RESUME_TIMEOUT_MS = 250;
+
+/** A burst that waited longer than this is no longer feedback for the action
+ *  that caused it, so it is dropped rather than played late. */
+const MAX_SCHEDULING_LAG_MS = 2000;
+
 export type ConsolidateSoundStyle = 'off' | 'solitaire' | 'chimes' | (string & {});
 
 let ctx: AudioContext | null = null;
@@ -90,11 +97,28 @@ async function readyContext(): Promise<AudioContext | null> {
   const c = getContext();
   if (!c) return null;
   if (c.state === 'suspended') {
-    try {
-      await c.resume();
-    } catch {
-      return null;
-    }
+    // BOUND the resume.
+    //
+    // On WebKit, resume() on a context that has never been unlocked by a user
+    // gesture returns a promise that stays PENDING — it does not reject, it
+    // simply never settles until audio is unlocked. Awaiting it unbounded parks
+    // this call indefinitely, and when the user finally clicks something an
+    // hour later every parked call resolves at once, sees a running context,
+    // and schedules its burst. That is the "sound turns up an hour later,
+    // sometimes several at once" report. The header above claims this class of
+    // bug was fixed by not scheduling against a frozen clock, but the await
+    // itself was left unbounded, which reintroduces it by another route.
+    //
+    // No prompt resume means no gesture in hand, so drop the burst.
+    // `armAudioUnlock` resumes the context during the next real gesture, and
+    // bursts after that schedule normally.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const resumed = await Promise.race([
+      c.resume().then(() => true, () => false),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), RESUME_TIMEOUT_MS); }),
+    ]);
+    clearTimeout(timer);
+    if (!resumed) return null;
   }
   return c.state === 'running' ? c : null;
 }
@@ -230,8 +254,13 @@ export async function playConsolidateSound(
   if (typeof document !== 'undefined' && document.hidden) return;
   if (Date.now() < burstEndsAt) return;
 
+  const requestedAt = Date.now();
   const c = await readyContext();
   if (!c) return;
+  // Belt and braces on the same failure mode: if getting here took long enough
+  // that this is no longer feedback for the consolidate that caused it, play
+  // nothing. Silence beats a sound with no cause.
+  if (Date.now() - requestedAt > MAX_SCHEDULING_LAG_MS) return;
 
   // Solitaire is one swoosh per three notes; chimes are one per note. Both are
   // capped so a huge consolidate doesn't allocate thousands of nodes.

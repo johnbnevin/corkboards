@@ -24,13 +24,16 @@ import { shouldRejectUrl } from './imageUtils';
  * Used both as the default upload set and as the render-time fallback set.
  * Each entry is a base origin ending in `/`.
  */
+// `nostr.download` was removed at the user's request — do not re-add it here or
+// to the platform DEFAULT_BLOSSOM_SERVERS lists. Every server in this list
+// receives uploaded blobs plus a NIP-98 auth event signed with the user's key,
+// so membership is a deliberate trust decision, not a availability tweak.
 export const KNOWN_BLOSSOM_SERVERS = [
   'https://blossom.band/',
   'https://blossom.primal.net/',
   'https://blossom.yakihonne.com/',
   'https://blossom.f7z.io/',
   'https://blossom.ditto.pub/',
-  'https://nostr.download/',
 ] as const;
 
 /** A blossom path is a bare 64-char sha256, optionally with a file extension. */

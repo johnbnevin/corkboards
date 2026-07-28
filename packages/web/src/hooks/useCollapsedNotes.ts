@@ -220,6 +220,24 @@ function useCollapsedNotesState() {
     notifyNoteState()
   }, [collapsedSet])
 
+  // Repair lists damaged by the old consolidate (see above): a note cannot be
+  // both saved-for-later and dismissed, so anything in both is a saved note
+  // that consolidate wrongly dismissed. Un-dismiss it.
+  //
+  // Runs on every mount rather than behind a one-shot flag: with the cause
+  // fixed the intersection is always empty, so this is a no-op — and `dismiss()`
+  // removes a note from the collapsed list first, so a deliberate dismissal of
+  // a saved note can never land in this set either.
+  useEffect(() => {
+    if (collapsedIds.length === 0 || dismissedIds.length === 0) return
+    const saved = new Set(collapsedIds)
+    const wronglyDismissed = dismissedIds.filter(id => saved.has(id))
+    if (wronglyDismissed.length === 0) return
+    console.info(`[collapsedNotes] restoring ${wronglyDismissed.length} saved notes that consolidate had dismissed`)
+    const remove = new Set(wronglyDismissed)
+    setDismissedIds(prev => prev.filter(id => !remove.has(id)))
+  }, [collapsedIds, dismissedIds, setDismissedIds])
+
   // Auto-cleanup on mount if over limits
   useEffect(() => {
     if (!hasCleanedUp.current) {
@@ -360,15 +378,25 @@ function useCollapsedNotesState() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [undoMapVersion])
 
-  /** Consolidate: move soft-dismissed AND collapsed (saved-for-later) placeholder
-   *  notes into the permanent dismissed list, removing all blank spaces from the grid.
-   *  Collapsed notes remain in the collapsed list so they still appear above the fold.
-   *  All soft-dismissed notes are consolidated, including those still in their undo window. */
+  /** Consolidate: move soft-dismissed notes into the permanent dismissed list,
+   *  removing all blank spaces from the grid.
+   *
+   *  Saved-for-later notes are NOT dismissed. They used to be: this wrote
+   *  `[...prev, ...allSoftDismissed, ...collapsedIds]`, so every consolidate
+   *  marked the user's ENTIRE saved list as dismissed — notes they had
+   *  deliberately kept, silently removed from the feed and never coming back,
+   *  because `dismissed-notes` is permanent. The stated goal was to clear the
+   *  blank placeholders a saved note leaves behind, but clearing
+   *  `_sessionCollapsedIds` below already does that: the placeholder becomes a
+   *  normal card again. Saving a note must never delete it.
+   *
+   *  All soft-dismissed notes are consolidated, including those still in their
+   *  undo window. */
   const consolidate = useCallback(() => {
     if (_softDismissedSet.size === 0 && collapsedIds.length === 0) return
     const allSoftDismissed = [..._softDismissedSet]
     setDismissedIds(prev => {
-      const unique = [...new Set([...prev, ...allSoftDismissed, ...collapsedIds])]
+      const unique = [...new Set([...prev, ...allSoftDismissed])]
       return unique.length > MAX_DISMISSED_NOTES ? unique.slice(-MAX_DISMISSED_NOTES) : unique
     })
     // Clear all soft-dismissed and undo state — consolidate is an explicit user action

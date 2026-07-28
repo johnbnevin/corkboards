@@ -12,6 +12,7 @@ import { GlobalLightbox } from "@/components/ui/lightbox";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { NostrLoginProvider } from '@nostrify/react/login';
 import { AppProvider } from '@/components/AppProvider';
+import { STORAGE_KEYS } from '@core/storageKeys';
 import { AppConfig } from '@/contexts/AppContext';
 import { NwcProvider } from '@/hooks/useNwc';
 import { CollapsedNotesProvider } from '@/hooks/useCollapsedNotes';
@@ -55,7 +56,7 @@ export function App() {
 
   return (
     <UnheadProvider head={head}>
-      <AppProvider storageKey="corkboard:app-config" defaultConfig={defaultConfig}>
+      <AppProvider storageKey={STORAGE_KEYS.APP_CONFIG} defaultConfig={defaultConfig}>
         <QueryClientProvider client={queryClient}>
           <NostrLoginProvider storageKey='corkboard:login'>
             <NostrProvider>

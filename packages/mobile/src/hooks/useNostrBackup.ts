@@ -103,7 +103,6 @@ export function isRelayBlocked(url: string): boolean {
 export const DEFAULT_BLOSSOM_SERVERS = [
   'https://blossom.primal.net/',
   'https://blossom.nostr.build/',
-  'https://nostr.download/',
   'https://blossom.yakihonne.com/',
   'https://blossom.ditto.pub/',
 ];

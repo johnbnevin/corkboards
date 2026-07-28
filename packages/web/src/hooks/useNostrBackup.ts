@@ -132,7 +132,6 @@ const BACKUP_SLOT_CURSOR_KEY = STORAGE_KEYS.BACKUP_SLOT_CURSOR;
 export const DEFAULT_BLOSSOM_SERVERS = [
   'https://blossom.primal.net/',
   'https://blossom.nostr.build/',
-  'https://nostr.download/',
   'https://blossom.yakihonne.com/',
   'https://blossom.ditto.pub/',
 ];

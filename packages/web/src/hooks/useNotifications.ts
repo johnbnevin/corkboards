@@ -15,7 +15,8 @@ import { useInfiniteQuery } from '@tanstack/react-query';
 import { useNostr } from '@/hooks/useNostr';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { getZapReceiptAmountSats } from '@core/lightningTarget';
+import { getZapReceiptAmountSats, invoiceAmountSats } from '@core/lightningTarget';
+import { verifyEvent } from 'nostr-tools/pure';
 
 export type NotificationType = 'reaction' | 'reply' | 'mention' | 'repost' | 'zap';
 
@@ -88,25 +89,85 @@ function getTargetInfo(event: NostrEvent): {
   return { targetEventId: null, targetRelayHint: null, targetAuthorPubkey: null };
 }
 
-/** Extract the real sender pubkey from a zap receipt (kind 9735).
- *  The receipt's own pubkey belongs to the LNURL server, not the person who zapped.
- *  The real sender is in the `description` tag (the kind-9734 zap request JSON). */
+/**
+ * Extract the real sender pubkey from a zap receipt (kind 9735) — but ONLY when
+ * the embedded zap request actually proves it.
+ *
+ * The receipt's own pubkey belongs to the LNURL server, not the person who
+ * zapped; NIP-57 puts the sender's kind-9734 zap request in the `description`
+ * tag. That JSON is UNSIGNED-BY-CONSTRUCTION as far as the receipt is
+ * concerned: the receipt's signature covers the description *string*, and the
+ * receipt is signed by the LNURL server, so a hostile (or merely buggy) server
+ * can put any pubkey it likes in there. Reading `.pubkey` and rendering it, as
+ * this used to, means anyone who can get a receipt tagged at you can make the
+ * notification list say a specific person zapped you.
+ *
+ * The zap request is itself a signed nostr event, so we can just check it:
+ * verify its id-hash and schnorr signature. If it doesn't verify, we return
+ * null and the caller falls back to showing the receipt's own author (the
+ * server) rather than an unproven claim about a person. Verification is not
+ * free (~ms of schnorr per receipt), so results are memoized by receipt id.
+ *
+ * NOTE: this proves WHO signed the request, not that the payment happened —
+ * full NIP-57 Appendix-F validation would also require the receipt to be signed
+ * by the recipient's advertised LNURL `nostrPubkey`, which needs that server's
+ * config. See `verifiedZapAmountSats` for the amount side.
+ */
+const _zapSenderCache = new Map<string, string | null>();
+const MAX_ZAP_VERIFY_CACHE = 500;
+
 export function getZapSenderPubkey(event: NostrEvent): string | null {
   if (event.kind !== 9735) return null;
+  const cached = _zapSenderCache.get(event.id);
+  if (cached !== undefined) return cached;
+
+  let sender: string | null = null;
   const descTag = event.tags.find(t => t[0] === 'description');
   if (descTag?.[1]) {
     try {
-      const zapRequest = JSON.parse(descTag[1]) as { pubkey?: string };
-      if (zapRequest.pubkey && typeof zapRequest.pubkey === 'string') return zapRequest.pubkey;
-    } catch { /* ignore */ }
+      const zapRequest = JSON.parse(descTag[1]) as NostrEvent;
+      // kind must be 9734 and the whole event must verify — id hash + signature.
+      if (zapRequest?.kind === 9734 && typeof zapRequest.pubkey === 'string' && verifyEvent(zapRequest)) {
+        sender = zapRequest.pubkey;
+      }
+    } catch { /* malformed description — leave sender null */ }
   }
-  return null;
+
+  if (_zapSenderCache.size >= MAX_ZAP_VERIFY_CACHE) {
+    _zapSenderCache.delete(_zapSenderCache.keys().next().value!);
+  }
+  _zapSenderCache.set(event.id, sender);
+  return sender;
 }
 
-/** Extract sats from a zap receipt (kind 9735). Delegates to the single shared,
- *  NaN-safe parser (amount tag → embedded zap-request → bolt11 invoice). */
+/**
+ * Sats for a zap receipt, cross-checked against the invoice.
+ *
+ * `getZapReceiptAmountSats` prefers the `amount` tag, then the embedded
+ * request, then the bolt11 — all of which except the bolt11 are attacker- or
+ * server-controlled strings on an event we did not sign. The bolt11 is the only
+ * field with money behind it: it is what was actually payable. So when both are
+ * present and they DISAGREE by more than rounding, we do not pick a winner —
+ * we return null, and the UI shows a zap without a number rather than a number
+ * that might be a hundred times too large.
+ */
+export function verifiedZapAmountSats(event: NostrEvent): number | null {
+  if (event.kind !== 9735) return null;
+  const claimed = getZapReceiptAmountSats(event);
+  const bolt11 = event.tags.find(t => t[0] === 'bolt11')?.[1];
+  if (!bolt11) return claimed;
+  const invoiceAmount = invoiceAmountSats(bolt11);
+  // An open invoice (no amount) can't contradict anything.
+  if (invoiceAmount === null || claimed === null) return claimed;
+  // Allow 1 sat of slack for msat→sat rounding on either side.
+  return Math.abs(invoiceAmount - claimed) <= 1 ? claimed : null;
+}
+
+/** Extract sats from a zap receipt (kind 9735).
+ *  Cross-checked against the bolt11 invoice — a claimed amount that the invoice
+ *  contradicts yields null rather than a number we can't stand behind. (L13) */
 export function getZapAmountSats(event: NostrEvent): number | null {
-  return getZapReceiptAmountSats(event);
+  return verifiedZapAmountSats(event);
 }
 
 const NOTIF_PAGE_SIZE = 100;

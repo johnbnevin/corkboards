@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { nip19 } from 'nostr-tools'
 import { useNostr } from '@/hooks/useNostr'
@@ -265,12 +265,18 @@ export function NoteLink({ noteId, inlineMode: _inlineMode = false, onViewThread
     retryDelay: 4000,
   })
 
+  // registerFailedNote mutates a module-level set — a side effect, so it belongs
+  // in an effect, not the render body. Under StrictMode/concurrent rendering a
+  // render can be thrown away and re-run, which double-registered the note.
+  useEffect(() => {
+    if (!isLoading && !event) registerFailedNote(noteId)
+  }, [isLoading, event, noteId])
+
   if (isLoading) {
     return <NoteLinkSkeleton />
   }
 
   if (!event) {
-    registerFailedNote(noteId)
     // Build truncated debug string for inline display
     const shortParts: string[] = []
     if (eventInfo.id) shortParts.push(`id:${eventInfo.id.slice(0, 8)}…`)

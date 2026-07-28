@@ -7,16 +7,18 @@ import { Label } from '@/components/ui/label';
 import { toast } from '@/hooks/useToast';
 import { useLoginActions } from '@/hooks/useLoginActions';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
-import { nip19 } from 'nostr-tools';
-import { privateKeyFromSeedWords, validateWords, generateSeedWords } from 'nostr-tools/nip06';
+import { nip19, generateSecretKey } from 'nostr-tools';
+// Import-only: NIP-06 is `unrecommended` upstream, so we no longer GENERATE
+// seed phrases — but people who made an account when we did (or in another
+// client) must always be able to get back in.
+import { privateKeyFromSeedWords, validateWords } from 'nostr-tools/nip06';
 import { getSignerRecommendation } from '@/components/auth/SignerRecommendations';
 import { SecurityInfoDialog } from '@/components/auth/SecurityInfoDialog';
 import QRCode from 'qrcode';
+import { isTauri } from '@/lib/tauri';
 
 type Step = 'name' | 'key-backup' | 'done';
 type LoginView = 'main' | 'amber' | 'nsec' | 'mnemonic' | 'signer';
-
-const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
 /** True on Android browser or Tauri Android. */
 const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
@@ -74,10 +76,6 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
   const [seedLoginLoading, setSeedLoginLoading] = useState(false);
   const [seedLoginError, setSeedLoginError] = useState<string | null>(null);
 
-  // New account mnemonic backup
-  const [mnemonic, setMnemonic] = useState('');
-  const [showMnemonic, setShowMnemonic] = useState(false);
-  const [mnemonicCopied, setMnemonicCopied] = useState(false);
 
   const [tipIndex, setTipIndex] = useState(() => Math.floor(Math.random() * LOGIN_TIPS.length));
 
@@ -133,9 +131,16 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
       toast({ title: 'Name required', description: 'Please enter a name to get started.', variant: 'destructive' });
       return;
     }
-    const words = generateSeedWords();
-    const sk = privateKeyFromSeedWords(words);
-    setMnemonic(words);
+    // A single nsec, not a NIP-06 seed phrase.
+    //
+    // The NIPs repo marks NIP-06 `unrecommended` — "prefer a single nsec". A
+    // mnemonic buys nothing here: nostr has no derivation path to walk and no
+    // second account behind word 13, so the words were only ever a second
+    // encoding of this one key. What they cost is real: two secrets to store,
+    // two ways to leak, and a passphrase field that silently derives a DIFFERENT
+    // key if the user misremembers it. Existing seed-phrase accounts still log
+    // in — mnemonicView below is untouched — this only stops minting new ones.
+    const sk = generateSecretKey();
     setNsec(nip19.nsecEncode(sk));
     setStep('key-backup');
   };
@@ -355,36 +360,6 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
         </p>
       </div>
 
-      <div className="space-y-2">
-        <Button variant="outline" onClick={() => setShowMnemonic(!showMnemonic)} className="w-full gap-1.5">
-          <BookKey className="h-4 w-4" />Write down 12 words instead
-        </Button>
-        {showMnemonic && mnemonic && (
-          <div className="p-3 rounded-lg border bg-muted/30 space-y-3">
-            <p className="text-xs text-muted-foreground">These 12 words are another form of the same key. Write them down and keep them safe.</p>
-            <div className="grid grid-cols-3 gap-2">
-              {mnemonic.split(' ').map((word, i) => (
-                <div key={`${word}-${i}`} className="flex items-center gap-1.5 text-sm font-mono">
-                  <span className="text-muted-foreground text-xs w-4 text-right">{i + 1}.</span>
-                  <span>{word}</span>
-                </div>
-              ))}
-            </div>
-            <Button variant="outline" size="sm" className="w-full text-xs gap-1" onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(mnemonic);
-                setMnemonicCopied(true);
-                setTimeout(() => setMnemonicCopied(false), 2000);
-              } catch {
-                toast({ title: 'Copy failed', variant: 'destructive' });
-              }
-            }}>
-              {mnemonicCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-              {mnemonicCopied ? 'Copied' : 'Copy words'}
-            </Button>
-          </div>
-        )}
-      </div>
     </div>
   );
 
@@ -408,10 +383,6 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
           <div className="p-3 rounded-lg border bg-muted/30 space-y-1">
             <p className="text-sm font-medium">nsec password</p>
             <p className="text-xs text-muted-foreground">Paste the nsec key you just saved.</p>
-          </div>
-          <div className="p-3 rounded-lg border bg-muted/30 space-y-1">
-            <p className="text-sm font-medium">12-word mnemonic</p>
-            <p className="text-xs text-muted-foreground">Type the 12 words if you wrote them down.</p>
           </div>
         </div>
         <Button className="w-full h-11" onClick={() => onClose?.()}>Go to corkboards</Button>
@@ -486,7 +457,7 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
       </div>
       <div className="relative">
         <div className="absolute inset-0 flex items-center"><span className="w-full border-t" /></div>
-        <div className="relative flex justify-center text-xs uppercase"><span className="bg-background px-2 text-muted-foreground">Or paste URI</span></div>
+        <div className="relative flex justify-center text-xs uppercase"><span className="bg-inherit px-2 text-muted-foreground">Or paste URI</span></div>
       </div>
       <div className="space-y-2">
         <label htmlFor="bunker-input" className="text-xs font-medium flex items-center gap-1">
@@ -659,51 +630,7 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
         {loginView === 'main' && loginOptions}
 
         {loginView === 'amber' && amberView}
-        {loginView === 'signer' && (
-          <div className="space-y-4 pt-2 border-t">
-            <button type="button" onClick={() => { connectAbortRef.current?.abort(); setConnectWaiting(false); setQrDataUrl(''); setConnectUri(''); setConnectError(null); setLoginView('main'); }} className="flex items-center justify-center w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-1">
-              <ChevronLeft className="h-3 w-3 mr-1" />Back
-            </button>
-            <div className="space-y-2">
-              {qrDataUrl && (
-                <div className="flex flex-col items-center gap-2">
-                  <p className="text-xs text-muted-foreground text-center">Scan with Amber, Alby Go, or any NIP-46 signer app</p>
-                  <div className="bg-white p-2 rounded-lg">
-                    <img src={qrDataUrl} alt="Scan with signer app" className="w-56 h-56" />
-                  </div>
-                  <Button variant="outline" size="sm" className="text-xs gap-1" onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(connectUri);
-                      setConnectCopied(true);
-                      setTimeout(() => setConnectCopied(false), 2000);
-                    } catch {
-                      toast({ title: 'Copy failed', variant: 'destructive' });
-                    }
-                  }}>
-                    {connectCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                    {connectCopied ? 'Copied' : 'Copy URI'}
-                  </Button>
-                </div>
-              )}
-              {connectWaiting && <p className="text-xs text-center text-muted-foreground animate-pulse">Waiting for signer to respond...</p>}
-              {connectError && <p className="text-xs text-red-500 text-center">{connectError}</p>}
-            </div>
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center"><span className="w-full border-t" /></div>
-              <div className="relative flex justify-center text-xs uppercase"><span className="bg-gray-100 dark:bg-gray-900 px-2 text-muted-foreground">Or paste URI</span></div>
-            </div>
-            <div className="space-y-2">
-              <label htmlFor="bunker-input" className="text-xs font-medium flex items-center gap-1">
-                <Link2 className="h-3 w-3" />Bunker / Remote Signer URI
-              </label>
-              <div className="flex gap-2">
-                <Input id="bunker-input" value={bunkerUrl} onChange={(e) => setBunkerUrl(e.target.value)} placeholder="bunker://... or nostrconnect://..." className="text-sm font-mono" onKeyDown={(e) => { if (e.key === 'Enter') handleBunkerLogin(); }} />
-                <Button onClick={handleBunkerLogin} disabled={bunkerLoading} size="sm">{bunkerLoading ? '...' : 'Go'}</Button>
-              </div>
-              {bunkerError && <p className="text-xs text-red-500">{bunkerError}</p>}
-            </div>
-          </div>
-        )}
+        {loginView === 'signer' && signerView}
         {loginView === 'mnemonic' && mnemonicView}
         {loginView === 'nsec' && nsecView}
 

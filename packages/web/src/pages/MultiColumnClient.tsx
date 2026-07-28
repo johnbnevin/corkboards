@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef, useTransition, lazy,
 import { RSS_PUBKEY } from '@core/rss';
 import { parseFeedSource as parseFeedSourceCore } from '@core/feedSource';
 import { useSeoMeta } from '@unhead/react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostr } from '@/hooks/useNostr';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
@@ -96,6 +97,7 @@ const AdvancedSettings = lazy(() => import('@/components/AdvancedSettings').then
 const EmojiSetEditor = lazy(() => import('@/components/EmojiSetEditor').then(m => ({ default: m.EmojiSetEditor })));
 import { useNostrBackup, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
+import { MAX_RETAINED_NOTES } from '@core/feedConstants';
 import { bumpQueryEpoch, getQueryEpoch, withQueryBudget, StaleEpochError } from '@core/queryGovernor';
 import { registerBackupFlush } from '@/lib/backupFlush';
 import { getOnboarded, setOnboarded, clearOnboarded, idbReady as onboardIdbReady } from '@/lib/onboardingFlag';
@@ -104,6 +106,7 @@ import { useAccountIsolation } from '@/hooks/useAccountIsolation';
 import { useAutoRestoreGuard } from '@/hooks/useAutoRestoreGuard';
 import { useScrollPersistence } from '@/hooks/useScrollPersistence';
 import { useIdleAutoRestoreCheck } from '@/hooks/useIdleAutoRestoreCheck';
+import { useKeychainHealth } from '@/hooks/useKeychainHealth';
 import { useAutoFetch } from '@/hooks/useAutoFetch';
 import { useAccountSwitchEffect } from '@/hooks/useAccountSwitchEffect';
 import { useBulkAuthorPrefetch } from '@/hooks/useBulkAuthorPrefetch';
@@ -140,6 +143,9 @@ import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 
 /** Notes we ask for engagement on. Kept near a screenful — every extra id
  *  changes the query key and forces a fresh network round trip. */
+/** Profiles fetched per follows page. Also the window `hasMoreFollows` compares against. */
+const FOLLOWS_BATCH_SIZE = 500;
+
 const LAZY_ENGAGEMENT_TARGETS = 60;
 /** Ceiling on engagement events pulled per round (was 500 — see the query). */
 const LAZY_ENGAGEMENT_LIMIT = 150;
@@ -247,6 +253,27 @@ export function MultiColumnClient() {
       navigator.storage.persist().catch(() => {});
     }
   }, [user?.pubkey]);
+
+  // Desktop: a signing key missing from the OS keychain makes every publish,
+  // reaction, zap and backup fail with no explanation (see useKeychainHealth).
+  // Say so once, plainly, instead of letting the user discover it as "the app
+  // is broken". Not auto-dismissed — this needs a decision, not a glance.
+  const { missingKeyPubkeys } = useKeychainHealth();
+  const warnedMissingKeysRef = useRef('');
+  useEffect(() => {
+    const signature = missingKeyPubkeys.join(',');
+    if (!signature || warnedMissingKeysRef.current === signature) return;
+    warnedMissingKeysRef.current = signature;
+    toast({
+      title: 'Signing key missing from your keychain',
+      description:
+        missingKeyPubkeys.length === 1
+          ? 'Corkboards can’t find this account’s key in the OS keychain, so posting, reacting, zapping and backup will all fail. If your keyring is locked, unlock it and restart. Otherwise log out and log back in with your nsec to restore it.'
+          : `${missingKeyPubkeys.length} accounts have no key in the OS keychain. Posting, reacting, zapping and backup will fail for them. Unlock your keyring and restart, or log in again with each nsec.`,
+      variant: 'destructive',
+      duration: Infinity,
+    });
+  }, [missingKeyPubkeys, toast]);
 
   // Per-user isolation: extracted into a focused hook so the bug-prone
   // account-switch flow can be tested independently and future fixes are
@@ -652,7 +679,6 @@ export function MultiColumnClient() {
   const [allFollowsData, setAllFollowsData] = useState<{pubkey: string, name: string, picture?: string}[]>([]);
   const [editingFeedId, setEditingFeedId] = useState<string | null>(null);
   const [followsOffset, setFollowsOffset] = useState(0);
-  const [hasMoreFollows, _setHasMoreFollows] = useState(true);
   const [isLoadingMoreFollows, setIsLoadingMoreFollows] = useState(false);
 
   // Zap dialog state
@@ -986,6 +1012,8 @@ export function MultiColumnClient() {
   //   • Blossom server list (kind 10063) → stored blossom servers
   // Both fall back to the profile indexers (purplepag.es, …) which hold these
   // replaceable lists for ~everyone, so a fresh device still finds them.
+  /** Attempts to fetch the user's kind-10002 before giving up for this session. */
+  const NIP65_SYNC_ATTEMPTS = 4;
   const nip65SyncDone = useRef(false);
   useEffect(() => {
     if (!canLoadNotes || !user || nip65SyncDone.current) return;
@@ -1018,24 +1046,50 @@ export function MultiColumnClient() {
 
     (async () => {
       // ── Relay list (kind 10002) ──
-      try {
-        const ev = await fetchLatest(10002);
-        if (ev && ev.created_at > appConfig.relayMetadata.updatedAt) {
-          const relays = ev.tags
-            .filter(([name]) => name === 'r')
-            .map(([, url, marker]) => ({
-              url,
-              read: !marker || marker === 'read',
-              write: !marker || marker === 'write',
-            }));
-          if (relays.length > 0) {
-            updateConfig((current) => ({
-              ...current,
-              relayMetadata: { relays, updatedAt: ev.created_at },
-            }));
+      //
+      // Retried, because this runs ONCE per session and everything downstream
+      // depends on it. A single transient miss — one fallback relay returning
+      // 503 while another times out, which is an ordinary Tuesday — used to
+      // leave `relayMetadata.relays` empty for the whole session. With no
+      // relay list the outbox router has nothing to route to, so it falls back
+      // to the hardcoded bootstrap set for EVERYTHING: profiles resolve as
+      // `user_xxxxxxxx`, nested/quoted notes never arrive, "load more" returns
+      // nothing, and Settings truthfully reports no relays while the health
+      // check happily shows the fallbacks as 9/9 healthy. The symptom looks
+      // like a broken app; the cause is one failed query nobody retried.
+      //
+      // Only a genuinely resolved outcome ends the loop: adopting a list, or
+      // finding one that isn't newer than what we already have.
+      for (let attempt = 0; attempt < NIP65_SYNC_ATTEMPTS; attempt++) {
+        try {
+          const ev = await fetchLatest(10002);
+          if (ev) {
+            if (ev.created_at > appConfig.relayMetadata.updatedAt) {
+              const relays = ev.tags
+                .filter(([name]) => name === 'r')
+                .map(([, url, marker]) => ({
+                  url,
+                  read: !marker || marker === 'read',
+                  write: !marker || marker === 'write',
+                }));
+              if (relays.length > 0) {
+                updateConfig((current) => ({
+                  ...current,
+                  relayMetadata: { relays, updatedAt: ev.created_at },
+                }));
+                break;
+              }
+            } else {
+              break; // ours is already current
+            }
           }
+        } catch { /* fall through to the retry delay */ }
+        // Linear backoff — the relays that just failed are usually back within
+        // seconds, and this runs while the feed is already rendering.
+        if (attempt < NIP65_SYNC_ATTEMPTS - 1) {
+          await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
         }
-      } catch { /* best-effort */ }
+      }
 
       // ── Blossom server list (kind 10063) ──
       try {
@@ -1158,6 +1212,25 @@ export function MultiColumnClient() {
     setActiveTab(`feed:${newFeed.id}`);
     toast({ title: 'Corkboard created', description: `New corkboard for #${norm}` });
   }, [customFeeds, setCustomFeeds, setActiveTab, toast]);
+
+  // ─── /t/:hashtag deep link ────────────────────────────────────────────────
+  // The route rendered this component but nothing read the param, so a shared
+  // /t/bitcoin link silently dropped the user on their default feed. Open (or
+  // reuse) the hashtag corkboard, then replace the URL with "/" so a refresh
+  // or a later back-navigation doesn't re-trigger the switch.
+  const { hashtag: routeHashtag } = useParams<{ hashtag: string }>();
+  const navigate = useNavigate();
+  const handledRouteHashtagRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!routeHashtag) return;
+    const norm = decodeURIComponent(routeHashtag).replace(/^#/, '').toLowerCase();
+    // Same charset core accepts for a hashtag feed source — never trust a path segment.
+    if (!norm || !/^[\p{L}\p{N}_]+$/u.test(norm)) return;
+    if (handledRouteHashtagRef.current === norm) return;
+    handledRouteHashtagRef.current = norm;
+    confirmOpenHashtagFeed(norm);
+    navigate('/', { replace: true });
+  }, [routeHashtag, confirmOpenHashtagFeed, navigate]);
 
   // ─── Migrate legacy "friends" (individual pubkey tabs) to custom corkboards ──
   // Friends were stored as an array of pubkeys; each becomes a single-pubkey corkboard.
@@ -1609,7 +1682,7 @@ export function MultiColumnClient() {
     queryFn: async () => {
       if (!contacts || contacts.length === 0) return [];
 
-      const authorBatch = contacts.slice(followsOffset, followsOffset + 500);
+      const authorBatch = contacts.slice(followsOffset, followsOffset + FOLLOWS_BATCH_SIZE);
       debugLog('[follows-data] Fetching profiles for', authorBatch.length, 'authors using outbox model');
 
       // Check cache first
@@ -1711,6 +1784,12 @@ export function MultiColumnClient() {
       setIsLoadingMoreFollows(false);
     }
   }, [followsData]);
+
+  // Whether another page of follows exists — DERIVED from the last batch, not
+  // state. It used to be `useState(true)` whose setter (`_setHasMoreFollows`)
+  // was never called anywhere, so "Load more" was offered forever, including on
+  // accounts whose entire follow list had already loaded.
+  const hasMoreFollows = (contacts?.length ?? 0) > followsOffset + FOLLOWS_BATCH_SIZE;
 
   // Update availableFollows when dialog is opened
   useEffect(() => {
@@ -1925,7 +2004,16 @@ export function MultiColumnClient() {
       fresh.push(n);
     }
     if (fresh.length === 0) return;
-    setStableDiscoverNotes(prev => [...prev, ...fresh]);
+    // Cap the live set. Discover appends forever as relays stream new authors in,
+    // and every retained note is both a NostrEvent and a mounted NoteCard (with
+    // avatars and media) in the webview DOM — on a long session that grows without
+    // bound. Keep the newest MAX_RETAINED_NOTES and let the oldest cards fall out;
+    // the seen/pubkey refs below still suppress re-adding them, so dropped cards
+    // stay dropped rather than cycling back in.
+    setStableDiscoverNotes(prev => {
+      const next = [...prev, ...fresh];
+      return next.length > MAX_RETAINED_NOTES ? next.slice(-MAX_RETAINED_NOTES) : next;
+    });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDiscoverTab, isOnboarding ? mergedDiscoverNotes : discoveredNotes]);
 
@@ -1982,6 +2070,10 @@ export function MultiColumnClient() {
     setExtraUserNotes(prev => {
       const seen = new Set(prev.map(n => n.id));
       const fresh = notes.filter(n => !seen.has(n.id));
+      // Intentionally NOT capped to MAX_RETAINED_NOTES: this is fed by
+      // fetchAndMergeUserNotes during pagination, so the notes appended here are
+      // ones the user explicitly paged for. Capping would slice them straight
+      // back off. Same reasoning as useFeedLoadMore in mobile's useFeed.
       return fresh.length > 0 ? [...prev, ...fresh] : prev;
     });
   }, []);
@@ -3167,9 +3259,14 @@ export function MultiColumnClient() {
 
   // Record that this tab has shown other-author notes, so a later transient
   // empty (cold relays on resume) won't collapse the feed to only own notes.
-  if (activeTab && notes.some(n => n.pubkey !== user?.pubkey)) {
-    otherAuthorsSeenRef.current[activeTab] = true;
-  }
+  // In an effect, not the render body: this mutates a ref that survives across
+  // renders, and a render React discards (StrictMode, a suspended transition)
+  // would otherwise leave the flag set for a feed the user never actually saw.
+  useEffect(() => {
+    if (activeTab && notes.some(n => n.pubkey !== user?.pubkey)) {
+      otherAuthorsSeenRef.current[activeTab] = true;
+    }
+  }, [activeTab, notes, user?.pubkey]);
 
   // Stats from deduped notes — these match the visible counts in the kind toggles
   const activeTabStats = useMemo(() => computeNoteKindStats(deduplicatedNotes, eventLookup), [deduplicatedNotes, eventLookup]);
@@ -4123,7 +4220,7 @@ export function MultiColumnClient() {
             />
           </div>
         ) : (
-          <div className={`relative -mx-4 px-2 sm:px-8 py-0.5 sm:py-1.5 bg-gradient-to-r from-gray-100/95 to-gray-200/95 backdrop-blur-sm border-b border-white/20 min-h-[24px] sm:min-h-[28px] ${stickyTabBar ? 'sticky top-0 z-30 shadow-sm' : ''}`}>
+          <div className={`relative -mx-4 px-2 sm:px-8 py-0.5 sm:py-1.5 bg-gradient-to-r from-gray-100/95 to-gray-200/95 dark:from-gray-900/95 dark:to-gray-800/95 backdrop-blur-sm border-b border-white/20 dark:border-white/10 min-h-[24px] sm:min-h-[28px] ${stickyTabBar ? 'sticky top-0 z-30 shadow-sm' : ''}`}>
             <TabBar
               activeTab={optimisticTab}
               setActiveTab={setActiveTab}

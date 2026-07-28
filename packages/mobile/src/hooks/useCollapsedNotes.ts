@@ -9,8 +9,9 @@
  * Soft-dismissed = visually blanked out but still in grid
  * Dismissed = removed from feed entirely on consolidate
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { mobileStorage } from '../storage/MmkvStorage';
+import { STORAGE_KEYS } from '../lib/storageKeys';
 
 const MAX_COLLAPSED_NOTES = 10000;
 const MAX_DISMISSED_NOTES = 10000;
@@ -19,12 +20,15 @@ const MAX_UNDO_MAP = 1000;
 const UNDO_WINDOW_MS = 20000;
 const MAX_DISMISSED_THREAD_ROOTS = 2000;
 
-const COLLAPSED_KEY = 'collapsed-notes';
-const DISMISSED_KEY = 'dismissed-notes';
+// Use the core constants, not string literals: the constants are what
+// PER_USER_KEYS and BACKED_UP_KEYS are built from, so a key spelled inline here
+// is silently excluded from per-account isolation and from backups.
+const COLLAPSED_KEY = STORAGE_KEYS.COLLAPSED_NOTES;
+const DISMISSED_KEY = STORAGE_KEYS.DISMISSED_NOTES;
 // Thread roots the user dismissed via "dismiss all associated". Persisted so
 // that notes belonging to the thread which arrive LATER (autofetch, load-more,
 // navigation) are also hidden — not just the ones visible at dismiss time.
-const DISMISSED_THREAD_ROOTS_KEY = 'dismissed-thread-roots';
+const DISMISSED_THREAD_ROOTS_KEY = STORAGE_KEYS.DISMISSED_THREAD_ROOTS;
 
 // Module-level shared state (mirrors web's module-level approach)
 let _softDismissedSet: Set<string> = new Set();
@@ -34,6 +38,7 @@ const _dismissedUndoMap = new Map<string, number>();
 const listeners = new Set<() => void>();
 
 function notifyListeners() {
+  notifyNoteState();
   listeners.forEach(fn => fn());
 }
 
@@ -52,11 +57,135 @@ function saveToMmkv(key: string, value: string[]): void {
   } catch { /* ignore */ }
 }
 
+// ─── Per-note external store ────────────────────────────────────────────────
+//
+// Mirrors packages/web/src/hooks/useCollapsedNotes.ts — keep the two in step.
+//
+// A card only needs to know about ITS OWN note. Reading the whole hook made
+// every mounted card re-render on every dismissal (and, on mobile, parse the
+// full persisted id lists out of MMKV on mount, once per card). Cards subscribe
+// here per note id instead; a dismissal only re-renders the cards whose own
+// snapshot changed.
+
+/** Module mirror of the persisted collapsed list, loaded once and kept in step
+ *  by the setter below, so a card never parses MMKV itself. */
+let _collapsedSet: Set<string> | null = null;
+function collapsedSet(): Set<string> {
+  if (!_collapsedSet) _collapsedSet = new Set(loadFromMmkv(COLLAPSED_KEY));
+  return _collapsedSet;
+}
+
+let _noteStateVersion = 0;
+const _noteStateListeners = new Set<() => void>();
+
+export interface NoteCollapsedState {
+  isCollapsed: boolean;
+  isCollapsedThisSession: boolean;
+  isSoftDismissed: boolean;
+  canUndoDismiss: boolean;
+}
+
+/** Snapshots must be referentially stable between notifications, or React
+ *  re-renders forever. Cached per note id against the store version. */
+const _noteSnapshots = new Map<string, { version: number; state: NoteCollapsedState }>();
+const MAX_NOTE_SNAPSHOTS = 4000;
+
+function notifyNoteState(): void {
+  _noteStateVersion++;
+  for (const listener of _noteStateListeners) listener();
+}
+
+/**
+ * Nudge subscribers once the undo window closes. The affordance is time-based,
+ * so nothing in the store changes when it expires — it has to announce itself
+ * now that cards re-render on their own state alone.
+ */
+let _undoExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleUndoExpiry(): void {
+  if (_undoExpiryTimer) clearTimeout(_undoExpiryTimer);
+  _undoExpiryTimer = setTimeout(() => {
+    _undoExpiryTimer = undefined;
+    notifyNoteState();
+  }, UNDO_WINDOW_MS + 100);
+}
+
+function getNoteSnapshot(noteId: string): NoteCollapsedState {
+  const cached = _noteSnapshots.get(noteId);
+  if (cached && cached.version === _noteStateVersion) return cached.state;
+  const dismissedAt = _dismissedUndoMap.get(noteId);
+  const state: NoteCollapsedState = {
+    isCollapsed: collapsedSet().has(noteId),
+    isCollapsedThisSession: _sessionCollapsedIds.has(noteId),
+    isSoftDismissed: _softDismissedSet.has(noteId),
+    canUndoDismiss: dismissedAt !== undefined && Date.now() - dismissedAt <= UNDO_WINDOW_MS,
+  };
+  // Cards unmount but their snapshots don't; drop the lot rather than track
+  // liveness — rebuilding one is a handful of Set lookups.
+  if (_noteSnapshots.size >= MAX_NOTE_SNAPSHOTS) _noteSnapshots.clear();
+  _noteSnapshots.set(noteId, { version: _noteStateVersion, state });
+  return state;
+}
+
+/**
+ * Subscribe a single card to its own collapsed/dismissed state.
+ *
+ * Use this in anything rendered once per note. `useCollapsedNotes()` remains
+ * the right call for screen-level consumers that need the lists and counts.
+ */
+export function useNoteCollapsedState(noteId: string): NoteCollapsedState {
+  const subscribe = useCallback((onChange: () => void) => {
+    _noteStateListeners.add(onChange);
+    return () => { _noteStateListeners.delete(onChange); };
+  }, []);
+  const getSnapshot = useCallback(() => getNoteSnapshot(noteId), [noteId]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
 export function clearCollapsedNotesModuleState(): void {
   _softDismissedSet = new Set();
   _dismissedUndoMap.clear();
   _sessionCollapsedIds = new Set();
   _sessionCollapsedCounter = 0;
+  _collapsedSet = new Set();
+  _noteSnapshots.clear();
+  notifyNoteState();
+}
+
+export interface CollapsedNotesActions {
+  toggleCollapsed: (noteId: string) => void;
+  collapse: (noteId: string) => void;
+  expand: (noteId: string) => void;
+  dismiss: (noteId: string) => void;
+  undoDismiss: (noteId: string) => void;
+  dismissMultiple: (noteIds: string[]) => void;
+  dismissThreadRoots: (rootIds: string[]) => void;
+}
+
+// The live implementations, republished by every mounted `useCollapsedNotes()`
+// on each render. Cards call through this so they get the verbs with a STABLE
+// identity, without subscribing to the lists — see `useCollapsedNotesActions`.
+// All mutation lands in module state + MMKV, so which instance publishes them
+// makes no difference.
+let _liveActions: CollapsedNotesActions | null = null;
+
+const _stableActions: CollapsedNotesActions = {
+  toggleCollapsed: (noteId) => _liveActions?.toggleCollapsed(noteId),
+  collapse: (noteId) => _liveActions?.collapse(noteId),
+  expand: (noteId) => _liveActions?.expand(noteId),
+  dismiss: (noteId) => _liveActions?.dismiss(noteId),
+  undoDismiss: (noteId) => _liveActions?.undoDismiss(noteId),
+  dismissMultiple: (noteIds) => _liveActions?.dismissMultiple(noteIds),
+  dismissThreadRoots: (rootIds) => _liveActions?.dismissThreadRoots(rootIds),
+};
+
+/**
+ * Actions only, with an identity that never changes.
+ *
+ * Requires a `useCollapsedNotes()` somewhere up the tree — every screen that
+ * renders cards has one. Pair with `useNoteCollapsedState`.
+ */
+export function useCollapsedNotesActions(): CollapsedNotesActions {
+  return _stableActions;
 }
 
 export function useCollapsedNotes() {
@@ -73,6 +202,9 @@ export function useCollapsedNotes() {
     setCollapsedIdsState(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
       saveToMmkv(COLLAPSED_KEY, next);
+      // Keep the module mirror in step so per-note subscribers see it.
+      _collapsedSet = new Set(next);
+      notifyNoteState();
       return next;
     });
   }, []);
@@ -182,6 +314,7 @@ export function useCollapsedNotes() {
       notifyListeners();
     }
     _dismissedUndoMap.set(noteId, Date.now());
+    scheduleUndoExpiry();
     if (_dismissedUndoMap.size > MAX_UNDO_MAP) {
       const now = Date.now();
       for (const [id, ts] of _dismissedUndoMap) {
@@ -289,6 +422,13 @@ export function useCollapsedNotes() {
       notifyListeners();
     }
   }, [setDismissedIds]);
+
+  // Republish this instance's callbacks for `useCollapsedNotesActions`. Plain
+  // assignment during render is safe here: it's idempotent, and every instance
+  // drives the same module-level state.
+  _liveActions = {
+    toggleCollapsed, collapse, expand, dismiss, undoDismiss, dismissMultiple, dismissThreadRoots,
+  };
 
   return {
     isCollapsed,

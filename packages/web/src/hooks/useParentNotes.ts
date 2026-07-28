@@ -5,8 +5,25 @@ import { type NostrEvent } from '@nostrify/nostrify';
 import { fetchEventWithOutbox } from '@/lib/fetchEvent';
 import { MissCache } from '@core/missCache';
 
-// Shared cache for parent notes (persists across hook instances)
+// Shared cache for parent notes (persists across hook instances).
+//
+// BOUNDED. It was a plain unbounded Map: every reply the user ever scrolled
+// past added a full event object (content, tags, sig) and nothing ever removed
+// one, so a long autofetch session — the normal way this app is used — grew it
+// until the tab was reloaded. `parentMisses` next to it is already bounded for
+// exactly this reason; the hit cache needs the same treatment, and more so,
+// because it stores whole events rather than counters.
+const MAX_PARENT_NOTE_CACHE = 1500;
 const parentNoteCache = new Map<string, NostrEvent>();
+
+/** LRU insert: re-inserting moves a key to the end of Map iteration order. */
+function cacheParentNote(id: string, event: NostrEvent): void {
+  parentNoteCache.delete(id);
+  while (parentNoteCache.size >= MAX_PARENT_NOTE_CACHE) {
+    parentNoteCache.delete(parentNoteCache.keys().next().value!);
+  }
+  parentNoteCache.set(id, event);
+}
 
 /**
  * Negative cache for IDs the fast batch pass didn't find.
@@ -87,7 +104,7 @@ export function useParentNote(eventId: string | undefined) {
       if (parentNoteCache.has(eventId)) return parentNoteCache.get(eventId)!;
 
       const result = await fetchEventWithOutbox(eventId, nostr);
-      if (result) parentNoteCache.set(eventId, result);
+      if (result) cacheParentNote(eventId, result);
       return result;
     },
     staleTime: 5 * 60 * 1000,
@@ -161,7 +178,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
             );
           });
           for (const event of events) {
-            parentNoteCache.set(event.id, event);
+            cacheParentNote(event.id, event);
           }
         } catch {
           // Pool query failed — all IDs become candidates for second pass
@@ -226,7 +243,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
 
       for (let i = 0; i < missing.length; i++) {
         if (results[i]) {
-          parentNoteCache.set(missing[i].eventId, results[i]!);
+          cacheParentNote(missing[i].eventId, results[i]!);
           parentMisses.recordHit(missing[i].eventId);
           found++;
         } else {

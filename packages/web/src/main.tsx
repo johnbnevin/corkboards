@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 // Import polyfills first
 import './lib/polyfills.ts';
 
-import { isTauri, tauriLog, clearTauriLog } from '@/lib/tauri';
+import { isTauri, tauriLog, clearTauriLog, initTauriLogging } from '@/lib/tauri';
 import { prepareLoginStorage } from '@/lib/webKeyStore';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { setImageProxyTemplate } from '@core/imageProxy';
@@ -54,7 +54,13 @@ try {
 // diagnose production issues without a devtools window.
 if (isTauri && !('__tauriConsoleOverride' in window)) {
   (window as unknown as Record<string, unknown>).__tauriConsoleOverride = true;
-  clearTauriLog();
+  // Ask Rust whether the user turned file logging on before forwarding
+  // anything. The console override is installed either way (it is harmless
+  // when logging is off — tauriLog drops the line), but nothing reaches disk
+  // until the answer comes back, and the answer defaults to "off".
+  void initTauriLogging().then((enabled) => {
+    if (enabled) clearTauriLog();
+  });
 
   // Defense-in-depth: tauriLog persists to a plaintext file on disk, so scrub
   // any secret that a stray log statement might carry before it lands there.

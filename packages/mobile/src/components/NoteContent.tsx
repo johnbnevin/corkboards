@@ -9,7 +9,7 @@ import {
   View,
   StyleSheet,
   TouchableOpacity,
-  Dimensions,
+  useWindowDimensions,
 } from 'react-native';
 import { nip19 } from 'nostr-tools';
 import { stripTrackingParams, getTrackingParams, canonicalMediaUrl } from '@core/sanitizeUtils';
@@ -31,9 +31,25 @@ import { openExternal } from '../lib/openExternal';
 import { contentHasAssumedMarkdown } from '@core/markdownDetect';
 import { InlineMarkdown } from './MarkdownText';
 import { useLocalStorage } from '../hooks/useLocalStorage';
+import { STORAGE_KEYS } from '../lib/storageKeys';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const MEDIA_WIDTH = SCREEN_WIDTH - 56; // card padding
+/**
+ * Media width, read per render rather than captured once at module scope.
+ *
+ * `Dimensions.get('window')` at import time freezes whatever the window was on
+ * the very first evaluation and never updates. Rotate the device, unfold a
+ * foldable, resize a tablet split-view or open the app in a Stage Manager
+ * window and every image kept the old width — clipped on the way down, letter-
+ * boxed on the way up. `useWindowDimensions` subscribes to the change event, so
+ * the layout follows the window.
+ */
+const MEDIA_HORIZONTAL_PADDING = 56; // card padding
+const MEDIA_ASPECT = 0.56;
+
+function useMediaWidth(): number {
+  const { width } = useWindowDimensions();
+  return width - MEDIA_HORIZONTAL_PADDING;
+}
 
 // ============================================================================
 // Patterns
@@ -48,6 +64,12 @@ const MEDIA_WIDTH = SCREEN_WIDTH - 56; // card padding
 // identifier, and the over-long token then fails to decode — the mention
 // renders as inert junk instead of the author's name. Same fix as web's
 // NoteContent, which now sources the pattern from @core/nostr.
+// NOT swapped for `NIP19_IDENTIFIER_PATTERN` from @core/nostr, deliberately:
+// the core pattern exposes FOUR capture groups (prefixed prefix/data, bare
+// prefix/data) and this one exposes a single group, and both are spliced into
+// the combined alternation below where the hashtag capture is read by index.
+// Substituting it would silently shift those indices and break hashtag parsing.
+// Matching semantics are identical; only the group shape differs.
 const NOSTR_URI = /(?<![\w/:])(?:nostr:)?(npub1|note1|nprofile1|nevent1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+/gi;
 const HASHTAG = /(?<!\w)#(\w{1,64})(?!\w)/g;
 const URL_PATTERN = /https?:\/\/[^\s<>)\]]+/gi;
@@ -145,12 +167,13 @@ function InlineImage({ url, sha256, fallbacks }: { url: string; sha256?: string;
     setSrcIndex(0);
   }
   const currentUrl = sources[srcIndex] ?? sources[0] ?? url;
+  const mediaWidth = useMediaWidth();
   return (
     <TouchableOpacity activeOpacity={0.9} onPress={() => openExternal(currentUrl)}>
       <SizeGuardedImage
         key={currentUrl}
         uri={currentUrl}
-        style={styles.mediaImage}
+        style={[styles.mediaImage, { width: mediaWidth, height: mediaWidth * MEDIA_ASPECT }]}
         type="image"
         resizeMode="cover"
         onError={() => {
@@ -165,8 +188,9 @@ function InlineImage({ url, sha256, fallbacks }: { url: string; sha256?: string;
 
 function InlineVideo({ url }: { url: string }) {
   // RN doesn't have a built-in video player; show a thumbnail link
+  const mediaWidth = useMediaWidth();
   return (
-    <TouchableOpacity style={styles.videoPlaceholder} onPress={() => openExternal(url)}>
+    <TouchableOpacity style={[styles.videoPlaceholder, { width: mediaWidth }]} onPress={() => openExternal(url)}>
       <Text style={styles.videoIcon}>▶</Text>
       <Text style={styles.videoLabel}>Play video</Text>
     </TouchableOpacity>
@@ -591,7 +615,7 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
   // Global "Render markdown" setting (Advanced settings), on by default and
   // shared by key with web ('corkboard:render-markdown'). Text runs that look
   // like markdown get inline emphasis; everything else renders raw.
-  const [renderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true);
+  const [renderMarkdown] = useLocalStorage<boolean>(STORAGE_KEYS.RENDER_MARKDOWN, true);
 
   // NIP-30 custom emoji map: shortcode → image URL
   const emojiMap = useMemo(() => {
@@ -792,9 +816,9 @@ const styles = StyleSheet.create({
   trackerShield: { color: '#f59e0b', fontSize: 12 },
   cleanShield: { color: '#999', fontSize: 12 },
   mediaContainer: { marginTop: 10, borderRadius: 10, overflow: 'hidden' },
-  mediaImage: { width: MEDIA_WIDTH, height: MEDIA_WIDTH * 0.56, borderRadius: 10 },
+  // width/height are supplied per render from useMediaWidth() — see above.
+  mediaImage: { borderRadius: 10 },
   videoPlaceholder: {
-    width: MEDIA_WIDTH,
     height: 80,
     backgroundColor: '#333',
     borderRadius: 10,

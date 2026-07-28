@@ -9,6 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@/hooks/useNostr';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useNostrPublish } from '@/hooks/useNostrPublish';
+import { fetchAuthoritativeEvent } from '@/lib/authoritativeEvent';
 
 export function useMuteList(fetchEnabled = true) {
   const { nostr } = useNostr();
@@ -75,26 +76,34 @@ export function useMuteList(fetchEnabled = true) {
   // undefined/stale after a transient relay miss; publishing off that would
   // republish a truncated list and WIPE the user's real mutes. Mirror the kind-3
   // contact-list safety pattern: confirm the current list before mutating it. (C2)
+  //
+  // `op` mirrors @core/contactList.resolveContactBase: 'add' tolerates a
+  // CONFIRMED-empty base (the user genuinely has no kind-10000 yet — their first
+  // ever mute), 'remove' never does. Returning null unconditionally when no event
+  // existed, as this used to, meant a user with no mute list could never create
+  // one: every `mute()` threw "Could not confirm mute list". The distinction that
+  // makes the tolerant path safe is EOSE — a relay positively saying "I have
+  // nothing" — not merely an empty result, which is also what an outage looks
+  // like. (H3)
   const resolveMuteBase = useCallback(
-    async (): Promise<{ tags: string[][]; content: string } | null> => {
+    async (op: 'add' | 'remove'): Promise<{ tags: string[][]; content: string } | null> => {
       if (!user?.pubkey) return null;
-      let authoritative = muteEvent ?? null;
-      try {
-        const events = await nostr.query(
-          [{ kinds: [10000], authors: [user.pubkey], limit: 1 }],
-          { signal: AbortSignal.timeout(8000) },
-        );
-        const newest = events.length > 0
-          ? events.reduce((best, e) => (e.created_at > best.created_at ? e : best))
-          : null;
-        if (newest && (!authoritative || newest.created_at >= authoritative.created_at)) {
-          authoritative = newest;
-        }
-      } catch {
-        // Network failure — fall back to whatever we have cached below.
+      const result = await fetchAuthoritativeEvent(nostr, user.pubkey, 10000);
+      if (result.status === 'found') {
+        // Prefer whichever of {fresh read, cached query} is newer — a relay that
+        // is behind must not roll the list back.
+        const authoritative = muteEvent && muteEvent.created_at > result.event.created_at
+          ? muteEvent
+          : result.event;
+        return { tags: authoritative.tags, content: authoritative.content };
       }
-      if (!authoritative) return null;
-      return { tags: authoritative.tags, content: authoritative.content };
+      // Relays confirmed nothing, but we may still hold a previously-read event.
+      // That is a real list and safe to build on for either operation.
+      if (muteEvent) return { tags: muteEvent.tags, content: muteEvent.content };
+      if (result.status === 'confirmed-empty' && op === 'add') {
+        return { tags: [], content: '' }; // genuine first mute — relays confirmed no list
+      }
+      return null; // nothing confirmable — caller must abort rather than risk a wipe
     },
     [user?.pubkey, muteEvent, nostr],
   );
@@ -115,7 +124,7 @@ export function useMuteList(fetchEnabled = true) {
 
   const mute = useCallback(
     async (pubkey: string) => {
-      const base = await resolveMuteBase();
+      const base = await resolveMuteBase('add');
       if (!base) {
         // Symmetric with unmute below. `mute` used to fall back to
         // `muteEvent?.tags ?? []` here, which meant an unconfirmable list was
@@ -135,7 +144,7 @@ export function useMuteList(fetchEnabled = true) {
 
   const unmute = useCallback(
     async (pubkey: string) => {
-      const base = await resolveMuteBase();
+      const base = await resolveMuteBase('remove');
       if (!base) {
         // Couldn't confirm the current list — refuse the removal rather than
         // republish an empty list and lose every mute we just failed to fetch.

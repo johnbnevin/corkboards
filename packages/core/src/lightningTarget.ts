@@ -83,14 +83,20 @@ export function invoiceAmountSats(invoice: string): number | null {
  * Sats amount of a NIP-57 zap receipt (kind 9735), or null when it can't be
  * determined.
  *
- * Prefers the millisat `amount` tag, then the amount inside the embedded
- * zap-request (`description`), then the amount encoded in the receipt's own
- * BOLT-11 invoice via the shared parser. This is the single source of truth for
- * every zap total in the app: the ad-hoc regexes it replaces disagreed by up to
- * a factor of 100 million (one dropped the ×1e8 for a whole-BTC invoice, another
- * had the pico multiplier 10× off), and one path floored `NaN` from a malformed
- * `amount` tag straight into a note's zap total. A bad amount yields null here,
- * never NaN.
+ * The BOLT-11 invoice is the ONLY part of a receipt whose amount the payer's
+ * wallet actually settled, so it wins whenever it disagrees with the tags. The
+ * `amount` and `description` tags are free text the zapping server wrote: a
+ * hostile (or broken) one can claim `["amount","100000000000"]` on an invoice
+ * for 21 sats and, without this cross-check, that number goes straight into a
+ * note's displayed zap total. So the order is: invoice amount when the receipt
+ * carries a parseable `bolt11`, otherwise the `amount` tag, otherwise the amount
+ * inside the embedded zap request (`description`).
+ *
+ * This is the single source of truth for every zap total in the app: the ad-hoc
+ * regexes it replaces disagreed by up to a factor of 100 million (one dropped
+ * the ×1e8 for a whole-BTC invoice, another had the pico multiplier 10× off),
+ * and one path floored `NaN` from a malformed `amount` tag straight into a
+ * note's zap total. A bad amount yields null here, never NaN.
  *
  * NOTE: this does not by itself prove the receipt is genuine — full NIP-57
  * Appendix-F validation would also check the receipt is signed by the
@@ -100,6 +106,12 @@ export function invoiceAmountSats(invoice: string): number | null {
  */
 export function getZapReceiptAmountSats(event: NostrEvent): number | null {
   if (event.kind !== 9735) return null;
+
+  // Invoice first: it's the amount that was really payable. An open invoice
+  // (no amount in the HRP) parses to null and falls through to the tags.
+  const bolt11Tag = event.tags.find((t) => t[0] === 'bolt11')?.[1];
+  const invoiceSats = typeof bolt11Tag === 'string' ? invoiceAmountSats(bolt11Tag) : null;
+  if (invoiceSats !== null) return invoiceSats;
 
   const amountTag = event.tags.find((t) => t[0] === 'amount')?.[1];
   if (amountTag) {
@@ -117,12 +129,10 @@ export function getZapReceiptAmountSats(event: NostrEvent): number | null {
         if (Number.isFinite(msats) && msats > 0) return Math.floor(msats / 1000);
       }
     } catch {
-      /* malformed description JSON — fall through to the invoice */
+      /* malformed description JSON — nothing left to fall back to */
     }
   }
 
-  const bolt11 = event.tags.find((t) => t[0] === 'bolt11')?.[1];
-  if (bolt11) return invoiceAmountSats(bolt11);
   return null;
 }
 

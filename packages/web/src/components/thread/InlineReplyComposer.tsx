@@ -13,6 +13,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { CombinedEmojiPicker } from '@/components/compose/CombinedEmojiPicker'
+import { buildHashtagTags } from '@core/hashtagTags'
 import { Loader2, Send, X, ImagePlus, Smile } from 'lucide-react'
 
 interface InlineReplyComposerProps {
@@ -65,8 +66,9 @@ export function InlineReplyComposer({ replyTo, onCancel, onPublished, onOpenEmoj
 
     const replyRelayHint = getRelayCache(replyTo.pubkey)?.[0] || FALLBACK_RELAYS[0] || ''
     const tags: string[][] = [...buildReplyTags(replyTo, replyRelayHint)]
-    const hashtagMatches = finalContent.matchAll(/#([a-zA-Z]\w*)/g)
-    for (const match of hashtagMatches) tags.push(['t', match[1].toLowerCase()])
+    // Hashtags come from the prose only — `finalContent` has image URLs appended,
+    // and a `#fragment` in one is not a topic (see @core/hashtagTags).
+    tags.push(...buildHashtagTags(finalContent))
     for (const tag of customEmojiTags) tags.push(tag)
 
     publish(
@@ -78,9 +80,19 @@ export function InlineReplyComposer({ replyTo, onCancel, onPublished, onOpenEmoj
           setCustomEmojiTags([])
           onPublished(event)
         },
+        // Without this a rejected reply vanished silently: the composer cleared
+        // nothing but gave no sign it hadn't been sent. Never let the user
+        // believe something was published when it wasn't.
+        onError: (err) => {
+          toast({
+            title: 'Failed to post reply',
+            description: err instanceof Error ? err.message : String(err),
+            variant: 'destructive',
+          })
+        },
       }
     )
-  }, [content, images, customEmojiTags, replyTo, publish, onPublished])
+  }, [content, images, customEmojiTags, replyTo, publish, onPublished, toast])
 
   return (
     <div className="border-t bg-background px-4 py-3 space-y-2">

@@ -3,10 +3,8 @@
   "version": "0.8.2",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "//exports": "No barrel entry point on purpose. Every consumer imports a specific module by path (`@core/noteClassifier`, …) via the web/mobile `@core/*` alias, so `src/index.ts` was dead weight AND perpetually stale — it re-exported about two thirds of the modules and nothing noticed, because nothing imported it. A subpath-only `exports` map means a new module is reachable the moment it exists, with no list to forget to update.",
   "exports": {
-    ".": "./src/index.ts",
     "./*": "./src/*"
   },
   "scripts": {

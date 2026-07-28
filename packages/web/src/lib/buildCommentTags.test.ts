@@ -66,13 +66,16 @@ describe('buildCommentTags (NIP-22)', () => {
     ]);
   });
 
-  it('keys an external URL root by scheme, per NIP-73', () => {
+  it('keys an http(s) URL root as "web", per NIP-73', () => {
+    // NIP-73's kind value for a web page is the literal string "web", not the
+    // URL scheme. Emitting 'https' put the comment outside the k-filter every
+    // other client queries for, so it was invisible to them.
     const root = new URL('https://example.com/post');
     expect(buildCommentTags(root)).toEqual([
       ['I', 'https://example.com/post'],
-      ['K', 'https'],
+      ['K', 'web'],
       ['i', 'https://example.com/post'],
-      ['k', 'https'],
+      ['k', 'web'],
     ]);
   });
 

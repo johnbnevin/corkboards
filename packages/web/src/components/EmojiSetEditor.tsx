@@ -17,7 +17,7 @@ import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Card } from '@/components/ui/card'
 import { isValidMediaUrl } from '@/lib/textareaUtils'
-import { CATEGORIES as EMOJI_CATEGORIES } from '@/components/compose/EmojiPicker'
+import { EMOJI_CATEGORIES } from '@core/emojiCategories'
 import {
   Plus,
   Trash2,

@@ -8,6 +8,7 @@
 
 import { type NostrEvent } from '@nostrify/nostrify'
 import { getReactionTargetId } from './threadTree'
+import { HASHTAG_RE } from './hashtagTags'
 
 // Video URL patterns for content-based video detection
 const VIDEO_URL_PATTERNS = [
@@ -206,11 +207,16 @@ export function getNoteCategories(event: NostrEvent, lookup?: Map<string, NostrE
   // NIP-22 comment (kind 1111) is always a reply to something
   if (event.kind === 1111) cats.add('replies');
 
-  // NIP-94 file metadata (kind 1063) — image or video by mime type
+  // NIP-94 file metadata (kind 1063) — image or video by mime type.
+  // The mime prefix must be checked in BOTH directions: "not video/" is not the
+  // same as "image/", and treating it that way filed every audio file, PDF and
+  // zip under `images`, where the card then tries to render it as one.
   if (event.kind === 1063) {
     const mime = event.tags.find(t => t[0] === 'm')?.[1] ?? '';
     if (mime.startsWith('video/')) cats.add('videos');
-    else cats.add('images');
+    else if (mime.startsWith('image/')) cats.add('images');
+    // Anything else (audio/*, application/*, a missing `m` tag) falls through to
+    // the `other` bucket below.
   }
 
   // NIP-88 poll (kind 1068) — grouped with short notes
@@ -398,6 +404,10 @@ export function noteMatchesKindFilters(
 const hashtagCache = new WeakMap<NostrEvent, Set<string>>();
 const repostHashtagCache = new WeakMap<NostrEvent, Set<string>>();
 
+// Inline `#hashtag` matching lives in ./hashtagTags so the composers write
+// exactly what these readers parse — the two used to keep private copies with a
+// "keep in sync" comment, which is how they got out of sync.
+
 /** Extract hashtags from a note's tags and content. */
 export function getNoteHashtags(note: NostrEvent): Set<string> {
   const cached = hashtagCache.get(note);
@@ -407,7 +417,7 @@ export function getNoteHashtags(note: NostrEvent): Set<string> {
   for (const t of note.tags) {
     if (t[0] === 't' && t[1]) tags.add(t[1].toLowerCase());
   }
-  for (const match of note.content.matchAll(/#([a-zA-Z]\w*)/g)) {
+  for (const match of note.content.matchAll(HASHTAG_RE)) {
     tags.add(match[1].toLowerCase());
   }
   hashtagCache.set(note, tags);
@@ -430,7 +440,7 @@ export function getRepostHashtags(note: NostrEvent): Set<string> {
       }
     }
     if (typeof embedded.content === 'string') {
-      for (const match of embedded.content.matchAll(/#([a-zA-Z]\w*)/g)) {
+      for (const match of embedded.content.matchAll(HASHTAG_RE)) {
         tags.add(match[1].toLowerCase());
       }
     }
@@ -499,7 +509,7 @@ export function hashtagFeedVerdict(note: NostrEvent, hashtag: string): HashtagFe
       if (typeof embedded?.content === 'string') content = embedded.content;
     } catch { /* fall back to raw content */ }
   }
-  for (const match of content.matchAll(/#([a-zA-Z]\w*)/g)) {
+  for (const match of content.matchAll(HASHTAG_RE)) {
     if (match[1].toLowerCase() === norm) return 'match';
   }
 

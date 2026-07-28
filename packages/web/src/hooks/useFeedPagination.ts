@@ -656,16 +656,28 @@ export function useFeedPagination({
         // Fresh (uncached) instance — we close it below, and closing a shared
         // cached relay would poison it for every other caller.
         const relay = createRelayFresh(activeTab, { backoff: false });
+        // A bare req() with no signal never ends on its own. A relay that
+        // accepts the subscription and then goes quiet — no EOSE, no CLOSED,
+        // which is the ordinary behaviour of an overloaded or half-open
+        // connection — leaves this for-await suspended indefinitely, holding a
+        // socket AND a global query-governor slot, while "Load newer" spins with
+        // no error to show. Bound it the way useRelayFeed.ts does: an abort
+        // signal, plus a close() timer as the backstop for a relay that ignores
+        // the CLOSE. (L11)
+        const closeTimer = setTimeout(() => { try { relay.close(); } catch { /* */ } }, 15000);
         try {
           for await (const msg of relay.req([{
             kinds: [1, 30023],
             since: sinceTs + 1,
             limit,
-          }])) {
+          }], { signal: AbortSignal.timeout(15000) })) {
             if (msg[0] === 'EVENT') newEvents.push(msg[2] as NostrEvent);
             else if (msg[0] === 'EOSE') break;
           }
+        } catch (err) {
+          debugWarn('[loadNewer] relay subscription failed/timed out:', err);
         } finally {
+          clearTimeout(closeTimer);
           relay.close();
         }
 

@@ -349,7 +349,7 @@ export function DiscoverScreen() {
       <NoteCard
         event={item}
         isBookmarked={isBookmarked(item.id)}
-        onToggleBookmark={() => toggleBookmark(item.id)}
+        onToggleBookmark={toggleBookmark}
         pinnedSet={pinnedSet}
         onTogglePin={togglePin}
       />

@@ -109,7 +109,9 @@ export function buildInvoiceUrl(
     url += `&comment=${encodeURIComponent(comment.slice(0, info.commentAllowed))}`;
   }
   for (const [key, value] of Object.entries(opts?.extraParams ?? {})) {
-    url += `&${key}=${encodeURIComponent(value)}`;
+    // Encode the KEY too — an unencoded `&`/`=` in it would split into extra
+    // parameters and could override `amount` further along the query string.
+    url += `&${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
   }
   return url;
 }

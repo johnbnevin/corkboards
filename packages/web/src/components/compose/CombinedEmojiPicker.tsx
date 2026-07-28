@@ -7,10 +7,47 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useCustomEmojiSets } from '@/hooks/useCustomEmojiSets';
 import { isValidMediaUrl } from '@/lib/textareaUtils';
+import { optimizeMediaUrl } from '@/lib/imageUtils';
 import { trackEmojiUse } from '@/components/EmojiSetEditor';
 import { EMOJI_CATEGORIES } from '@core/emojiCategories';
-import { CORKBOARDS_DEFAULT_EMOJIS } from '@core/defaultEmojiSet';
+import { CORKBOARDS_DEFAULT_EMOJIS, defaultEmojiChar } from '@core/defaultEmojiSet';
 import { Settings } from 'lucide-react';
+
+/** Sizing heuristic — animated formats get a bigger cell so they stay legible. */
+function emojiImgSize(url: string): string {
+  const isAnimated = url.endsWith('.gif') || url.includes('.gif?') || url.endsWith('.webp') || url.includes('.webp?');
+  return isAnimated ? 'h-12 w-12' : 'h-8 w-8';
+}
+
+/**
+ * One emoji-set thumbnail. Set images are URLs authored by whoever published the
+ * NIP-30 set — the same attacker-controlled media as anything in a note — so they
+ * go through the SSRF/proxy gate rather than straight into `<img src>`. A
+ * rejected host degrades to the shortcode instead of firing a request.
+ */
+function EmojiThumb({ url, shortcode }: { url: string; shortcode: string }) {
+  // Most of the built-in set is ordinary Unicode that merely happens to be
+  // DISTRIBUTED as PNGs from one CDN. Drawing the character costs no request,
+  // works offline, and keeps ~54 image fetches per picker open from announcing
+  // to a third-party host that this user opened the emoji picker.
+  const nativeChar = defaultEmojiChar(shortcode);
+  if (nativeChar) {
+    return <span className="text-lg leading-none" role="img" aria-label={`:${shortcode}:`}>{nativeChar}</span>;
+  }
+  const safeUrl = optimizeMediaUrl(url);
+  if (!safeUrl) {
+    return <span className="text-[9px] text-muted-foreground truncate px-0.5">:{shortcode}:</span>;
+  }
+  return (
+    <img
+      src={safeUrl}
+      alt={`:${shortcode}:`}
+      className={`${emojiImgSize(url)} object-contain`}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+    />
+  );
+}
 
 interface CombinedEmojiPickerProps {
   /** Standard emoji selected (unicode string) */
@@ -146,12 +183,6 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
     return { standardMatches, customMatches };
   }, [search, sets]);
 
-  // Determine what to display
-  const getImgSize = (url: string) => {
-    const isAnimated = url.endsWith('.gif') || url.includes('.gif?') || url.endsWith('.webp') || url.includes('.webp?');
-    return isAnimated ? 'h-12 w-12' : 'h-8 w-8';
-  };
-
   if (isLoading) {
     return (
       <div className="p-4 space-y-2">
@@ -262,12 +293,7 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
                       className="flex items-center justify-center rounded hover:bg-muted transition-colors p-1"
                       title={`:${emoji.shortcode}:`}
                     >
-                      <img
-                        src={emoji.url}
-                        alt={`:${emoji.shortcode}:`}
-                        className={`${getImgSize(emoji.url)} object-contain`}
-                        loading="lazy"
-                      />
+                      <EmojiThumb url={emoji.url} shortcode={emoji.shortcode} />
                     </button>
                   ))}
                 </div>
@@ -287,12 +313,7 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
                 className="flex items-center justify-center rounded hover:bg-muted transition-colors p-1"
                 title={`:${emoji.shortcode}:`}
               >
-                <img
-                  src={emoji.url}
-                  alt={`:${emoji.shortcode}:`}
-                  className={`${getImgSize(emoji.url)} object-contain`}
-                  loading="lazy"
-                />
+                <EmojiThumb url={emoji.url} shortcode={emoji.shortcode} />
               </button>
             ))}
           </div>
@@ -306,12 +327,7 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
                 className="flex items-center justify-center rounded hover:bg-muted transition-colors p-1"
                 title={`:${emoji.shortcode}:`}
               >
-                <img
-                  src={emoji.url}
-                  alt={`:${emoji.shortcode}:`}
-                  className={`${getImgSize(emoji.url)} object-contain`}
-                  loading="lazy"
-                />
+                <EmojiThumb url={emoji.url} shortcode={emoji.shortcode} />
               </button>
             ))}
           </div>

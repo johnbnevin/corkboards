@@ -10,7 +10,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { useImageSizeLimit } from '@/hooks/useImageSizeLimit';
 import { supportsCorsHead, learnCorsHost } from '@/lib/mediaUtils';
-import { applyImageProxy } from '@core/imageProxy';
 import { ImageOff } from 'lucide-react';
 
 // ─── HEAD-based size cache ──────────────────────────────────────────────────
@@ -43,6 +42,14 @@ async function checkImageSize(url: string): Promise<SizeCheckResult> {
   if (pendingChecks.has(url)) return pendingChecks.get(url)!;
 
   const host = getHost(url);
+
+  // A host that already failed a CORS HEAD will fail again — don't flood it.
+  if (host && corsBlockedHosts.has(host)) {
+    const result: SizeCheckResult = { size: null, isVideo: false };
+    sizeCache.set(url, result);
+    return result;
+  }
+
   const promise = (async () => {
     try {
       const res = await fetch(url, {
@@ -103,10 +110,10 @@ interface SizeGuardedImageProps extends React.ImgHTMLAttributes<HTMLImageElement
   compact?: boolean;
 }
 
-export function SizeGuardedImage({ src: rawSrc, compact = false, className, alt, ...imgProps }: SizeGuardedImageProps) {
-  // Apply the user's image proxy here so HEAD probe + final render both hit
-  // the proxied URL. Non-http(s) URLs (data:, blob:) pass through unchanged.
-  const src = applyImageProxy(rawSrc);
+// Callers pass an already-proxied URL (see optimizeMediaUrl / applyImageProxy at
+// the call sites) — proxying again here would double-wrap the URL, so this
+// component uses `src` exactly as given for both the HEAD probe and the render.
+export function SizeGuardedImage({ src, compact = false, className, alt, ...imgProps }: SizeGuardedImageProps) {
   const limitBytes = useImageSizeLimit();
   const [status, setStatus] = useState<'checking' | 'allowed' | 'blocked' | 'unknown' | 'override'>('checking');
   const [fileSize, setFileSize] = useState<number | null>(null);
@@ -138,11 +145,15 @@ export function SizeGuardedImage({ src: rawSrc, compact = false, className, alt,
     }
 
     setStatus('checking');
+    // Guard against a stale HEAD resolving after `src` changed — without this a
+    // slow probe for the previous URL could block/allow the current image.
+    let cancelled = false;
     checkImageSize(src).then(result => {
-      if (!mountedRef.current) return;
+      if (cancelled || !mountedRef.current) return;
       setFileSize(result.size === SIZE_UNKNOWN ? null : result.size);
       setStatus(resolve(result));
     });
+    return () => { cancelled = true; };
   }, [src, limitBytes]);
 
   if (status === 'checking') {

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { visibleLength } from '@core/textTruncation';
 import { hasHtmlContent, sanitizeHtml } from '@/lib/sanitize';
+import { verifyEmbeddedEvent } from '@/lib/embeddedEvent';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { contentHasAssumedMarkdown } from '@core/markdownDetect';
 import { NoteContent } from './NoteContent';
@@ -24,32 +25,6 @@ interface SmartNoteContentProps {
   forceExpand?: boolean;
   /** Internal: tracks recursive embed depth to prevent stack overflow */
   _embedDepth?: number;
-}
-
-/**
- * Try to parse JSON content that looks like an embedded Nostr event.
- * Some clients embed quoted posts as JSON in the content field.
- */
-function tryParseEmbeddedEvent(content: string): NostrEvent | null {
-  if (!content.startsWith('{')) return null;
-  try {
-    const parsed = JSON.parse(content);
-    // Validate all required Nostr event fields
-    if (
-      typeof parsed.id === 'string' && parsed.id.length === 64 &&
-      typeof parsed.pubkey === 'string' && parsed.pubkey.length === 64 &&
-      typeof parsed.content === 'string' &&
-      typeof parsed.created_at === 'number' &&
-      typeof parsed.kind === 'number' &&
-      Array.isArray(parsed.tags) &&
-      typeof parsed.sig === 'string'
-    ) {
-      return parsed as NostrEvent;
-    }
-  } catch {
-    // Not valid JSON
-  }
-  return null;
 }
 
 /**
@@ -145,8 +120,12 @@ export function SmartNoteContent({ event, className, inModalContext = false, onV
   // ^ only trigger spoiler if well past threshold (avoid collapsing for just a few extra chars)
   // but when we do spoiler, truncate at the original threshold height
 
-  // Check for JSON-embedded Nostr event (some clients embed quotes this way)
-  const embeddedEvent = _embedDepth < MAX_EMBED_DEPTH ? tryParseEmbeddedEvent(text) : null;
+  // Check for JSON-embedded Nostr event (some clients embed quotes this way).
+  // Shape-checking the JSON is not enough: the embedded blob is attacker-supplied,
+  // so rendering it under the pubkey it claims lets a hostile relay put words in
+  // anyone's mouth. verifyEmbeddedEvent recomputes the id and checks the Schnorr
+  // signature, and returns null for anything forged — same gate NoteCard uses.
+  const embeddedEvent = _embedDepth < MAX_EMBED_DEPTH ? verifyEmbeddedEvent(text) : null;
   if (embeddedEvent) {
     // Recursively render the embedded event's content
     return (

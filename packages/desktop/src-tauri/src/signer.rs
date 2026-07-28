@@ -57,9 +57,13 @@ pub fn sign_event(pubkey: String, unsigned: Value) -> Result<Value, String> {
                 let s = x.as_str().ok_or("tag element is not a string")?;
                 parts.push(s.to_string());
             }
-            if !parts.is_empty() {
-                tags.push(Tag::parse(parts).map_err(|e| format!("bad tag: {e}"))?);
+            // An empty tag array gets the same treatment as a non-string element:
+            // silently dropping it would sign an event that differs from what the
+            // caller sent.
+            if parts.is_empty() {
+                return Err("empty tag array".to_string());
             }
+            tags.push(Tag::parse(parts).map_err(|e| format!("bad tag: {e}"))?);
         }
     }
 

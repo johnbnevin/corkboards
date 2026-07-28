@@ -18,8 +18,11 @@ import {
   Platform,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { nip19 } from 'nostr-tools';
-import { privateKeyFromSeedWords, validateWords, generateSeedWords } from 'nostr-tools/nip06';
+import { nip19, generateSecretKey } from 'nostr-tools';
+// Import-only: NIP-06 is `unrecommended` upstream, so we no longer GENERATE
+// seed phrases — but people who made an account when we did (or in another
+// client) must always be able to get back in.
+import { privateKeyFromSeedWords, validateWords } from 'nostr-tools/nip06';
 import { useAuth } from '../lib/AuthContext';
 import { useNostr } from '../lib/NostrProvider';
 import { useSignerConnect } from '../hooks/useSignerConnect';
@@ -41,12 +44,9 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
   // Create new account state
   const [displayName, setDisplayName] = useState('');
   const [newNsec, setNewNsec] = useState('');
-  const [newMnemonic, setNewMnemonic] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [copied, setCopied] = useState(false);
   const [publishing, setPublishing] = useState(false);
-  const [showMnemonicBackup, setShowMnemonicBackup] = useState(false);
-  const [mnemonicCopied, setMnemonicCopied] = useState(false);
 
   // Nsec login state
   const [nsecInput, setNsecInput] = useState('');
@@ -63,11 +63,8 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
     setView('main');
     setDisplayName('');
     setNewNsec('');
-    setNewMnemonic('');
     setShowKey(false);
     setCopied(false);
-    setShowMnemonicBackup(false);
-    setMnemonicCopied(false);
     setNsecInput('');
     setNsecError(null);
     setSeedPhrase('');
@@ -87,24 +84,27 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
       Alert.alert('Name required', 'Enter a display name to continue');
       return;
     }
-    const words = generateSeedWords();
-    const sk = privateKeyFromSeedWords(words);
-    setNewMnemonic(words);
+    // A single nsec, not a NIP-06 seed phrase — matches web's WelcomePage and
+    // mobile's own SignupFlow (which already did this). The NIPs repo marks
+    // NIP-06 `unrecommended` ("prefer a single nsec"): with no derivation path
+    // to walk, the words were only a second encoding of the same key, so they
+    // doubled the number of secrets to store and leak for no gain. Logging in
+    // WITH a seed phrase still works below — this only stops minting new ones.
+    const sk = generateSecretKey();
     setNewNsec(nip19.nsecEncode(sk));
     setView('create-backup');
   };
 
+  // NOTE: no OS "sensitive" flag is available here — expo-clipboard's only
+  // `setStringAsync` option is `inputFormat`, so Android's
+  // ClipDescription.EXTRA_IS_SENSITIVE (which suppresses the clipboard preview
+  // toast on API 33+) would need a native module. The auto-clear below is the
+  // mitigation we can actually apply.
   const handleCopyNsec = async () => {
     await Clipboard.setStringAsync(newNsec);
     setCopied(true);
     setTimeout(() => setCopied(false), 3000);
     setTimeout(() => { Clipboard.setStringAsync('').catch(() => {}); }, 15000);
-  };
-
-  const handleCopyMnemonic = async () => {
-    await Clipboard.setStringAsync(newMnemonic);
-    setMnemonicCopied(true);
-    setTimeout(() => setMnemonicCopied(false), 3000);
   };
 
   const handleCreateComplete = async () => {
@@ -264,35 +264,6 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
             <TouchableOpacity style={styles.copyBtn} onPress={handleCopyNsec}>
               <Text style={styles.copyText}>{copied ? '✓ Copied' : 'Copy nsec'}</Text>
             </TouchableOpacity>
-
-            {/* 12-word mnemonic */}
-            <TouchableOpacity
-              style={styles.optionBtn}
-              onPress={() => setShowMnemonicBackup(!showMnemonicBackup)}
-            >
-              <Text style={styles.optionText}>
-                {showMnemonicBackup ? 'Hide 12 words' : 'Write down 12 words'}
-              </Text>
-            </TouchableOpacity>
-
-            {showMnemonicBackup && newMnemonic && (
-              <View style={styles.mnemonicBox}>
-                <Text style={styles.hint}>
-                  These 12 words are another form of the same password. Write them down to log in later.
-                </Text>
-                <View style={styles.mnemonicGrid}>
-                  {newMnemonic.split(' ').map((word, i) => (
-                    <View key={`${word}-${i}`} style={styles.mnemonicWord}>
-                      <Text style={styles.mnemonicIndex}>{i + 1}.</Text>
-                      <Text style={styles.mnemonicText}>{word}</Text>
-                    </View>
-                  ))}
-                </View>
-                <TouchableOpacity style={styles.copyBtn} onPress={handleCopyMnemonic}>
-                  <Text style={styles.copyText}>{mnemonicCopied ? '✓ Copied' : 'Copy words'}</Text>
-                </TouchableOpacity>
-              </View>
-            )}
 
             {/* Warning */}
             <View style={styles.warningBox}>

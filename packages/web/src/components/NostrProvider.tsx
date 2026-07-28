@@ -89,8 +89,57 @@ async function waitForRateLimit(url: string): Promise<void> {
 // directly were creating fresh NRelay1 + WebSocket per call.
 // ============================================================================
 
-/** Cached relay instances by URL — reused across all createRelay() calls */
+/**
+ * Cached relay instances, keyed by URL **plus a signature of the constructor
+ * options**.
+ *
+ * The options must be part of the key. `createRelayDirect(url, { backoff:
+ * false, idleTimeout: false })` is used by the NIP-46 login flows
+ * (nostrconnect/Amber), which need a socket that stays open indefinitely
+ * waiting for the signer. Keyed on URL alone, that never-idling instance was
+ * stored under the bare relay URL — so every later `createRelay(url)` for a
+ * FALLBACK_RELAY handed back a connection configured for a completely different
+ * purpose, which then never idled out for the rest of the session. Conversely a
+ * short-lived default instance could be handed to a login flow that needed it
+ * to persist. Same URL, different contracts: different cache entries.
+ *
+ * Backoff/scoring stay keyed on the bare URL — those are properties of the
+ * relay, not of how we opened it.
+ */
 const _relayCache = new Map<string, { relay: NRelay1; createdAt: number }>();
+
+/**
+ * Cache key for a relay instance. Options are serialized in a stable order so
+ * `{backoff:false, idleTimeout:false}` and `{idleTimeout:false, backoff:false}`
+ * share one entry. `auth` is a function (identity varies per call) so it is
+ * deliberately excluded — RateLimitedRelay injects the same shared handler.
+ */
+function relayCacheKey(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): string {
+  const base = url.replace(/\/+$/, '');
+  if (!opts) return base;
+  const entries = Object.entries(opts as Record<string, unknown>)
+    .filter(([k, v]) => k !== 'auth' && typeof v !== 'function')
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${k}=${String(v)}`);
+  return entries.length > 0 ? `${base}#${entries.join(',')}` : base;
+}
+
+/**
+ * Replace a cache entry, CLOSING whatever it displaces.
+ *
+ * Overwriting a `Map` entry drops the reference to the old NRelay1 but does not
+ * close its WebSocket — the socket (and its buffers, and its reconnect timer)
+ * survives with nothing left to close it. On a long session, every TTL
+ * expiry for every relay leaked one. Closing before we forget is the only place
+ * that can still be done.
+ */
+function setCachedRelay(key: string, relay: NRelay1): void {
+  const previous = _relayCache.get(key);
+  if (previous && previous.relay !== relay) {
+    previous.relay.close().catch(() => {});
+  }
+  _relayCache.set(key, { relay, createdAt: Date.now() });
+}
 
 /** Failure backoff: URL → { failCount, blockedUntil } */
 const _relayBackoff = new Map<string, { failCount: number; blockedUntil: number }>();
@@ -131,11 +180,14 @@ function recordRelayFailure(url: string): void {
   const failCount = (existing?.failCount ?? 0) + 1;
   const backoffMs = getBackoffMs(failCount);
   _relayBackoff.set(key, { failCount, blockedUntil: Date.now() + backoffMs });
-  // Evict the cached relay so the next caller after backoff gets a fresh connection
-  const staleEntry = _relayCache.get(key);
-  if (staleEntry) {
-    staleEntry.relay.close().catch(() => {});
-    _relayCache.delete(key);
+  // Evict every cached instance for this relay so the next caller after backoff
+  // gets a fresh connection. There can be more than one entry per URL now (the
+  // cache keys on constructor options too — see relayCacheKey), and leaving the
+  // others behind would keep handing out the broken socket.
+  for (const [cacheKey, entry] of _relayCache) {
+    if (cacheKey !== key && !cacheKey.startsWith(`${key}#`)) continue;
+    entry.relay.close().catch(() => {});
+    _relayCache.delete(cacheKey);
   }
 }
 
@@ -167,11 +219,13 @@ function isRelayBlocked(url: string): boolean {
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export function createRelay(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
-  // Normalize URL for cache/backoff lookups (trailing slash differences)
-  const key = url.replace(/\/+$/, '');
+  // Backoff is a property of the RELAY, so it is looked up by bare URL...
+  const backoffKey = url.replace(/\/+$/, '');
+  // ...while the instance cache also keys on how the socket was configured.
+  const key = relayCacheKey(url, opts);
 
   // Check backoff — if relay is blocked, return a dummy that rejects immediately
-  if (isRelayBlocked(key)) {
+  if (isRelayBlocked(backoffKey)) {
     return new BlockedRelay(url) as unknown as NRelay1;
   }
 
@@ -184,16 +238,16 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
   // Evict stale entries periodically
   if (_relayCache.size > 50) {
     const now = Date.now();
-    for (const [key, entry] of _relayCache) {
+    for (const [staleKey, entry] of _relayCache) {
       if (now - entry.createdAt > RELAY_CACHE_TTL_MS) {
         entry.relay.close().catch(() => {});
-        _relayCache.delete(key);
+        _relayCache.delete(staleKey);
       }
     }
   }
 
   const relay = new RateLimitedRelay(url, opts) as unknown as NRelay1;
-  _relayCache.set(key, { relay, createdAt: Date.now() });
+  setCachedRelay(key, relay); // closes the expired instance it replaces
   return relay;
 }
 
@@ -205,11 +259,11 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export function createRelayDirect(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
-  const key = url.replace(/\/+$/, '');
+  const key = relayCacheKey(url, opts);
   const cached = _relayCache.get(key);
   if (cached && Date.now() - cached.createdAt < RELAY_CACHE_TTL_MS) return cached.relay;
   const relay = new RateLimitedRelay(url, opts) as unknown as NRelay1;
-  _relayCache.set(key, { relay, createdAt: Date.now() });
+  setCachedRelay(key, relay); // closes the expired instance it replaces
   return relay;
 }
 
@@ -405,6 +459,11 @@ const MAX_RELAY_CACHE = 5000;
 const BULK_AUTHOR_THRESHOLD = 10; // >= this many authors → bulk tier (no per-author expansion)
 const MAX_FEED_RELAYS = 12;       // bulk feed: bounded outbox coverage (was a flat 2; see selectFeedRelays)
 const MAX_TARGETED_RELAYS = 3;    // cap for targeted queries (threads, profiles)
+// Publishing gets its own, larger budget — see eventRouter. A reply that
+// mentions three people needs the user's own write relays PLUS a couple of
+// inbox relays per mentioned participant, which a flat 3 cannot express.
+const MAX_PUBLISH_RELAYS = 24;    // hard ceiling so a 50-mention note can't fan out unbounded
+const PUBLISH_RELAYS_PER_PARTICIPANT = 2;
 const MAX_REFERENCE_RELAYS = 8;   // cap for author-less reference queries (thread replies, reactions, comments, notifications)
 let relayCache: Map<string, string[]> = new Map();
 
@@ -783,12 +842,36 @@ function createPool(): NPool {
     },
 
     // Publishing: delegate to welshman's PublishEvent scenario.
-    // It returns the union of user's write relays + author's outbox.
+    // It returns the union of the user's write relays + every tagged
+    // participant's inbox (read) relays — which is what makes a mention actually
+    // ARRIVE for the person mentioned, rather than only existing on relays they
+    // never read.
+    //
+    // The limit was a flat MAX_TARGETED_RELAYS (3), shared with the query path.
+    // Three slots cannot hold "my write relays AND your inbox relays": the
+    // user's own 3-4 write relays alone consumed the whole budget, so every
+    // mentioned user's inbox relays were truncated away and the notification
+    // simply never reached them — invisible, because the publish still succeeded
+    // on our own relays. Budget it by what the event actually needs: our write
+    // relays plus a couple per tagged participant, under a hard ceiling so a
+    // note tagging fifty people can't fan out unbounded. (M9b)
     eventRouter(event: NostrEvent) {
+      const participants = new Set(
+        event.tags.filter(t => t[0] === 'p' && typeof t[1] === 'string' && t[1]).map(t => t[1]),
+      );
+      const ownWriteCount = getUserRelays().write.length || FALLBACK_RELAYS.length;
+      const budget = Math.min(
+        MAX_PUBLISH_RELAYS,
+        Math.max(
+          MAX_TARGETED_RELAYS,
+          ownWriteCount + participants.size * PUBLISH_RELAYS_PER_PARTICIPANT,
+        ),
+      );
+
       const scenario = Router.get()
         .PublishEvent(event as unknown as TrustedEvent)
         .policy(addMinimalFallbacks)
-        .limit(MAX_TARGETED_RELAYS);
+        .limit(budget);
       const urls = scenario.getUrls().map(normalizeRelayUrl);
 
       // Author's own cached outbox relays — welshman includes them already,
@@ -994,23 +1077,19 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
           // tokio task (and a fresh TLS handshake) per relay.
           withQueryBudget(() => {
             const relays = relaysFor(filter);
-            return tauriQuery(relays, filter, 5000) as Promise<NostrEvent[]>;
+            // The signal goes INTO tauriQuery rather than racing the promise.
+            // Racing it rejected the whole query on abort, discarding every
+            // event Rust had already returned — and since callers pass
+            // `AbortSignal.timeout(5000)` against this same 5000 ms budget, the
+            // two expired together and the abort usually won. That is what made
+            // "load 25/100 more" do nothing on desktop while working on web.
+            // Aborting now ends the read and keeps the partial page, which is
+            // exactly what NRelay1 does on web and what relay.rs does natively.
+            return tauriQuery(relays, filter, 5000, opts?.signal) as Promise<NostrEvent[]>;
           }),
         ),
       );
-      // Honor the caller's abort signal by racing it — the Rust side has
-      // its own timeout, but callers expect AbortSignal.timeout to throw.
-      const signal = opts?.signal;
-      const results = signal
-        ? await Promise.race([
-            queries,
-            new Promise<never>((_, reject) => {
-              const onAbort = () => reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
-              if (signal.aborted) onAbort();
-              else signal.addEventListener('abort', onAbort, { once: true });
-            }),
-          ])
-        : await queries;
+      const results = await queries;
       // Merge + dedup by event id across per-filter result sets
       const seen = new Set<string>();
       const merged: NostrEvent[] = [];

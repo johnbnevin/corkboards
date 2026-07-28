@@ -15,6 +15,16 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
 import { Loader2, Camera, Zap, Upload, AlertTriangle } from 'lucide-react';
@@ -128,7 +138,12 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
 
   const doUpload = async (file: File, field: 'picture' | 'banner') => {
     try {
-      const [[, url]] = await uploadFile(file);
+      // Blind-destructuring the first tag assumed the server always returns
+      // `url` first. Blossom/NIP-94 responses order tags freely, so a server
+      // that led with `x` or `m` silently set the avatar to a sha256 hash.
+      const tags = await uploadFile(file);
+      const url = tags.find(t => t[0] === 'url')?.[1];
+      if (!url) throw new Error('Upload response contained no url tag');
       form.setValue(field, url, { shouldDirty: true });
     } catch (error) {
       debugError(`Failed to upload ${field}:`, error);
@@ -417,39 +432,45 @@ export function EditProfileForm({ onSaved }: { onSaved?: () => void }) {
           Save Profile
         </Button>
 
-        {/* Size warning dialog */}
-        {sizeWarning && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setSizeWarning(null)}>
-            <div className="bg-background rounded-lg border shadow-lg max-w-sm mx-4 p-4 space-y-3" onClick={e => e.stopPropagation()}>
-              <div className="flex items-start gap-2">
+        {/* Size warning — AlertDialog primitive rather than a hand-rolled
+            overlay, so it gets focus trapping, Esc handling, scroll lock and
+            the correct ARIA roles for free (the old div had none of them). */}
+        <AlertDialog open={!!sizeWarning} onOpenChange={(open) => { if (!open) setSizeWarning(null) }}>
+          <AlertDialogContent className="max-w-sm">
+            <AlertDialogHeader>
+              <AlertDialogTitle className="flex items-start gap-2 text-sm">
                 <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-sm font-medium">Large {sizeWarning.field === 'picture' ? 'avatar' : 'banner'} image</p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    This image is {formatBytes(sizeWarning.fileSize)} (recommended max: {formatBytes(sizeWarning.limit)}).
-                  </p>
+                Large {sizeWarning?.field === 'picture' ? 'avatar' : 'banner'} image
+              </AlertDialogTitle>
+              <AlertDialogDescription asChild>
+                <div className="space-y-1.5 text-xs">
+                  {sizeWarning && (
+                    <p>
+                      This image is {formatBytes(sizeWarning.fileSize)} (recommended max: {formatBytes(sizeWarning.limit)}).
+                    </p>
+                  )}
+                  <p>Low-bandwidth peers will appreciate a smaller image.</p>
+                  <p>Some Nostr clients won't display large images by default to protect users on slow connections{sizeWarning?.blockedByDefault ? ', including corkboards at your current size limit settings' : ''}.</p>
+                  <p>Consider resizing before uploading for the best experience across all clients.</p>
                 </div>
-              </div>
-              <div className="text-xs text-muted-foreground space-y-1.5 pl-7">
-                <p>Low-bandwidth peers will appreciate a smaller image.</p>
-                <p>Some Nostr clients won't display large images by default to protect users on slow connections{sizeWarning.blockedByDefault ? ', including corkboards at your current size limit settings' : ''}.</p>
-                <p>Consider resizing before uploading for the best experience across all clients.</p>
-              </div>
-              <div className="flex gap-2 justify-end pt-1">
-                <Button variant="outline" size="sm" className="text-xs" onClick={() => setSizeWarning(null)}>
-                  Cancel
-                </Button>
-                <Button variant="default" size="sm" className="text-xs" onClick={() => {
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel className="text-xs">Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                className="text-xs"
+                onClick={() => {
+                  if (!sizeWarning) return;
                   const { file, field } = sizeWarning;
                   setSizeWarning(null);
                   doUpload(file, field);
-                }}>
-                  Upload Anyway
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
+                }}
+              >
+                Upload Anyway
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </form>
     </Form>
   );

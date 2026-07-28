@@ -1,10 +1,22 @@
 /**
  * useNostrDismissedSync — saves/loads dismissed + collapsed (saved-for-later)
- * notes as kind 35572 encrypted Nostr events.
+ * notes as NIP-78 kind 30078 encrypted Nostr events.
  *
- * Each user gets one event: kind 35572, d-tag "corkboard:dismissed".
+ * Each user gets one event: kind 30078, d-tag "corkboard:dismissed".
  * Content is AES-256-GCM encrypted JSON of { dismissed: string[], collapsed: string[] }.
  * The AES key is NIP-44 wrapped to the user's own pubkey.
+ *
+ * ## Why 30078 and not 35572
+ *
+ * Same reasoning as useNostrCustomFeedsSync: 35572 was an unregistered,
+ * app-private kind for data NIP-78 (kind 30078, "arbitrary custom app data")
+ * already models — addressable, replaceable per `d` tag, namespaced by the app.
+ * A kind nobody else reads is lock-in wearing protocol clothes. The d-tag stays
+ * `corkboard:dismissed`, so the data keeps its identity.
+ *
+ * READS still accept the legacy kind 35572 for one release (newest-wins across
+ * both), so nobody's dismissed/saved notes vanish on upgrade. Mobile mirrors
+ * this exactly — same kind, same d-tag. Do not diverge.
  */
 import { useCallback, useRef } from 'react';
 import type { NostrEvent, NPool } from '@nostrify/nostrify';
@@ -12,7 +24,10 @@ import type { NUser } from '@nostrify/react/login';
 import { FALLBACK_RELAYS, getUserRelays, getRelayCache, createRelayFresh } from '@/components/NostrProvider';
 import { encryptForSelf, decryptFromSelf } from '@/lib/nostrEncrypt';
 
-const KIND = 35572;
+/** NIP-78 app-specific data. All new writes go here. */
+const KIND = 30078;
+/** Pre-NIP-78 proprietary kind. READ-ONLY, for one release, so upgrades don't lose data. */
+const LEGACY_KIND = 35572;
 const D_TAG = 'corkboard:dismissed';
 
 function normalizeRelay(url: string): string {
@@ -82,12 +97,16 @@ export function useNostrDismissedSync(user: NUser | undefined, _nostr: NPool) {
     for (const url of relays) {
       const relay = createRelayFresh(url, { backoff: false });
       try {
-        const [event] = await relay.query(
-          [{ kinds: [KIND], authors: [user.pubkey], '#d': [D_TAG], limit: 1 }],
+        // Dual-read: the NIP-78 event AND the legacy proprietary one, newest
+        // wins — otherwise upgrading looks like every dismissed/saved note was
+        // forgotten, and the next save writes that emptiness back.
+        const events = await relay.query(
+          [{ kinds: [KIND, LEGACY_KIND], authors: [user.pubkey], '#d': [D_TAG], limit: 2 }],
           { signal: AbortSignal.timeout(5000) }
         );
-        if (event && (!best || event.created_at > best.created_at)) {
-          best = event;
+        for (const event of events) {
+          if (event.pubkey !== user.pubkey) continue;
+          if (!best || event.created_at > best.created_at) best = event;
         }
       } catch { /* continue */ }
       finally { try { relay.close(); } catch { /* */ } }

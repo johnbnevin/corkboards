@@ -71,9 +71,24 @@ const MAX_EVENT_CACHE = 750
 const eventCache = new Map<string, NostrEvent>()
 const eventCacheTimestamps = new Map<string, number>()
 
-function lruSet<K, V>(map: Map<K, V>, key: K, value: V, maxSize: number): void {
+/**
+ * LRU insert that also evicts the PARALLEL timestamp map.
+ *
+ * `eventCache` and `eventCacheTimestamps` are two maps keyed the same way, but
+ * only the first was bounded: dropping an event here left its timestamp entry
+ * behind forever, so the timestamp map grew without limit for the life of the
+ * tab — an unbounded leak keyed by event id, on the hottest path in the app.
+ * (It also meant `getCachedEvent` could see a fresh timestamp for an event that
+ * had already been evicted, which is harmless but nonsense.) Whatever the LRU
+ * forgets, the timestamps must forget too.
+ */
+function lruSet<K, V>(map: Map<K, V>, key: K, value: V, maxSize: number, onEvict?: (key: K) => void): void {
   map.delete(key)
-  while (map.size >= maxSize) map.delete(map.keys().next().value!)
+  while (map.size >= maxSize) {
+    const oldest = map.keys().next().value!
+    map.delete(oldest)
+    onEvict?.(oldest)
+  }
   map.set(key, value)
 }
 
@@ -88,7 +103,7 @@ export function getCachedEvent(id: string): NostrEvent | undefined {
 }
 
 export function setCachedEvent(id: string, event: NostrEvent): void {
-  lruSet(eventCache, id, event, MAX_EVENT_CACHE)
+  lruSet(eventCache, id, event, MAX_EVENT_CACHE, (evicted) => eventCacheTimestamps.delete(evicted))
   eventCacheTimestamps.set(id, Date.now())
 }
 
@@ -267,6 +282,19 @@ export function fetchEventWithOutbox(
 }
 
 /**
+ * Newest version of an addressable event, with NIP-01's tie-break (lowest id
+ * wins on equal created_at) so relay response order never decides. Returns null
+ * for an empty set.
+ */
+function newestAddressable(events: NostrEvent[]): NostrEvent | null {
+  if (events.length === 0) return null
+  return events.reduce((a, b) => {
+    if (b.created_at !== a.created_at) return b.created_at > a.created_at ? b : a
+    return b.id < a.id ? b : a
+  })
+}
+
+/**
  * Fetch a replaceable event (naddr) using outbox model routing.
  */
 export async function fetchNaddrWithOutbox(
@@ -286,28 +314,35 @@ export async function fetchNaddrWithOutbox(
 
   const racePromises: Promise<NostrEvent | null>[] = [
     nostr.query([filter], { signal: AbortSignal.timeout(3000 + CONNECT_OVERHEAD_MS) })
-      .then(events => events[0] || null)
+      .then(events => newestAddressable(events))
       .catch(() => null),
     ...hintOnly.map(relay =>
       queryRelay(relay, filter)
-        .then(events => events[0] || null)
+        .then(events => newestAddressable(events))
         .catch(() => null)
     ),
   ]
 
-  const raceTimeout = new Promise<NostrEvent | null>(resolve => setTimeout(() => resolve(null), 4000 + CONNECT_OVERHEAD_MS))
-  let result = await Promise.race([
-    ...racePromises.map(p => p.then(r => { if (r) return r; throw new Error('skip') })),
-    raceTimeout,
-  ]).catch(() => null as NostrEvent | null)
+  // Unlike a plain event id (immutable — the first copy you find IS the event),
+  // an naddr names an ADDRESSABLE event that its author replaces in place.
+  // Different relays therefore legitimately hold different versions, and
+  // resolving to "whoever answered first" showed the user a stale article or an
+  // outdated listing whenever a fast relay happened to be behind. Collect
+  // briefly, then keep max(created_at). (L12)
+  const collectDeadline = 1200 + CONNECT_OVERHEAD_MS
+  const collected = await Promise.race([
+    Promise.all(racePromises),
+    new Promise<(NostrEvent | null)[] | null>(resolve => setTimeout(() => resolve(null), collectDeadline)),
+  ])
+
+  let result = collected ? newestAddressable(collected.filter((e): e is NostrEvent => e !== null)) : null
 
   if (!result) {
-    // (M4) Hard-cap the fallback: Promise.all(racePromises) can otherwise block
-    // on the slowest relay long past the 4s race timeout. Race it against the
-    // same deadline so a slow relay can't hang the call.
+    // Nothing within the collect window — fall back to the first responder,
+    // still hard-capped so a slow relay can't hang the call. (M4)
     const fallbackDeadline = new Promise<null>(resolve => setTimeout(() => resolve(null), 4000 + CONNECT_OVERHEAD_MS))
     const all = await Promise.race([Promise.all(racePromises), fallbackDeadline])
-    result = all?.find(e => e !== null) || null
+    result = all ? newestAddressable(all.filter((e): e is NostrEvent => e !== null)) : null
   }
 
   if (result) { setCachedEvent(result.id, result); return result }
@@ -317,10 +352,10 @@ export async function fetchNaddrWithOutbox(
   if (authorRelays.length > 0) {
     const all = await Promise.all(
       authorRelays.slice(0, 3).map(relay =>
-        queryRelay(relay, filter).then(events => events[0] || null).catch(() => null)
+        queryRelay(relay, filter).then(events => newestAddressable(events)).catch(() => null)
       )
     )
-    result = all.find(e => e !== null) || null
+    result = newestAddressable(all.filter((e): e is NostrEvent => e !== null))
     if (result) { setCachedEvent(result.id, result); return result }
   }
 

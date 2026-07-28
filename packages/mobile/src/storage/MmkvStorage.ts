@@ -196,6 +196,50 @@ export function prepareSecureStorage(): Promise<void> {
   return _prepareDone;
 }
 
+// ─── Pre-ready write buffer ─────────────────────────────────────────────────
+//
+// Between module evaluation and `prepareSecureStorage()` resolving, `mmkv`
+// points at the LEGACY UNENCRYPTED instance (opened synchronously just below so
+// module-eval-time reads don't crash). Anything written in that window used to
+// land there in cleartext — and then vanish, because the migration step reads
+// the legacy instance BEFORE those writes happen and `legacy.clearAll()` wipes
+// them afterwards. Two failures in one: secrets on disk unencrypted, and user
+// data silently lost.
+//
+// So: writes made before the swap are held here, applied to the encrypted
+// instance the moment it opens, and served from the buffer in the meantime so
+// reads stay consistent within the window.
+let storageReady = false;
+const pendingWrites = new Map<string, string | null>(); // null = pending delete
+
+/** Replay buffered writes onto whichever instance is now active. */
+function flushPendingWrites(): void {
+  for (const [key, value] of pendingWrites) {
+    try {
+      if (value === null) mmkv.remove(key); else mmkv.set(key, value);
+    } catch (e) {
+      console.warn('[MmkvStorage] Failed to replay buffered write:', e instanceof Error ? e.message : e);
+    }
+  }
+  pendingWrites.clear();
+  storageReady = true;
+}
+
+function readThroughBuffer(key: string): string | undefined {
+  if (!storageReady && pendingWrites.has(key)) {
+    return pendingWrites.get(key) ?? undefined;
+  }
+  return mmkv.getString(key);
+}
+
+function writeThroughBuffer(key: string, value: string | null): void {
+  if (!storageReady) {
+    pendingWrites.set(key, value);
+    return;
+  }
+  if (value === null) mmkv.remove(key); else mmkv.set(key, value);
+}
+
 // Eagerly start init so consumers that depend on `mobileStorage.ready` get
 // a settled promise without having to call prepareSecureStorage themselves.
 // The App.tsx splash still awaits this before unmounting; any code path that
@@ -221,16 +265,22 @@ try {
   } as unknown as MMKV;
 }
 // Start the async upgrade in the background; App.tsx awaits its promise.
-prepareSecureStorage();
+// Buffered writes are replayed onto the (now encrypted) instance either way —
+// including the degraded fallback paths, where the buffer must still be drained
+// or the data would only exist in memory.
+const _readyPromise = prepareSecureStorage().then(flushPendingWrites, (e) => {
+  console.warn('[MmkvStorage] Bootstrap rejected; replaying buffered writes anyway:', e);
+  flushPendingWrites();
+});
 
 export const mobileStorage: KVStorage = {
   // Async methods (delegate to sync — MMKV is already synchronous)
   async get(key: string): Promise<string | null> {
-    return mmkv.getString(key) ?? null;
+    return readThroughBuffer(key) ?? null;
   },
   async set(key: string, value: string): Promise<void> {
     try {
-      mmkv.set(key, value);
+      writeThroughBuffer(key, value);
       consecutiveWriteFailures = 0;
     } catch (err) {
       consecutiveWriteFailures++;
@@ -241,13 +291,18 @@ export const mobileStorage: KVStorage = {
     }
   },
   async remove(key: string): Promise<void> {
-    mmkv.remove(key);
+    writeThroughBuffer(key, null);
   },
   async clear(): Promise<void> {
+    pendingWrites.clear();
     mmkv.clearAll();
   },
   async keys(): Promise<string[]> {
-    return mmkv.getAllKeys();
+    const keys = new Set(mmkv.getAllKeys());
+    for (const [key, value] of pendingWrites) {
+      if (value === null) keys.delete(key); else keys.add(key);
+    }
+    return [...keys];
   },
   async getAll(): Promise<Map<string, string>> {
     const map = new Map<string, string>();
@@ -255,12 +310,15 @@ export const mobileStorage: KVStorage = {
       const value = mmkv.getString(key);
       if (value !== undefined) map.set(key, value);
     }
+    for (const [key, value] of pendingWrites) {
+      if (value === null) map.delete(key); else map.set(key, value);
+    }
     return map;
   },
 
-  // Sync methods (direct MMKV access)
+  // Sync methods (direct MMKV access, through the pre-ready buffer)
   getSync(key: string): string | null {
-    return mmkv.getString(key) ?? null;
+    return readThroughBuffer(key) ?? null;
   },
   // MMKV reads hit the real store, so existence is always exactly known — no
   // cache layer can make a present key look absent the way web's IndexedDB
@@ -268,11 +326,11 @@ export const mobileStorage: KVStorage = {
   // answer on every platform rather than falling back to their conservative
   // "don't delete when unsure" path. See KVStorage.hasSync in @core/storage.
   hasSync(key: string): boolean {
-    return mmkv.getString(key) !== undefined;
+    return readThroughBuffer(key) !== undefined;
   },
   setSync(key: string, value: string): void {
     try {
-      mmkv.set(key, value);
+      writeThroughBuffer(key, value);
       consecutiveWriteFailures = 0;
     } catch (err) {
       consecutiveWriteFailures++;
@@ -283,9 +341,10 @@ export const mobileStorage: KVStorage = {
     }
   },
   removeSync(key: string): void {
-    mmkv.remove(key);
+    writeThroughBuffer(key, null);
   },
 
-  // Ready when secure-key bootstrap completes.
-  ready: prepareSecureStorage(),
+  // Ready when the secure-key bootstrap completes AND buffered writes have been
+  // replayed onto the encrypted instance.
+  ready: _readyPromise,
 };

@@ -12,6 +12,23 @@ import { debugLog, debugWarn, debugError } from '@/lib/debug'
 const IDB_KEY = STORAGE_KEYS.PINNED_NOTE_IDS
 
 /**
+ * Result of reading the authoritative kind-10001.
+ *
+ * `status` is only ever 'none'/'no-list' when at least one relay actually
+ * ANSWERED — see the queryFn. A total relay failure THROWS instead, because
+ * "nobody answered" and "the user has no pins" are indistinguishable from an
+ * empty result set, and treating the first as the second wipes the pin list.
+ * `content` carries the NIP-51 encrypted private section forward verbatim.
+ */
+interface PinListResult {
+  ids: string[]
+  status: 'found' | 'none' | 'no-list'
+  relayHints: Record<string, string>
+  /** kind-10001 content — NIP-51 private (encrypted) pins. Preserved verbatim. */
+  content: string
+}
+
+/**
  * Hook for managing NIP-51 pinned notes (kind 10001).
  *
  * - Reads the user's kind 10001 pin list from relays (source of truth)
@@ -49,8 +66,8 @@ export function usePinnedNotes() {
   // relays and could return stale data from a fast-but-outdated relay.
   const { data: pinListResult, isLoading: isLoadingPinList } = useQuery({
     queryKey: ['pinned-notes', user?.pubkey],
-    queryFn: async (): Promise<{ ids: string[]; status: 'found' | 'none' | 'no-list'; relayHints: Record<string, string> }> => {
-      if (!user?.pubkey) return { ids: [], status: 'no-list', relayHints: {} }
+    queryFn: async (): Promise<PinListResult> => {
+      if (!user?.pubkey) return { ids: [], status: 'no-list', relayHints: {}, content: '' }
 
       const userRelays = getUserRelays()
       const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
@@ -80,6 +97,18 @@ export function usePinnedNotes() {
       const rejected = results.filter(r => r.status === 'rejected').length
       debugLog(`[pinnedNotes] Step 1 done: ${fulfilled} relays OK, ${rejected} relays failed`)
 
+      // ZERO relays answered — we learned NOTHING about the user's pin list.
+      // Reporting 'no-list' here (what this used to do) cleared the local pins
+      // below and, worse, let the very next pin publish a ONE-ENTRY kind-10001
+      // that replaced the user's real list on every relay. Kind 10001 is
+      // replaceable; an empty base is a wipe. Throw instead: React Query retries,
+      // `pinListResult` stays undefined, status stays 'loading', and
+      // publishPinList refuses to build on an unconfirmed base. Mirrors the
+      // confirmed-empty semantics of @core/contactList. (H1)
+      if (fulfilled === 0) {
+        throw new Error(`[pinnedNotes] All ${writeRelays.length} relays failed — pin list unconfirmed`)
+      }
+
       // Pick the newest kind 10001 event across all relays
       let best: NostrEvent | null = null
       for (const r of results) {
@@ -90,8 +119,9 @@ export function usePinnedNotes() {
       }
 
       if (!best) {
-        debugLog('[pinnedNotes] Step 1 result: no kind 10001 found on any relay')
-        return { ids: [], status: 'no-list', relayHints: {} }
+        // Confirmed-empty: at least one relay answered and had no kind-10001.
+        debugLog('[pinnedNotes] Step 1 result: no kind 10001 found on any relay (confirmed)')
+        return { ids: [], status: 'no-list', relayHints: {}, content: '' }
       }
 
       const eTags = best.tags.filter(t => t[0] === 'e' && t[1])
@@ -103,11 +133,16 @@ export function usePinnedNotes() {
       }
 
       debugLog(`[pinnedNotes] Step 1 result: ${ids.length} pinned IDs from event created_at=${best.created_at} hints=${Object.keys(relayHints).length}`)
-      if (ids.length === 0) return { ids: [], status: 'none', relayHints: {} }
-      return { ids, status: 'found', relayHints }
+      const content = best.content ?? ''
+      if (ids.length === 0) return { ids: [], status: 'none', relayHints: {}, content }
+      return { ids, status: 'found', relayHints, content }
     },
     enabled: !!user?.pubkey,
     staleTime: 5 * 60 * 1000,
+    // Retry the total-failure throw above rather than surfacing an error state:
+    // a transient outage must not look like "you have no pins".
+    retry: 3,
+    retryDelay: (attempt) => Math.min(2000 * 2 ** attempt, 15_000),
   })
 
   // Sync local state when relay data arrives — relay is authoritative over IDB cache.
@@ -129,7 +164,11 @@ export function usePinnedNotes() {
     }
   }, [pinListResult])
 
-  const pinnedNotesStatus: 'loading' | 'found' | 'none' | 'no-list' = isLoadingPinList ? 'loading' : (pinListResult?.status ?? 'no-list')
+  // No result yet (still loading, or every retry failed) means UNCONFIRMED, not
+  // "no list". Reporting 'no-list' for an unconfirmed read is what made the UI
+  // show an empty me-tab and invited a clobbering republish. (H1)
+  const pinnedNotesStatus: 'loading' | 'found' | 'none' | 'no-list' =
+    isLoadingPinList || !pinListResult ? 'loading' : pinListResult.status
 
   // Fetch actual pinned note events — use NPool (outbox routing + fallback relays
   // in parallel) instead of querying only the user's write relays sequentially.
@@ -221,6 +260,15 @@ export function usePinnedNotes() {
   const publishPinList = useCallback(async (newIds: string[]) => {
     if (!user) return
 
+    // REFUSE to publish from an unconfirmed base. kind 10001 is replaceable, so
+    // the event we sign here REPLACES whatever the relays hold. Without a
+    // confirmed read we don't know what we'd be replacing, and the failure mode
+    // is silent and total (every pin gone). Same stance as @core/contactList's
+    // "nothing confirmable — caller must abort rather than risk a wipe". (H1)
+    if (!pinListResult) {
+      throw new Error('Could not confirm your pin list; pin change aborted to avoid data loss')
+    }
+
     const userRelays = getUserRelays()
     const relays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
     debugLog(`[pinnedNotes] publishPinList: ${newIds.length} IDs → ${relays.length} write relays: ${relays.join(', ')}`)
@@ -228,11 +276,15 @@ export function usePinnedNotes() {
     // Preserve each pin's relay hint (["e", id, relay-hint]). The read path
     // relies on these hints to locate notes pinned from other authors; rebuilding
     // bare ["e", id] tags on every pin/unpin would strip them all. (H3)
-    const hints = pinListResult?.relayHints ?? {}
+    const hints = pinListResult.relayHints
     const tags = newIds.map(id => (hints[id] ? ['e', id, hints[id]] : ['e', id]))
     const event = await user.signer.signEvent({
       kind: 10001,
-      content: '',
+      // Carry the existing content forward. NIP-51 stores PRIVATE list items as
+      // a NIP-44 payload in `content`; writing '' here (what this used to do)
+      // silently destroyed every privately-pinned note on the first public
+      // pin/unpin. Mirrors useMuteList.ts's `content ?? muteEvent?.content`. (H1)
+      content: pinListResult.content,
       tags,
       created_at: Math.floor(Date.now() / 1000),
     })
@@ -266,6 +318,13 @@ export function usePinnedNotes() {
   const togglePin = useCallback(async (noteId: string) => {
     if (!user) return
 
+    // Bail BEFORE the optimistic update when the list is unconfirmed, so the UI
+    // never shows a pin state we can't actually persist. (H1)
+    if (!pinListResult) {
+      debugError('[pinnedNotes] togglePin refused — pin list not confirmed from any relay')
+      throw new Error('Could not confirm your pin list; please try again')
+    }
+
     const currentIds = [...pinnedIds]
     const isUnpin = currentIds.includes(noteId)
     const newIds = isUnpin
@@ -288,15 +347,21 @@ export function usePinnedNotes() {
     // Set optimistic pin list cache (prevents relay refetch from reverting).
     // Carry relayHints forward: publishPinList reads them from this cache, so
     // dropping them here would strip every pin's relay hint on the NEXT pin/unpin.
-    queryClient.setQueryData(['pinned-notes', user.pubkey],
-      { ids: newIds, status: newIds.length > 0 ? 'found' as const : 'none' as const, relayHints: pinListResult?.relayHints ?? {} })
+    queryClient.setQueryData<PinListResult>(['pinned-notes', user.pubkey], {
+      ids: newIds,
+      status: newIds.length > 0 ? 'found' : 'none',
+      relayHints: pinListResult.relayHints,
+      // Keep the private section alive across optimistic updates too — the next
+      // publish reads `content` from this cache entry.
+      content: pinListResult.content,
+    })
 
     // Publish to relays
     await publishPinList(newIds)
 
     // After relay confirms, refetch events to pick up newly pinned notes
     queryClient.invalidateQueries({ queryKey: ['pinned-note-events'] })
-  }, [user, pinnedIds, publishPinList, queryClient, pinListResult?.relayHints])
+  }, [user, pinnedIds, publishPinList, queryClient, pinListResult])
 
   return {
     pinnedIds,

@@ -35,7 +35,7 @@ export function useContactActions(
   contacts: string[] | undefined,
 ) {
   const { nostr } = useNostr();
-  const { mutate: createEvent } = useNostrPublish();
+  const { mutateAsync: createEvent } = useNostrPublish();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -66,9 +66,31 @@ export function useContactActions(
       const result = applyContactChange(base, op);
       if (!result) return; // no-op (already following / already not following)
 
+      // Optimistic: show the change immediately, then confirm or ROLL BACK.
+      // Without the rollback a publish that reached zero relays still left the
+      // UI (and the recent-base cache the NEXT click builds on) claiming the
+      // follow happened — so the user believed they'd followed someone they
+      // hadn't, and the following click built its kind-3 on a base containing a
+      // p-tag no relay ever stored.
+      const previousContacts = queryClient.getQueryData<string[]>(['contacts', pubkey]);
+      const previousRecentBase = recentBaseByPubkey.get(pubkey);
       recentBaseByPubkey.set(pubkey, { base: { tags: result.tags, content: result.content }, at: Date.now() });
-      createEvent({ kind: 3, content: result.content, tags: result.tags });
       queryClient.setQueryData(['contacts', pubkey], result.pubkeys);
+
+      try {
+        await createEvent({ kind: 3, content: result.content, tags: result.tags });
+      } catch (err) {
+        queryClient.setQueryData(['contacts', pubkey], previousContacts);
+        if (previousRecentBase) recentBaseByPubkey.set(pubkey, previousRecentBase);
+        else recentBaseByPubkey.delete(pubkey);
+        toast({
+          title: "Couldn't update follows",
+          description: err instanceof Error ? err.message : 'The change could not be sent to any relay.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
       toast(successMsg);
     });
   }, [user?.pubkey, contacts, nostr, createEvent, queryClient, toast]);

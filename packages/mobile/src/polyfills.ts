@@ -23,7 +23,17 @@
  *
  * Installed feature-detected, so this becomes a no-op the moment React Native
  * ships a spec-complete AbortSignal.
+ *
+ * ## WebCrypto `subtle`
+ *
+ * Hermes has none, and `react-native-get-random-values` supplies only
+ * `getRandomValues`. Every encrypted backup and every Blossom hash check needs
+ * `crypto.subtle`, and each of those call sites swallows its error — so the
+ * absence showed up as silently failing backups rather than a crash. See
+ * `src/webcrypto.ts`; App.tsx additionally asserts the capability at startup
+ * and warns visibly if it is still missing.
  */
+import { installWebCrypto } from './webcrypto';
 
 type AbortSignalCtor = typeof AbortSignal & {
   timeout?: (ms: number) => AbortSignal;
@@ -125,3 +135,4 @@ export function installAbortSignalPolyfills(): void {
 }
 
 installAbortSignalPolyfills();
+installWebCrypto();

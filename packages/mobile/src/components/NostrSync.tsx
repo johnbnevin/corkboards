@@ -10,6 +10,7 @@ import { View, Text, StyleSheet } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 import { useNostr } from '../lib/NostrProvider';
+import { parseNip65Relays } from '../lib/nip65';
 import { useAuth } from '../lib/AuthContext';
 import { useAppContext } from '../hooks/useAppContext';
 import { useNostrCustomFeedsSync } from '../hooks/useNostrCustomFeedsSync';
@@ -82,13 +83,7 @@ export function NostrSync({ showStatus = false }: NostrSyncProps) {
       try {
         const event = await fetchLatest(10002);
         if (event && event.created_at > config.relayMetadata.updatedAt) {
-          const fetchedRelays = event.tags
-            .filter(([name]) => name === 'r')
-            .map(([_, url, marker]) => ({
-              url,
-              read: !marker || marker === 'read',
-              write: !marker || marker === 'write',
-            }));
+          const fetchedRelays = parseNip65Relays(event.tags);
           if (fetchedRelays.length > 0) {
             updateConfig((current) => ({
               ...current,

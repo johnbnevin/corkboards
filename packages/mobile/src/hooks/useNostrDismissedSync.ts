@@ -1,9 +1,19 @@
 /**
  * useNostrDismissedSync — saves/loads dismissed + collapsed (saved-for-later)
- * notes as kind 35572 encrypted Nostr events.
+ * notes as NIP-78 kind 30078 encrypted Nostr events.
  *
  * Port of packages/web/src/hooks/useNostrDismissedSync.ts for mobile.
  * Uses mobile's AuthContext and NostrProvider instead of web equivalents.
+ *
+ * ## Why 30078 and not 35572
+ *
+ * Same reasoning as useNostrCustomFeedsSync: 35572 was an unregistered,
+ * app-private kind for data NIP-78 (kind 30078, "arbitrary custom app data")
+ * already describes. The d-tag (`corkboard:dismissed`) is unchanged, so the
+ * data keeps its identity.
+ *
+ * READS still accept the legacy kind 35572 for one release (newest-wins across
+ * both). Web mirrors this exactly — same kind, same d-tag. Do not diverge.
  */
 import { useCallback, useRef } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -11,7 +21,10 @@ import { FALLBACK_RELAYS, getUserRelays, getRelayCache, createRelay } from '../l
 import { encryptForSelf, decryptFromSelf } from '../lib/nostrEncrypt';
 import { useAuth } from '../lib/AuthContext';
 
-const KIND = 35572;
+/** NIP-78 app-specific data. All new writes go here. */
+const KIND = 30078;
+/** Pre-NIP-78 proprietary kind. READ-ONLY, for one release, so upgrades don't lose data. */
+const LEGACY_KIND = 35572;
 const D_TAG = 'corkboard:dismissed';
 
 function normalizeRelay(url: string): string {
@@ -82,12 +95,17 @@ export function useNostrDismissedSync() {
     for (const url of relays) {
       const relay = createRelay(url, { backoff: false });
       try {
-        const [event] = await relay.query(
-          [{ kinds: [KIND], authors: [pubkey], '#d': [D_TAG], limit: 1 }],
+        // Dual-read across the NIP-78 kind and the legacy one, newest wins —
+        // a user who last saved on an older build only has data under 35572,
+        // and reading just 30078 would look like "nothing was ever dismissed"
+        // and then overwrite the real list on the next save.
+        const events = await relay.query(
+          [{ kinds: [KIND, LEGACY_KIND], authors: [pubkey], '#d': [D_TAG], limit: 2 }],
           { signal: AbortSignal.timeout(5000) }
         );
-        if (event && (!best || event.created_at > best.created_at)) {
-          best = event;
+        for (const event of events) {
+          if (event.pubkey !== pubkey) continue;
+          if (!best || event.created_at > best.created_at) best = event;
         }
       } catch { /* continue */ }
       finally { try { relay.close(); } catch { /* */ } }

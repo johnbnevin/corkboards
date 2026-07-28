@@ -7,6 +7,8 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { prepareSecureStorage, mmkvInitError, mmkvIsEncrypted, mobileStorage } from './src/storage/MmkvStorage';
+import { hasWebCryptoSubtle } from './src/webcrypto';
+import { cleanupRetiredNoteCaches } from './src/lib/notesCache';
 import { setImageProxyTemplate } from '@core/imageProxy';
 import { NostrProvider, WelshmanRouterBridge } from './src/lib/NostrProvider';
 import { AuthProvider } from './src/lib/AuthContext';
@@ -101,9 +103,18 @@ export default function App() {
   // access failed and we're running unencrypted, the user should know so they
   // can decide whether to continue.
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
+  // Startup capability assertion for WebCrypto. Hermes ships no `crypto.subtle`
+  // and the polyfill in src/webcrypto.ts installs one — but if that ever fails,
+  // the symptom on device is silently failing encrypted backups (every call
+  // site catches), which is the worst possible way to lose a backup. Surface it
+  // like the storage warning instead of letting a `catch` hide it.
+  const [cryptoWarning, setCryptoWarning] = useState<string | null>(null);
   const [warningAcked, setWarningAcked] = useState(false);
   useEffect(() => {
     Promise.all([prepareSecureStorage()]).finally(() => {
+      if (!hasWebCryptoSubtle()) {
+        setCryptoWarning('This device has no working WebCrypto (crypto.subtle), and the built-in fallback failed to install. Encrypted cloud backup, corkboard sync and backup integrity checks will NOT work. Do not rely on cloud backup on this device.');
+      }
       if (mmkvInitError) {
         setStorageWarning(mmkvInitError);
       } else if (!mmkvIsEncrypted) {
@@ -113,6 +124,9 @@ export default function App() {
       // image renders. Settings UI calls setImageProxyTemplate directly on
       // save, so this only matters for cold launches.
       setImageProxyTemplate(mobileStorage.getSync('corkboard:image-proxy-template'));
+      // One-time reclaim of the retired note-cache rows (see lib/notesCache.ts).
+      // After prepareSecureStorage so it operates on the encrypted instance.
+      cleanupRetiredNoteCaches();
       setStorageReady(true);
     });
   }, []);
@@ -127,16 +141,19 @@ export default function App() {
     );
   }
 
-  if (storageWarning && !warningAcked) {
+  const startupWarnings = [cryptoWarning, storageWarning].filter((w): w is string => !!w);
+  if (startupWarnings.length > 0 && !warningAcked) {
     return (
       <View style={{ flex: 1, backgroundColor: '#1f1f1f', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
         <Text style={{ fontSize: 40, marginBottom: 16 }}>⚠️</Text>
         <Text style={{ color: '#f97316', fontSize: 16, fontWeight: '600', marginBottom: 12, textAlign: 'center' }}>
-          Secure storage warning
+          {cryptoWarning ? 'Encryption unavailable' : 'Secure storage warning'}
         </Text>
-        <Text style={{ color: '#d4d4d4', fontSize: 14, textAlign: 'center', lineHeight: 20, marginBottom: 24 }}>
-          {storageWarning}
-        </Text>
+        {startupWarnings.map((warning) => (
+          <Text key={warning} style={{ color: '#d4d4d4', fontSize: 14, textAlign: 'center', lineHeight: 20, marginBottom: 24 }}>
+            {warning}
+          </Text>
+        ))}
         <Text
           onPress={() => setWarningAcked(true)}
           style={{

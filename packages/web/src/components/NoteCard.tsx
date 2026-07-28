@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react'
+import React, { useMemo, useRef, useEffect, useState, useCallback, useId } from 'react'
 import { RSS_PUBKEY } from '@core/rss';
 import { toast } from '@/hooks/useToast'
 import { type NostrEvent } from '@nostrify/nostrify'
@@ -6,7 +6,7 @@ import { EngagementBar } from '@/components/EngagementBar'
 import { useNostr } from '@nostrify/react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuthor } from '@/hooks/useAuthor'
-import { useCollapsedNotes } from '@/hooks/useCollapsedNotes'
+import { useNoteCollapsedState, useCollapsedNotesActions } from '@/hooks/useCollapsedNotes'
 import { fetchEventWithOutbox } from '@/lib/fetchEvent'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
@@ -20,7 +20,7 @@ import { ClickableProfile, profileModalState, PROFILE_ACTION_FOLLOW } from '@/co
 import { genUserName } from '@/lib/genUserName'
 import { useIsDeletedAuthor } from '@/contexts/deletedAuthors'
 import { formatTimeAgoCompact } from '@/lib/formatTimeAgo'
-import { optimizeAvatarUrl } from '@/lib/imageUtils'
+import { optimizeAvatarUrl, optimizeMediaUrl } from '@/lib/imageUtils'
 import { nip19 } from 'nostr-tools'
 import { PinIcon, MessageSquare, Reply, Repeat2, Zap, Rss, Heart, Copy, Check, Pin, RotateCw, Globe, BadgeCheck, ChevronDown, Trash2, Highlighter, UserPlus, Smile, Hash } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -32,6 +32,7 @@ import { useToast } from '@/hooks/useToast'
 import { EmojiName } from '@/components/EmojiName'
 import { verifyEmbeddedEvent } from '@/lib/embeddedEvent'
 import { getZapReceiptAmountSats } from '@core/lightningTarget'
+import { defaultEmojiChar } from '@core/defaultEmojiSet'
 
 // (B4) Named constants extracted from inline magic numbers
 /** Character limit for the "more from this author" note previews (discover tab) */
@@ -575,11 +576,22 @@ export const NoteCard = React.memo(function NoteCard({
 }: NoteCardProps) {
   // When a media filter is active, override blurMedia to show all media
   const effectiveBlurMedia = mediaFilterActive ? false : blurMedia;
+  // SVG `id`s are document-global. Keying the dismiss-stripe pattern off the
+  // note id alone collided whenever the same note rendered in two columns, and
+  // every `url(#…)` then resolved to whichever instance mounted first.
+  // (useId's separators are stripped — they're legal in an id attribute but not
+  // in the url(#…) fragment reference the <polygon> fill uses.)
+  const dismissPatternId = `ds-${useId().replace(/[^a-zA-Z0-9]/g, '')}`
   const isRss = note.pubkey === RSS_PUBKEY
   const { data: author, isFetching: isAuthorFetching } = useAuthor(isRss ? undefined : note.pubkey)
   // Author confirmed deleted/vanished (NIP-09 profile deletion / NIP-62 vanish).
   const isDeletedAuthor = useIsDeletedAuthor(isRss ? undefined : note.pubkey)
-  const { isCollapsed, isCollapsedThisSession, isSoftDismissed, toggleCollapsed, dismiss, undoDismiss, canUndoDismiss, isBatchTrigger } = useCollapsedNotes()
+  // Per-note subscription + stable actions, NOT the whole collapsed-notes
+  // context: a card that reads the context re-renders on every dismissal
+  // anywhere in the feed, which is hundreds of cards' worth of work for one
+  // click. See useCollapsedNotes.ts.
+  const noteState = useNoteCollapsedState(note.id)
+  const { toggleCollapsed, dismiss, undoDismiss } = useCollapsedNotesActions()
   const queryClient = useQueryClient()
   const metadata = author?.metadata
   const profileLoading = !isRss && isAuthorFetching && !metadata
@@ -595,8 +607,8 @@ export const NoteCard = React.memo(function NoteCard({
       : (metadata?.display_name || metadata?.name || (profileLoading ? '' : genUserName(note.pubkey)))
   // Deleted authors get a neutral (blank) avatar rather than a possibly-stale picture.
   const avatarUrl = isDeletedAuthor ? undefined : optimizeAvatarUrl(isRss ? rssFeedIcon : metadata?.picture)
-  const collapsed = isCollapsed(note.id)
-  const softDismissed = isSoftDismissed(note.id)
+  const collapsed = noteState.isCollapsed
+  const softDismissed = noteState.isSoftDismissed
 
   // Reaction publishing (for emoji reaction button on notes)
   const { mutate: publishReaction } = useNostrPublish()
@@ -812,7 +824,9 @@ export const NoteCard = React.memo(function NoteCard({
     ? (isRepost ? repostedAuthor?.metadata : reactedToAuthor?.metadata) ?? null
     : metadata ?? null
   const discoverFeaturedDisplayName = isFollowedActivityInDiscover
-    ? (isRepost ? repostedDisplayName : reactedToDisplayName) || discoverFeaturedPubkey.slice(0, 8)
+    // Never fall back to raw hex — an 8-char pubkey slice is not a name and is
+    // not even a valid npub. genUserName gives a stable, readable placeholder.
+    ? (isRepost ? repostedDisplayName : reactedToDisplayName) || genUserName(discoverFeaturedPubkey)
     : displayName
   const discoverFeaturedAvatarUrl = isFollowedActivityInDiscover
     ? optimizeAvatarUrl(discoverFeaturedMeta?.picture)
@@ -822,8 +836,8 @@ export const NoteCard = React.memo(function NoteCard({
 
   // Soft-dismissed placeholder — blank card at exact original height
   if (softDismissed && !forceExpanded) {
-    const canUndo = canUndoDismiss(note.id)
-    const isTrigger = isBatchTrigger(note.id)
+    const canUndo = noteState.canUndoDismiss
+    const isTrigger = noteState.isBatchTrigger
     const undoLabel = canUndo ? (isTrigger ? 'undo all' : 'undo') : 'dismissed'
     return (
       <Card
@@ -847,7 +861,7 @@ export const NoteCard = React.memo(function NoteCard({
   // Collapsed placeholder — blank card at exact original height (saved for later)
   // Only show placeholder if the note was collapsed during THIS session (not from restore).
   // Restored collapsed notes render normally so they don't create phantom blank spots.
-  if (collapsed && !forceExpanded && isCollapsedThisSession(note.id)) {
+  if (collapsed && !forceExpanded && noteState.isCollapsedThisSession) {
     return (
       <Card
         className="border-dashed border-muted-foreground/15 bg-transparent flex items-center justify-center cursor-pointer hover:bg-accent/20 transition-colors"
@@ -953,13 +967,24 @@ export const NoteCard = React.memo(function NoteCard({
           const reaction = note.content || '❤️';
           // NIP-30 custom emoji: content is :shortcode:, look up URL from emoji tag
           const customEmojiMatch = reaction.match(/^:([^:]+):$/);
-          const customEmojiUrl = customEmojiMatch
+          // The emoji tag URL is attacker-controlled just like any other media in
+          // a note, so it goes through the same SSRF/proxy gate. '' means the
+          // host was rejected — fall back to rendering the :shortcode: as text.
+          const rawCustomEmojiUrl = customEmojiMatch
             ? note.tags.find(t => t[0] === 'emoji' && t[1] === customEmojiMatch[1])?.[2]
+            : undefined;
+          // Reactions from our own default set are ordinary Unicode published as
+          // a CDN PNG. Render the character instead of fetching the image: a feed
+          // full of :cb-lol: reactions otherwise means one third-party request per
+          // card, every scroll.
+          const nativeCustomChar = customEmojiMatch ? defaultEmojiChar(customEmojiMatch[1]) : null;
+          const customEmojiUrl = !nativeCustomChar && rawCustomEmojiUrl
+            ? (optimizeMediaUrl(rawCustomEmojiUrl) || undefined)
             : undefined;
           // Displayable as icon: standard emoji, +/-, or custom emoji with URL
           const isStandardEmoji = reaction === '+' || reaction === '-' || reaction === '❤️'
             || (/^\p{Emoji_Presentation}(\u{FE0F}|\u{200D}\p{Emoji_Presentation})*$/u.test(reaction) && [...reaction].length <= 4);
-          const isDisplayableIcon = isStandardEmoji || !!customEmojiUrl;
+          const isDisplayableIcon = isStandardEmoji || !!customEmojiUrl || !!nativeCustomChar;
           return (
           <>
             <div className="flex items-center flex-wrap gap-1.5 text-xs text-muted-foreground">
@@ -1024,10 +1049,11 @@ export const NoteCard = React.memo(function NoteCard({
                     src={customEmojiUrl}
                     alt={reaction}
                     className="absolute -top-4 -right-2 h-10 w-10 drop-shadow-md select-none object-contain"
+                    referrerPolicy="no-referrer"
                   />
                 ) : (
                   <span className="absolute -top-4 -right-2 text-4xl drop-shadow-md select-none">
-                    {reaction === '+' ? '👍' : reaction === '-' ? '👎' : reaction}
+                    {nativeCustomChar ?? (reaction === '+' ? '👍' : reaction === '-' ? '👎' : reaction)}
                   </span>
                 )
               )}
@@ -1649,12 +1675,12 @@ export const NoteCard = React.memo(function NoteCard({
         >
           <svg width="28" height="28" viewBox="0 0 28 28">
             <defs>
-              <pattern id={`ds-${note.id.slice(0, 8)}`} patternUnits="userSpaceOnUse" width="5" height="5" patternTransform="rotate(-45)">
+              <pattern id={dismissPatternId} patternUnits="userSpaceOnUse" width="5" height="5" patternTransform="rotate(-45)">
                 <rect width="2.5" height="5" fill="white" />
                 <rect x="2.5" width="2.5" height="5" fill="#ef4444" />
               </pattern>
             </defs>
-            <polygon points="0,28 28,0 28,28" fill={`url(#ds-${note.id.slice(0, 8)})`} />
+            <polygon points="0,28 28,0 28,28" fill={`url(#${dismissPatternId})`} />
           </svg>
         </button>
       )}

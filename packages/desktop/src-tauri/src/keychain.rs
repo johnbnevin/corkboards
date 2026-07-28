@@ -47,6 +47,23 @@ pub(crate) fn get_secret(key: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Whether the keychain holds an entry for `key`.
+///
+/// Safe to expose to the webview in a way `keychain_get` is not: it answers a
+/// yes/no question and never returns key material, so an XSS learns only that
+/// an account exists — which the login list already tells it.
+///
+/// This exists because a missing entry is otherwise INVISIBLE until the user
+/// tries to post: `signer.rs` fails every sign/encrypt with "no key in keychain
+/// for this pubkey" and the UI just looks broken. Users who stored a key under
+/// the old volatile-keyutils Linux backend lost it on reboot and had no way to
+/// tell that from a bug. The frontend calls this at startup so it can say
+/// plainly that the key is gone and offer to re-import it.
+#[tauri::command]
+pub fn keychain_has(key: String) -> Result<bool, String> {
+    Ok(get_secret(&key)?.is_some())
+}
+
 /// Delete a secret from the OS keychain.
 #[tauri::command]
 pub fn keychain_delete(key: String) -> Result<(), String> {

@@ -95,15 +95,29 @@ function broadcastChange(msg: BroadcastMessage): void {
 
 // ─── Custom event for same-tab sync ─────────────────────────────────────────
 // Mirrors the old 'local-storage-sync' event so useIdbStorage hooks update.
-function dispatchSyncEvent(key: string, value: unknown): void {
+//
+// `origin` identifies the writer, so a caller that already holds this value in
+// its own state can ignore its own echo. Without it, every write came straight
+// back to the writer, which re-deserialized the value and re-set state with a
+// fresh identity: a second full render pass per write, and for a big value —
+// `dismissed-notes` runs to thousands of ids — four passes over the string
+// (serialize, parse, stringify, parse) plus a rebuilt Set and a re-run of every
+// memo downstream. Cross-tab messages carry no origin, so they always apply.
+function dispatchSyncEvent(key: string, value: unknown, origin?: string): void {
   // Guarded: writes are scheduled asynchronously, so this can fire after the
   // document is gone — during teardown, or in any non-DOM context that imports
   // this module. An unhandled ReferenceError there would reject the write's
   // promise chain and look like a persistence failure.
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
-    new CustomEvent('idb-storage-sync', { detail: { key, value } })
+    new CustomEvent('idb-storage-sync', { detail: { key, value, origin } })
   );
+}
+
+/** Mint an id a caller can pass to `idbSetSync` to suppress its own echo. */
+let _originCounter = 0;
+export function nextWriteOrigin(): string {
+  return `w${++_originCounter}`;
 }
 
 // ─── Availability flag (false when IDB is unavailable, e.g. Safari private mode) ──
@@ -320,8 +334,10 @@ export function idbHasSync(key: string): boolean {
   return uncached;
 }
 
-/** Synchronous write – updates cache immediately and schedules IDB write. */
-export function idbSetSync(key: string, value: string): void {
+/** Synchronous write – updates cache immediately and schedules IDB write.
+ *  `origin` (see `nextWriteOrigin`) is echoed back on the sync event so the
+ *  writer can skip re-applying a value it already has. */
+export function idbSetSync(key: string, value: string, origin?: string): void {
   // Only skip memCache for the same blacklist used at init. A size threshold
   // here would create a sync/IDB read mismatch — idbGetSync would return null
   // for a value that exists on disk, silently breaking every reader.
@@ -333,7 +349,7 @@ export function idbSetSync(key: string, value: string): void {
   // Dispatch the sync event after IDB write (includes retry on failure).
   // If both attempts fail, data lives only in memCache until next successful write.
   idbSet(key, value).then(
-    () => dispatchSyncEvent(key, tryParse(value)),
+    () => dispatchSyncEvent(key, tryParse(value), origin),
     (err) => console.warn('[idb] Failed to persist key (after retry)', key, err),
   );
 }

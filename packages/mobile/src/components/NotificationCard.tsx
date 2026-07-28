@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useAuthor } from '../hooks/useAuthor';
-import { useCollapsedNotes } from '../hooks/useCollapsedNotes';
+import { useNoteCollapsedState, useCollapsedNotesActions } from '../hooks/useCollapsedNotes';
 import { type NotificationItem, getZapAmountSats } from '../hooks/useNotifications';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { NoteContent } from './NoteContent';
@@ -86,7 +86,9 @@ export const NotificationCard = React.memo(function NotificationCard({
   onViewThread,
 }: NotificationCardProps) {
   const { event, type, targetEventId, senderPubkey } = notification;
-  const { isCollapsed, toggleCollapsed, dismiss, isSoftDismissed, canUndoDismiss, undoDismiss } = useCollapsedNotes();
+  // Per-note subscription + stable actions — see NoteCard for why.
+  const noteState = useNoteCollapsedState(event.id);
+  const { toggleCollapsed, dismiss, undoDismiss } = useCollapsedNotesActions();
 
   // For zaps, use the real sender pubkey
   const actorPubkey = (type === 'zap' && senderPubkey) ? senderPubkey : event.pubkey;
@@ -115,12 +117,12 @@ export const NotificationCard = React.memo(function NotificationCard({
     ? (targetEventId || event.id)
     : event.id;
 
-  const collapsed = isCollapsed(event.id);
-  const softDismissed = isSoftDismissed(event.id);
+  const collapsed = noteState.isCollapsed;
+  const softDismissed = noteState.isSoftDismissed;
 
   // Soft-dismissed placeholder
   if (softDismissed) {
-    const canUndo = canUndoDismiss(event.id);
+    const canUndo = noteState.canUndoDismiss;
     return (
       <TouchableOpacity
         style={styles.placeholder}

@@ -8,6 +8,7 @@ import type { NostrEvent, NostrFilter, NRelay1 } from '@nostrify/nostrify';
 import { createRelayFresh } from './NostrProvider';
 import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS } from './NostrProvider';
 import { isSecureRelay } from '@core/nostrUtils';
+import { nip65OutboxRelays } from './nip65';
 import { FETCH_EVENT_CACHE_TTL_MS as CACHE_TTL_MS } from '@core/cacheConfig';
 
 const MAX_CONCURRENT_OUTBOX_FETCHES = 4;
@@ -115,10 +116,10 @@ async function fetchAuthorRelays(pubkey: string): Promise<string[]> {
     .sort((a, b) => b.created_at - a.created_at)[0];
 
   if (best) {
-    const relays = best.tags
-      .filter(t => t[0] === 'r' && t[1]?.startsWith('wss://'))
-      .map(t => t[1])
-      .slice(0, 10);
+    // Outbox only — see lib/nip65.ts. A `read`-marked relay is where the author
+    // receives mentions, not where they publish, so querying it for their own
+    // events returns nothing.
+    const relays = nip65OutboxRelays(best.tags, 10);
     if (relays.length > 0) updateRelayCache(pubkey, relays);
     return relays;
   }

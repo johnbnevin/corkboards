@@ -7,6 +7,11 @@ import { debugLog } from '@/lib/debug';
 import { ZAP_RELAYS } from '@/lib/relayConstants';
 import { resolveZapEndpoint } from '@core/zap';
 import { createZapInvoice } from '@core/lnurlPay';
+import { getUserRelays } from '@/components/NostrProvider';
+import { isSecureRelay } from '@core/nostrUtils';
+
+/** Cap the NIP-57 `relays` tag — some LNURL servers reject very long tags. */
+const MAX_ZAP_RECEIPT_RELAYS = 8;
 
 export function useZap(note: NostrEvent | null) {
   const { user } = useCurrentUser();
@@ -39,6 +44,18 @@ export function useZap(note: NostrEvent | null) {
       // arrives as a plain LNURL payment with no receipt.
       signZapRequest: user
         ? async (amountMsats) => {
+            // NIP-57 `relays` tells the LNURL server where to PUBLISH the
+            // kind-9735 receipt. Hardcoding ZAP_RELAYS meant the receipt landed
+            // only on our defaults: if the user reads from anywhere else, their
+            // own zap never appeared in their notifications, and neither the
+            // sender nor the recipient could find the proof of payment on the
+            // relays they actually use. Their read relays go FIRST (the ones
+            // that matter for them seeing it), with our defaults kept as a
+            // safety net so a user with no NIP-65 list still gets a receipt.
+            const userReadRelays = getUserRelays().read;
+            const receiptRelays = [...new Set([...userReadRelays, ...ZAP_RELAYS])]
+              .filter(isSecureRelay)
+              .slice(0, MAX_ZAP_RECEIPT_RELAYS);
             const zapRequest = await user.signer.signEvent({
               kind: 9734,
               content: comment || '',
@@ -46,7 +63,7 @@ export function useZap(note: NostrEvent | null) {
                 ['p', note.pubkey],
                 ['e', note.id],
                 ['amount', amountMsats.toString()],
-                ['relays', ...ZAP_RELAYS],
+                ['relays', ...(receiptRelays.length > 0 ? receiptRelays : ZAP_RELAYS)],
               ],
               created_at: Math.floor(Date.now() / 1000),
             });

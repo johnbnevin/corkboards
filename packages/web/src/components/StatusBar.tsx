@@ -117,7 +117,16 @@ export function StatusBar({
   // Auto-expand when loading or when there are important actions available
   const shouldAutoExpand = isLoading || blankSpaceCount > 0 || isSaving || isRestoring;
   
-  // Handle hover at bottom of page to show status bar
+  // Handle hover at bottom of page to show status bar.
+  // isVisible/isSticky are read through refs so this listener is registered ONCE
+  // for the lifetime of the component. Depending on the state directly tore down
+  // and re-attached a document-level mousemove handler on every visibility flip —
+  // needless churn on the hottest event in the browser.
+  const isVisibleRef = useRef(isVisible);
+  const isStickyRef = useRef(isSticky);
+  useEffect(() => { isVisibleRef.current = isVisible; }, [isVisible]);
+  useEffect(() => { isStickyRef.current = isSticky; }, [isSticky]);
+
   useEffect(() => {
     const handleMouseMove = (event: MouseEvent) => {
       const windowHeight = window.innerHeight;
@@ -129,12 +138,12 @@ export function StatusBar({
         dismissedUntilLeftRef.current = false;
       }
 
-      if (isNearBottom && !isVisible && !dismissedUntilLeftRef.current) {
+      if (isNearBottom && !isVisibleRef.current && !dismissedUntilLeftRef.current) {
         setIsVisible(true);
         if (hoverTimeoutRef.current) {
           clearTimeout(hoverTimeoutRef.current);
         }
-      } else if (!isNearBottom && isVisible && !isSticky) {
+      } else if (!isNearBottom && isVisibleRef.current && !isStickyRef.current) {
         // Hide after 1 second of not being near bottom (unless sticky)
         hoverTimeoutRef.current = setTimeout(() => {
           setIsVisible(false);
@@ -150,7 +159,7 @@ export function StatusBar({
         clearTimeout(hoverTimeoutRef.current);
       }
     };
-  }, [isVisible, isSticky]);
+  }, []);
 
   // Update visibility based on auto-expand conditions
   useEffect(() => {
@@ -241,7 +250,7 @@ export function StatusBar({
       {isVisible && (
         <div 
           ref={statusBarRef}
-          className={`fixed bottom-0 left-0 right-0 z-40 bg-gradient-to-r from-gray-100/95 to-gray-200/95 backdrop-blur-sm border-t border-white/20 transition-all duration-300 ease-in-out ${isSticky ? 'shadow-lg' : ''}`}
+          className={`fixed bottom-0 left-0 right-0 z-40 bg-gradient-to-r from-gray-100/95 to-gray-200/95 dark:from-gray-900/95 dark:to-gray-800/95 backdrop-blur-sm border-t border-white/20 dark:border-white/10 transition-all duration-300 ease-in-out ${isSticky ? 'shadow-lg' : ''}`}
         >
       {/* Desktop: Single row layout */}
         <div className={`hidden sm:flex items-center justify-center px-8 py-1.5 min-h-[28px] transition-all duration-300 ease-in-out opacity-100 relative`}>

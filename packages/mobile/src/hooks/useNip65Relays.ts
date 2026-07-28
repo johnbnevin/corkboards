@@ -1,11 +1,7 @@
 import { useCallback } from 'react';
 import { useNostr, updateRelayCache, getRelayCache } from '../lib/NostrProvider';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
-
-function isValidRelayUrl(url: unknown): url is string {
-  if (typeof url !== 'string' || url.length > 256) return false;
-  try { return new URL(url).protocol === 'wss:'; } catch { return false; }
-}
+import { nip65OutboxRelays } from '../lib/nip65';
 
 const MAX_RELAYS_PER_USER = 20;
 
@@ -41,10 +37,9 @@ export function useNip65Relays() {
       }
       if (!event) return [];
 
-      const relays = event.tags
-        .filter(([name, url]) => name === 'r' && isValidRelayUrl(url))
-        .map(([, url]) => url as string)
-        .slice(0, MAX_RELAYS_PER_USER);
+      // Outbox only — a `read`-marked relay is an inbox for mentions and will
+      // never hold this author's own notes (NIP-65).
+      const relays = nip65OutboxRelays(event.tags, MAX_RELAYS_PER_USER);
 
       if (relays.length > 0) updateRelayCache(pubkey, relays);
       return relays;
@@ -63,10 +58,7 @@ export function useNip65Relays() {
         { signal: AbortSignal.timeout(5000) },
       );
       for (const event of events) {
-        const relays = event.tags
-          .filter(([name, url]) => name === 'r' && isValidRelayUrl(url))
-          .map(([, url]) => url as string)
-          .slice(0, MAX_RELAYS_PER_USER);
+        const relays = nip65OutboxRelays(event.tags, MAX_RELAYS_PER_USER);
         if (relays.length > 0) updateRelayCache(event.pubkey, relays);
       }
     } catch {

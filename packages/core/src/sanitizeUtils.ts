@@ -50,8 +50,18 @@ const VOID_CONTENT_OPEN_RE = new RegExp(`<(${VOID_CONTENT_ELEMENTS})\\b[\\s\\S]*
  * Match a single HTML tag, honouring quoted attribute values so a `>` inside an
  * attribute doesn't terminate the match early. `<a title="a>b">` is one tag —
  * the naive `/<[^>]*>/` splits it and leaks `b">` into the output as text.
+ *
+ * The three attribute-region alternatives are MUTUALLY EXCLUSIVE on their first
+ * character (`"`, `'`, and anything that is none of `>"'`), so any given input
+ * has exactly one way to match and the engine never has to try another. That is
+ * the whole point of writing it this way: the previous form,
+ * `(?:\s+(?:"…"|'…'|[^>"'])*)?`, let `\s+` and `[^>"']` both match a space, so
+ * an unterminated tag with a run of whitespace (`'<a ' + ' '.repeat(n)`, which
+ * any note author can post) gave the engine exponentially many ways to fail and
+ * hung the render thread. Whitespace is now consumed only by the general
+ * character alternative, with no second path to it.
  */
-const HTML_TAG_RE = /<\/?[a-zA-Z][^\s/>]*(?:\s+(?:"[^"]*"|'[^']*'|[^>"'])*)?\/?>|<!--[\s\S]*?-->|<![^>]*>/g;
+const HTML_TAG_RE = /<\/?[a-zA-Z][^\s/>]*(?:"[^"]*"|'[^']*'|[^>"'])*>|<!--[\s\S]*?-->|<![^>]*>/g;
 
 /** Max tag-stripping passes. Bounded so malformed input can't spin forever. */
 const MAX_STRIP_PASSES = 8;

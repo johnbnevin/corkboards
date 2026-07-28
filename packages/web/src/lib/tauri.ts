@@ -28,6 +28,17 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
 const _logQueue: string[] = [];
 let _logFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * Mirror of the Rust `file_logging` setting, cached so `tauriLog` stays
+ * synchronous and cheap.
+ *
+ * Rust is the authority and refuses to write when logging is off, so this is
+ * only an optimisation: without it every console line in the app would still
+ * cross the IPC boundary just to be discarded. Starts false so nothing is
+ * queued before `initTauriLogging()` reports what the user actually chose.
+ */
+let _fileLoggingEnabled = false;
+
 function flushLogQueue(): void {
   const batch = _logQueue.splice(0);
   if (batch.length === 0) return;
@@ -37,10 +48,11 @@ function flushLogQueue(): void {
 /**
  * Write a message to ~/.local/share/me.corkboards.desktop/debug.log.
  * Batches writes every 50ms so console.log spam doesn't flood IPC.
- * No-op when not running inside Tauri.
+ * No-op when not running inside Tauri, or when the user has not turned on
+ * file logging (it records browsing metadata, so it is opt-in).
  */
 export function tauriLog(message: string): void {
-  if (!isTauri) return;
+  if (!isTauri || !_fileLoggingEnabled) return;
   _logQueue.push(message);
   if (!_logFlushTimer) {
     _logFlushTimer = setTimeout(() => {
@@ -56,6 +68,73 @@ export function tauriLog(message: string): void {
  */
 export async function clearTauriLog(): Promise<void> {
   await invoke('clear_log');
+}
+
+// ─── Desktop settings ───────────────────────────────────────────────────────
+
+/**
+ * Load the user's file-logging choice into the local mirror.
+ *
+ * Call once at startup, before anything worth logging happens. Until it
+ * resolves `tauriLog` stays silent, which is the right way round: the log
+ * holds a record of relay selections, RSS subscriptions and timings, so
+ * "not yet known" must behave like "off", never like "on".
+ */
+export async function initTauriLogging(): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    _fileLoggingEnabled = (await invoke<boolean>('get_file_logging')) ?? false;
+  } catch {
+    _fileLoggingEnabled = false;
+  }
+  return _fileLoggingEnabled;
+}
+
+/** Whether desktop file logging is currently on (cached; see initTauriLogging). */
+export function isFileLoggingEnabled(): boolean {
+  return _fileLoggingEnabled;
+}
+
+/** Turn desktop file logging on/off. Returns the value actually persisted. */
+export async function setFileLogging(enabled: boolean): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    await invoke('set_file_logging', { enabled });
+    _fileLoggingEnabled = enabled;
+    // Leaving the previous session's lines on disk after the user switches
+    // logging off would defeat the point of switching it off.
+    if (!enabled) await invoke('clear_log').catch(() => {});
+    return enabled;
+  } catch (e) {
+    console.warn('[tauri] set_file_logging failed:', e);
+    return _fileLoggingEnabled;
+  }
+}
+
+/** Whether the window is excluded from screen capture (desktop only). */
+export async function getContentProtected(): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    return (await invoke<boolean>('get_content_protected')) ?? true;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Set screen-capture protection. Takes effect on the NEXT launch — Tauri can
+ * only apply the flag when the window is built — so callers must say so rather
+ * than implying the change was immediate.
+ */
+export async function setContentProtected(enabled: boolean): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    await invoke('set_content_protected', { enabled });
+    return true;
+  } catch (e) {
+    console.warn('[tauri] set_content_protected failed:', e);
+    return false;
+  }
 }
 
 // ─── OS Keychain ────────────────────────────────────────────────────────────
@@ -75,6 +154,23 @@ export async function keychainStore(key: string, value: string): Promise<boolean
 // keychainGet was removed: the `keychain_get` IPC command is no longer exposed to
 // the webview (it could exfiltrate the nsec via XSS). Secrets stay in Rust —
 // signing/encryption use sign_event / nip04_* / nip44_* which never return the key.
+
+/**
+ * Whether the OS keychain still holds the signing key for `pubkey`.
+ *
+ * Returns true off-desktop and on error: this drives a "your key is missing"
+ * warning, and a false positive there would tell users their key is gone
+ * whenever the check itself hiccups — worse than staying quiet.
+ */
+export async function keychainHasKey(pubkey: string): Promise<boolean> {
+  if (!isTauri) return true;
+  try {
+    return (await invoke<boolean>('keychain_has', { key: `nsec:${pubkey}` })) ?? true;
+  } catch (e) {
+    console.warn('[tauri] keychain_has failed:', e);
+    return true;
+  }
+}
 
 /** Delete a secret from the OS keychain. */
 export async function keychainDelete(key: string): Promise<boolean> {
@@ -208,6 +304,7 @@ export async function tauriQuery(
   urls: string[],
   filter: Record<string, unknown>,
   timeoutMs = 5000,
+  signal?: AbortSignal,
 ): Promise<unknown[]> {
   if (!isTauri || urls.length === 0) return [];
 
@@ -251,9 +348,60 @@ export async function tauriQuery(
 
   return new Promise<unknown[]>((resolve) => {
     let unlistenFn: (() => void) | null = null;
-    const cleanup = () => { unlistenFn?.(); };
+    let settled = false;
+    // Client-side backstop.
+    //
+    // This promise resolved ONLY on a `done: true` payload. Rust has its own
+    // timeout, so in the normal case that emit always arrives — but it is an
+    // app.emit() across the webview bridge, and if it is ever lost (the window
+    // closing mid-query, a dropped/never-registered listener, a panic in the
+    // emitting task) the promise NEVER settles. That is not merely a hung
+    // query: every tauriQuery runs inside `withQueryBudget`, so an unsettled
+    // one holds a global query-governor slot forever. A handful of those and
+    // the desktop app stops querying anything at all, with no error anywhere —
+    // it just quietly goes dead. Give Rust its own deadline plus generous
+    // slack, then settle with whatever we received.
+    const backstop = setTimeout(() => {
+      if (settled) return;
+      console.warn(`[tauri] relay query ${subId} produced no completion signal within ${timeoutMs + 5000}ms — settling with ${allEvents.length} events`);
+      finish();
+    }, timeoutMs + 5000);
+
+    let onAbort: (() => void) | null = null;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(backstop);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      unlistenFn?.();
+      resolve(allEvents);
+    };
+
+    // An abort STOPS the read and keeps what arrived — it does not discard it.
+    //
+    // This used to be a `Promise.race` in NostrProvider that REJECTED on abort,
+    // and callers pass `AbortSignal.timeout(5000)` against a native budget of
+    // exactly 5000 ms. The two expire together, the abort usually wins by a
+    // hair, and every event Rust had already collected was thrown away — so
+    // "load 25/100 more" reliably did nothing on desktop while working on web.
+    // NRelay1 has always behaved this way (its timeout closes the socket and
+    // keeps the partial page), and `run_query` in relay.rs deliberately does the
+    // same on its own deadline. This makes the third layer agree with them.
+    if (signal) {
+      if (signal.aborted) {
+        // Nothing has been collected yet; settle rather than start a query.
+        clearTimeout(backstop);
+        settled = true;
+        resolve([]);
+        return;
+      }
+      onAbort = () => finish();
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     tauriListen<RelayBatch>(`relay-${subId}`, (event) => {
+      if (settled) return;
       const { events, done } = event.payload;
       for (const ev of events) {
         const e = ev as { id?: string };
@@ -262,12 +410,13 @@ export async function tauriQuery(
           allEvents.push(ev);
         }
       }
-      if (done) {
-        cleanup();
-        resolve(allEvents);
-      }
+      if (done) finish();
     }).then((unlisten) => {
       unlistenFn = unlisten;
+      // The backstop may already have fired while `listen` was resolving; if so
+      // this listener is orphaned, so detach it immediately rather than leaving
+      // it registered for the life of the window.
+      if (settled) { unlisten(); return; }
       tauriInvoke('relay_subscribe', {
         subId,
         urls,
@@ -275,12 +424,11 @@ export async function tauriQuery(
         timeoutMs,
       }).catch((err) => {
         console.warn('[tauri] relay_subscribe failed:', err);
-        cleanup();
-        resolve(allEvents);
+        finish();
       });
     }).catch((err) => {
       console.warn('[tauri] listen failed:', err);
-      resolve(allEvents);
+      finish();
     });
   });
 }
@@ -358,6 +506,26 @@ export async function tauriProxyWebviewUnprotected(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether publishing must be refused because the user requires a proxy and this
+ * window is not behind one.
+ *
+ * Publishing rides the webview's own WebSocket, which relay.rs's kill-switch
+ * cannot see — so without this check a Tor-only user kept emitting SIGNED
+ * events over clearnet (linking npub to IP) while their reads were correctly
+ * blocked. Reads failing closed and writes not is exactly backwards: the write
+ * is the identity-bearing half.
+ *
+ * The answer changes only on restart (the webview's proxy is fixed at window
+ * creation) EXCEPT for the `proxy_required` half, which the user can toggle
+ * live — so this re-asks each time rather than caching, and one IPC round trip
+ * per publish is nothing next to the relay round trip that follows. On error it
+ * returns false: this must not become a way to block posting.
+ */
+export async function isPublishBlockedByProxy(): Promise<boolean> {
+  return tauriProxyWebviewUnprotected();
 }
 
 /**

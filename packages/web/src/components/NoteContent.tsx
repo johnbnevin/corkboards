@@ -492,8 +492,17 @@ interface ContentPart {
 const nostrPattern = new RegExp(NIP19_IDENTIFIER_PATTERN, 'g')
 const urlPattern = /(https?:\/\/[^\s]+)/g
 const hashtagPattern = /(?<!#)#([a-zA-Z]\w*)/g
-const mediaPattern = new RegExp(
-  `(${[
+/**
+ * Hosts whose URLs get inline media/embed treatment.
+ *
+ * These are matched by *parsing* the URL and comparing hostnames (see
+ * `isMediaUrl` below), never by regex over the whole string. The previous
+ * version was an unanchored alternation with unescaped dots, so
+ * `https://evil.example/?x=youtube.com` — or literally any host containing
+ * `youtubeXcom` — was classified as a trusted media host and auto-loaded.
+ * `MediaLink` already does exact-or-suffix matching; this now agrees with it.
+ */
+const MEDIA_HOSTS = [
     // Video platforms
     'youtube.com',
     'youtu.be',
@@ -528,9 +537,29 @@ const mediaPattern = new RegExp(
     'imdb.com',
     // Other
     'wav.school'
-  ].join('|')}|\\.(?:jpg|jpeg|png|gif|webp|mp4|webm|mov)(?:[?#]|$))`,
-  'i'
-)
+]
+
+/** Exact-or-suffix host match — `evilyoutube.com` and `youtube.com.evil.net` fail. */
+function hostMatches(hostname: string, domain: string): boolean {
+  return hostname === domain || hostname.endsWith('.' + domain)
+}
+
+const MEDIA_EXTENSION_RE = /\.(?:jpg|jpeg|png|gif|webp|mp4|webm|mov)$/i
+
+/** True when `url` is a known media host or has a media file extension. */
+function isMediaUrl(url: string): boolean {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return false
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+  if (MEDIA_HOSTS.some(host => hostMatches(u.hostname, host))) return true
+  // Extension check runs on the decoded path only, so a `?foo=.jpg` query or a
+  // `#.png` fragment can't make an arbitrary URL look like an image.
+  return MEDIA_EXTENSION_RE.test(u.pathname)
+}
 
 // Regex patterns for parsing — instantiated fresh per call to avoid stateful /g issues
 const MD_LINK_PATTERN = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g
@@ -588,7 +617,7 @@ function parseContent(content: string, renderMarkdown = true): ContentPart[] {
         })
       }
       // For image markdown ![alt](media-url), extract as media to get inline rendering
-      if (content[mdLink.start] === '!' && mediaPattern.test(mdLink.url)) {
+      if (content[mdLink.start] === '!' && isMediaUrl(mdLink.url)) {
         parts.push({ type: 'media', value: mdLink.url })
       } else {
         // Keep full [text](url) as text — ReactMarkdown will render it with
@@ -625,7 +654,7 @@ function parseContent(content: string, renderMarkdown = true): ContentPart[] {
       fullMatch.startsWith('nostr:nprofile1')
     ) {
       parts.push({ type: 'profile', value: fullMatch.replace('nostr:', '') })
-    } else if (mediaPattern.test(fullMatch)) {
+    } else if (isMediaUrl(fullMatch)) {
       parts.push({ type: 'media', value: fullMatch })
     } else if (fullMatch.startsWith('http')) {
       parts.push({ type: 'web', value: fullMatch })

@@ -180,7 +180,9 @@ describe('switchActiveUser round trip', () => {
 });
 
 describe('the sync cache pins keys these helpers depend on', () => {
-  it('never evicts a per-user key, only the unbounded caches', async () => {
+  // ~2,590 idbSetSync calls = as many individual IndexedDB transactions; in
+  // fake-indexeddb that legitimately takes >5s, so give it its own budget.
+  it('never evicts a per-user key, only the unbounded caches', { timeout: 30_000 }, async () => {
     // This is the property that lets the sync path stay correct. If a future
     // change makes app-state keys evictable again, the helpers go back to
     // reading live data as absent — so assert the policy directly.

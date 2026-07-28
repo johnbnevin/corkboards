@@ -7,6 +7,7 @@ import { useAuthor } from './useAuthor.ts';
 import { isTauri } from '@/lib/tauri';
 import { createTauriNsecSigner } from '@/lib/tauriSigner';
 import { createWebNsecSigner } from '@/lib/webNsecSigner';
+import { peekSecret, bunkerClientSecretId } from '@/lib/webKeyStore';
 
 /**
  * Module-scoped NUser cache.
@@ -34,12 +35,26 @@ function buildUser(login: NLoginType, nostr: NPool): NUser {
       // On Tauri desktop, sign + encrypt in Rust so the nsec never enters JS
       // (it lives only in the OS keychain). Duck-type an NUser — the app only
       // consumes `.method`/`.pubkey`/`.signer`.
-      if (isTauri) {
+      //
+      // ...but ONLY when the keychain actually holds the key. useLoginActions
+      // deliberately leaves `data.nsec` populated when `keychainStore` fails, so
+      // a keychain that is locked, absent (headless/minimal Linux desktops have
+      // no Secret Service) or erroring doesn't lock the user out. Returning the
+      // keychain signer unconditionally, as this did, threw that lifeline away:
+      // the Rust signer looked up a key that had never been stored and every
+      // signature failed, on exactly the machines where the fallback was written
+      // to help. A non-empty data.nsec is the signal that the fallback is live.
+      const tauriNsecData = (login.data ?? null) as { nsec?: string } | null;
+      if (isTauri && !tauriNsecData?.nsec) {
         return {
           method: 'nsec',
           pubkey: login.pubkey,
           signer: createTauriNsecSigner(login.pubkey),
         } as unknown as NUser;
+      }
+      if (isTauri) {
+        // Keychain write had failed — sign with the key still held in the login.
+        return NUser.fromNsecLogin(login);
       }
       // Plain web: the persisted login carries a BLANKED data.nsec — the real
       // key lives AES-GCM-encrypted in IndexedDB (lib/webKeyStore). Duck-type
@@ -56,8 +71,29 @@ function buildUser(login: NLoginType, nostr: NPool): NUser {
       }
       return NUser.fromNsecLogin(login);
     }
-    case 'bunker':
+    case 'bunker': {
+      // The NIP-46 client key is kept AES-GCM-encrypted in IndexedDB
+      // (lib/webKeyStore), not as plaintext in localStorage, so the persisted
+      // login carries a blanked `clientNsec`. webKeyStore.prepareLoginStorage
+      // warms the session cache before React mounts (main.tsx awaits it), which
+      // is what lets this synchronous builder read it back.
+      //
+      // A non-empty clientNsec means the encrypted store was unavailable at
+      // login time and we fell back to legacy in-login storage — use it as-is,
+      // exactly like the nsec path, so a storage failure never locks anyone out.
+      const bunkerData = login.data as { clientNsec?: string } | undefined;
+      if (!bunkerData?.clientNsec) {
+        const clientNsec = peekSecret(bunkerClientSecretId(login.pubkey));
+        if (!clientNsec) {
+          throw new Error('Bunker client key unavailable — please reconnect your remote signer');
+        }
+        return NUser.fromBunkerLogin(
+          { ...login, data: { ...login.data, clientNsec } } as typeof login,
+          nostr,
+        );
+      }
       return NUser.fromBunkerLogin(login, nostr);
+    }
     case 'extension':
       return NUser.fromExtensionLogin(login);
     default:

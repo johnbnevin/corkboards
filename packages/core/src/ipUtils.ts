@@ -64,7 +64,8 @@ export function ipv4ToInt(host: string): number | null {
  * `packages/web/rss-proxy.php`: the PHP proxy and this client-side gate defend
  * the same class of attack (an attacker-supplied URL steering a fetch at an
  * address the user didn't intend), and a range blocked on one side but not the
- * other is exactly the kind of drift that reopens a hole.
+ * other is exactly the kind of drift that reopens a hole. If you add a range
+ * here, add it there in the same change.
  */
 export function isPrivateIPv4(n: number): boolean {
   const a = (n >>> 24) & 0xff;
@@ -75,9 +76,13 @@ export function isPrivateIPv4(n: number): boolean {
   if (a === 100 && b >= 64 && b <= 127) return true;              // CGNAT 100.64/10
   if (a === 169 && b === 254) return true;                        // link-local incl. cloud metadata 169.254.169.254
   if (a === 172 && b >= 16 && b <= 31) return true;               // RFC1918 172.16/12
+  const c = (n >>> 8) & 0xff;
   if (a === 192 && b === 0) return true;                          // IETF protocol assignments 192.0.0/24 (+ TEST-NET-1 192.0.2/24)
+  if (a === 192 && b === 88 && c === 99) return true;             // deprecated 6to4 relay anycast 192.88.99/24
   if (a === 192 && b === 168) return true;                        // RFC1918 192.168/16
   if (a === 198 && (b === 18 || b === 19)) return true;           // benchmarking 198.18/15
+  if (a === 198 && b === 51 && c === 100) return true;            // TEST-NET-2 198.51.100/24
+  if (a === 203 && b === 0 && c === 113) return true;             // TEST-NET-3 203.0.113/24
   if (a >= 224) return true;                                      // multicast 224/4 + reserved/broadcast 240/4 (incl. 255.255.255.255)
   return false;
 }
@@ -117,6 +122,12 @@ export function isPrivateIPv6(ipv6: string): boolean {
 
   // IPv4-mapped ::ffff:0:0/96
   if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff) {
+    return isPrivateIPv4(embeddedV4);
+  }
+  // IPv4-translated ::ffff:0:0:0/96 (SIIT, RFC 2765) — the same embedded v4 as
+  // the mapped form above but shifted one hextet left, which is exactly why it
+  // slipped through: the h[5] === 0xffff test can't see it.
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0xffff && h[5] === 0) {
     return isPrivateIPv4(embeddedV4);
   }
   // IPv4-compatible ::a.b.c.d (deprecated, still routable by some stacks)

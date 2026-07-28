@@ -21,6 +21,7 @@ export const STORAGE_KEYS = {
   CUSTOM_FEEDS: 'nostr-custom-feeds',
   COLLAPSED_NOTES: 'collapsed-notes',
   DISMISSED_NOTES: 'dismissed-notes',
+  DISMISSED_THREAD_ROOTS: 'dismissed-thread-roots',
   FRIENDS: 'nostr-friends',
   BROWSE_RELAYS: 'nostr-browse-relays',
   RSS_FEEDS: 'nostr-rss-feeds',
@@ -58,6 +59,7 @@ export const STORAGE_KEYS = {
   HIDE_HTML: 'corkboard:hide-html',
   HIDE_MARKDOWN: 'corkboard:hide-markdown',
   HIDE_EXACT_TEXT: 'corkboard:hide-exact-text',
+  RENDER_MARKDOWN: 'corkboard:render-markdown',
 
   // Dialog geometry (platform-specific — different screen sizes per device)
   THREAD_DIALOG_GEOMETRY: 'corkboard:thread-dialog-geometry',
@@ -85,6 +87,9 @@ export const STORAGE_KEYS = {
 
   // Blossom servers (per-user — different accounts may use different servers)
   BLOSSOM_SERVERS: 'corkboard:blossom-servers',
+  // Watermark (created_at of the last-adopted kind-10063) for the Blossom server
+  // list sync — per-user, local bookkeeping, NOT backed up.
+  BLOSSOM_SERVERS_UPDATED_AT: 'corkboard:blossom-servers-updated-at',
   // Servers that rejected the backup-blob content type (HTTP 415). App-local
   // health state so backup saves skip them; NOT backed up (device/network-specific).
   BLOSSOM_BLOB_REJECTS: 'corkboard:blossom-blob-rejects',
@@ -163,6 +168,7 @@ const SHARED_BACKED_UP_KEYS = [
   STORAGE_KEYS.CUSTOM_FEEDS,
   STORAGE_KEYS.COLLAPSED_NOTES,
   STORAGE_KEYS.DISMISSED_NOTES,
+  STORAGE_KEYS.DISMISSED_THREAD_ROOTS,
   STORAGE_KEYS.FRIENDS,
   STORAGE_KEYS.BROWSE_RELAYS,
   STORAGE_KEYS.RSS_FEEDS,
@@ -199,6 +205,7 @@ const SHARED_BACKED_UP_KEYS = [
   STORAGE_KEYS.HIDE_HTML,
   STORAGE_KEYS.HIDE_MARKDOWN,
   STORAGE_KEYS.HIDE_EXACT_TEXT,
+  STORAGE_KEYS.RENDER_MARKDOWN,
   STORAGE_KEYS.ONBOARDING_SKIPPED,
   STORAGE_KEYS.ONBOARDING_FOLLOW_TARGET,
   STORAGE_KEYS.BANNER_HEIGHT_PCT,
@@ -240,6 +247,7 @@ function getAllPerUserKeys(): string[] {
     STORAGE_KEYS.LAST_CHUNK_COUNT,
     STORAGE_KEYS.BACKUP_SLOT_CURSOR, // per-user local bookkeeping (not backed up)
     STORAGE_KEYS.BLOSSOM_BLOB_REJECTS, // per-user server-health state (not backed up)
+    STORAGE_KEYS.BLOSSOM_SERVERS_UPDATED_AT, // per-user sync watermark (not backed up)
     STORAGE_KEYS.LAST_BACKUP_DATA,
     STORAGE_KEYS.LAST_BACKUP_HASHES,
     STORAGE_KEYS.LAST_BACKUP_COUNTS,
@@ -408,7 +416,15 @@ export function switchActiveUser(
   for (const [key, value] of newUserData) {
     if (value !== null) {
       storage.setSync(key, value);
+    } else if (!isConfirmedAbsent(storage, `user:${newPubkey}:${key}`)) {
+      // Stashed but not synchronously readable (e.g. `corkboard:last-backup-data`,
+      // deliberately kept out of web's sync cache). Without this branch the key was
+      // cleared above and never restored — silently dropping the incoming account's
+      // backup baseline on every switch. Mirror restoreUserData: the live key is
+      // already cleared, so copy this account's stashed value through the async API.
+      copyThroughAsync(storage, `user:${newPubkey}:${key}`, key);
     }
+    // else: genuinely absent for the incoming account — leave the live key cleared.
   }
 
   storage.setSync(ACTIVE_USER_KEY, newPubkey);
@@ -443,9 +459,15 @@ export function handleLogoutStorage(storage: KVStorage, pubkey: string): void {
  */
 export async function handleLogoutStorageAsync(storage: KVStorage, pubkey: string): Promise<void> {
   assertValidPubkey(pubkey);
-  // Stash: read from sync cache (always current in an active session) and persist
+  // Stash by reading each key AUTHORITATIVELY from the backing store, not the sync
+  // cache. `getSync` returns null for keys deliberately excluded from web's
+  // memCache — `corkboard:last-backup-data` on EVERY call — and the old code took
+  // that null as "absent" and deleted the departing account's stashed backup
+  // snapshot on every logout (a certainty, not a race; the sync stash path guards
+  // against exactly this). `await storage.get` reads disk, so a null here means the
+  // value is genuinely gone and removing the stash copy is correct.
   const stashOps = PER_USER_KEYS.map(async (key) => {
-    const value = storage.getSync(key);
+    const value = await storage.get(key);
     if (value !== null) {
       await storage.set(`user:${pubkey}:${key}`, value);
     } else {

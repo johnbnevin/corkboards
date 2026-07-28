@@ -7,6 +7,7 @@
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { useNostr } from '@nostrify/react';
 import { debugLog, debugWarn, debugError } from '@/lib/debug';
+import { isTauri } from '@/lib/tauri';
 import { deduplicateAndSort } from '@core/feedAlgorithms';
 import { hashtagFeedVerdict } from '@core/noteCategories';
 export { deduplicateAndSort, mergeEvents } from '@core/feedAlgorithms';
@@ -21,12 +22,25 @@ export type { RssFeedResult } from '@core/rss';
 
 // ─── RSS fetch (platform-specific: uses fetch + import.meta.env) ────────────
 
+/**
+ * Where to reach the RSS proxy.
+ *
+ * On web the relative `/rss-proxy.php` is correct and keeps the request
+ * same-origin. On DESKTOP it is not: the Tauri build serves the frontend from
+ * the asset protocol (`tauri://localhost`), where `/rss-proxy.php` resolves to a
+ * bundled file with no PHP interpreter behind it — the fetch succeeds, returns
+ * the raw PHP SOURCE, `JSON.parse` fails, and every RSS feed in the app silently
+ * shows nothing. Desktop therefore points at the deployed proxy explicitly,
+ * which is what mobile already does (packages/mobile/src/lib/feedUtils.ts).
+ */
+const RSS_PROXY_URL = isTauri ? 'https://corkboards.me/rss-proxy.php' : RSS_PROXY;
+
 export async function fetchRssFeed(feedUrl: string, maxItems = 20): Promise<import('@core/rss').RssFeedResult | null> {
   let feedDomain = '';
   try { feedDomain = new URL(feedUrl).hostname.replace('www.', ''); } catch { /* ignore */ }
 
   try {
-    const url = `${RSS_PROXY}?url=${encodeURIComponent(feedUrl)}&max=${maxItems}`;
+    const url = `${RSS_PROXY_URL}?url=${encodeURIComponent(feedUrl)}&max=${maxItems}`;
     const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
     debugLog('[rss] Proxy response for', feedUrl, '→ status:', response.status, 'content-type:', response.headers.get('content-type'));
     const text = await response.text();

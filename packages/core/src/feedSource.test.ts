@@ -9,6 +9,16 @@ describe('parseFeedSource', () => {
   it('classifies hashtags (lowercased, # stripped)', () => {
     expect(parseFeedSource('#Bitcoin', decode)).toEqual({ type: 'hashtag', value: 'bitcoin' });
   });
+  it('classifies non-Latin hashtags', () => {
+    // `\w` is ASCII-only; these were rejected before the class went Unicode.
+    expect(parseFeedSource('#биткоин', decode)).toEqual({ type: 'hashtag', value: 'биткоин' });
+    expect(parseFeedSource('#比特币', decode)).toEqual({ type: 'hashtag', value: '比特币' });
+    expect(parseFeedSource('#ビットコイン', decode)).toEqual({ type: 'hashtag', value: 'ビットコイン' });
+  });
+  it('rejects a hashtag containing punctuation or spaces', () => {
+    expect(parseFeedSource('#not a tag', decode)).toBeNull();
+    expect(parseFeedSource('#tag!', decode)).toBeNull();
+  });
   it('classifies relays', () => {
     expect(parseFeedSource('wss://relay.example', decode)).toEqual({ type: 'relay', value: 'wss://relay.example' });
   });

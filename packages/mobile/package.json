@@ -12,6 +12,8 @@
     "test:unit": "jest"
   },
   "dependencies": {
+    "@noble/ciphers": "^2.1.1",
+    "@noble/hashes": "^1.8.0",
     "@nostrify/nostrify": "^0.51.0",
     "@react-navigation/bottom-tabs": "^7.15.9",
     "@react-navigation/native": "^7.2.2",

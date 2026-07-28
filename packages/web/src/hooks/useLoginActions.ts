@@ -51,10 +51,39 @@ import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
 import { clearNoteCardCache } from '@/components/NoteCard';
 import { handleLogoutStorageAsync } from '@/lib/storageKeys';
 import { isTauri, keychainStore, keychainDelete, tauriLog } from '@/lib/tauri';
-import { storeNsec, deleteNsec, wipeKeyStore } from '@/lib/webKeyStore';
+import {
+  storeNsec, deleteNsec, wipeKeyStore,
+  storeSecret, loadSecret, deleteSecret,
+  AMBER_CLIENT_SECRET_ID, bunkerClientSecretId,
+} from '@/lib/webKeyStore';
 import { NOSTRCONNECT_RELAYS, NSEC_APP_RELAY } from '@/lib/relayConstants';
 
 const BACKUP_CHECKED_KEY = 'corkboard:backup-checked';
+
+/**
+ * Move a bunker login's ephemeral NIP-46 client key out of the persisted login
+ * object and into the encrypted key store.
+ *
+ * @nostrify's login store persists the whole login to
+ * `localStorage['corkboard:login']`, so leaving `clientNsec` in place wrote a
+ * plaintext `nsec1…` to localStorage on every bunker/nostrconnect/Amber login.
+ * That key is not the identity key, but it authenticates our end of the signing
+ * channel: anyone who reads it can impersonate this client to the signer and
+ * ask it to sign. It now gets the same at-rest treatment as the identity key
+ * (AES-GCM under a non-extractable CryptoKey in IndexedDB), and
+ * useCurrentUser/webKeyStore.prepareLoginStorage read it back.
+ *
+ * Persist-THEN-blank, and only blank on success — a storage failure must leave
+ * the working (if weaker) legacy path intact rather than locking the user out.
+ * Same availability policy as the nsec and Tauri-keychain paths. (M10)
+ */
+async function persistBunkerClientKey(login: { pubkey: string; data?: unknown }): Promise<void> {
+  const data = login.data as { clientNsec?: string } | undefined;
+  if (!data || typeof data.clientNsec !== 'string' || data.clientNsec === '') return;
+  const stored = await storeSecret(bunkerClientSecretId(login.pubkey), data.clientNsec);
+  if (stored) data.clientNsec = '';
+  else console.error('[login] Failed to encrypt NIP-46 client key — falling back to login-state persistence');
+}
 
 export function useLoginActions() {
   const { nostr } = useNostr();
@@ -105,6 +134,7 @@ export function useLoginActions() {
 
     async bunker(uri: string): Promise<void> {
       const login = await NLogin.fromBunker(uri, nostr);
+      await persistBunkerClientKey(login);
       addLogin(login);
     },
 
@@ -208,6 +238,7 @@ export function useLoginActions() {
         clientNsec,
         relays: connectRelays,
       });
+      await persistBunkerClientKey(login);
       addLogin(login);
     },
 
@@ -217,18 +248,48 @@ export function useLoginActions() {
       // specific client pubkey; generating a fresh key every login made Amber
       // treat each connection as a new app and re-prompt every time. This key
       // only authorizes the NIP-46 channel (revocable in Amber), not identity.
+      //
+      // Stored AES-GCM-encrypted in IndexedDB (lib/webKeyStore), NOT as a
+      // plaintext nsec in localStorage as it was: a `nsec1…` sitting in
+      // localStorage is readable by any script in the origin and by anything
+      // that snapshots browser storage, and whoever reads it can pose as this
+      // client to Amber. Legacy plaintext copies are migrated on first sight and
+      // then removed. (M10)
       const AMBER_CLIENT_KEY = 'corkboard:amber-client-nsec';
       let sk: Uint8Array | undefined;
-      try {
-        const stored = localStorage.getItem(AMBER_CLIENT_KEY);
-        if (stored) {
-          const decoded = nip19.decode(stored);
-          if (decoded.type === 'nsec') sk = decoded.data as Uint8Array;
+      const decodeNsec = (value: string | null): Uint8Array | undefined => {
+        if (!value) return undefined;
+        try {
+          const decoded = nip19.decode(value);
+          return decoded.type === 'nsec' ? (decoded.data as Uint8Array) : undefined;
+        } catch { return undefined; }
+      };
+
+      sk = decodeNsec(await loadSecret(AMBER_CLIENT_SECRET_ID).catch(() => null));
+
+      if (!sk) {
+        // One-time migration of the legacy plaintext localStorage copy.
+        let legacy: string | null = null;
+        try { legacy = localStorage.getItem(AMBER_CLIENT_KEY); } catch { /* unavailable */ }
+        const migrated = decodeNsec(legacy);
+        if (migrated) {
+          sk = migrated;
+          // Encrypt first, and only then drop the plaintext — a crash between
+          // the two must not destroy the only copy, which would make Amber
+          // re-prompt for permission as if this were a brand-new app.
+          if (await storeSecret(AMBER_CLIENT_SECRET_ID, nip19.nsecEncode(migrated))) {
+            try { localStorage.removeItem(AMBER_CLIENT_KEY); } catch { /* ignore */ }
+          }
         }
-      } catch { /* ignore */ }
+      }
+
       if (!sk) {
         sk = generateSecretKey();
-        try { localStorage.setItem(AMBER_CLIENT_KEY, nip19.nsecEncode(sk)); } catch { /* ignore */ }
+        // If the encrypted store is unavailable, do NOT fall back to plaintext:
+        // the cost is only that Amber re-prompts next session, which is a
+        // usability wrinkle, not a lost account. Trading key confidentiality for
+        // one fewer tap is not a trade to make silently.
+        await storeSecret(AMBER_CLIENT_SECRET_ID, nip19.nsecEncode(sk)).catch(() => false);
       }
       const clientPubkey = getPublicKey(sk);
       const clientNsec = nip19.nsecEncode(sk);
@@ -332,6 +393,7 @@ export function useLoginActions() {
         clientNsec,
         relays: connectRelays,
       });
+      await persistBunkerClientKey(login);
       addLogin(login);
     },
 
@@ -349,6 +411,11 @@ export function useLoginActions() {
       if (login) {
         if (isTauri) await keychainDelete(`nsec:${login.pubkey}`);
         else await deleteNsec(login.pubkey).catch(() => {});
+        // Drop this account's encrypted NIP-46 client key too — leaving it
+        // behind keeps a live credential for a signing channel the user just
+        // ended. (The Amber client key is deliberately account-agnostic and
+        // survives, so Amber doesn't re-prompt on every re-login.)
+        await deleteSecret(bunkerClientSecretId(login.pubkey)).catch(() => {});
         removeLogin(login.id);
       }
 

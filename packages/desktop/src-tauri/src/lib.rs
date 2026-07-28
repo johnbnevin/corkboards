@@ -3,14 +3,18 @@ mod logger;
 mod opener;
 mod proxy;
 mod relay;
+mod settings;
 mod signer;
 
-use keychain::{keychain_store, keychain_delete};
+use keychain::{keychain_store, keychain_delete, keychain_has};
 use logger::{write_log, clear_log};
 use opener::{open_external, open_lightning};
 use proxy::{
     get_proxy, set_proxy, get_proxy_required, set_proxy_required, proxy_load_failed,
     proxy_webview_unprotected,
+};
+use settings::{
+    get_content_protected, set_content_protected, get_file_logging, set_file_logging,
 };
 use relay::{relay_query, relay_subscribe};
 use signer::{sign_event, nip44_encrypt, nip44_decrypt, nip04_encrypt, nip04_decrypt};
@@ -30,7 +34,11 @@ pub fn run() {
                     .inner_size(1280.0, 800.0)
                     .min_inner_size(800.0, 600.0)
                     .resizable(true)
-                    .content_protected(true);
+                    // Excluding the window from screen capture defends against a
+                    // shoulder-surfing/screen-scraping threat model, but it also
+                    // blocks the user's OWN screenshots and screen sharing — so it
+                    // is a default, not a lock. Read from settings each launch.
+                    .content_protected(settings::content_protected());
 
             // Apply the saved proxy to ALL WebView network requests (relay sockets,
             // images, embeds) — closing the gap where only native Rust relay queries
@@ -73,6 +81,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             keychain_store,
             keychain_delete,
+            keychain_has,
             write_log,
             clear_log,
             relay_query,
@@ -90,6 +99,10 @@ pub fn run() {
             nip04_decrypt,
             open_external,
             open_lightning,
+            get_file_logging,
+            set_file_logging,
+            get_content_protected,
+            set_content_protected,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -25,13 +25,47 @@ import type { NUser } from '@nostrify/react/login';
 import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache, createRelayFresh } from '@/components/NostrProvider';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '@/lib/storageKeys';
 import { fnv1a32 } from '@core/hashCore';
+import { randomUuid } from '@core/cryptoUtils';
 import { formatTimeAgo } from '@/lib/formatTimeAgo';
 import { debugLog, debugWarn } from '@/lib/debug';
 import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy } from '@/lib/idb';
 import {
-  generateAesKey, importAesKey,
-  aesEncrypt, aesDecrypt, rawKeyToHex, hexToRawKey,
+  importAesKey, aesDecrypt, hexToRawKey, encryptForSelf,
 } from '@/lib/nostrEncrypt';
+
+/**
+ * Decrypt a payload that was encrypted directly TO SELF with the signer (the
+ * manifest envelope — not the AES-wrapped blob, which goes through
+ * `@core/nostrEncrypt.decryptFromSelf`).
+ *
+ * Tries NIP-44 first, then falls back to NIP-04. The fallback is READ-ONLY and
+ * exists because manifests written by older builds of this app (and by any
+ * nip04-only signer) are NIP-04 and were otherwise permanently unrestorable:
+ * the decrypt path called `nip44!.decrypt` and nothing else, so a legacy backup
+ * failed with a bare "Decrypt failed" and the user's only cloud copy was
+ * unreadable. Reading a legacy ciphertext is not a downgrade; WRITING one would
+ * be, which is why the encrypt path (encryptForSelf) is NIP-44 only. (M7a)
+ */
+async function decryptSelfPayload(
+  signer: { nip44?: { decrypt(pk: string, c: string): Promise<string> }; nip04?: { decrypt(pk: string, c: string): Promise<string> } },
+  pubkey: string,
+  ciphertext: string,
+  timeoutMs = 5000,
+): Promise<string> {
+  const withTimeout = <T>(p: Promise<T>) => Promise.race([
+    p,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), timeoutMs)),
+  ]);
+  let firstErr: unknown;
+  if (signer.nip44) {
+    try { return await withTimeout(signer.nip44.decrypt(pubkey, ciphertext)); }
+    catch (err) { firstErr = err; }
+  }
+  if (signer.nip04) {
+    return withTimeout(signer.nip04.decrypt(pubkey, ciphertext));
+  }
+  throw firstErr ?? new Error('Signer supports neither NIP-44 nor NIP-04 decryption');
+}
 
 // Relay blacklist - persists across sessions
 const BLOCKED_RELAYS_KEY = 'corkboard:blocked-relays';
@@ -423,8 +457,34 @@ function getPublishRelays(pubkey: string): { primary: string[]; fallback: string
 }
 
 
-// Keys tracked for change detection (shared between save, auto-save, and restore)
-const SNAPSHOT_KEYS = ['nostr-custom-feeds','collapsed-notes','dismissed-notes','nostr-friends','nostr-browse-relays','nostr-rss-feeds','saved-minimized-notes','corkboard:tab-filters','corkboard:onboarding-skipped','corkboard:banner-height-pct','corkboard:banner-fit-mode'] as const;
+// Keys tracked for change detection (shared between save, auto-save, and restore).
+//
+// This list is what `hasUnsavedChanges()` hashes and what the auto-save
+// regression guard counts, so a key missing from it is a key whose changes never
+// trigger a backup. Two consequences that were live bugs:
+//   - BOOKMARK_IDS was absent while `snapshotCounts()` read
+//     `snapshot['nostr-bookmark-ids']` — so the bookmark count was ALWAYS 0 and
+//     the guard could never notice bookmarks disappearing.
+//   - DISMISSED_THREAD_ROOTS / PINNED_NOTE_IDS / RENDER_MARKDOWN are per-user
+//     isolated and backed up, but edits to them alone left the app believing
+//     nothing had changed.
+const SNAPSHOT_KEYS = [
+  STORAGE_KEYS.CUSTOM_FEEDS,
+  STORAGE_KEYS.COLLAPSED_NOTES,
+  STORAGE_KEYS.DISMISSED_NOTES,
+  STORAGE_KEYS.DISMISSED_THREAD_ROOTS,
+  STORAGE_KEYS.FRIENDS,
+  STORAGE_KEYS.BROWSE_RELAYS,
+  STORAGE_KEYS.RSS_FEEDS,
+  STORAGE_KEYS.SAVED_MINIMIZED_NOTES,
+  STORAGE_KEYS.BOOKMARK_IDS,
+  STORAGE_KEYS.PINNED_NOTE_IDS,
+  STORAGE_KEYS.TAB_FILTERS,
+  STORAGE_KEYS.ONBOARDING_SKIPPED,
+  STORAGE_KEYS.BANNER_HEIGHT_PCT,
+  STORAGE_KEYS.BANNER_FIT_MODE,
+  STORAGE_KEYS.RENDER_MARKDOWN,
+] as const;
 
 /**
  * Counts of meaningful items at last-backup time — small enough to keep in
@@ -474,6 +534,19 @@ function persistSnapshotAndHashes(snapshot: Record<string, string>): void {
 // Keyed by pubkey so switching accounts still triggers a check.
 let _checkedPubkey: string | null = null;
 
+// Module-level save/restore mutexes.
+//
+// These were per-instance `useRef`s, which made them no guard at all: every
+// mount of useNostrBackup got its OWN flag, so a manual save from Settings and
+// the visibilitychange auto-save (different component trees, different
+// instances) could run concurrently, each uploading a blob and each publishing a
+// kind-30078 to the same d-tag — last writer wins, and the loser's data is gone.
+// Worse, `autoSaveBackup` checks `isRestoring` to avoid uploading a HALF-RESTORED
+// IDB as the canonical cloud state; with a per-instance ref, a restore running
+// in one component simply did not stop an auto-save in another. Backup state is
+// process-global, so its mutex must be too. (L19)
+const _backupMutex = { saving: false, restoring: false };
+
 // Module-level in-flight dedupe: if a check is already running for a pubkey,
 // concurrent callers share that promise instead of starting a parallel run.
 // Defends against effect-deps changes during the (potentially slow, with
@@ -498,8 +571,6 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     return parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
   });
 
-  const isSaving = useRef(false);
-  const isRestoring = useRef(false);
   const manifestEventRef = useRef<NostrEvent | null>(null);
   const manifestDataRef = useRef<Record<string, unknown> | null>(null);
   const idbReadyChecked = useRef(false);
@@ -509,7 +580,10 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   const [deviceId] = useState(() => {
     const existing = idbGetSync('corkboard:device-id');
     if (existing) return existing;
-    const id = crypto.randomUUID();
+    // randomUuid() (getRandomValues-based) rather than crypto.randomUUID(),
+    // which is absent on React Native/Hermes — keeps this identical across
+    // platforms and non-crashing wherever the shared code is reused.
+    const id = randomUuid();
     idbSetSync('corkboard:device-id', id);
     idbSet('corkboard:device-id', id);
     return id;
@@ -576,11 +650,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
 
   // Save backup to Nostr
   const saveBackup = useCallback(async (): Promise<boolean> => {
-    if (!user || isSaving.current) {
+    if (!user || _backupMutex.saving) {
       log('Save skipped: ' + (!user ? 'no user' : 'already saving'));
       return false;
     }
-    isSaving.current = true;
+    _backupMutex.saving = true;
     log('Starting save...');
 
     try {
@@ -594,29 +668,28 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const pubkey = user.pubkey;
       const signer = user.signer;
 
-      if (!signer.nip04 && !signer.nip44) {
-        log('Signer does not support encryption', 'error');
+      // NIP-44 is required to WRITE a backup. This used to accept a nip04-only
+      // signer and silently wrap the AES key with deprecated NIP-04, and the
+      // manifest below fell back further still — to PLAINTEXT — leaking the
+      // user's corkboard names, item counts and Blossom URL onto public relays
+      // whenever nip44 was absent. A weaker-or-absent encryption path is a
+      // consent decision, not a catch block, so we fail loudly instead.
+      // Legacy NIP-04 backups remain RESTORABLE (see decryptSelfPayload). (M7b)
+      if (!signer.nip44) {
+        log('Signer does not support NIP-44 encryption', 'error');
         setStatus('save-error');
-        setMessage('Backup failed: signer does not support encryption');
-        isSaving.current = false;
+        setMessage('Backup failed: your signer does not support NIP-44 encryption, which is required to encrypt a backup.');
+        _backupMutex.saving = false;
         return false;
       }
 
       const now = Math.floor(Date.now() / 1000);
 
-      // Generate AES key, encrypt the entire backup as a single blob
-      log('Generating AES key...');
-      const { raw: aesRaw, key: aesKey } = await generateAesKey();
-      const aesKeyHex = rawKeyToHex(aesRaw);
-
-      const signerMethod = signer.nip44 ? 'nip44' : 'nip04';
-      log(`Wrapping AES key with ${signerMethod}...`);
-      const wrappedKey = signerMethod === 'nip44'
-        ? await signer.nip44!.encrypt(pubkey, aesKeyHex)
-        : await signer.nip04!.encrypt(pubkey, aesKeyHex);
-
-      log('Encrypting backup...');
-      const encryptedData = await aesEncrypt(aesKey, json);
+      // AES-256-GCM blob + NIP-44-wrapped key, via the single shared
+      // implementation in @core/nostrEncrypt (which is NIP-44-only by design).
+      log('Encrypting backup (AES-256-GCM, NIP-44 wrapped key)...');
+      const { content: encryptedData, wrappedKey, signerMethod } =
+        await encryptForSelf(json, signer, pubkey);
       log(`Encrypted: ${encryptedData.length} chars`);
 
       // Upload encrypted backup to Blossom as a single file
@@ -659,13 +732,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       };
       log(`Manifest v4: ${keysPresent.length} keys, blossom: ${blossomUrl}, device: ${deviceId.slice(0, 8)}`);
 
-      // Encrypt manifest so corkboard names, stats, and Blossom URL aren't leaked
+      // Encrypt manifest so corkboard names, stats, and Blossom URL aren't leaked.
+      // NIP-44 only — the nip04-then-plaintext ladder that used to live here is
+      // gone (see the guard above); `signer.nip44` is proven present by now.
       const manifestJson = JSON.stringify(manifestData);
-      const encryptedManifest = signer.nip44
-        ? await signer.nip44.encrypt(pubkey, manifestJson)
-        : signer.nip04
-          ? await signer.nip04.encrypt(pubkey, manifestJson)
-          : manifestJson;
+      const encryptedManifest = await signer.nip44!.encrypt(pubkey, manifestJson);
 
       // Bounded ring: rotate through a fixed set of slots instead of minting a
       // new timestamp d-tag per save (which accumulated forever on relays).
@@ -760,7 +831,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       setMessage('Backup failed: ' + errMsg);
       return false;
     } finally {
-      isSaving.current = false;
+      _backupMutex.saving = false;
     }
   }, [user, log, deviceId]);
 
@@ -774,7 +845,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   // ('skipped', silent) — the two used to collapse into a bare false and
   // surface the same misleading "Could not save to Blossom" toast.
   const autoSaveBackup = useCallback(async (): Promise<AutoSaveResult> => {
-    if (!user || isSaving.current || isRestoring.current) return 'skipped';
+    if (!user || _backupMutex.saving || _backupMutex.restoring) return 'skipped';
     if (!hasUnsavedChanges()) return 'skipped';
 
     // Guard: don't overwrite a good cloud backup with empty/corrupt local state.
@@ -825,22 +896,18 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       } catch { /* ignore parse errors — don't block save on unexpected format */ }
     }
 
-    isSaving.current = true;
+    _backupMutex.saving = true;
 
     try {
       const json = serializeBackup();
       const pubkey = user.pubkey;
       const signer = user.signer;
-      if (!signer.nip04 && !signer.nip44) { isSaving.current = false; return 'skipped'; }
+      // NIP-44 only on the write path — same reasoning as saveBackup. (M7b)
+      if (!signer.nip44) { _backupMutex.saving = false; return 'skipped'; }
 
       const now = Math.floor(Date.now() / 1000);
-      const { raw: aesRaw, key: aesKey } = await generateAesKey();
-      const aesKeyHex = rawKeyToHex(aesRaw);
-      const signerMethod = signer.nip44 ? 'nip44' : 'nip04';
-      const wrappedKey = signerMethod === 'nip44'
-        ? await signer.nip44!.encrypt(pubkey, aesKeyHex)
-        : await signer.nip04!.encrypt(pubkey, aesKeyHex);
-      const encryptedData = await aesEncrypt(aesKey, json);
+      const { content: encryptedData, wrappedKey, signerMethod } =
+        await encryptForSelf(json, signer, pubkey);
 
       const blob = new Blob([encryptedData], { type: 'text/plain' });
       const file = new File([blob], 'corkboard-autosave.txt', { type: 'text/plain' });
@@ -848,7 +915,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // Redundant, 415-aware upload (skips servers known to reject the blob type).
       const { url: blossomUrl, hash: blossomHash } =
         await uploadBlobWithRedundancy(file, signer, getActiveBlossomServers());
-      if (!blossomUrl) { isSaving.current = false; return 'no-servers'; }
+      if (!blossomUrl) { _backupMutex.saving = false; return 'no-servers'; }
 
       const keysPresent = BACKED_UP_KEYS.filter(k => idbGetSync(k) !== null);
       const stats = {
@@ -868,11 +935,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         ...(blossomHash ? { blossomHash } : {}),
         keys: keysPresent, stats, corkboardNames,
       });
-      const encryptedAutoManifest = signer.nip44
-        ? await signer.nip44.encrypt(pubkey, autoManifestJson)
-        : signer.nip04
-          ? await signer.nip04.encrypt(pubkey, autoManifestJson)
-          : autoManifestJson;
+      // NIP-44 only — never NIP-04, never plaintext. (M7b)
+      const encryptedAutoManifest = await signer.nip44!.encrypt(pubkey, autoManifestJson);
 
       const manifestEvent = await signer.signEvent({
         kind: 30078,
@@ -941,14 +1005,24 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       debugWarn('[backup]', 'Auto-save failed');
       return 'error';
     } finally {
-      isSaving.current = false;
+      _backupMutex.saving = false;
     }
   }, [user, hasUnsavedChanges, deviceId]);
 
   // Query relays in small batches (2–3 at a time) — stop early when results found.
   // Avoids overwhelming mobile browsers with 10+ simultaneous WebSocket connections.
   // Tracks which relays were used so post-login fetches can prefer the others.
-  const queryAll = useCallback(async (filter: { kinds: number[]; authors: string[]; '#d'?: string[]; limit?: number }, label: string, specificRelays?: string[], _checkAll = false, overallTimeoutMs = 15000, perRelayTimeoutMs = 5000): Promise<NostrEvent[]> => {
+  //
+  // `minRelaysWithResults` is how many relays must ANSWER WITH DATA before we
+  // stop early. Default 1 preserves the cheap "first hit wins" behaviour for
+  // chunk fetches, where any copy is as good as another. For the addressable
+  // manifest it must be higher: kind 30078 is replaceable per d-tag, so each
+  // relay holds exactly one event per tag and they can DISAGREE — a relay that
+  // missed the last few autosaves answers instantly with a stale manifest, and
+  // stopping there restored an old backup over newer data. Collecting from a
+  // few relays and taking max(created_at) is what makes "newest wins" true
+  // rather than "fastest wins".
+  const queryAll = useCallback(async (filter: { kinds: number[]; authors: string[]; '#d'?: string[]; limit?: number }, label: string, specificRelays?: string[], _checkAll = false, overallTimeoutMs = 15000, perRelayTimeoutMs = 5000, minRelaysWithResults = 1): Promise<NostrEvent[]> => {
     const pubkey = user?.pubkey || '';
     const primaryRelays = specificRelays?.map(normalizeRelay) || [];
     const { primary: writePrimary, fallback: writeFallback } = pubkey
@@ -988,15 +1062,19 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       }
     };
 
-    // Query relays one at a time — stop as soon as we get results (unless checkAll).
-    // This avoids opening connections to relays that are down when another works.
+    // Query relays one at a time — stop once enough relays have answered with
+    // data (unless checkAll). This avoids opening connections to relays that are
+    // down when another works, while still sampling more than one source when
+    // the caller needs a newest-wins comparison.
+    let relaysWithResults = 0;
     for (const url of activeRelayUrls) {
       if (overallAbort.signal.aborted) break;
       const events = await queryRelay(url);
+      if (events.length > 0) relaysWithResults++;
       for (const ev of events) {
         if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
       }
-      if (!_checkAll && allEvents.length > 0) break;
+      if (!_checkAll && relaysWithResults >= minRelaysWithResults) break;
     }
 
     clearTimeout(overallTimeout);
@@ -1121,19 +1199,26 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setMessage('Finding your relays...');
         log('Fetching kind 10002 relay list from fallback relays...');
         const relayEvents: NostrEvent[] = [];
-        // Try relays one at a time — stop at the first that returns results
+        // Sample up to 3 relays rather than stopping at the first responder.
+        // kind 10002 is replaceable, so relays hold one event each and they can
+        // disagree; the reduce below picks max(created_at), which needs more than
+        // one candidate to mean anything. Adopting a stale relay list here poisons
+        // the whole session's outbox routing. (M7c)
+        let answered = 0;
         for (const url of FALLBACK_RELAYS) {
+          if (answered >= 3) break;
+          let relay;
           try {
-            const relay = createRelayFresh(normalizeRelay(url), { backoff: false });
+            relay = createRelayFresh(normalizeRelay(url), { backoff: false });
             const evts = await relay.query(
               [{ kinds: [10002], authors: [pubkey], limit: 1 }],
               { signal: AbortSignal.timeout(6000) }
             );
-            if (evts.length > 0) {
-              relayEvents.push(...evts);
-              break; // Got results, no need to try more relays
-            }
+            // Guard against a relay answering with someone else's relay list.
+            const mine = evts.filter(e => e.kind === 10002 && e.pubkey === pubkey);
+            if (mine.length > 0) { relayEvents.push(...mine); answered++; }
           } catch { /* try next relay */ }
+          finally { try { relay?.close(); } catch { /* */ } }
         }
         if (relayEvents.length > 0) {
           const best = relayEvents.reduce((a, b) => a.created_at > b.created_at ? a : b);
@@ -1157,9 +1242,14 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         { kinds: [30078], authors: [pubkey], '#d': [`${D_TAG_PREFIX}:auto`], limit: 1 },
         'autosave manifest',
         undefined,
-        false, // stop on first result — any relay that has it is enough
+        false,
         10000,
-        5000
+        5000,
+        // Sample up to 3 relays before choosing. `bestManifestEvent` below picks
+        // max(created_at), which is only meaningful with more than one candidate:
+        // stopping at the first responder meant a lagging relay's stale manifest
+        // could be restored over newer local data. (M7c)
+        3,
       );
       const manifestEvents = allEvents; // relay already filtered by d-tag
       log(`Total: ${manifestEvents.length} autosave manifest events`);
@@ -1194,13 +1284,12 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         manifestDataRef.current = manifest;
         log(`Manifest (plaintext): v=${manifest!.v}, chunks=${manifest!.chunks}, ts=${manifest!.timestamp}, relays=${manifest!.relays?.length || 'none'}`);
       } catch {
-        // Old format: manifest is NIP-44 encrypted
-        log('Manifest is not plaintext JSON, trying NIP-44 decrypt...');
+        // Encrypted manifest — NIP-44, or NIP-04 for backups written by older
+        // builds. Trying only nip44 (what this did) made every legacy backup
+        // permanently unrestorable. (M7a)
+        log('Manifest is not plaintext JSON, decrypting (NIP-44, then legacy NIP-04)...');
         try {
-          const manifestJson = await Promise.race([
-            user.signer.nip44!.decrypt(pubkey, bestManifestEvent.content),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), 5000)),
-          ]);
+          const manifestJson = await decryptSelfPayload(user.signer, pubkey, bestManifestEvent.content);
           manifest = JSON.parse(manifestJson);
           manifestDataRef.current = manifest;
           log(`Manifest (decrypted): v=${manifest!.v}, chunks=${manifest!.chunks}, ts=${manifest!.timestamp}`);
@@ -1342,11 +1431,11 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       log('Restore skipped: ' + (!user ? 'no user' : 'no remote backup'));
       return;
     }
-    if (isRestoring.current) {
+    if (_backupMutex.restoring) {
       log('Restore skipped: already restoring');
       return;
     }
-    isRestoring.current = true;
+    _backupMutex.restoring = true;
 
     setStatus('restoring');
     setMessage('Restoring backup...');
@@ -1563,7 +1652,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       setStatus('restore-error');
       setMessage('Restore failed: ' + errMsg);
     } finally {
-      isRestoring.current = false;
+      _backupMutex.restoring = false;
     }
   }, [user, queryAll, remoteBackup, log]);
 
@@ -1662,7 +1751,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     // this checkpoint path (auto-restore, idle-return, manual restore) never did.
     // Set it AFTER the intentional pre-restore save above, or that save would be
     // skipped and the newer current state lost.
-    isRestoring.current = true;
+    _backupMutex.restoring = true;
     try {
       // Try the original Blossom URL first, then fall back to other servers using the hash
       let encryptedData: string | null = null;
@@ -1737,7 +1826,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // Restore writes are done (or failed) — let auto-save resume. The 3s
       // 'restored'→'idle' status flash above is only cosmetic; data safety is
       // governed by this ref, which autoSaveBackup checks.
-      isRestoring.current = false;
+      _backupMutex.restoring = false;
     }
   }, [user, log, autoSaveBackup]);
 
@@ -1807,10 +1896,9 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
           let m: Record<string, unknown> | null = null;
           try { m = JSON.parse(ev.content); } catch {
             try {
-              const json = await Promise.race([
-                user.signer.nip44!.decrypt(user.pubkey, ev.content),
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), 3000)),
-              ]);
+              // NIP-44 first, legacy NIP-04 fallback — otherwise older
+              // checkpoints are invisible to the scan. (M7a)
+              const json = await decryptSelfPayload(user.signer, user.pubkey, ev.content, 3000);
               m = JSON.parse(json);
             } catch { continue; }
           }

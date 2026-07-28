@@ -327,14 +327,20 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     // when the user navigates away and back (injectedReply state is cleared
     // on navigation but query cache survives until staleTime expires).
     if (rootId) {
+      // The key MUST match the live query's key exactly — ['thread-tree',
+      // rootId, rootAddr]. Writing the two-element ['thread-tree', rootId]
+      // created a SEPARATE cache entry that nothing ever read: the reply
+      // survived in state only until navigation cleared `injectedReply`, and
+      // then vanished on return, which is precisely the persistence this block
+      // exists to provide. setQueryData does no key-prefix matching. (L15)
       queryClient.setQueryData<NostrEvent[]>(
-        ['thread-tree', rootId],
+        ['thread-tree', rootId, rootAddr],
         // Dedup by id — a double-submit or a concurrent refetch can inject the
         // same reply twice, bloating the cache and miscounting allEvents.
         (old) => old?.some(e => e.id === event.id) ? old : [...(old ?? []), event],
       )
     }
-  }, [rootId, queryClient])
+  }, [rootId, rootAddr, queryClient])
 
   const toggleCollapse = useCallback((id: string) => {
     setCollapsedIds(prev => {

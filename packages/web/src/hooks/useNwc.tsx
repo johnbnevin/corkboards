@@ -41,7 +41,14 @@ function parseNwcUri(uri: string): NwcParsed {
  *  Returns 'nip44_v2' if supported, 'nip04' as fallback for older wallets. */
 async function detectEncryption(relay: NRelay1, walletPubkey: string): Promise<EncryptionType> {
   try {
-    for await (const msg of relay.req([{ kinds: [13194], authors: [walletPubkey], limit: 1 }])) {
+    // Bounded: an unsignalled req() on a wallet relay that accepts the
+    // subscription and then goes quiet would hang here forever — and this runs
+    // INSIDE payInvoice, before the payment is sent, so the user's tap on "Zap"
+    // would simply never do anything and never report why. (L11)
+    for await (const msg of relay.req(
+      [{ kinds: [13194], authors: [walletPubkey], limit: 1 }],
+      { signal: AbortSignal.timeout(8000) },
+    )) {
       if (msg[0] === 'EOSE') break;
       if (msg[0] === 'EVENT') {
         const encTag = msg[2].tags?.find((t: string[]) => t[0] === 'encryption');
@@ -163,7 +170,10 @@ export function NwcProvider({ children }: { children: React.ReactNode }) {
         created_at: Math.floor(Date.now() / 1000),
       }, secret);
 
-      await relay.event(requestEvent);
+      // Timeout the publish too: without a signal this awaits the relay's OK
+      // indefinitely, so a wallet relay that stalls mid-write leaves isProcessing
+      // stuck true and the pay button dead with no error. (L11)
+      await relay.event(requestEvent, { signal: AbortSignal.timeout(15000) });
       debugLog(`[nwc] Request sent (${encType})`);
 
       // Use AbortController to cancel the subscription without closing the pooled relay

@@ -26,6 +26,22 @@ const RENDER_INCREMENT_PER_COL = 8;
  *  NoteCards into the webview DOM. With the per-tab MAX_RETAINED_NOTES cap this
  *  is a secondary ceiling; 200/col across typical column counts stays generous. */
 const MAX_RENDER_PER_COL = 200;
+/** Hard cap on live NoteCards across ALL columns.
+ *
+ *  The per-column cap alone is not a budget: columns are user-selectable 1–9, so
+ *  200/col meant a 9-column layout kept 1,800 live cards — each with its own
+ *  queries, images and (with "load all media" on) a `<video preload="metadata">`
+ *  — while a 1-column layout kept 200. The thing that costs the machine is the
+ *  TOTAL, so the total is what's bounded; the per-column figure is derived from
+ *  it. Sized so the common 2–3 column layouts keep the window they had. */
+const MAX_RENDER_TOTAL = 600;
+/** Floor for the derived per-column budget, so a very wide layout still renders
+ *  a useful column rather than three cards. */
+const MIN_RENDER_PER_COL = 24;
+/** How far down a column we look for the previous head note when deciding how
+ *  much the feed was prepended by. Beyond this it isn't a prepend — it's a
+ *  wholesale refresh — and we leave the window where it is. */
+const MAX_PREPEND_LOOKAHEAD = 200;
 
 // ─── Discover loading experience ─────────────────────────────────────────────
 
@@ -226,21 +242,68 @@ export const FeedGrid = React.memo(function FeedGrid({
 
   // ── Incremental rendering: render a small batch first, add more on scroll ──
   const maxColLength = Math.max(...columns.map(c => c.length), 0);
-  const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_PER_COL);
 
-  // Reset render limit when the underlying data changes (tab switch, new data).
-  // We compare the first id of each column individually instead of joining into
-  // a string — string-join allocated O(n) per render on a hot path.
+  // Per-column budget derived from the global ceiling — see MAX_RENDER_TOTAL.
+  const perColLimit = Math.max(
+    MIN_RENDER_PER_COL,
+    Math.min(MAX_RENDER_PER_COL, Math.ceil(MAX_RENDER_TOTAL / Math.max(1, columnCount))),
+  );
+
+  const [renderLimit, setRenderLimit] = useState(() => Math.min(INITIAL_RENDER_PER_COL, perColLimit));
+
+  // Reset the render window only when the FEED changes — not when it grows.
+  //
+  // This used to reset to 8/col whenever the first id of any column changed.
+  // Autofetch prepends newer notes, so that fired on every tick: the window
+  // collapsed from (say) 120/col to 8, unmounting hundreds of NoteCards; the
+  // page height collapsed with it, which clamped the scroll position and put
+  // the bottom sentinel straight back in view; the observer then climbed back
+  // 8 at a time, each step a full re-render and masonry relayout, remounting
+  // every card (and its queries, images and `<video preload="metadata">`) on
+  // the way up. With autofetch + auto-consolidate on, that sawtooth ran
+  // unattended for as long as the app was open. It is the single most
+  // expensive thing the feed did, and none of the work was wanted.
+  //
+  // Now: a tab/feed switch starts small again (genuinely new content), and a
+  // prepend WIDENS the window by however far the old head slid down, so
+  // everything that was mounted stays mounted and the note being read stays
+  // put. The window only ever grows within a feed, and `perColLimit` bounds it.
   const prevFirstColumnIds = useRef<readonly (string | undefined)[]>([]);
+  const prevTabRef = useRef(activeTab);
   useEffect(() => {
     const cur = columns.map(col => col[0]?.id);
     const prev = prevFirstColumnIds.current;
-    const changed = cur.length !== prev.length || cur.some((id, i) => id !== prev[i]);
-    if (changed) {
+
+    if (activeTab !== prevTabRef.current) {
+      prevTabRef.current = activeTab;
       prevFirstColumnIds.current = cur;
-      setRenderLimit(INITIAL_RENDER_PER_COL);
+      setRenderLimit(Math.min(INITIAL_RENDER_PER_COL, perColLimit));
+      return;
     }
-  }, [columns]);
+
+    const changed = cur.length !== prev.length || cur.some((id, i) => id !== prev[i]);
+    if (!changed) return;
+    prevFirstColumnIds.current = cur;
+
+    // How far did the previous head slide? That's how many notes were prepended
+    // to the deepest column. A head that isn't found near the top means this
+    // wasn't a prepend (consolidate dropped it, or the feed was replaced) — in
+    // that case leave the window alone rather than shrinking it.
+    let shift = 0;
+    for (let i = 0; i < columns.length; i++) {
+      const prevHead = prev[i];
+      if (!prevHead) continue;
+      const col = columns[i];
+      const upTo = Math.min(col.length, MAX_PREPEND_LOOKAHEAD);
+      for (let j = 0; j < upTo; j++) {
+        if (col[j].id === prevHead) {
+          if (j > shift) shift = j;
+          break;
+        }
+      }
+    }
+    if (shift > 0) setRenderLimit(prev => Math.min(prev + shift, perColLimit));
+  }, [columns, activeTab, perColLimit]);
 
   // Explicit "+25/+100" reveal: the user asked to load more, so grow the render
   // window to include the notes that were just appended (older notes land past
@@ -249,13 +312,13 @@ export const FeedGrid = React.memo(function FeedGrid({
   // lazy rendering stays in effect for normal scrolling.
   useEffect(() => {
     if (!revealMoreTick) return; // 0 / undefined = initial mount, nothing to reveal
-    setRenderLimit(Math.min(maxColLength, MAX_RENDER_PER_COL));
+    setRenderLimit(Math.min(maxColLength, perColLimit));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revealMoreTick]);
 
   // Expand render window when user scrolls near the bottom
   const sentinelRef = useRef<HTMLDivElement>(null);
-  const canLoadMore = renderLimit < maxColLength && renderLimit < MAX_RENDER_PER_COL;
+  const canLoadMore = renderLimit < maxColLength && renderLimit < perColLimit;
   useEffect(() => {
     if (!canLoadMore) return;
     const sentinel = sentinelRef.current;
@@ -263,17 +326,17 @@ export const FeedGrid = React.memo(function FeedGrid({
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting) {
-          setRenderLimit(prev => Math.min(prev + RENDER_INCREMENT_PER_COL, maxColLength, MAX_RENDER_PER_COL));
+          setRenderLimit(prev => Math.min(prev + RENDER_INCREMENT_PER_COL, maxColLength, perColLimit));
         }
       },
       { rootMargin: '600px' },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [canLoadMore, renderLimit, maxColLength]);
+  }, [canLoadMore, renderLimit, maxColLength, perColLimit]);
 
-  // Slice columns to only render up to renderLimit (capped at MAX_RENDER_PER_COL) per column
-  const visibleColumns = columns.map(col => col.slice(0, Math.min(renderLimit, MAX_RENDER_PER_COL)));
+  // Slice columns to only render up to renderLimit (capped by the global budget)
+  const visibleColumns = columns.map(col => col.slice(0, Math.min(renderLimit, perColLimit)));
 
   // Detect when notes rearrange (new notes prepended / order changes) and briefly
   // suppress pointer events so the user doesn't misclick during layout shift.
@@ -429,7 +492,12 @@ export const FeedGrid = React.memo(function FeedGrid({
                   </div>
                 }
               >
-                <div className="space-y-4">
+                {/* `contain: layout` scopes a re-render's layout work to this
+                    column instead of invalidating the whole masonry grid — the
+                    difference is large in WebKitGTK, where the desktop build
+                    lives. Deliberately NOT `paint`, which would clip anything a
+                    card draws outside its box. */}
+                <div className="space-y-4" style={{ contain: 'layout' }}>
                   {columnNotes.map((note, noteIndex) => {
                     const classification = noteClassifications.get(note.id);
                     const parentNote = classification?.parentEventId
@@ -479,7 +547,7 @@ export const FeedGrid = React.memo(function FeedGrid({
           {/* Sentinel for incremental rendering — triggers loading more notes on scroll */}
           {canLoadMore && <div ref={sentinelRef} style={{ height: 1 }} />}
           {/* Cap reached — nudge user to dismiss notes to free space */}
-          {!canLoadMore && renderLimit >= MAX_RENDER_PER_COL && maxColLength > MAX_RENDER_PER_COL && (
+          {!canLoadMore && renderLimit >= perColLimit && maxColLength > perColLimit && (
             <div className="flex justify-center py-6">
               <p className="text-xs text-muted-foreground">Dismiss notes to load more</p>
             </div>

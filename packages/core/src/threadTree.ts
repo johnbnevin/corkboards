@@ -36,9 +36,14 @@ export function parseThreadTags(event: NostrEvent): {
   if (rootTag || replyTag) {
     return { root: clean(rootTag?.[1]), reply: clean(replyTag?.[1] || rootTag?.[1]), hints }
   }
-  // Positional fallback (NIP-10)
-  if (eTags.length === 1) return { root: clean(eTags[0]?.[1]), reply: clean(eTags[0]?.[1]), hints }
-  if (eTags.length > 1) return { root: clean(eTags[0]?.[1]), reply: clean(eTags[eTags.length - 1]?.[1]), hints }
+  // Positional fallback (NIP-10): `[root, mention…, reply]`. A tag the author
+  // marked 'mention' is a citation, not a thread position, so it must not be
+  // eligible to become the root or the parent.
+  const positional = eTags.filter(t => t[3] !== 'mention')
+  if (positional.length === 1) return { root: clean(positional[0]?.[1]), reply: clean(positional[0]?.[1]), hints }
+  if (positional.length > 1) {
+    return { root: clean(positional[0]?.[1]), reply: clean(positional[positional.length - 1]?.[1]), hints }
+  }
   return { hints }
 }
 
@@ -55,13 +60,27 @@ export function getReactionTargetId(event: NostrEvent): string | undefined {
   return (marked ?? eTags[eTags.length - 1])?.[1]
 }
 
-/** Get the immediate parent event ID of a reply */
+/**
+ * Get the immediate parent event ID of a reply.
+ *
+ * Same NIP-10 precedence as `parseThreadTags` and `classifyNote`, and it has to
+ * stay that way — this one decides where a reply hangs in the tree, so a
+ * disagreement shows up as a reply rendered under the wrong note:
+ *   1. an e-tag marked 'reply';
+ *   2. otherwise an e-tag marked 'root' (a direct reply to the thread root
+ *      carries only the 'root' marker);
+ *   3. otherwise the last DEPRECATED-POSITIONAL e-tag — excluding any marked
+ *      'mention', which is a citation rather than a thread position.
+ */
 export function getParentId(event: NostrEvent): string | null {
   const eTags = event.tags.filter(t => t[0] === 'e')
   if (eTags.length === 0) return null
   const replyTag = eTags.find(t => t[3] === 'reply')
   if (isValidEventId(replyTag?.[1])) return replyTag![1]
-  const last = eTags[eTags.length - 1]?.[1]
+  const rootTag = eTags.find(t => t[3] === 'root')
+  if (rootTag) return isValidEventId(rootTag[1]) ? rootTag[1] : null
+  const positional = eTags.filter(t => t[3] !== 'mention')
+  const last = positional[positional.length - 1]?.[1]
   return isValidEventId(last) ? last : null
 }
 
@@ -171,10 +190,19 @@ export function buildThreadTree(
 
   function buildNode(event: NostrEvent): ThreadNode {
     seen.add(event.id)
-    const children = (childrenByParent.get(event.id) || [])
-      .filter(e => !seen.has(e.id))
-      .sort((a, b) => a.created_at - b.created_at)
-      .map(e => { seen.add(e.id); return buildNode(e) })
+    // Check-and-mark in ONE pass. The old `.filter(!seen).map(seen.add)` split
+    // the test from the mark across two traversals, so two copies of the same
+    // event id in `events` (the pool returns the same note from several relays)
+    // both passed the filter before either was marked, and the reply rendered
+    // twice under its parent.
+    const children: ThreadNode[] = []
+    // Copy before sorting — `sort` is in-place and the array belongs to the map.
+    const candidates = [...(childrenByParent.get(event.id) || [])].sort((a, b) => a.created_at - b.created_at)
+    for (const child of candidates) {
+      if (seen.has(child.id)) continue
+      seen.add(child.id)
+      children.push(buildNode(child))
+    }
     const reactions = reactionsByTarget.get(event.id) || []
     return { event, children, reactions }
   }
@@ -212,20 +240,20 @@ export function flattenTree(
 }
 
 /**
- * Deduplicate events by id, preferring the version with more e-tags
- * (more specific threading info from NIP-10 compliant clients).
+ * Deduplicate events by id, keeping the first copy seen.
+ *
+ * First-seen is not an arbitrary choice: a Nostr event `id` is the SHA-256 of
+ * its serialized `[0, pubkey, created_at, kind, tags, content]`, so two events
+ * sharing an id have byte-identical tags. The "prefer the copy with more
+ * e-tags" comparison that used to live here could therefore never fire for a
+ * valid event — and for an INVALID one (a relay serving a mismatched id) it was
+ * actively wrong, letting the copy with the richest threading tags win. Same
+ * reasoning as `dedupBatch` in paginationCore.
  */
 export function deduplicateEvents(events: NostrEvent[]): NostrEvent[] {
   const byId = new Map<string, NostrEvent>()
   for (const e of events) {
-    const existing = byId.get(e.id)
-    if (!existing) {
-      byId.set(e.id, e)
-    } else {
-      const existingETags = existing.tags.filter(t => t[0] === 'e').length
-      const newETags = e.tags.filter(t => t[0] === 'e').length
-      if (newETags > existingETags) byId.set(e.id, e)
-    }
+    if (!byId.has(e.id)) byId.set(e.id, e)
   }
   return [...byId.values()]
 }

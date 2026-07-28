@@ -17,6 +17,16 @@ import {
   ResizableDialog,
   ResizableDialogContent,
 } from '@/components/ui/resizable-dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
@@ -42,6 +52,7 @@ import {
 } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { CombinedEmojiPicker } from '@/components/compose/CombinedEmojiPicker'
+import { buildHashtagTags } from '@core/hashtagTags'
 import { insertAtCursor } from '@/lib/textareaUtils'
 import { STORAGE_KEYS, CURRENT_PLATFORM, platformKey } from '@/lib/storageKeys'
 
@@ -93,6 +104,7 @@ export function ComposeDialog({
   const [customEmojiTags, setCustomEmojiTags] = useState<string[][]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
 
   // Reset state when dialog opens
   useEffect(() => {
@@ -102,8 +114,20 @@ export function ComposeDialog({
       setImages([])
       setIsLongForm(false)
       setCustomEmojiTags([])
+      setConfirmDiscard(false)
     }
   }, [isOpen])
+
+  // Closing throws the draft away (state resets on next open), and Esc or a
+  // stray backdrop click is easy to hit mid-sentence. Ask first when there's
+  // something to lose — an unrecoverable action deserves a deliberate confirm.
+  const requestClose = useCallback(() => {
+    if (content.trim() || images.length > 0) {
+      setConfirmDiscard(true)
+      return
+    }
+    onClose()
+  }, [content, images, onClose])
 
   // Get reply author info
   const { data: replyAuthor } = useAuthor(replyTo?.pubkey || '')
@@ -197,11 +221,8 @@ export function ComposeDialog({
       tags.push(['p', quotedEvent.pubkey])
     }
 
-    // Extract hashtags
-    const hashtagMatches = finalContent.matchAll(/#([a-zA-Z]\w*)/g)
-    for (const match of hashtagMatches) {
-      tags.push(['t', match[1].toLowerCase()])
-    }
+    // Extract hashtags (URLs stripped first — see @core/hashtagTags)
+    tags.push(...buildHashtagTags(finalContent))
 
     // Long-form specific
     if (isLongForm) {
@@ -345,7 +366,8 @@ export function ComposeDialog({
   const dialogIcon = replyTo ? <Reply className="h-4 w-4" /> : quotedEvent ? <Quote className="h-4 w-4" /> : <Send className="h-4 w-4" />
 
   return (
-    <ResizableDialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+    <>
+    <ResizableDialog open={isOpen} onOpenChange={(open) => !open && requestClose()}>
       <ResizableDialogContent
         defaultWidth={Math.round(window.innerWidth * 0.5)}
         defaultHeight={Math.round(window.innerHeight * 0.65)}
@@ -507,5 +529,24 @@ export function ComposeDialog({
         </div>
       </ResizableDialogContent>
     </ResizableDialog>
+
+    <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Discard draft?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This post hasn't been published. Closing now throws it away — there's no
+            way to get it back.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Keep writing</AlertDialogCancel>
+          <AlertDialogAction onClick={() => { setConfirmDiscard(false); onClose() }}>
+            Discard
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    </>
   )
 }

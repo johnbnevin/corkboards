@@ -12,7 +12,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { useNostr } from '@/hooks/useNostr';
 import { useAuthor } from '@/hooks/useAuthor';
-import { useCollapsedNotes } from '@/hooks/useCollapsedNotes';
+import { useNoteCollapsedState, useCollapsedNotesActions } from '@/hooks/useCollapsedNotes';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -23,7 +23,7 @@ import { ClickableProfile } from '@/components/ProfileModal';
 import { CopyEventIdButton } from '@/components/NoteCard';
 import { genUserName } from '@/lib/genUserName';
 import { formatTimeAgoCompact } from '@/lib/formatTimeAgo';
-import { optimizeAvatarUrl } from '@/lib/imageUtils';
+import { optimizeAvatarUrl, optimizeMediaUrl } from '@/lib/imageUtils';
 import { fetchEventWithOutbox } from '@/lib/fetchEvent';
 import { type NotificationItem, getZapAmountSats } from '@/hooks/useNotifications';
 import {
@@ -192,7 +192,9 @@ export const NotificationCard = React.memo(function NotificationCard({
   onViewThread,
 }: NotificationCardProps) {
   const { event, type, targetEventId, targetRelayHint, targetAuthorPubkey, senderPubkey } = notification;
-  const { isCollapsed, isCollapsedThisSession, isSoftDismissed, toggleCollapsed, dismiss, undoDismiss, canUndoDismiss } = useCollapsedNotes();
+  // Per-note subscription + stable actions — see NoteCard for why.
+  const noteState = useNoteCollapsedState(event.id);
+  const { toggleCollapsed, dismiss, undoDismiss } = useCollapsedNotesActions();
   const cardRef = useRef<HTMLDivElement>(null);
 
   // For zaps, the event.pubkey is the LNURL server — use senderPubkey (from zap request) instead
@@ -203,8 +205,8 @@ export const NotificationCard = React.memo(function NotificationCard({
   const actorAvatar = optimizeAvatarUrl(actor?.metadata?.picture);
   const timeAgo = useMemo(() => formatTimeAgoCompact(event.created_at), [event.created_at]);
 
-  const collapsed = isCollapsed(event.id);
-  const softDismissed = isSoftDismissed(event.id);
+  const collapsed = noteState.isCollapsed;
+  const softDismissed = noteState.isSoftDismissed;
 
   // Capture height while expanded
   useEffect(() => {
@@ -222,7 +224,10 @@ export const NotificationCard = React.memo(function NotificationCard({
     const customMatch = content.match(/^:([^:]+):$/);
     if (customMatch) {
       const url = event.tags.find(t => t[0] === 'emoji' && t[1] === customMatch[1])?.[2];
-      if (url) return { reactionEmoji: content, reactionCustomUrl: url };
+      // Attacker-controlled URL — same SSRF/proxy gate as every other note image.
+      // A rejected host yields '' and we render the :shortcode: as text instead.
+      const safeUrl = url ? optimizeMediaUrl(url) : '';
+      if (safeUrl) return { reactionEmoji: content, reactionCustomUrl: safeUrl };
     }
     return { reactionEmoji: content || '❤️', reactionCustomUrl: undefined };
   }, [type, event.content, event.tags]);
@@ -302,7 +307,7 @@ export const NotificationCard = React.memo(function NotificationCard({
 
   // Soft-dismissed placeholder
   if (softDismissed) {
-    const canUndo = canUndoDismiss(event.id);
+    const canUndo = noteState.canUndoDismiss;
     return (
       <Card
         className={`border-dashed border-muted-foreground/15 bg-transparent flex items-center justify-center ${canUndo ? 'cursor-pointer hover:bg-accent/20 transition-colors' : ''}`}
@@ -315,7 +320,7 @@ export const NotificationCard = React.memo(function NotificationCard({
   }
 
   // Collapsed placeholder (saved for later)
-  if (collapsed && isCollapsedThisSession(event.id)) {
+  if (collapsed && noteState.isCollapsedThisSession) {
     return (
       <Card
         className="border-dashed border-muted-foreground/15 bg-transparent flex items-center justify-center cursor-pointer hover:bg-accent/20 transition-colors"
@@ -406,6 +411,7 @@ export const NotificationCard = React.memo(function NotificationCard({
                   src={reactionCustomUrl}
                   alt={reactionEmoji}
                   className="absolute -top-1 -right-1 h-10 w-10 drop-shadow-md select-none object-contain"
+                  referrerPolicy="no-referrer"
                 />
               ) : (
                 <span className="absolute -top-1 -right-1 text-4xl drop-shadow-md select-none">

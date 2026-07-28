@@ -22,8 +22,11 @@ export function parseFeedSource(raw: string, decodeNpub: NpubDecoder): FeedSourc
   const input = raw.trim();
   if (!input) return null;
 
-  // Hashtag: #bitcoin
-  if (input.startsWith('#') && input.length > 1 && /^#[\w]+$/.test(input)) {
+  // Hashtag: #bitcoin. Unicode-aware — `\w` is ASCII-only, so `#биткоин` and
+  // `#比特币` were rejected outright and there was no way to add a non-Latin
+  // hashtag source to a corkboard at all. Same character class as the inline
+  // hashtag matcher in noteCategories, so what you can add is what will match.
+  if (input.startsWith('#') && input.length > 1 && /^#[\p{L}\p{N}_]+$/u.test(input)) {
     return { type: 'hashtag', value: input.slice(1).toLowerCase() };
   }
   // Relay

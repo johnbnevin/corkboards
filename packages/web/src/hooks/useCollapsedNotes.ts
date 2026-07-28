@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useEffect, useRef, useState, createContext, useContext, createElement, type ReactNode } from 'react'
+import { useCallback, useMemo, useEffect, useRef, useState, useSyncExternalStore, createContext, useContext, createElement, type ReactNode } from 'react'
 import { useLocalStorage } from './useLocalStorage'
 
 const MAX_COLLAPSED_NOTES = 10000 // Keep memory bounded
@@ -37,6 +37,7 @@ const _dismissBatchMap = new Map<string, Set<string>>()
 const LAST_DISMISSED_EVENT = 'last-dismissed-sync'
 
 function notifyLastDismissedChange() {
+  notifyNoteState()
   window.dispatchEvent(new CustomEvent(LAST_DISMISSED_EVENT))
 }
 
@@ -58,21 +59,113 @@ const SESSION_COLLAPSED_EVENT = 'session-collapsed-sync'
 function notifySessionCollapsedChange() {
   try { sessionStorage.setItem('corkboard:session-collapsed', JSON.stringify([..._sessionCollapsedIds])) }
   catch { /* empty */ }
+  notifyNoteState()
   window.dispatchEvent(new CustomEvent(SESSION_COLLAPSED_EVENT))
 }
 
 function notifySoftDismissChange() {
+  notifyNoteState()
   window.dispatchEvent(new CustomEvent(SOFT_DISMISS_EVENT))
+}
+
+// ─── Per-note external store ────────────────────────────────────────────────
+//
+// A card only ever needs to know about ITS OWN note, but every NoteCard used to
+// read the whole context — so one dismissal, which changes the context value
+// three times over (soft-dismissed list, undo version, session-collapsed
+// counter), re-rendered every mounted card. At 200 notes/column that is the
+// most expensive thing a keystroke can do in this app, and it scaled with the
+// column count.
+//
+// So: cards subscribe here instead, per note id, via useSyncExternalStore. A
+// dismissal notifies every subscriber, but only the cards whose snapshot
+// actually changed re-render. Everything read here is module-level except the
+// persisted collapsed list, which the provider mirrors into `_collapsedSet`.
+
+let _collapsedSet: Set<string> = new Set()
+let _noteStateVersion = 0
+const _noteStateListeners = new Set<() => void>()
+
+export interface NoteCollapsedState {
+  isCollapsed: boolean
+  isCollapsedThisSession: boolean
+  isSoftDismissed: boolean
+  canUndoDismiss: boolean
+  isBatchTrigger: boolean
+}
+
+/** Snapshots must be referentially stable between notifications, or React
+ *  re-renders forever. Cached per note id against the store version. */
+const _noteSnapshots = new Map<string, { version: number; state: NoteCollapsedState }>()
+const MAX_NOTE_SNAPSHOTS = 4000
+
+function notifyNoteState(): void {
+  _noteStateVersion++
+  for (const listener of _noteStateListeners) listener()
+}
+
+/**
+ * Nudge subscribers once the undo window closes.
+ *
+ * The undo affordance is time-based, so nothing changes in the store when it
+ * expires. Cards used to notice only because some unrelated dismissal happened
+ * to re-render them; now that they re-render on their own state alone, the
+ * expiry has to announce itself. One pending timer, re-armed per dismissal.
+ */
+let _undoExpiryTimer: ReturnType<typeof setTimeout> | undefined
+function scheduleUndoExpiry(): void {
+  if (_undoExpiryTimer) clearTimeout(_undoExpiryTimer)
+  _undoExpiryTimer = setTimeout(() => {
+    _undoExpiryTimer = undefined
+    notifyNoteState()
+  }, UNDO_WINDOW_MS + 100)
+}
+
+function getNoteSnapshot(noteId: string): NoteCollapsedState {
+  const cached = _noteSnapshots.get(noteId)
+  if (cached && cached.version === _noteStateVersion) return cached.state
+  const dismissedAt = _dismissedUndoMap.get(noteId)
+  const state: NoteCollapsedState = {
+    isCollapsed: _collapsedSet.has(noteId),
+    isCollapsedThisSession: _sessionCollapsedIds.has(noteId),
+    isSoftDismissed: _softDismissedSet.has(noteId),
+    canUndoDismiss: dismissedAt !== undefined && Date.now() - dismissedAt <= UNDO_WINDOW_MS,
+    isBatchTrigger: _dismissBatchMap.has(noteId),
+  }
+  // Cards unmount but their snapshots don't; drop the lot rather than track
+  // liveness — rebuilding one is a handful of Set lookups.
+  if (_noteSnapshots.size >= MAX_NOTE_SNAPSHOTS) _noteSnapshots.clear()
+  _noteSnapshots.set(noteId, { version: _noteStateVersion, state })
+  return state
+}
+
+/**
+ * Subscribe a single card to its own collapsed/dismissed state.
+ *
+ * Use this in anything rendered once per note. `useCollapsedNotes()` remains
+ * the right call for feed-level consumers that need the lists and counts.
+ */
+export function useNoteCollapsedState(noteId: string): NoteCollapsedState {
+  const subscribe = useCallback((onChange: () => void) => {
+    _noteStateListeners.add(onChange)
+    return () => { _noteStateListeners.delete(onChange) }
+  }, [])
+  const getSnapshot = useCallback(() => getNoteSnapshot(noteId), [noteId])
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
 /** Clear all module-level state (call on logout/wipe) */
 export function clearCollapsedNotesModuleState(): void {
   _softDismissedSet = new Set()
   _dismissedUndoMap.clear()
+  _dismissBatchMap.clear()
   _sessionCollapsedIds = new Set()
   _sessionCollapsedCounter = 0
+  _collapsedSet = new Set()
+  _noteSnapshots.clear()
   try { sessionStorage.removeItem('corkboard:soft-dismissed') } catch { /* empty */ }
   try { sessionStorage.removeItem('corkboard:session-collapsed') } catch { /* empty */ }
+  notifyNoteState()
 }
 
 /**
@@ -119,6 +212,13 @@ function useCollapsedNotesState() {
   const dismissedSet = useMemo(() => new Set(dismissedIds), [dismissedIds])
   const softDismissedSet = useMemo(() => new Set(softDismissedIds), [softDismissedIds])
   const dismissedThreadRootSet = useMemo(() => new Set(dismissedThreadRoots), [dismissedThreadRoots])
+
+  // Mirror the persisted collapsed list into module state so per-note
+  // subscribers (useNoteCollapsedState) can read it without the context.
+  useEffect(() => {
+    _collapsedSet = collapsedSet
+    notifyNoteState()
+  }, [collapsedSet])
 
   // Auto-cleanup on mount if over limits
   useEffect(() => {
@@ -210,6 +310,7 @@ function useCollapsedNotesState() {
     }
     // Track for per-card undo (each card gets its own 20s window)
     _dismissedUndoMap.set(noteId, Date.now())
+    scheduleUndoExpiry()
     // Prune expired entries to keep map bounded
     if (_dismissedUndoMap.size > MAX_UNDO_MAP) {
       const now = Date.now()
@@ -294,6 +395,7 @@ function useCollapsedNotesState() {
       next.add(id)
       _dismissedUndoMap.set(id, now)
     }
+    scheduleUndoExpiry()
     _softDismissedSet = next
     _setSoftDismissedIds([..._softDismissedSet])
     persistSoftDismissed()
@@ -418,13 +520,58 @@ const CollapsedNotesContext = createContext<CollapsedNotesValue | null>(null)
  * module-level and shared, so behavior is unchanged — only the per-card cost is
  * gone.
  */
+export interface CollapsedNotesActions {
+  toggleCollapsed: (noteId: string) => void
+  collapse: (noteId: string) => void
+  expand: (noteId: string) => void
+  dismiss: (noteId: string) => void
+  undoDismiss: (noteId: string) => void
+  dismissMultiple: (noteIds: string[], triggerId?: string) => void
+  dismissThreadRoots: (rootIds: string[]) => void
+}
+
+/**
+ * Actions only, with an identity that NEVER changes.
+ *
+ * The full context value legitimately changes on every dismissal (the lists it
+ * carries changed), so anything reading it re-renders. A card needs the verbs,
+ * not the lists — this context lets it take them without subscribing to state
+ * it doesn't render. Pair it with `useNoteCollapsedState`.
+ */
+const CollapsedNotesActionsContext = createContext<CollapsedNotesActions | null>(null)
+
 export function CollapsedNotesProvider({ children }: { children: ReactNode }) {
   const value = useCollapsedNotesState()
-  return createElement(CollapsedNotesContext.Provider, { value }, children)
+
+  // Call through a ref so the exposed object can be built once and never
+  // change, even though the underlying callbacks are re-created as state moves.
+  const latest = useRef(value)
+  latest.current = value
+  const actions = useMemo<CollapsedNotesActions>(() => ({
+    toggleCollapsed: (noteId) => latest.current.toggleCollapsed(noteId),
+    collapse: (noteId) => latest.current.collapse(noteId),
+    expand: (noteId) => latest.current.expand(noteId),
+    dismiss: (noteId) => latest.current.dismiss(noteId),
+    undoDismiss: (noteId) => latest.current.undoDismiss(noteId),
+    dismissMultiple: (noteIds, triggerId) => latest.current.dismissMultiple(noteIds, triggerId),
+    dismissThreadRoots: (rootIds) => latest.current.dismissThreadRoots(rootIds),
+  }), [])
+
+  return createElement(
+    CollapsedNotesContext.Provider,
+    { value },
+    createElement(CollapsedNotesActionsContext.Provider, { value: actions }, children),
+  )
 }
 
 export function useCollapsedNotes(): CollapsedNotesValue {
   const ctx = useContext(CollapsedNotesContext)
   if (!ctx) throw new Error('useCollapsedNotes must be used within a CollapsedNotesProvider')
+  return ctx
+}
+
+export function useCollapsedNotesActions(): CollapsedNotesActions {
+  const ctx = useContext(CollapsedNotesActionsContext)
+  if (!ctx) throw new Error('useCollapsedNotesActions must be used within a CollapsedNotesProvider')
   return ctx
 }

@@ -25,9 +25,43 @@ import { isUnsafeHost } from './ipUtils';
 
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
+/** BIP-173 checksum step. Operates on the 5-bit value stream, generator
+ *  constants straight from the spec's reference implementation. */
+function bech32Polymod(values: number[]): number {
+  const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) {
+    const top = chk >>> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < 5; i++) {
+      if ((top >>> i) & 1) chk ^= GEN[i];
+    }
+  }
+  return chk >>> 0;
+}
+
+/** BIP-173 HRP expansion: high bits, a zero separator, then low bits. */
+function bech32HrpExpand(hrp: string): number[] {
+  const high: number[] = [];
+  const low: number[] = [];
+  for (let i = 0; i < hrp.length; i++) {
+    const c = hrp.charCodeAt(i);
+    // The HRP is restricted to US-ASCII 33–126; anything else can't be encoded.
+    if (c < 33 || c > 126) return [];
+    high.push(c >>> 5);
+    low.push(c & 31);
+  }
+  return [...high, 0, ...low];
+}
+
 /** Decode a bech32 string into its human-readable prefix + 5-bit data words.
  *  Does NOT enforce the 90-char BIP-173 length cap — LNURL intentionally
- *  exceeds it. Checksum is stripped but not verified (lenient). */
+ *  exceeds it. The CHECKSUM IS VERIFIED and a mismatch fails closed: the
+ *  checksum is the only thing standing between a typo'd or tampered `lud06` and
+ *  a silently different destination URL, and the payload here comes from an
+ *  untrusted kind-0 profile. Stripping it without checking it, as this used to,
+ *  meant a single flipped character could decode to a working URL on some other
+ *  host and the user would zap it without noticing. */
 function bech32Decode(input: string): { hrp: string; words: number[] } | null {
   // Reject mixed-case (invalid per spec); accept all-lower or all-upper.
   if (input !== input.toLowerCase() && input !== input.toUpperCase()) return null;
@@ -42,6 +76,13 @@ function bech32Decode(input: string): { hrp: string; words: number[] } | null {
     words.push(v);
   }
   if (words.length < 6) return null;
+
+  const expanded = bech32HrpExpand(hrp);
+  if (expanded.length === 0) return null; // non-ASCII HRP
+  // Original bech32 (BIP-173) constant. LNURL uses bech32, not bech32m, so a
+  // bech32m-encoded string is correctly rejected here rather than half-decoded.
+  if (bech32Polymod([...expanded, ...words]) !== 1) return null;
+
   return { hrp, words: words.slice(0, words.length - 6) };
 }
 
@@ -82,6 +123,20 @@ export function isSafeZapUrl(url: string): boolean {
   return !isUnsafeHost(u.hostname);
 }
 
+/**
+ * A lud16 domain, as it may appear in the URL we build. Deliberately narrow:
+ * letters/digits/dots/hyphens, with an optional port.
+ *
+ * The previous check only rejected `/` and `\`, which let `evil.com?x=`,
+ * `evil.com#`, `evil.com:@attacker.com` and similar junk straight into a
+ * template string — where the `?`/`#` starts a query or fragment and the whole
+ * `.well-known/lnurlp/…` path we thought we were requesting becomes decoration
+ * on someone else's URL. `isUnsafeHost` was then run on that raw string rather
+ * than on a parsed hostname, so it was answering a question about the wrong
+ * value. Everything is now parsed with `new URL` and validated on `hostname`.
+ */
+const LUD16_DOMAIN_RE = /^[a-z0-9.-]+(:\d{1,5})?$/;
+
 /** Convert a lud16 lightning address (`name@domain`) to its LNURL-pay URL. */
 export function lud16ToLnurlPayUrl(lud16: string): string | null {
   const addr = lud16.trim();
@@ -90,9 +145,21 @@ export function lud16ToLnurlPayUrl(lud16: string): string | null {
   const name = addr.slice(0, atIdx).trim();
   const domain = addr.slice(atIdx + 1).trim().toLowerCase();
   if (!name || !domain) return null;
-  if (domain.includes('/') || domain.includes('\\') || !domain.includes('.')) return null;
-  if (isUnsafeHost(domain)) return null; // block IP-literal / private-host lud16
-  return `https://${domain}/.well-known/lnurlp/${encodeURIComponent(name)}`;
+  if (!domain.includes('.') || !LUD16_DOMAIN_RE.test(domain)) return null;
+
+  const url = `https://${domain}/.well-known/lnurlp/${encodeURIComponent(name)}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  // Re-derive the authority from the parsed URL: this is the only value that is
+  // certainly what a fetch will actually contact.
+  if (parsed.protocol !== 'https:') return null;
+  if (parsed.username || parsed.password) return null;
+  if (isUnsafeHost(parsed.hostname)) return null; // block IP-literal / private-host lud16
+  return parsed.toString();
 }
 
 /** Decode a lud06 bech32 LNURL (`lnurl1…`) into its https URL (SSRF-checked). */

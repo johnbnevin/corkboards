@@ -23,10 +23,28 @@ import {
   Platform,
 } from 'react-native';
 import { EMOJI_CATEGORIES } from '@core/emojiCategories';
-import { CORKBOARDS_DEFAULT_EMOJIS } from '@core/defaultEmojiSet';
+import { CORKBOARDS_DEFAULT_EMOJIS, defaultEmojiChar } from '@core/defaultEmojiSet';
 import { useCustomEmojiSets } from '../hooks/useCustomEmojiSets';
 import { useEmojiSetsModal } from './EmojiSetsModalProvider';
 import { mobileStorage } from '../storage/MmkvStorage';
+
+/**
+ * One custom-emoji cell.
+ *
+ * Most of the built-in set is ordinary Unicode that merely happens to be
+ * DISTRIBUTED as PNGs from a single CDN. Drawing the character costs no
+ * request, works offline, and stops ~54 image fetches per picker open from
+ * telling a third-party host that this user opened the emoji picker. Only the
+ * genuinely custom animated art (which has no Unicode equivalent) still loads
+ * from its URL.
+ */
+function CustomEmojiThumb({ shortcode, url }: { shortcode: string; url: string }) {
+  const nativeChar = defaultEmojiChar(shortcode);
+  if (nativeChar) {
+    return <Text style={styles.customChar} accessibilityLabel={`:${shortcode}:`}>{nativeChar}</Text>;
+  }
+  return <Image source={{ uri: url }} style={styles.customImage} resizeMode="contain" />;
+}
 
 // ── Favorites tracking (mirrors web's trackEmojiUse in EmojiSetEditor.tsx) ──
 const FAVORITES_KEY = 'corkboard:emoji-favorites';
@@ -249,11 +267,7 @@ export function EmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onManageSets }
                   style={[styles.customCell, { width: CUSTOM_CELL_SIZE, height: CUSTOM_CELL_SIZE }]}
                   onPress={() => onSelectCustomEmoji(e.shortcode, e.url)}
                 >
-                  <Image
-                    source={{ uri: e.url }}
-                    style={styles.customImage}
-                    resizeMode="contain"
-                  />
+                  <CustomEmojiThumb shortcode={e.shortcode} url={e.url} />
                 </TouchableOpacity>
               ))}
             </View>
@@ -273,11 +287,7 @@ export function EmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onManageSets }
               style={[styles.customCell, { width: CUSTOM_CELL_SIZE, height: CUSTOM_CELL_SIZE }]}
               onPress={() => onSelectCustomEmoji(item.shortcode, item.url)}
             >
-              <Image
-                source={{ uri: item.url }}
-                style={styles.customImage}
-                resizeMode="contain"
-              />
+              <CustomEmojiThumb shortcode={item.shortcode} url={item.url} />
             </TouchableOpacity>
           )}
           keyboardShouldPersistTaps="always"
@@ -495,6 +505,11 @@ const styles = StyleSheet.create({
   customImage: {
     width: '80%',
     height: '80%',
+  },
+  customChar: {
+    fontSize: 26,
+    lineHeight: 32,
+    textAlign: 'center',
   },
 
   // Search

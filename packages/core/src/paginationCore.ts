@@ -52,7 +52,16 @@ export function dedupBatch(raw: NostrEvent[], existingIds: ReadonlySet<string>):
   return { trulyNew, oldestReturned: oldest };
 }
 
-/** Initial `until` cursor: oldest cached event minus one, or now if cache empty. */
+/**
+ * Initial `until` cursor: oldest cached event minus one, or now if cache empty.
+ *
+ * PRECONDITION: `existing` is sorted NEWEST-FIRST (descending `created_at`) —
+ * the order `dedupBatch` returns and the order the feed keeps its cache in. The
+ * last element is therefore the oldest event, and one second before it is where
+ * the next page starts. Hand this an unsorted or ascending array and the cursor
+ * is taken from the newest event instead, which re-requests the page you already
+ * have and makes pagination appear to stall.
+ */
 export function initialUntilCursor(existing: NostrEvent[]): number {
   if (existing.length === 0) return Math.floor(Date.now() / 1000);
   return existing[existing.length - 1].created_at - 1;

@@ -5,7 +5,7 @@
  * and action buttons (via NoteActions). Handles reposts with a header banner.
  * Mobile equivalent of packages/web/src/components/NoteCard.tsx.
  */
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -22,7 +22,7 @@ import { genUserName } from '@core/genUserName';
 import { useIsDeletedAuthor } from '../contexts/deletedAuthors';
 import { visibleLength, findVisibleCutoff } from '@core/textTruncation';
 import { verifyEmbeddedEvent } from '../lib/embeddedEvent';
-import { useCollapsedNotes } from '../hooks/useCollapsedNotes';
+import { useNoteCollapsedState, useCollapsedNotesActions } from '../hooks/useCollapsedNotes';
 
 // ============================================================================
 // Repost author name — shows the actual author for reposts
@@ -82,7 +82,14 @@ interface NoteCardProps {
   event: NostrEvent;
   onReply?: (e: NostrEvent) => void;
   isBookmarked?: boolean;
-  onToggleBookmark?: () => void;
+  /**
+   * Takes the note id rather than being a pre-bound thunk. Screens used to pass
+   * `() => toggleBookmark(item.id)`, a fresh closure on every render of every
+   * row — which made `memo` on this component useless, since one prop always
+   * differed by identity. Passing the stable `toggleBookmark` itself and binding
+   * the id here keeps the shallow compare meaningful.
+   */
+  onToggleBookmark?: (id: string) => void;
   onViewProfile?: (pubkey: string) => void;
   onViewThread?: (eventId: string) => void;
   /** Parent note for replies (the note being replied to) */
@@ -108,7 +115,7 @@ interface NoteCardProps {
   onTogglePin?: (id: string) => void;
 }
 
-export function NoteCard({
+function NoteCardImpl({
   event,
   onReply,
   isBookmarked = false,
@@ -168,9 +175,13 @@ export function NoteCard({
   // already exist; this adds the on-card affordance, matching web and the
   // mobile NotificationCard. Keyed on the feed item (event.id), which is what
   // the feed filter checks.
-  const { isCollapsed, toggleCollapsed, dismiss, dismissThreadRoots, isSoftDismissed, canUndoDismiss, undoDismiss } = useCollapsedNotes();
-  const softDismissed = showCollapseActions && isSoftDismissed(event.id);
-  const collapsed = showCollapseActions && isCollapsed(event.id);
+  // Per-note subscription + stable actions, NOT the whole hook: reading the
+  // hook here made every mounted card parse the persisted id lists out of MMKV
+  // on mount and re-render on every dismissal anywhere in the feed.
+  const noteState = useNoteCollapsedState(event.id);
+  const { toggleCollapsed, dismiss, dismissThreadRoots, undoDismiss } = useCollapsedNotesActions();
+  const softDismissed = showCollapseActions && noteState.isSoftDismissed;
+  const collapsed = showCollapseActions && noteState.isCollapsed;
   // Long-pressing dismiss hides the whole thread: mark its NIP-10 root (or this
   // note when it is the root) as a dismissed thread root so members that arrive
   // later are filtered too, then dismiss this card.
@@ -179,7 +190,7 @@ export function NoteCard({
     ?? event.id;
 
   if (softDismissed) {
-    const canUndo = canUndoDismiss(event.id);
+    const canUndo = noteState.canUndoDismiss;
     return (
       <TouchableOpacity
         style={styles.placeholder}
@@ -297,13 +308,26 @@ export function NoteCard({
         event={displayEvent}
         onReply={() => onReply?.(displayEvent)}
         isBookmarked={isBookmarked}
-        onToggleBookmark={onToggleBookmark}
+        // `event.id`, not `displayEvent.id`: for a repost the bookmark has
+        // always been keyed on the wrapper, and the screens read
+        // `isBookmarked(item.id)` the same way. Keep the two in step.
+        onToggleBookmark={onToggleBookmark ? () => onToggleBookmark(event.id) : undefined}
         isPinned={pinned}
         onTogglePin={onTogglePin ? () => onTogglePin(displayEvent.id) : undefined}
       />
     </TouchableOpacity>
   );
 }
+
+/**
+ * Memoized: a feed is a long FlatList of these, and every card subscribes to
+ * profile lookups, engagement counts and note parsing. Without memo, any state
+ * change on the screen (a scroll flag, a new note arriving, the tab switching)
+ * re-rendered every mounted card and re-ran all of that work. The callers pass
+ * stable, `useCallback`-wrapped handlers, so the default shallow prop compare is
+ * the correct one — it stays correct only for as long as they do.
+ */
+export const NoteCard = memo(NoteCardImpl);
 
 // ============================================================================
 // Styles

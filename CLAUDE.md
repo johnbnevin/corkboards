@@ -85,10 +85,12 @@ The app wraps components in this order (see `packages/web/src/App.tsx`):
 
 Pure TypeScript modules with no DOM or React dependencies. Used by web, desktop, and mobile.
 
-- **Protocol**: `nostr.ts`, `noteClassifier.ts`, `dmUtils.ts`, `dmConstants.ts`
-- **Feed**: `feedConstants.ts`, `rss.ts`
+- **Protocol**: `nostr.ts`, `nostrUtils.ts`, `noteClassifier.ts`, `threadTree.ts`, `contactList.ts` (kind-3 wipe guards), `nip99.ts`, `nostrEncrypt.ts` (NIP-44 only on write paths)
+- **Feed**: `feedConstants.ts`, `feedAlgorithms.ts`, `feedSource.ts`, `noteCategories.ts`, `contentFilters.ts`, `paginationCore.ts`, `rss.ts`
 - **Storage**: `storage.ts` (KVStorage interface), `storageKeys.ts` (user isolation with DI)
-- **Text**: `formatTimeAgo.ts`, `textTruncation.ts`, `genUserName.ts`, `sanitizeUtils.ts`
+- **Relays/media**: `relayConstants.ts`, `normalizeRelay.ts`, `queryGovernor.ts`, `blossom.ts`, `imageUtils.ts`, `imageProxy.ts`
+- **Safety**: `ipUtils.ts` (SSRF gate, kept in lockstep with `rss-proxy.php`), `sanitizeUtils.ts`, `cryptoUtils.ts`
+- **Text**: `formatTimeAgo.ts`, `textTruncation.ts`, `genUserName.ts`, `markdownParse.ts`, `markdownDetect.ts`
 - **Path alias**: `@core/*` maps to `packages/core/src/*`
 
 ### Nostr Integration

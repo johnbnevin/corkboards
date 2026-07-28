@@ -2,8 +2,8 @@
 //!
 //! Persists user-selected proxy URL (e.g. `socks5h://127.0.0.1:9050` for Tor)
 //! to a small JSON file in the platform-specific app data directory, and exposes
-//! it through a process-wide `Mutex<Option<String>>` so `relay.rs` can read it
-//! cheaply on every connection.
+//! it through a process-wide mutex so `relay.rs` can read it cheaply on every
+//! connection.
 //!
 //! Cypherpunk note: when set, every NATIVE relay query (outbox lookups and REQ
 //! subscriptions routed through Rust) goes through SOCKS5 — the user's IP and
@@ -22,12 +22,23 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, Once};
 
-static PROXY_URL: Mutex<Option<String>> = Mutex::new(None);
-static PROXY_REQUIRED: Mutex<bool> = Mutex::new(false);
+/// The full proxy state behind ONE mutex, held across mutate-and-persist so two
+/// concurrent IPC calls can never interleave into a stale url/required combo on
+/// disk (for a Tor user, a resurrected `required=false` matters).
+struct ProxyConfig {
+    url: Option<String>,
+    required: bool,
+    /// Set when the on-disk config existed but could not be parsed — surfaced to
+    /// the UI so a Tor user knows their proxy setting may not have loaded.
+    load_failed: bool,
+}
+
+static CONFIG: Mutex<ProxyConfig> = Mutex::new(ProxyConfig {
+    url: None,
+    required: false,
+    load_failed: false,
+});
 static INIT: Once = Once::new();
-/// Set when the on-disk config existed but could not be parsed — surfaced to the
-/// UI so a Tor user knows their proxy setting may not have loaded.
-static LOAD_FAILED: Mutex<bool> = Mutex::new(false);
 /// Whether this session's WebView was actually routed through a proxy. Latched at
 /// window creation (the WebView's proxy can't change without a restart), but the
 /// *warning* derived from it is computed live against `proxy_required()` — see
@@ -54,21 +65,22 @@ fn load_from_disk() {
         // No file yet is normal (proxy unconfigured); only flag real read errors.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(_) => {
-            *lock(&LOAD_FAILED) = true;
+            lock(&CONFIG).load_failed = true;
             return;
         }
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
-        *lock(&LOAD_FAILED) = true;
+        lock(&CONFIG).load_failed = true;
         return;
     };
+    let mut cfg = lock(&CONFIG);
     if let Some(s) = v.get("url").and_then(|x| x.as_str()) {
         if !s.is_empty() {
-            *lock(&PROXY_URL) = Some(s.to_string());
+            cfg.url = Some(s.to_string());
         }
     }
     if let Some(req) = v.get("required").and_then(|x| x.as_bool()) {
-        *lock(&PROXY_REQUIRED) = req;
+        cfg.required = req;
     }
 }
 
@@ -76,23 +88,38 @@ fn load_from_disk() {
 /// First call also loads from disk; subsequent calls read the in-memory value.
 pub fn current_proxy() -> Option<String> {
     INIT.call_once(load_from_disk);
-    lock(&PROXY_URL).clone()
+    lock(&CONFIG).url.clone()
 }
 
 /// True when the user requires all native relay traffic to go through the proxy.
 /// `relay.rs` must error rather than connect directly when this is set.
 pub fn proxy_required() -> bool {
     INIT.call_once(load_from_disk);
-    *lock(&PROXY_REQUIRED)
+    lock(&CONFIG).required
 }
 
-fn save_to_disk(url: Option<&str>, required: bool) -> Result<(), String> {
+/// Owner read/write only: the file can name a private SOCKS endpoint, and the
+/// default umask would leave it world-readable. No-op off unix (Windows ACLs
+/// already restrict the app-data dir). Same policy as logger.rs.
+#[cfg(unix)]
+fn restrict_perms(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_perms(_path: &std::path::Path) {}
+
+fn save_to_disk(cfg: &ProxyConfig) -> Result<(), String> {
     let path = config_path().ok_or_else(|| "no config dir".to_string())?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
-    let body = serde_json::json!({ "url": url.unwrap_or(""), "required": required }).to_string();
-    fs::write(&path, body).map_err(|e| format!("write: {e}"))
+    let body =
+        serde_json::json!({ "url": cfg.url.as_deref().unwrap_or(""), "required": cfg.required })
+            .to_string();
+    fs::write(&path, body).map_err(|e| format!("write: {e}"))?;
+    restrict_perms(&path);
+    Ok(())
 }
 
 fn validate(url: &str) -> Result<String, String> {
@@ -104,6 +131,11 @@ fn validate(url: &str) -> Result<String, String> {
     if parsed.host_str().is_none() || parsed.port().is_none() {
         return Err("proxy URL must include host and port".to_string());
     }
+    // relay.rs connects with host:port only — credentials in the URL would be
+    // silently ignored AND persisted to disk in plaintext. Refuse them.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("proxy credentials in the URL are not supported — use an unauthenticated local proxy (e.g. Tor on 127.0.0.1:9050)".to_string());
+    }
     Ok(url.to_string())
 }
 
@@ -114,10 +146,10 @@ pub fn set_proxy(url: Option<String>) -> Result<(), String> {
         None | Some("") => None,
         Some(s) => Some(validate(s)?),
     };
-    *lock(&PROXY_URL) = normalized.clone();
-    *lock(&LOAD_FAILED) = false;
-    let required = *lock(&PROXY_REQUIRED);
-    save_to_disk(normalized.as_deref(), required)
+    let mut cfg = lock(&CONFIG);
+    cfg.url = normalized;
+    cfg.load_failed = false;
+    save_to_disk(&cfg)
 }
 
 #[tauri::command]
@@ -129,9 +161,9 @@ pub fn get_proxy() -> Option<String> {
 #[tauri::command]
 pub fn set_proxy_required(required: bool) -> Result<(), String> {
     INIT.call_once(load_from_disk);
-    *lock(&PROXY_REQUIRED) = required;
-    let url = lock(&PROXY_URL).clone();
-    save_to_disk(url.as_deref(), required)
+    let mut cfg = lock(&CONFIG);
+    cfg.required = required;
+    save_to_disk(&cfg)
 }
 
 #[tauri::command]
@@ -144,7 +176,7 @@ pub fn get_proxy_required() -> bool {
 #[tauri::command]
 pub fn proxy_load_failed() -> bool {
     INIT.call_once(load_from_disk);
-    *lock(&LOAD_FAILED)
+    lock(&CONFIG).load_failed
 }
 
 /// Record (at window creation) whether the WebView was routed through a proxy.

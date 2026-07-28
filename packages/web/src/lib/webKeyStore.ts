@@ -194,13 +194,65 @@ export function clearKeyStoreMemCache(): void {
   memNsec.clear();
 }
 
+// ─── Non-identity secrets (NIP-46 client keys) ───────────────────────────────
+//
+// A NIP-46 session needs an *ephemeral client* keypair — the key that
+// authenticates our end of the signing channel to the bunker/Amber. It is NOT
+// the user's identity key (it signs nothing on their behalf and is revocable at
+// the signer), but it is still key material, and it was living as a plaintext
+// `nsec1…` string in localStorage: readable by any script in the origin,
+// visible in a devtools panel, and copied verbatim into anything that snapshots
+// localStorage. "Lower-value" is not "worthless" — whoever holds it can pose as
+// this client to the signer and ask it to sign.
+//
+// So it goes through the same at-rest encryption as the identity key: AES-GCM
+// under a NON-EXTRACTABLE CryptoKey in IndexedDB. Same threat model caveat as
+// the docblock above: this defends at-rest exposure, not XSS.
+//
+// Namespaced ids keep them from colliding with pubkey-keyed identity records
+// (a pubkey is 64 hex chars and never contains ':').
+
+/** Id for the persistent Amber (NIP-55/46 deep-link) client key. */
+export const AMBER_CLIENT_SECRET_ID = 'client:amber';
+/** Id for a bunker login's ephemeral client key, one per account. */
+export function bunkerClientSecretId(pubkey: string): string {
+  return `client:bunker:${pubkey}`;
+}
+
+/** Encrypt and persist a non-identity secret. Returns false (never throws) on failure. */
+export function storeSecret(id: string, secret: string): Promise<boolean> {
+  return storeNsec(id, secret);
+}
+
+/** Decrypt a non-identity secret, or null when absent/undecryptable. */
+export function loadSecret(id: string): Promise<string | null> {
+  return loadNsec(id);
+}
+
+/**
+ * Synchronous read from the session cache ONLY.
+ *
+ * Exists because `useCurrentUser.buildUser` is synchronous and must produce a
+ * bunker signer during render. `prepareLoginStorage` warms the cache before
+ * React mounts, so by the time a component asks, the value is there.
+ * Returns null when the cache is cold — callers must have a fallback.
+ */
+export function peekSecret(id: string): string | null {
+  return memNsec.get(id) ?? null;
+}
+
+/** Remove one non-identity secret (logout). */
+export function deleteSecret(id: string): Promise<void> {
+  return deleteNsec(id);
+}
+
 // ─── Startup migration + restore ─────────────────────────────────────────────
 
 interface PersistedLogin {
   id?: string;
   type?: string;
   pubkey?: string;
-  data?: { nsec?: string } | null;
+  data?: { nsec?: string; clientNsec?: string } | null;
 }
 
 /**
@@ -238,8 +290,26 @@ export async function prepareLoginStorage(storageKey: string): Promise<void> {
   const plaintext: Array<{ pubkey: string; nsec: string }> = [];
   const blanked: string[] = [];
   for (const entry of state as PersistedLogin[]) {
-    if (!entry || entry.type !== 'nsec' || typeof entry.pubkey !== 'string') continue;
-    const nsec = entry.data && typeof entry.data === 'object' ? entry.data.nsec : undefined;
+    if (!entry || typeof entry.pubkey !== 'string') continue;
+    const data = entry.data && typeof entry.data === 'object' ? entry.data : undefined;
+
+    // NIP-46 bunker logins persist an ephemeral CLIENT key. Same treatment as
+    // the identity key: capture it into the session cache, encrypt it, and
+    // blank the localStorage copy only once the encrypted record commits.
+    if (entry.type === 'bunker') {
+      const id = bunkerClientSecretId(entry.pubkey);
+      const clientNsec = data?.clientNsec;
+      if (typeof clientNsec === 'string' && clientNsec !== '') {
+        memNsec.set(id, clientNsec);
+        plaintext.push({ pubkey: id, nsec: clientNsec });
+      } else {
+        blanked.push(id);
+      }
+      continue;
+    }
+
+    if (entry.type !== 'nsec') continue;
+    const nsec = data?.nsec;
     if (typeof nsec === 'string' && nsec !== '') {
       memNsec.set(entry.pubkey, nsec); // keep the session alive regardless of persist outcome
       plaintext.push({ pubkey: entry.pubkey, nsec });
@@ -278,9 +348,11 @@ export async function prepareLoginStorage(storageKey: string): Promise<void> {
       const curState: unknown = cur ? JSON.parse(cur) : state;
       if (Array.isArray(curState)) {
         for (const entry of curState as PersistedLogin[]) {
-          if (entry?.type === 'nsec' && typeof entry.pubkey === 'string' &&
-              committed.has(entry.pubkey) && entry.data && typeof entry.data === 'object') {
+          if (typeof entry?.pubkey !== 'string' || !entry.data || typeof entry.data !== 'object') continue;
+          if (entry.type === 'nsec' && committed.has(entry.pubkey)) {
             entry.data.nsec = '';
+          } else if (entry.type === 'bunker' && committed.has(bunkerClientSecretId(entry.pubkey))) {
+            entry.data.clientNsec = '';
           }
         }
         localStorage.setItem(storageKey, JSON.stringify(curState));

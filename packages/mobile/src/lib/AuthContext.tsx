@@ -9,6 +9,7 @@
  * The account list (pubkeys + active account) is tracked in MMKV.
  */
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import * as Keychain from 'react-native-keychain';
 import { nip19, getPublicKey } from 'nostr-tools';
 import { NSecSigner, NConnectSigner, NRelay1 } from '@nostrify/nostrify';
@@ -109,6 +110,24 @@ function setAccountType(pubkey: string, type: 'nsec' | 'bunker') {
 function removeBunkerData(pubkey: string) {
   mobileStorage.removeSync(`corkboard:bunker:${pubkey}`);
   mobileStorage.removeSync(`corkboard:account-type:${pubkey}`);
+}
+
+/**
+ * Erase every secret this module can hold for a pubkey.
+ *
+ * Both keychain services are reset UNCONDITIONALLY rather than branching on the
+ * MMKV account-type record. That record is ordinary app storage: a restored
+ * backup, a partial wipe, or a failed write can leave it missing or wrong, and
+ * when it did, the branch it drove removed the wrong entry — a bunker account
+ * whose type record had gone read back as 'nsec', so its `corkboards-clientnsec:`
+ * key survived "remove account" and the identity kept reappearing in the account
+ * list. Resetting a service that holds nothing is free; leaving a private key on
+ * the device after the user asked for it to be gone is not.
+ */
+async function purgeAccountSecrets(pubkey: string): Promise<void> {
+  await Keychain.resetGenericPassword({ service: keychainService(pubkey) }).catch(() => {});
+  await Keychain.resetGenericPassword({ service: clientNsecService(pubkey) }).catch(() => {});
+  removeBunkerData(pubkey);
 }
 
 /**
@@ -218,6 +237,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const pubkeyRef = useRef<string | null>(null);
   useEffect(() => { pubkeyRef.current = state.pubkey; }, [state.pubkey]);
 
+  // The react-query cache is shared process-wide and is keyed by pubkey only in
+  // some places (['contacts', pubkey]) and not at all in others (['mobile-feed',
+  // …], profile and engagement queries). After an account swap those entries are
+  // still "fresh", so the incoming account renders the departing account's feed,
+  // follows and notifications until each query happens to refetch. Dropping the
+  // cache on switch/logout is the only way to guarantee no cross-account bleed.
+  const queryClient = useQueryClient();
+
   // Restore session from keychain on mount
   useEffect(() => {
     (async () => {
@@ -301,15 +328,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const oldPubkey = pubkeyRef.current;
     if (oldPubkey && oldPubkey !== pubkey) {
+      // Logging in while another account is active IS an account switch, so it
+      // needs the same pending-backup flush switchAccount does. Without it, any
+      // unsaved change to account A (a new corkboard, a batch of dismissals) was
+      // stashed locally and then never uploaded, because `switchActiveUser`
+      // below moves A's data out from under the auto-saver.
+      await flushBackupBeforeSwitch();
       // Abort BEFORE any storage swap or state set, so in-flight queries
       // for the old account can't write into the new account's UI.
       bumpSessionEpoch();
+      queryClient.removeQueries();
       switchActiveUser(oldPubkey, pubkey);
     }
     setStoredActiveAccount(pubkey);
 
     setState({ pubkey, signer, loading: false, accounts });
-  }, []);
+  }, [queryClient]);
 
   const loginWithBunker = useCallback(async (
     bunkerPubkey: string,
@@ -334,7 +368,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const oldPubkey = pubkeyRef.current;
     if (oldPubkey && oldPubkey !== userPubkey) {
+      // Same as loginWithNsec: this is an account switch, so flush the
+      // departing account's pending cloud backup before its data is stashed.
+      await flushBackupBeforeSwitch();
       bumpSessionEpoch();
+      queryClient.removeQueries();
       switchActiveUser(oldPubkey, userPubkey);
     }
     setStoredActiveAccount(userPubkey);
@@ -350,7 +388,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     setState({ pubkey: userPubkey, signer, loading: false, accounts });
-  }, []);
+  }, [queryClient]);
 
   const switchAccount = useCallback(async (pubkey: string) => {
     const accounts = await getStoredAccounts();
@@ -367,6 +405,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Abort first — otherwise stale subscriptions for oldPubkey may resolve
       // after setState below and write into the new account's UI.
       bumpSessionEpoch();
+      queryClient.removeQueries();
       switchActiveUser(oldPubkey, pubkey);
       clearRelayCache();
       clearCollapsedNotesModuleState();
@@ -375,22 +414,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setStoredActiveAccount(pubkey);
 
     setState({ pubkey, signer, loading: false, accounts });
-  }, []);
+  }, [queryClient]);
 
   const removeAccount = useCallback(async (pubkey: string) => {
     // Removing the active account changes the in-flight session, so abort
     // anything pending. Removing an inactive account is harmless but cheap
     // to handle uniformly.
-    if (pubkeyRef.current === pubkey) bumpSessionEpoch();
+    if (pubkeyRef.current === pubkey) {
+      bumpSessionEpoch();
+      queryClient.removeQueries();
+    }
     handleLogoutStorage(pubkey);
 
-    const type = getAccountType(pubkey);
-    if (type === 'bunker') {
-      await Keychain.resetGenericPassword({ service: clientNsecService(pubkey) }).catch(() => {});
-      removeBunkerData(pubkey);
-    } else {
-      await Keychain.resetGenericPassword({ service: keychainService(pubkey) }).catch(() => {});
-    }
+    await purgeAccountSecrets(pubkey);
 
     clearRelayCache();
     clearCollapsedNotesModuleState();
@@ -417,20 +453,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } else {
       setState(prev => ({ ...prev, accounts }));
     }
-  }, []);
+  }, [queryClient]);
 
   const logout = useCallback(async () => {
     bumpSessionEpoch();
+    queryClient.removeQueries();
     const accounts = await getStoredAccounts();
     for (const pk of accounts) {
       handleLogoutStorage(pk);
-      const type = getAccountType(pk);
-      if (type === 'bunker') {
-        await Keychain.resetGenericPassword({ service: clientNsecService(pk) }).catch(() => {});
-        removeBunkerData(pk);
-      } else {
-        await Keychain.resetGenericPassword({ service: keychainService(pk) }).catch(() => {});
-      }
+      await purgeAccountSecrets(pk);
     }
     setStoredActiveAccount(null);
     clearRelayCache();
@@ -440,7 +471,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // under the next account that signs in (clearNotesCache had no callers).
     await clearNotesCache().catch(() => {});
     setState({ pubkey: null, signer: null, loading: false, accounts: [] });
-  }, []);
+  }, [queryClient]);
 
   return (
     <AuthContext.Provider value={{ ...state, loginWithNsec, loginWithBunker, logout, removeAccount, switchAccount }}>

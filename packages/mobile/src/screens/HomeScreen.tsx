@@ -108,6 +108,16 @@ const DEFAULT_CONTENT_FILTERS: ContentFilterConfig = {
   allow100: false,
 };
 
+/**
+ * Hoisted out of the render body. As an inline arrow it was a NEW component
+ * type on every HomeScreen render, so React unmounted and remounted every
+ * separator in the list each time — for a spacer view, on every scroll-driven
+ * state change.
+ */
+function NoteSeparator() {
+  return <View style={{ height: 8 }} />;
+}
+
 // ============================================================================
 // HomeScreen
 // ============================================================================
@@ -143,7 +153,12 @@ export function HomeScreen() {
   const flatListRef = useRef<FlatListType<NostrEvent>>(null);
 
   // ── Tab / feed switching ────────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useLocalStorage<FeedTab>('home:active-tab', 'following');
+  // `corkboard:active-tab`, not the old mobile-only `home:active-tab`: the
+  // latter is in neither PER_USER_KEYS nor BACKED_UP_KEYS, so the selected board
+  // leaked across account switches (account B opened on account A's corkboard,
+  // whose id B may not even own) and was never restored from a backup. Same key
+  // web uses, so the selection now travels with the account.
+  const [activeTab, setActiveTab] = useLocalStorage<FeedTab>(STORAGE_KEYS.ACTIVE_TAB, 'following');
   const [customFeeds, setCustomFeeds] = useLocalStorage<CustomFeed[]>('nostr-custom-feeds', []);
 
   // Corkboard builder (create/edit a board from npubs/#hashtags/relays/RSS).
@@ -594,7 +609,7 @@ export function HomeScreen() {
           event={item}
           onReply={handleReply}
           isBookmarked={isBookmarked(item.id)}
-          onToggleBookmark={() => toggleBookmark(item.id)}
+          onToggleBookmark={toggleBookmark}
           onViewProfile={setViewingProfile}
           onViewThread={setViewingThread}
           mediaFilterActive={mediaFilterActive}
@@ -742,7 +757,7 @@ export function HomeScreen() {
           initialNumToRender={10}
           windowSize={10}
           updateCellsBatchingPeriod={50}
-          ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+          ItemSeparatorComponent={NoteSeparator}
           refreshControl={
             <RefreshControl
               refreshing={isFetching && !isLoading}

@@ -465,17 +465,10 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
         return { url: `https://embed.music.apple.com${u.pathname}${search}`, aspectRatio: 'audio' }
       }
 
-      // Bandcamp
-      if (hostMatches(u.hostname, 'bandcamp.com')) {
-        // Bandcamp requires oEmbed, but we can try iframe embed
-        // (M3) validate the trailing slug before interpolating into the embed src
-        const bcSlug = safeId(u.pathname.split('/').pop())
-        if (!bcSlug) return null
-        return {
-          url: `https://bandcamp.com/EmbeddedPlayer/${u.pathname.includes('/album/') ? 'album' : 'track'}=${encodeURIComponent(bcSlug)}/size=large/bgcol=333333/linkcol=0f91ff/tracklist=false/transparent=true/`,
-          aspectRatio: 'square'
-        }
-      }
+      // Bandcamp: NO embed. Its EmbeddedPlayer takes numeric album/track IDs
+      // (`album=1234567890`), which are only discoverable via oEmbed — the page
+      // slug we have here always produces a dead player. Fall through to the
+      // plain link rather than render a broken iframe.
 
       return null
     } catch {
@@ -521,7 +514,7 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
       )
     }
     return (
-      <LightboxTrigger src={optimizeMediaUrl(currentImageUrl, true)} className="inline-block my-2">
+      <LightboxTrigger src={optimizeMediaUrl(currentImageUrl, true)} originalSrc={currentImageUrl} className="inline-block my-2">
         <SizeGuardedImage
           key={currentImageUrl}
           src={optimizeMediaUrl(currentImageUrl, true)}
@@ -578,9 +571,22 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
     )
   }
 
-  // Direct video or forceVideo (imeta) — always render inline player, never blur
+  // Direct video or forceVideo (imeta) — inline player.
   const isDirectVideo = isVideoUrl(url) || forceVideo
   if (isDirectVideo) {
+    // Honor blurMedia here too. The player sets preload="metadata", so simply
+    // mounting it already fetches from the host — which is exactly the request
+    // "blur media" exists to withhold until the user asks for it.
+    if (blurMedia && !revealed) {
+      return (
+        <div
+          className="w-full h-9 flex items-center justify-center cursor-pointer bg-muted/60 hover:bg-muted border-b border-border/30 transition-colors"
+          onClick={(e) => { e.stopPropagation(); setRevealed(true); }}
+        >
+          <span className="text-xs text-muted-foreground">Click to load video</span>
+        </div>
+      )
+    }
     return <VideoPlayer sources={resolveMediaSources({ url: embed.url, sha256, fallbacks })} poster={poster} />
   }
 

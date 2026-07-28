@@ -20,6 +20,44 @@ import type { NostrEvent } from '@nostrify/nostrify'
 
 const IDB_KEY = 'nostr-bookmark-ids'
 
+/**
+ * What we read off the user's kind-10003, including the parts this app doesn't
+ * own.
+ *
+ * NIP-51 bookmark lists are a SHARED, multi-client structure: `e` (notes),
+ * `a` (articles / addressable events), `t` (hashtags) and `r` (URLs), in a
+ * public tag section and an encrypted private one. corkboards only manages
+ * note bookmarks (`e`), but kind 10003 is REPLACEABLE — the event we publish
+ * replaces the whole thing. Rebuilding it from our `e` tags alone silently
+ * deleted every article, hashtag and link the user had bookmarked in any other
+ * client, and every private tag we didn't happen to be tracking.
+ *
+ * So we keep the unrecognized tags — public and private — verbatim, and merge
+ * them back on publish. (H2)
+ */
+interface BookmarkListResult {
+  /** Note ids (`e` tags) from both sections — what this app manages. */
+  ids: string[]
+  /** True when a relay actually returned a kind-10003. */
+  found: boolean
+  /** True when note ids were present as PUBLIC tags. */
+  hasPublicTags: boolean
+  /** Every public tag that is not one of OUR `e` tags — other clients' data. */
+  foreignPublicTags: string[][]
+  /** Every decrypted private tag that is not an `e` tag — other clients' data. */
+  foreignPrivateTags: string[][]
+  /** True when `content` existed but could NOT be decrypted (see publish guard). */
+  privateSectionUnreadable: boolean
+  /** The raw encrypted `content`, so an unreadable private section can be re-sent as-is. */
+  rawContent: string
+}
+
+const EMPTY_BOOKMARK_RESULT: BookmarkListResult = {
+  ids: [], found: false, hasPublicTags: false,
+  foreignPublicTags: [], foreignPrivateTags: [],
+  privateSectionUnreadable: false, rawContent: '',
+}
+
 /** Read the public-bookmarks preference from IDB (default: false = private) */
 function getPublicBookmarksPref(): boolean {
   try {
@@ -130,8 +168,8 @@ export function useBookmarks(fetchEnabled = true) {
   // Fetch bookmark list (kind 10003) from relays
   const { data: relayResult, isLoading } = useQuery({
     queryKey: ['bookmarks', user?.pubkey],
-    queryFn: async (): Promise<{ ids: string[]; found: boolean; hasPublicTags: boolean }> => {
-      if (!user?.pubkey) return { ids: [], found: false, hasPublicTags: false }
+    queryFn: async (): Promise<BookmarkListResult> => {
+      if (!user?.pubkey) return EMPTY_BOOKMARK_RESULT
 
       const userRelays = getUserRelays()
       const writeRelays = userRelays.write.length > 0 ? userRelays.write : FALLBACK_RELAYS
@@ -153,37 +191,63 @@ export function useBookmarks(fetchEnabled = true) {
         )
       } catch {
         debugLog('[bookmarks] No kind 10003 found on any relay')
-        return { ids: [], found: false, hasPublicTags: false }
+        return EMPTY_BOOKMARK_RESULT
       }
 
-      if (!bookmarkEvent) return { ids: [], found: false, hasPublicTags: false }
+      if (!bookmarkEvent) return EMPTY_BOOKMARK_RESULT
 
       // Public tags (from other clients or legacy)
       const publicIds = bookmarkEvent.tags
         .filter(t => t[0] === 'e' && t[1])
         .map(t => t[1])
+      // Everything else the user (or another client) put in the public section:
+      // `a` articles, `t` hashtags, `r` URLs, and anything a NIP we haven't read
+      // yet defines. Carried through publish untouched.
+      const foreignPublicTags = bookmarkEvent.tags.filter(t => !(t[0] === 'e' && t[1]))
 
       // Private tags (encrypted in content)
       let privateIds: string[] = []
+      let foreignPrivateTags: string[][] = []
+      let privateSectionUnreadable = false
       if (bookmarkEvent.content) {
         try {
           debugLog('[bookmarks] Decrypting private bookmark content...')
           const decrypted = await decryptFromSelf(user.signer, user.pubkey, bookmarkEvent.content)
           const tags = JSON.parse(decrypted) as string[][]
           privateIds = tags.filter(t => t[0] === 'e' && t[1]).map(t => t[1])
-          debugLog('[bookmarks] Decrypted', privateIds.length, 'private bookmarks')
+          foreignPrivateTags = tags.filter(t => !(t[0] === 'e' && t[1]))
+          debugLog('[bookmarks] Decrypted', privateIds.length, 'private bookmarks,', foreignPrivateTags.length, 'other private tags')
         } catch (err) {
+          // We could not read the private section. It is still THERE, and it is
+          // still the user's data — publishing a freshly-encrypted content that
+          // omits it would destroy bookmarks we merely failed to decrypt (a
+          // dismissed NIP-46 prompt is enough). Flag it; the publish path refuses.
+          privateSectionUnreadable = true
           debugWarn('[bookmarks] Failed to decrypt content:', err)
         }
       }
 
       const ids = [...new Set([...publicIds, ...privateIds])]
       debugLog('[bookmarks] Total:', ids.length, 'bookmark ids (public:', publicIds.length, ', private:', privateIds.length, ')')
-      return { ids, found: true, hasPublicTags: publicIds.length > 0 }
+      return {
+        ids,
+        found: true,
+        hasPublicTags: publicIds.length > 0,
+        foreignPublicTags,
+        foreignPrivateTags,
+        privateSectionUnreadable,
+        rawContent: bookmarkEvent.content ?? '',
+      }
     },
     enabled: !!user?.pubkey && fetchEnabled,
     staleTime: 5 * 60_000,
   })
+
+  // Ref mirror so the debounced/timeout publish paths read the CURRENT remote
+  // shape without adding `relayResult` to publishBookmarkList's deps (which
+  // would re-arm every publish timer on each refetch).
+  const relayResultRef = useRef<BookmarkListResult | undefined>(relayResult)
+  relayResultRef.current = relayResult
 
   // Publish updated kind 10003 bookmark list to relays
   const publishBookmarkList = useCallback(async (newIds: string[]) => {
@@ -201,6 +265,16 @@ export function useBookmarks(fetchEnabled = true) {
       debugWarn('[bookmarks] Publish skipped — already publishing')
       return
     }
+    // Refuse to publish when the existing private section exists but couldn't be
+    // decrypted: kind 10003 is replaceable, so a fresh `content` REPLACES it, and
+    // we would be deleting private bookmarks we simply failed to read. (H2)
+    const remote = relayResultRef.current
+    if (remote?.privateSectionUnreadable) {
+      debugError('[bookmarks] Publish refused — existing private bookmark section could not be decrypted; refusing to overwrite it')
+      publishingRef.current = false
+      return
+    }
+
     publishingRef.current = true
 
     const isPublic = getPublicBookmarksPref()
@@ -208,13 +282,22 @@ export function useBookmarks(fetchEnabled = true) {
 
     try {
       const eTags = newIds.map(id => ['e', id])
-      const payload = JSON.stringify(eTags)
+      // Merge back every tag we did not author. NIP-51 bookmark lists are shared
+      // across clients: `a` (articles), `t` (hashtags) and `r` (URLs) belong to
+      // whatever client wrote them, and dropping them on our publish deleted
+      // them from the user's account everywhere. (H2)
+      const foreignPublic = remote?.foreignPublicTags ?? []
+      const foreignPrivate = remote?.foreignPrivateTags ?? []
+
+      const payload = JSON.stringify([...eTags, ...foreignPrivate])
       const encrypted = await encryptToSelf(currentUser.signer, currentUser.pubkey, payload)
 
       const event = await currentUser.signer.signEvent({
         kind: 10003,
         content: encrypted,
-        tags: isPublic ? eTags : [],  // public tags only when user opts in
+        // Public note tags only when the user opts in — but foreign public tags
+        // are preserved either way, because they were never ours to hide.
+        tags: isPublic ? [...eTags, ...foreignPublic] : [...foreignPublic],
         created_at: Math.floor(Date.now() / 1000),
       })
       debugLog('[bookmarks] Signed event', event.id.slice(0, 8))
@@ -247,16 +330,15 @@ export function useBookmarks(fetchEnabled = true) {
         return merged
       })
 
-      // Re-publish if public/private state doesn't match user preference
-      if (relayResult.hasPublicTags && !getPublicBookmarksPref()) {
-        debugLog('[bookmarks] Re-publishing bookmarks as private (user preference)...')
-        if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
-        syncTimerRef.current = setTimeout(() => { if (isMountedRef.current && userRef.current) publishBookmarkList(relayResult.ids) }, 3000)
-      } else if (!relayResult.hasPublicTags && getPublicBookmarksPref()) {
-        debugLog('[bookmarks] Re-publishing bookmarks as public (user preference)...')
-        if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
-        syncTimerRef.current = setTimeout(() => { if (isMountedRef.current && userRef.current) publishBookmarkList(relayResult.ids) }, 3000)
-      }
+      // NOTE: this used to silently re-publish the whole kind-10003 three seconds
+      // after load whenever the on-relay public/private shape didn't match the
+      // local preference. That is a write the user never asked for, fired on
+      // every session, and it is exactly the write most likely to do damage: it
+      // ran before anything had been verified, could flip a list PUBLIC (leaking
+      // what the user reads) or private purely because a per-device IDB flag
+      // said so, and it raced the load path. Converting between public and
+      // private is a deliberate, consequential choice — it now happens ONLY when
+      // the user toggles the preference, via republishBookmarks() below. (H2)
     }
 
     // Migration: if relay has no bookmark IDs (empty or missing), check for legacy collapsed-notes.

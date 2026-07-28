@@ -142,7 +142,7 @@ export function SavedScreen() {
         <NoteCard
           event={item}
           isBookmarked={isBookmarked(item.id)}
-          onToggleBookmark={() => toggleBookmark(item.id)}
+          onToggleBookmark={toggleBookmark}
         />
         <View style={styles.savedActions}>
           <TouchableOpacity style={styles.actionBtn} onPress={() => togglePin(item.id)}>

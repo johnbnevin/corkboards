@@ -53,6 +53,13 @@ export function SignupFlow({ onComplete, onCancel }: SignupFlowProps) {
   };
 
   const handleCopy = async () => {
+    // NOTE: Android's ClipDescription.EXTRA_IS_SENSITIVE (API 33+) would stop
+    // the system from previewing this nsec in the clipboard toast, and iOS 16+
+    // has no equivalent flag at all. expo-clipboard exposes neither — its only
+    // `setStringAsync` option is `inputFormat` (see SetStringOptions in
+    // expo-clipboard/build/Clipboard.types.d.ts) — so setting it would take a
+    // native module. The 15-second auto-clear below is what we have; it bounds
+    // the exposure window but does not hide the preview.
     await Clipboard.setStringAsync(nsec);
     setCopied(true);
     setTimeout(() => setCopied(false), 3000);

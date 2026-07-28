@@ -185,29 +185,81 @@ export function SettingsScreen() {
     setTimeout(republishBookmarks, 500);
   };
 
-  // Delete account — NIP-09 kind 5 with per-target a-tags so relays actually
-  // have something to delete (mirrors web's MultiColumnClient handleVanish).
+  /**
+   * Delete account.
+   *
+   * Two mechanisms, because neither alone does the job:
+   *
+   *  - NIP-62 kind 62 "request to vanish" with `["relay","ALL_RELAYS"]` asks
+   *    every relay to erase *everything* this pubkey ever wrote, including the
+   *    kind-5s themselves. It is the only thing here that covers notes,
+   *    reactions, zaps and gift wraps rather than a hand-listed set, and NIP-62
+   *    says clients SHOULD broadcast it as widely as possible.
+   *  - NIP-09 kind 5 deletions stay as well, because kind 62 is `draft` and
+   *    unevenly implemented; a relay that ignores it may still honour a kind 5.
+   *
+   * `a` coordinates are used ONLY for the addressable events (30000–39999),
+   * which is the only range where a `kind:pubkey:d` coordinate has meaning. The
+   * previous code also emitted `a` tags for kinds 0, 3 and 10002 — those are
+   * *replaceable*, not addressable, so `0:<pubkey>:` addresses nothing and a
+   * conforming relay drops the request on the floor. Replaceable events are
+   * deleted with a `k` tag (the kind) instead, per NIP-09.
+   *
+   * The alert says "requests broadcast", not "deleted": NIP-09 and NIP-62 both
+   * ask, and relays may refuse. Telling a user their data is gone when we only
+   * asked politely would be a lie.
+   */
   const handleDeleteAccount = async () => {
     if (!pubkey || !signer) return;
     const now = Math.floor(Date.now() / 1000);
-    // Replaceable events (0, 3, 10002) use empty d-tag; addressable events need their actual d-tag
-    const deletionTargets: Array<{ kind: number; dTag?: string }> = [
-      { kind: 0 }, { kind: 3 }, { kind: 10002 },
+
+    // NIP-62 first — the broad request, before the narrow ones.
+    try {
+      await publish({
+        kind: 62,
+        content: 'Account deleted by owner. Please erase all events for this pubkey.',
+        tags: [['relay', 'ALL_RELAYS']],
+        created_at: now,
+      });
+    } catch { /* best effort — fall through to the kind-5s */ }
+
+    // Replaceable events: identified by kind alone.
+    const replaceableKinds = [0, 3, 10002];
+    try {
+      await publish({
+        kind: 5,
+        content: 'Account deleted by owner',
+        tags: replaceableKinds.map(kind => ['k', String(kind)]),
+        created_at: now,
+      });
+    } catch { /* best effort */ }
+
+    // Addressable events: `a` coordinates are meaningful here.
+    // Kinds/d-tags kept in step with the NIP-78 migration in the sync hooks —
+    // the legacy 35571/35572 events still exist on relays, so they still need
+    // deleting alongside the 30078 ones that replaced them.
+    const addressableTargets: Array<{ kind: number; dTag: string }> = [
       { kind: 30078, dTag: 'corkboard:backup' },
+      { kind: 30078, dTag: 'corkboard:feeds' },
+      { kind: 30078, dTag: 'corkboard:dismissed' },
       { kind: 35571, dTag: 'corkboard:feeds' },
       { kind: 35572, dTag: 'corkboard:dismissed' },
     ];
-    for (const { kind, dTag } of deletionTargets) {
+    for (const { kind, dTag } of addressableTargets) {
       try {
         await publish({
           kind: 5,
           content: 'Account deleted by owner',
-          tags: [['a', `${kind}:${pubkey}:${dTag || ''}`]],
+          tags: [['a', `${kind}:${pubkey}:${dTag}`], ['k', String(kind)]],
           created_at: now,
         });
       } catch { /* best effort — continue with remaining targets */ }
     }
-    Alert.alert('Account deleted', 'Deletion requests broadcast to relays. Logging out.');
+
+    Alert.alert(
+      'Deletion requested',
+      'Vanish and deletion requests were broadcast to relays. Relays may refuse or may not implement them, so copies can survive. Logging out.',
+    );
     logout();
   };
 

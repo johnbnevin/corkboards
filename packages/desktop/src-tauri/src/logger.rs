@@ -106,6 +106,14 @@ fn redact_secret_param(input: &str) -> String {
 
 #[tauri::command]
 pub fn write_log(message: String) -> Result<(), String> {
+    // Opt-in: the log is a local record of browsing behaviour (relay choices,
+    // RSS subscription URLs, timings), so it is written only when the user has
+    // deliberately switched it on in settings. Silently doing nothing is the
+    // correct response to a disabled sink — the caller forwards every console
+    // line and must not treat "logging is off" as a failure.
+    if !crate::settings::file_logging_enabled() {
+        return Ok(());
+    }
     let path = log_path().ok_or_else(|| "no data dir".to_string())?;
     ensure_dir(&path)?;
 
@@ -122,7 +130,10 @@ pub fn write_log(message: String) -> Result<(), String> {
         .open(&path)
         .map_err(|e| e.to_string())?;
     restrict_perms(&path);
-    writeln!(file, "{}", redact_secrets(&message)).map_err(|e| e.to_string())
+    // One write_all per line: writeln! issues multiple write syscalls, which
+    // lets concurrent write_log calls interleave partial lines under O_APPEND.
+    let line = format!("{}\n", redact_secrets(&message));
+    file.write_all(line.as_bytes()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -126,7 +126,14 @@ export function getRelayCache(pubkey: string): string[] {
 // Get user's configured relays from MMKV (same format as web's APP_CONFIG_KEY in IDB).
 /** Normalize a relay URL for deduplication — strips trailing slashes.
  *  Mirrors web's normalizeRelayUrl() so both platforms compare relay identity
- *  the same way (`wss://a.example` and `wss://a.example/` are one relay). */
+ *  the same way (`wss://a.example` and `wss://a.example/` are one relay).
+ *
+ *  NOT `@core/normalizeRelay`: that one canonicalizes to `wss://host/` WITH a
+ *  trailing slash and rewrites `ws://`/`http(s)://` schemes. It is the right
+ *  function for *storing* a relay the user typed; this one is a comparison key
+ *  and produces the opposite slash convention, so the two are not
+ *  interchangeable. Swapping it would silently change every AUTH-allowlist key
+ *  in this module at once. Left as-is on purpose. */
 function normalizeRelayUrl(url: string): string {
   return url.replace(/\/+$/, '');
 }

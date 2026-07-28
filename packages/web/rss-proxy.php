@@ -194,8 +194,12 @@ function isBlockedIp(string $ip): bool {
             ['169.254.0.0', 16],  // link-local (incl. cloud metadata 169.254.169.254)
             ['172.16.0.0', 12],   // RFC 1918
             ['192.0.0.0', 24],    // IETF protocol assignments
+            ['192.0.2.0', 24],    // TEST-NET-1
+            ['192.88.99.0', 24],  // 6to4 relay anycast (deprecated)
             ['192.168.0.0', 16],  // RFC 1918
             ['198.18.0.0', 15],   // benchmarking
+            ['198.51.100.0', 24], // TEST-NET-2
+            ['203.0.113.0', 24],  // TEST-NET-3
             ['224.0.0.0', 4],     // multicast
             ['240.0.0.0', 4],     // reserved + broadcast
         ];
@@ -219,6 +223,16 @@ function isBlockedIp(string $ip): bool {
     $zeroTo9 = true;
     for ($i = 0; $i < 10; $i++) { if ($b[$i] !== 0) { $zeroTo9 = false; break; } }
     if ($zeroTo9 && $b[10] === 0xff && $b[11] === 0xff) {
+        return isBlockedIp(implode('.', array_slice($b, 12, 4)));
+    }
+
+    // SIIT IPv4-translated ::ffff:0:a.b.c.d (RFC 6052) — bytes 8-9 hold 0xffff
+    // and 10-11 are zero, so the IPv4-mapped branch above (which wants 0xffff in
+    // bytes 10-11) does NOT catch it, and neither does the all-zero-prefix branch
+    // below. Re-check the embedded IPv4 rather than letting it through.
+    $zeroTo7 = true;
+    for ($i = 0; $i < 8; $i++) { if ($b[$i] !== 0) { $zeroTo7 = false; break; } }
+    if ($zeroTo7 && $b[8] === 0xff && $b[9] === 0xff && $b[10] === 0 && $b[11] === 0) {
         return isBlockedIp(implode('.', array_slice($b, 12, 4)));
     }
 

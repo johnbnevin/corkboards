@@ -10,6 +10,7 @@ import {
   deleteNsec,
   prepareLoginStorage,
   clearKeyStoreMemCache,
+  bunkerClientSecretId,
 } from './webKeyStore';
 import { createWebNsecSigner } from './webNsecSigner';
 
@@ -109,7 +110,7 @@ describe('prepareLoginStorage (startup migration)', () => {
     expect(await loadNsec(pubkey)).toBe(nsec);
   });
 
-  it('migrates multiple accounts and leaves non-nsec logins untouched', async () => {
+  it('migrates multiple accounts, including a bunker login’s client key', async () => {
     const a = freshAccount();
     const b = freshAccount();
     const bunkerLogin = {
@@ -130,12 +131,26 @@ describe('prepareLoginStorage (startup migration)', () => {
     const state = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
     expect(state[0].data.nsec).toBe('');
     expect(state[2].data.nsec).toBe('');
-    // bunker login (ephemeral NIP-46 client key, intentionally persisted) untouched
-    expect(state[1]).toEqual(bunkerLogin);
+
+    // The bunker login's NIP-46 CLIENT key gets the same treatment as an
+    // identity key. It used to be left in localStorage as plaintext on the
+    // grounds that it is "only" a channel key — but a signer that granted this
+    // client an "always" approval will auto-approve signing requests from
+    // anyone holding it, so exfiltrating it yields remote signing as the user.
+    // Everything else about the entry must survive the rewrite untouched.
+    expect(state[1].data.clientNsec).toBe('');
+    expect(localStorage.getItem(STORAGE_KEY)).not.toContain('nsec1clientonly');
+    expect(state[1]).toEqual({
+      ...bunkerLogin,
+      data: { ...bunkerLogin.data, clientNsec: '' },
+    });
 
     clearKeyStoreMemCache();
     expect(await loadNsec(a.pubkey)).toBe(a.nsec);
     expect(await loadNsec(b.pubkey)).toBe(b.nsec);
+    // Blanking is only safe because the key is recoverable — useCurrentUser
+    // reads it back through peekSecret to build the bunker signer.
+    expect(await loadNsec(bunkerClientSecretId(bunkerLogin.pubkey))).toBe('nsec1clientonly');
   });
 
   it('is idempotent: a second run with already-blanked state changes nothing and warms the cache', async () => {

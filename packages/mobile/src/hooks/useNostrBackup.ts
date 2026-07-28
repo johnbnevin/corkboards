@@ -25,11 +25,11 @@ import { mobileStorage, isStorageHealthy } from '../storage/MmkvStorage';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '../lib/storageKeys';
 import { FALLBACK_RELAYS, getUserRelays, getRelayCache, createRelayFresh } from '../lib/NostrProvider';
 import {
-  generateAesKey, importAesKey,
-  aesEncrypt, aesDecrypt, rawKeyToHex, hexToRawKey,
+  importAesKey, aesDecrypt, hexToRawKey, encryptForSelf,
 } from '../lib/nostrEncrypt';
 import { formatTimeAgo } from '@core/formatTimeAgo';
 import { normalizeRelay } from '@core/normalizeRelay';
+import { randomUuid } from '@core/cryptoUtils';
 
 export type BackupStatus =
   | 'idle'
@@ -122,7 +122,7 @@ export function setBlossomServers(servers: string[]): void {
 // created_at of the kind-10063 event the stored blossom list was last synced
 // from (0 if only ever from local edits / defaults / a backup). Used for
 // newer-wins reconciliation on login. Keep in sync with web's useNostrBackup.
-const BLOSSOM_SERVERS_TS_KEY = 'corkboard:blossom-servers-updated-at';
+const BLOSSOM_SERVERS_TS_KEY = STORAGE_KEYS.BLOSSOM_SERVERS_UPDATED_AT;
 
 export function getBlossomServersUpdatedAt(): number {
   const raw = mobileStorage.getSync(BLOSSOM_SERVERS_TS_KEY);
@@ -390,11 +390,15 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
   });
 
   // Persistent device ID for cross-device sync — stays local, never backed up.
+  // `randomUuid` (getRandomValues only) rather than `crypto.randomUUID`, which
+  // does not exist on Hermes: this initializer runs on the very first render
+  // after a fresh install or a logout (which rotates the device id away), so a
+  // bare `crypto.randomUUID()` threw and took the whole app down at launch.
   const [deviceId] = useState(() => {
-    const existing = mobileStorage.getSync('corkboard:device-id');
+    const existing = mobileStorage.getSync(STORAGE_KEYS.DEVICE_ID);
     if (existing) return existing;
-    const id = crypto.randomUUID();
-    mobileStorage.setSync('corkboard:device-id', id);
+    const id = randomUuid();
+    mobileStorage.setSync(STORAGE_KEYS.DEVICE_ID, id);
     return id;
   });
 
@@ -409,9 +413,11 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
 
   const saveBackup = useCallback(async () => {
     if (!pubkey || !signer || isSaving.current) return;
-    if (!signer.nip04 && !signer.nip44) {
+    // NIP-44 only on the write path (see @core/nostrEncrypt.encryptForSelf).
+    // NIP-04 stays supported for *reading* legacy backups below.
+    if (!signer.nip44) {
       setStatus('save-error');
-      setMessage('Signer does not support encryption');
+      setMessage('Signer does not support NIP-44 encryption');
       return;
     }
 
@@ -423,16 +429,13 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       const json = serializeBackup();
       log(`Serialized: ${new TextEncoder().encode(json).length} bytes`);
 
-      // Generate AES key + encrypt
-      const { raw: aesRaw, key: aesKey } = await generateAesKey();
-      const aesKeyHex = rawKeyToHex(aesRaw);
-
-      const signerMethod: 'nip44' | 'nip04' = signer.nip44 ? 'nip44' : 'nip04';
-      const wrappedKey = signerMethod === 'nip44'
-        ? await signer.nip44!.encrypt(pubkey, aesKeyHex)
-        : await signer.nip04!.encrypt(pubkey, aesKeyHex);
-
-      const encryptedData = await aesEncrypt(aesKey, json);
+      // AES-256-GCM blob + NIP-44-wrapped key, via the shared core helper.
+      // Doing the wrap inline used to fall back to NIP-04 whenever `nip44` was
+      // merely momentarily unavailable (a dismissed NIP-46 prompt, a signer
+      // timeout) — a silent downgrade to an unrecommended, length-leaking
+      // scheme with no user consent. encryptForSelf throws instead.
+      const { content: encryptedData, wrappedKey, signerMethod } =
+        await encryptForSelf(json, signer, pubkey);
       log(`Encrypted: ${encryptedData.length} chars`);
 
       setStatus('saving');
@@ -465,12 +468,11 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         ...(blossomHash ? { blossomHash } : {}),
         keys: keysPresent, stats, corkboardNames,
       });
-      // Encrypt manifest so stats and Blossom URL aren't leaked
-      const encryptedManifest = signer.nip44
-        ? await signer.nip44.encrypt(pubkey, manifestJson)
-        : signer.nip04
-          ? await signer.nip04.encrypt(pubkey, manifestJson)
-          : manifestJson;
+      // Encrypt manifest so stats and Blossom URL aren't leaked. NIP-44 only —
+      // encryptForSelf above already established the signer has it, and the old
+      // chain ended in `: manifestJson`, i.e. publishing the Blossom URL and the
+      // user's corkboard names in the clear if both encrypt paths were missing.
+      const encryptedManifest = await signer.nip44!.encrypt(pubkey, manifestJson);
 
       const manifestEvent = await signer.signEvent({
         kind: 30078,
@@ -532,7 +534,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
   // ('no-servers'/'error') from a benign protective skip ('skipped', silent).
   const autoSaveBackup = useCallback(async (): Promise<AutoSaveResult> => {
     if (!pubkey || !signer || isSaving.current || isRestoring.current) return 'skipped';
-    if (!signer.nip04 && !signer.nip44) return 'skipped';
+    if (!signer.nip44) return 'skipped'; // NIP-44 only on the write path
     if (!hasUnsavedChanges()) return 'skipped';
 
     // Guard: don't overwrite a good cloud backup with empty/corrupt local state.
@@ -588,13 +590,9 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     try {
       const json = serializeBackup();
 
-      const { raw: aesRaw, key: aesKey } = await generateAesKey();
-      const aesKeyHex = rawKeyToHex(aesRaw);
-      const signerMethod: 'nip44' | 'nip04' = signer.nip44 ? 'nip44' : 'nip04';
-      const wrappedKey = signerMethod === 'nip44'
-        ? await signer.nip44!.encrypt(pubkey, aesKeyHex)
-        : await signer.nip04!.encrypt(pubkey, aesKeyHex);
-      const encryptedData = await aesEncrypt(aesKey, json);
+      // NIP-44 only — same reasoning as saveBackup above.
+      const { content: encryptedData, wrappedKey, signerMethod } =
+        await encryptForSelf(json, signer, pubkey);
 
       // Redundant, 415-aware upload (skips servers known to reject the blob type).
       const { url: blossomUrl, hash: blossomHash } =
@@ -622,11 +620,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         keys: BACKED_UP_KEYS.filter(k => mobileStorage.getSync(k) !== null),
         stats, corkboardNames,
       });
-      const encryptedManifest = signer.nip44
-        ? await signer.nip44.encrypt(pubkey, manifestJson)
-        : signer.nip04
-          ? await signer.nip04.encrypt(pubkey, manifestJson)
-          : manifestJson;
+      const encryptedManifest = await signer.nip44!.encrypt(pubkey, manifestJson);
 
       const manifestEvent = await signer.signEvent({
         kind: 30078,

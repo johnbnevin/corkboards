@@ -69,9 +69,14 @@ fn launch(url: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         // spawn(), not status(): xdg-open on some desktops blocks until the
         // browser exits, which would hang the IPC call (and the UI) for as long
-        // as the user keeps that browser open.
+        // as the user keeps that browser open. Reap the child off-thread so it
+        // doesn't linger as a zombie until app exit.
         .spawn()
-        .map(|_| ())
+        .map(|mut child| {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        })
         .map_err(|e| format!("failed to launch browser: {e}"))
 }
 

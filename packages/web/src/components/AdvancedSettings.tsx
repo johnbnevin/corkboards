@@ -28,7 +28,8 @@ import {
 } from 'lucide-react';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
-import { useNostrPublish } from '@/hooks/useNostrPublish';
+import { useNostr } from '@/hooks/useNostr';
+import { publishRelayList } from '@/lib/relayListPublish';
 import { useRelayHealth, type RelayHealth } from '@/hooks/useRelayHealth';
 import { useToast } from '@/hooks/useToast';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/components/NostrProvider';
@@ -36,7 +37,7 @@ import {
   getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS,
   getBlobRejectingServers, clearBlobRejectingServer,
 } from '@/hooks/useNostrBackup';
-import { isTauri, tauriGetProxy, tauriSetProxy, tauriGetProxyRequired, tauriSetProxyRequired, tauriProxyLoadFailed, tauriProxyWebviewUnprotected } from '@/lib/tauri';
+import { isTauri, tauriGetProxy, tauriSetProxy, tauriGetProxyRequired, tauriSetProxyRequired, tauriProxyLoadFailed, tauriProxyWebviewUnprotected, isFileLoggingEnabled, setFileLogging as tauriSetFileLogging, getContentProtected as tauriGetContentProtected, setContentProtected as tauriSetContentProtected } from '@/lib/tauri';
 import { getImageProxyTemplate, saveImageProxyTemplate } from '@/lib/imageProxySettings';
 import { validateImageProxyTemplate } from '@core/imageProxy';
 
@@ -277,7 +278,7 @@ export function AdvancedSettings({
 function RelaySection() {
   const { config, updateConfig } = useAppContext();
   const { user } = useCurrentUser();
-  const { mutate: publishEvent } = useNostrPublish();
+  const { nostr } = useNostr();
   const { toast } = useToast();
   const { relayHealth, checkAllRelays } = useRelayHealth();
 
@@ -286,7 +287,6 @@ function RelaySection() {
   // user's own choices and must be shown and never silently removed.
   const [relays, setRelays] = useState<Relay[]>(config.relayMetadata.relays);
   const [newRelayUrl, setNewRelayUrl] = useState('');
-  const [includeFallbacks, setIncludeFallbacks] = useState(true);
 
   /** Normalize relay URL for comparison (strip trailing slash) */
   const norm = (url: string) => url.replace(/\/+$/, '');
@@ -306,8 +306,21 @@ function RelaySection() {
 
   const handleAddRelay = () => {
     const normalized = normalizeRelayUrl(newRelayUrl);
-    try { new URL(normalized); } catch {
+    // A relay is a WebSocket endpoint. Accepting any scheme let `https://…` (or
+    // worse, `javascript:`/`file:`) into the user's NIP-65 list — published to
+    // the network, where every other client would then try to connect to it.
+    // Reject anything that isn't wss:/ws: rather than publish a broken list.
+    let parsed: URL;
+    try { parsed = new URL(normalized); } catch {
       toast({ title: 'Invalid relay URL', variant: 'destructive' });
+      return;
+    }
+    if (parsed.protocol !== 'wss:' && parsed.protocol !== 'ws:') {
+      toast({
+        title: 'Relay URLs must start with wss://',
+        description: 'Relays speak WebSocket. Use wss:// (or ws:// for a local relay).',
+        variant: 'destructive',
+      });
       return;
     }
     if (relays.some(r => r.url === normalized)) {
@@ -323,7 +336,9 @@ function RelaySection() {
   const handleRemoveRelay = (url: string) => {
     const newRelays = relays.filter(r => r.url !== url);
     setRelays(newRelays);
-    saveRelays(newRelays);
+    // The ONLY path that may shrink the published list, so it is the only one
+    // that names a removal. See saveRelays.
+    saveRelays(newRelays, [url]);
   };
 
   const handleToggleRead = (url: string) => {
@@ -338,7 +353,7 @@ function RelaySection() {
     saveRelays(newRelays);
   };
 
-  const saveRelays = useCallback((userRelays: Relay[]) => {
+  const saveRelays = useCallback((userRelays: Relay[], removals: string[] = []) => {
     // Config stores ONLY the user's NIP-65 relays — hardcoded relays are always
     // added by NostrProvider's reqRouter/eventRouter separately. This ensures
     // NostrSync won't see hardcoded relays as "user relays" and we never
@@ -348,23 +363,43 @@ function RelaySection() {
       ...current,
       relayMetadata: { relays: userRelays, updatedAt: now },
     }));
-    // Publish the user's relay list to Nostr (NIP-65 kind:10002)
-    if (user) {
-      const tags = userRelays.map(relay => {
-        if (relay.read && relay.write) return ['r', relay.url];
-        if (relay.read) return ['r', relay.url, 'read'];
-        if (relay.write) return ['r', relay.url, 'write'];
-        return null;
-      }).filter((tag): tag is string[] => tag !== null);
-      publishEvent(
-        { kind: 10002, content: '', tags },
-        {
-          onSuccess: () => toast({ title: 'Relay list published to Nostr' }),
-          onError: () => toast({ title: 'Failed to publish relay list', variant: 'destructive' }),
-        }
-      );
-    }
-  }, [updateConfig, user, publishEvent, toast]);
+    if (!user) return;
+
+    // Publish through the read-modify-write guard rather than signing whatever
+    // local state happens to hold.
+    //
+    // kind 10002 is REPLACEABLE: a publish replaces the user's whole relay list
+    // everywhere. This screen's state is seeded from local config, which on a
+    // fresh device is empty until NostrSync has pulled the real list — so the
+    // old code's "build tags from local state and publish" turned a single
+    // toggle into a wipe of a multi-relay list the user had built elsewhere.
+    // publishRelayList re-reads the authoritative event first, merges onto it,
+    // and refuses to shrink from a base it could not confirm. Same class of
+    // guard @core/contactList applies to follows.
+    void publishRelayList(
+      nostr as Parameters<typeof publishRelayList>[0],
+      user.pubkey,
+      user.signer as Parameters<typeof publishRelayList>[2],
+      userRelays,
+      removals,
+    ).then((result) => {
+      if (result.refusedReason) {
+        toast({ title: 'Relay list not published', description: result.refusedReason, variant: 'destructive' });
+        return;
+      }
+      if (!result.published) return;
+      // Reflect what was actually published — the merge may legitimately keep
+      // relays this screen never knew about.
+      setRelays(result.entries.map((e) => ({ url: e.url, read: e.read, write: e.write })));
+      updateConfig((current) => ({
+        ...current,
+        relayMetadata: { relays: result.entries, updatedAt: result.updatedAt || now },
+      }));
+      toast({ title: 'Relay list published to Nostr' });
+    }).catch((e) => {
+      toast({ title: 'Failed to publish relay list', description: String(e), variant: 'destructive' });
+    });
+  }, [updateConfig, user, nostr, toast]);
 
   const getHealthForRelay = (url: string): RelayHealth | undefined => {
     return relayHealth.find(h => h.url === url || h.url === url.replace(/\/$/, '') + '/');
@@ -448,22 +483,27 @@ function RelaySection() {
 
       <Separator />
 
-      {/* ── Fallback Relays (hardcoded, read/write, include toggle) ── */}
+      {/* ── Fallback Relays (hardcoded, read/write, always on) ──
+          There used to be an "Include" switch here. It controlled nothing but
+          the opacity of this list — the pool routed through these relays either
+          way. A control that appears to govern where a user's notes travel and
+          silently doesn't is worse than no control, so it's gone and the state
+          is now stated plainly. (Making it real belongs in NostrProvider's
+          routers, not in a settings toggle.) */}
       <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Fallback Relays</p>
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] text-muted-foreground">Include</span>
-            <Switch checked={includeFallbacks} onCheckedChange={setIncludeFallbacks} className="scale-75" />
-          </div>
+        <div className="mb-1.5">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Fallback Relays (always used)</p>
         </div>
-        <p className="text-[10px] text-muted-foreground mb-1.5">Read + write relays used for discovery and bootstrapping</p>
+        <p className="text-[10px] text-muted-foreground mb-1.5">
+          Read + write relays used for discovery and bootstrapping. These are always
+          queried alongside your own relays; add yours above to route around them.
+        </p>
         <div className="space-y-0.5">
           {FALLBACK_RELAYS.map(url => {
             const health = getHealthForRelay(url);
             const inUserList = isInUserList(url);
             return (
-              <div key={url} className={`flex items-center gap-1.5 text-[10px] px-2 py-1 rounded ${includeFallbacks ? 'text-foreground' : 'text-muted-foreground/40'}`}>
+              <div key={url} className="flex items-center gap-1.5 text-[10px] px-2 py-1 rounded text-foreground">
                 <StatusDot status={health?.status || 'unknown'} />
                 <span className="font-mono truncate">{url}</span>
                 {inUserList && <span className="text-green-500 shrink-0">in your list</span>}
@@ -514,6 +554,8 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
   const [webviewUnprotected, setWebviewUnprotected] = useState(false);
   const [imgProxy, setImgProxy] = useState(getImageProxyTemplate);
   const [savedImgProxy, setSavedImgProxy] = useState(getImageProxyTemplate);
+  const [fileLogging, setFileLoggingState] = useState(false);
+  const [contentProtected, setContentProtectedState] = useState(true);
   const desktop = isTauri;
 
   const handleSaveImgProxy = () => {
@@ -540,7 +582,35 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     tauriGetProxyRequired().then(setProxyRequired);
     tauriProxyLoadFailed().then(setProxyLoadFailed);
     tauriProxyWebviewUnprotected().then(setWebviewUnprotected);
+    setFileLoggingState(isFileLoggingEnabled());
+    tauriGetContentProtected().then(setContentProtectedState);
   }, [desktop]);
+
+  const handleToggleFileLogging = async (next: boolean) => {
+    const applied = await tauriSetFileLogging(next);
+    setFileLoggingState(applied);
+    toast({
+      title: applied ? 'Activity log on' : 'Activity log off',
+      description: applied
+        ? 'Console output is being written to debug.log on this device. Turn it off when you are done troubleshooting.'
+        : 'Logging stopped and the existing log file was cleared.',
+    });
+  };
+
+  const handleToggleContentProtected = async (next: boolean) => {
+    const ok = await tauriSetContentProtected(next);
+    if (!ok) {
+      toast({ title: 'Failed to update setting', variant: 'destructive' });
+      return;
+    }
+    setContentProtectedState(next);
+    toast({
+      title: next ? 'Screenshot protection on' : 'Screenshot protection off',
+      // Tauri can only apply this when the window is built, so saying it is
+      // active now would be a lie the user would discover by testing it.
+      description: 'Takes effect the next time you start Corkboards.',
+    });
+  };
 
   const handleToggleRequired = async (next: boolean) => {
     try {
@@ -653,6 +723,45 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
             <span className="text-[11px]">
               Require proxy (kill-switch)
               <span className="block text-[10px] text-muted-foreground">When on, native relay queries FAIL rather than connect directly if the proxy is unset/unreachable — no silent clearnet fallback.</span>
+            </span>
+          </button>
+
+          <Separator />
+
+          <button
+            type="button"
+            className="flex items-center gap-2 text-left"
+            onClick={() => handleToggleFileLogging(!fileLogging)}
+          >
+            <span className={`inline-block h-4 w-7 rounded-full transition-colors ${fileLogging ? 'bg-green-600' : 'bg-muted-foreground/40'}`}>
+              <span className={`block h-3 w-3 m-0.5 rounded-full bg-white transition-transform ${fileLogging ? 'translate-x-3' : ''}`} />
+            </span>
+            <span className="text-[11px]">
+              Write activity log to disk
+              <span className="block text-[10px] text-muted-foreground">
+                Off by default. When on, console output — including which relays you query, your RSS
+                subscription URLs and when you were active — is written in plain text to
+                <code className="mx-1">debug.log</code> in this app&apos;s data folder. Useful for
+                troubleshooting; turn it back off afterwards. Turning it off also deletes the file.
+              </span>
+            </span>
+          </button>
+
+          <button
+            type="button"
+            className="flex items-center gap-2 text-left"
+            onClick={() => handleToggleContentProtected(!contentProtected)}
+          >
+            <span className={`inline-block h-4 w-7 rounded-full transition-colors ${contentProtected ? 'bg-green-600' : 'bg-muted-foreground/40'}`}>
+              <span className={`block h-3 w-3 m-0.5 rounded-full bg-white transition-transform ${contentProtected ? 'translate-x-3' : ''}`} />
+            </span>
+            <span className="text-[11px]">
+              Hide window from screen capture
+              <span className="block text-[10px] text-muted-foreground">
+                Asks the OS to exclude the Corkboards window from screenshots and screen sharing
+                (Windows and macOS; no effect on Linux). This also blocks your OWN screenshots and
+                screen shares — turn it off if you need to record or demo the app. Applies on next launch.
+              </span>
             </span>
           </button>
         </div>

@@ -5,6 +5,30 @@ import { useNostr } from '../lib/NostrProvider';
 import { FALLBACK_RELAYS } from '../lib/NostrProvider';
 import { FEED_PAGE_SIZE_MOBILE, FEED_KINDS } from '@core/feedConstants';
 import { dedupBatch, initialUntilCursor, PAGINATION_MAX_ITERATIONS } from '@core/paginationCore';
+import { fnv1a32 } from '@core/hashCore';
+
+/**
+ * React Query cache key for an author set.
+ *
+ * The key used to be `authors.slice(0, 10).join(',')`. Every corkboard built
+ * from the same first ten authors — which is the normal case when boards are
+ * created by adding to a copy of an existing one, and the guaranteed case for
+ * two boards over the same follow list with different extras — collided onto a
+ * single cache entry, so switching between them showed the other board's notes
+ * and `useFeedLoadMore` appended pages of one board into the other. Digest the
+ * FULL list (order-independent, so a reordered but identical set still hits)
+ * and carry the length, which makes an accidental collision vanishingly rare
+ * and a silent one impossible to produce by prefix alone.
+ */
+export function authorsCacheKey(authors: string[]): string {
+  if (authors.length === 0) return 'global';
+  // XOR-fold per-author hashes: commutative, so it doesn't depend on ordering,
+  // and it doesn't require sorting a 5000-element array on every render.
+  // fnv1a32 returns 8 hex chars; parse back to fold numerically.
+  let digest = 0;
+  for (const author of authors) digest = (digest ^ parseInt(fnv1a32(author), 16)) >>> 0;
+  return `${authors.length}:${digest.toString(36)}`;
+}
 
 /**
  * Fetch recent notes from a set of authors.
@@ -14,7 +38,7 @@ export function useFeed(authors: string[] = []) {
   const { nostr } = useNostr();
 
   return useQuery<NostrEvent[]>({
-    queryKey: ['mobile-feed', authors.length > 0 ? authors.slice(0, 10).join(',') : 'global'],
+    queryKey: ['mobile-feed', authorsCacheKey(authors)],
     queryFn: async () => {
       const filter = {
         kinds: FEED_KINDS.filter(k => k === 1 || k === 6) as number[],
@@ -88,10 +112,7 @@ export function useFeedLoadMore({ authors, isDismissed, onLoaded }: UseFeedLoadM
   // Memoize the cache-key signature so the useCallback deps stay "simple
   // expressions" per react-hooks/use-memo rule, and so the cacheKey identity
   // is stable when authors are unchanged.
-  const authorsKey = useMemo(
-    () => (authors.length > 0 ? authors.slice(0, 10).join(',') : 'global'),
-    [authors],
-  );
+  const authorsKey = useMemo(() => authorsCacheKey(authors), [authors]);
   const cacheKey = useMemo(() => ['mobile-feed', authorsKey] as const, [authorsKey]);
 
   const loadMoreByCount = useCallback(async (count: number) => {

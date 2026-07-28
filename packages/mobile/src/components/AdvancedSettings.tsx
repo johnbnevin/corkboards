@@ -21,6 +21,8 @@ import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS, getBlobR
 import { mobileStorage } from '../storage/MmkvStorage';
 import { setImageProxyTemplate, validateImageProxyTemplate } from '@core/imageProxy';
 import { useLocalStorage } from '../hooks/useLocalStorage';
+import { STORAGE_KEYS } from '../lib/storageKeys';
+import { isRssProxyFallbackEnabled, setRssProxyFallbackEnabled } from '../lib/feedUtils';
 
 const LEGACY_PROXY_URL_KEY = '__proxy_url__';
 const IMAGE_PROXY_KEY = 'corkboard:image-proxy-template';
@@ -82,7 +84,12 @@ export function AdvancedSettings({
 }: AdvancedSettingsProps) {
   const [section, setSection] = useState<'main' | 'relays' | 'blossom' | 'network'>(initialSection);
   // Render-markdown display setting — same key web uses; read by NoteContent.
-  const [renderMarkdown, setRenderMarkdown] = useLocalStorage<boolean>('corkboard:render-markdown', true);
+  const [renderMarkdown, setRenderMarkdown] = useLocalStorage<boolean>(STORAGE_KEYS.RENDER_MARKDOWN, true);
+  // RSS proxy fallback — off by default. See lib/feedUtils.ts: mobile fetches
+  // feeds directly (no CORS), so routing them through corkboards.me is a pure
+  // privacy cost. Exposed here so a user with a feed that blocks direct fetches
+  // can make that trade knowingly rather than having it made for them.
+  const [rssProxyFallback, setRssProxyFallbackState] = useState(() => isRssProxyFallbackEnabled());
 
   // Sync with external section changes (e.g., opened from settings shortcut).
   // The v7 set-state-in-effect warning is a known false positive for this
@@ -260,6 +267,25 @@ export function AdvancedSettings({
           {renderMarkdown
             ? 'Notes show bold, italics, and other markdown formatting'
             : 'Notes show raw markdown text'}
+        </Text>
+      </TouchableOpacity>
+
+      {/* RSS proxy fallback (off by default — it discloses feed URLs) */}
+      <TouchableOpacity
+        style={styles.settingRow}
+        onPress={() => {
+          const next = !rssProxyFallback;
+          setRssProxyFallbackEnabled(next);
+          setRssProxyFallbackState(next);
+        }}
+      >
+        <Text style={styles.settingTitle}>
+          {rssProxyFallback ? '✓ ' : ''}RSS proxy fallback
+        </Text>
+        <Text style={styles.settingHint}>
+          {rssProxyFallback
+            ? 'Feeds that fail to load directly are retried via corkboards.me, which then sees those feed URLs'
+            : 'RSS feeds are fetched directly from their source. Nobody else sees what you subscribe to'}
         </Text>
       </TouchableOpacity>
 

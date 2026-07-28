@@ -3,10 +3,17 @@
  *
  * Single source of truth for web + mobile (both re-export this via
  * `@core/nostrEncrypt`). It was hand-duplicated in each app before, which is how
- * it drifted — the same one-line fix had to be applied twice. Pure: Web Crypto
- * (`crypto.subtle`), `TextEncoder`/`TextDecoder`, `btoa`/`atob`, all provided by
- * browsers, the RN/Hermes runtime, and Node — so it needs no DOM/React and is
- * testable directly under `test:core`.
+ * it drifted — the same one-line fix had to be applied twice. It needs no
+ * DOM/React and is testable directly under `test:core`.
+ *
+ * ⚠ PLATFORM PREREQUISITE: this module assumes the runtime provides WebCrypto
+ * (`crypto.subtle`, `crypto.getRandomValues`), `TextEncoder`/`TextDecoder` and
+ * `btoa`/`atob` as globals. Browsers and Node ≥ 16 do. **React Native / Hermes
+ * does NOT ship `crypto.subtle`** — the app must install a polyfill at startup,
+ * before anything imports this, or every call here throws at the first
+ * `crypto.subtle.…`. Do not "fix" a failure by falling back to a hand-rolled
+ * cipher; a missing polyfill is a startup bug, not a reason to weaken the
+ * encryption protecting the user's backup.
  *
  * Used by:
  * - useNostrBackup.ts (full settings backup)
@@ -123,9 +130,21 @@ export async function decryptFromSelf(
   signer: { nip44?: { decrypt(pubkey: string, ciphertext: string): Promise<string> }; nip04?: { decrypt(pubkey: string, ciphertext: string): Promise<string> } },
   pubkey: string,
 ): Promise<string> {
-  const keyHex = signerMethod === 'nip04'
-    ? await signer.nip04!.decrypt(pubkey, wrappedKey)
-    : await signer.nip44!.decrypt(pubkey, wrappedKey);
+  // Explicit checks rather than `!`: a signer without the method the event was
+  // written with is a real, reachable state (a NIP-07 extension or a NIP-46
+  // remote signer may implement only NIP-44), and the assertion turned it into
+  // an opaque "cannot read properties of undefined" instead of something the UI
+  // can tell the user about.
+  let keyHex: string;
+  if (signerMethod === 'nip04') {
+    if (!signer.nip04) {
+      throw new Error('Signer does not support NIP-04 (required to decrypt this legacy event)');
+    }
+    keyHex = await signer.nip04.decrypt(pubkey, wrappedKey);
+  } else {
+    if (!signer.nip44) throw new Error('Signer does not support NIP-44 decryption');
+    keyHex = await signer.nip44.decrypt(pubkey, wrappedKey);
+  }
 
   const raw = hexToRawKey(keyHex);
   const aesKey = await importAesKey(raw);

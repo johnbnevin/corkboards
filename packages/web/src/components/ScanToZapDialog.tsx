@@ -64,6 +64,10 @@ export function ScanToZapDialog({ open, onOpenChange, onOpenWalletSettings }: Sc
   useEffect(() => {
     if (open && isConnected && !target && cameraAvailable()) start();
     if (!open) stop();
+    // Unmounting while open (route change, parent teardown) never ran the
+    // `!open` branch, leaving the camera — and the OS recording indicator —
+    // live with no UI attached. Release it on teardown too.
+    return () => { stop(); };
   }, [open, isConnected, target, start, stop]);
 
   const reset = useCallback(() => {

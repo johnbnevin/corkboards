@@ -22,13 +22,17 @@
 
 import { type NostrEvent } from '@nostrify/nostrify';
 import { noteDisplayText, type EventResolver } from './noteCategories';
+import { hasHtmlContent } from './sanitizeUtils';
 
 // Emoji-presentation codepoints plus the joiners/variation selectors that glue
 // them together — a note made only of these is "just emoji".
 const EMOJI_ONLY = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}\s️‍]+$/u;
 const URL_ONLY = /^\s*(https?:\/\/\S+\s*)+$/i;
 const MEDIA_URL = /\.(jpg|jpeg|png|gif|webp|mp4|webm|mov|ogg|svg)\b/i;
-const HTML_PATTERN = /<\/?[a-z][\s\S]*?>/i;
+// HTML detection is delegated to `hasHtmlContent` (sanitizeUtils), which anchors
+// on a KNOWN tag name. The pattern that used to live here — `/<\/?[a-z].*?>/i` —
+// matched any angle-bracketed word, so ordinary notes saying `<Bitcoin>` or
+// `<insert name here>` were silently hidden by the "hide HTML" filter.
 const MD_PATTERN = /(\[.+?\]\(.+?\)|^#{1,6}\s|^\*{1,3}.+?\*{1,3}$|^[-*+]\s|!\[|^>\s|```)/m;
 
 /* eslint-disable no-misleading-character-class */
@@ -112,7 +116,7 @@ export function noteMatchesContentFilters(
   if (config.hideOnlyEmoji && EMOJI_ONLY.test(trimmed)) return false;
   if (config.hideOnlyMedia && MEDIA_URL.test(trimmed) && trimmed.replace(/https?:\/\/\S+/g, '').trim().length === 0) return false;
   if (config.hideOnlyLinks && URL_ONLY.test(trimmed)) return false;
-  if (config.hideHtml && HTML_PATTERN.test(trimmed)) return false;
+  if (config.hideHtml && hasHtmlContent(trimmed)) return false;
   if (config.hideMarkdown && MD_PATTERN.test(trimmed)) return false;
   return true;
 }

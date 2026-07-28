@@ -94,3 +94,56 @@ export const CORKBOARDS_DEFAULT_EMOJIS: { shortcode: string; url: string }[] = [
   { shortcode: 'cb-peepoLeave', url: 'https://cdn.betterttv.net/emote/5d324913ff6ed36801311fd2/3x.webp' },
   { shortcode: 'cb-catrave', url: 'https://cdn.betterttv.net/emote/5f2692d565fe924464ef166b/3x.webp' },
 ];
+
+/**
+ * The Unicode character a twemoji asset URL stands for, or null if the URL
+ * isn't one.
+ *
+ * Twemoji names every file after the codepoints it renders
+ * (`…/72x72/1f600.png` is U+1F600 😀), so the glyph is recoverable from the URL
+ * with no lookup table to maintain and no chance of the table drifting from the
+ * list above.
+ */
+export function twemojiCharFromUrl(url: string): string | null {
+  const match = /\/([0-9a-f]{4,6}(?:-[0-9a-f]{4,6})*)\.png$/i.exec(url);
+  if (!match) return null;
+  try {
+    const codepoints = match[1].split('-').map((hex) => parseInt(hex, 16));
+    return String.fromCodePoint(...codepoints);
+  } catch {
+    // A filename that parses as hex but isn't a valid scalar value.
+    return null;
+  }
+}
+
+/**
+ * Native Unicode glyphs for the default-set shortcodes that have one.
+ *
+ * Two thirds of the default set are plain Unicode emoji that happen to be
+ * *distributed* as twemoji PNGs from a single CDN. Rendering those as an
+ * `<img>` meant every viewer fetched up to ~54 images from one third-party host
+ * on every picker open and every reaction render — a per-view IP leak to a host
+ * the user never chose, and a single point of failure for a feature that needs
+ * no network at all. Rendering the character instead is free, offline, and
+ * theme-aware.
+ *
+ * The remaining entries are genuinely custom animated art with no Unicode
+ * equivalent; they are absent from this map and still load from their URLs.
+ * The published kind-30030 event keeps the URLs either way, because NIP-30 is
+ * defined in terms of URLs and other clients need them to render our set.
+ */
+const DEFAULT_EMOJI_CHARS: ReadonlyMap<string, string> = new Map(
+  CORKBOARDS_DEFAULT_EMOJIS.flatMap(({ shortcode, url }) => {
+    const char = twemojiCharFromUrl(url);
+    return char ? [[shortcode, char] as [string, string]] : [];
+  }),
+);
+
+/**
+ * The native glyph for a default-set shortcode, or null when the shortcode is
+ * unknown or is one of the custom animated emoji. Callers that get a string
+ * should render it as text and skip the network fetch entirely.
+ */
+export function defaultEmojiChar(shortcode: string): string | null {
+  return DEFAULT_EMOJI_CHARS.get(shortcode) ?? null;
+}

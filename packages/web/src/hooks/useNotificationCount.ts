@@ -61,6 +61,16 @@ export function useNotificationCount() {
     enabled: idleReady && !!user?.pubkey,
     staleTime: 60_000,
     refetchInterval: 60_000,
+    // Stated explicitly rather than relied on as a library default: this is a
+    // once-a-minute relay query carrying the user's pubkey, and it must stop
+    // when the tab is hidden. Leaving it running in a backgrounded tab burns
+    // battery and, more to the point, keeps a steady beacon going to every
+    // routed relay for as long as the tab exists — a presence signal the user
+    // never asked to emit. TanStack's default is already false; pinning it here
+    // means a future default change can't quietly turn it back on.
+    refetchIntervalInBackground: false,
+    // Focus comes back → refetch once, so the count is current the moment the
+    // user looks at it. That is the right place to spend the query.
     refetchOnWindowFocus: true,
   });
 

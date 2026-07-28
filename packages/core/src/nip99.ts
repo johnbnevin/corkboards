@@ -38,8 +38,14 @@ export interface ParsedListing {
   specs: [string, string][];
 }
 
+/** A tag's first value, but only when it really is a string. Relay-supplied
+ *  tags are typed `string[][]` and are not: a merchant's listing can carry
+ *  `["stock", 5]` or `["title", null]`, and without this guard the number/null
+ *  flows out under a `string` type and the first `.startsWith`/`.trim` on it
+ *  throws inside a render path. Same check the spec/image handling below does. */
 function tagVal(event: NostrEvent, name: string): string | undefined {
-  return event.tags.find(t => t[0] === name)?.[1];
+  const val = event.tags.find(t => t[0] === name)?.[1];
+  return typeof val === 'string' ? val : undefined;
 }
 
 /** Format a NIP-99 price tag: ['price', amount, currency, frequency?]. */

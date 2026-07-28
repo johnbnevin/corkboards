@@ -54,6 +54,11 @@ export function classifyNote(event: NostrEvent): NoteClassification {
   // Markers: 'root', 'reply', 'mention'
   const rootTag = eTags.find(t => t[3] === 'root');
   const replyTag = eTags.find(t => t[3] === 'reply');
+  // Deprecated positional e-tags are `[root, mention…, reply]`, so an e-tag the
+  // author explicitly marked 'mention' is a citation, never a thread position.
+  // Leaving mentions in the positional list is how a quoted note ended up being
+  // treated as the parent — the note attaches under something it merely cited.
+  const positional = eTags.filter(t => t[3] !== 'mention');
 
   // Get parent event ID (what this note is directly replying to)
   let parentEventId: string | undefined;
@@ -63,13 +68,18 @@ export function classifyNote(event: NostrEvent): NoteClassification {
     // Explicit reply marker
     const id = replyTag[1];
     if (isValidEventId(id)) parentEventId = id;
-  } else if (eTags.length === 1 && eTags[0].length > 1) {
-    // Single e-tag: it's both root and parent
-    const id = eTags[0][1];
+  } else if (rootTag && rootTag.length > 1) {
+    // Marked scheme with a root but no reply: NIP-10 says a direct reply to the
+    // root of a thread carries only the 'root' marker, so the root IS the parent.
+    const id = rootTag[1];
     if (isValidEventId(id)) parentEventId = id;
-  } else if (eTags.length > 1 && eTags[eTags.length - 1].length > 1) {
+  } else if (positional.length === 1 && positional[0].length > 1) {
+    // Single e-tag: it's both root and parent
+    const id = positional[0][1];
+    if (isValidEventId(id)) parentEventId = id;
+  } else if (positional.length > 1 && positional[positional.length - 1].length > 1) {
     // Multiple e-tags without markers: last one is parent (NIP-10 deprecated convention)
-    const id = eTags[eTags.length - 1][1];
+    const id = positional[positional.length - 1][1];
     if (isValidEventId(id)) parentEventId = id;
   }
 
@@ -77,9 +87,9 @@ export function classifyNote(event: NostrEvent): NoteClassification {
   if (rootTag && rootTag.length > 1) {
     const id = rootTag[1];
     if (isValidEventId(id)) rootEventId = id;
-  } else if (eTags.length >= 1 && eTags[0].length > 1) {
+  } else if (positional.length >= 1 && positional[0].length > 1) {
     // First e-tag is typically the root
-    const id = eTags[0][1];
+    const id = positional[0][1];
     if (isValidEventId(id)) rootEventId = id;
   }
 
@@ -163,7 +173,15 @@ export function getReferencedEventIds(event: NostrEvent): string[] {
 export function buildReplyTags(replyTo: NostrEvent, replyRelayHint = ''): string[][] {
   const tags: string[][] = [];
   const hint = isValidRelayHint(replyRelayHint) ? replyRelayHint : '';
-  const rootTag = replyTo.tags.find(t => t[0] === 'e' && t[3] === 'root');
+  const parentETags = replyTo.tags.filter(t => t[0] === 'e');
+  // Marked scheme first; otherwise the DEPRECATED-POSITIONAL scheme, where the
+  // parent's FIRST e-tag is the thread root (`[root, mention…, reply]`). Without
+  // that fallback a reply to any note from a positional-tagging client made the
+  // parent look like a thread root, which forks the thread: our reply tags it
+  // 'root' while every other participant tags the real root, and the two halves
+  // of the conversation stop resolving to each other.
+  const rootTag = parentETags.find(t => t[3] === 'root')
+    ?? parentETags.find(t => t[3] !== 'mention' && isValidEventId(t[1]));
   const rootId = (rootTag?.[1] && isValidEventId(rootTag[1])) ? rootTag[1] : replyTo.id;
 
   if (rootId !== replyTo.id) {
@@ -248,9 +266,19 @@ export function buildCommentTags(
       : ['e', 'a', 'i', 'k', 'p'];
 
     if (target instanceof URL) {
-      tags.push([I, target.toString()]);
-      // NIP-73: an external URL's "kind" is its scheme, not its hostname. (H5)
-      tags.push([K, target.protocol.replace(/:$/, '')]);
+      // NIP-73 wants the URL "normalized, no fragment": the fragment is a
+      // client-side anchor, so `…/post` and `…/post#comments` are the same
+      // external item and must produce the same `i` value or comments on one
+      // never surface on the other.
+      const url = new URL(target.toString());
+      url.hash = '';
+      tags.push([I, url.toString()]);
+      // NIP-73's k value for a web page is the literal string "web" — NOT the
+      // scheme. Emitting "https" here made every URL comment a kind nobody
+      // queries for. Non-web schemes have no NIP-73 mapping, so they fall back
+      // to the scheme rather than claiming to be a web page. (H5)
+      const scheme = target.protocol.replace(/:$/, '');
+      tags.push([K, scheme === 'http' || scheme === 'https' ? 'web' : scheme]);
       return;
     }
 

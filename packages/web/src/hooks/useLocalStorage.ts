@@ -1,5 +1,20 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbReady } from '@/lib/idb';
+import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbReady, nextWriteOrigin } from '@/lib/idb';
+
+/**
+ * Deserialize, reporting success separately from the value.
+ *
+ * A `{ ok, value }` pair rather than `T | null`, because `null` is a perfectly
+ * valid deserialized value and conflating it with "this wasn't the serialized
+ * form" would make a legitimately-null stored value fall back to the raw string.
+ */
+function tryDeserialize<T>(raw: string, deserialize: (v: string) => T): { ok: true; value: T } | { ok: false } {
+  try {
+    return { ok: true, value: deserialize(raw) };
+  } catch {
+    return { ok: false };
+  }
+}
 
 /**
  * Generic hook for managing persistent state backed by IndexedDB.
@@ -62,11 +77,19 @@ export function useLocalStorage<T>(
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
+  // Identity for this hook instance's writes. The sync event echoes it back so
+  // `handleSync` below can skip the value this instance just wrote — its state
+  // is already correct, and re-applying it costs a full deserialize plus a
+  // render with a fresh object identity, which invalidates every memo
+  // downstream. Other instances of the same key (and other tabs) still update.
+  const writeOrigin = useRef<string>();
+  if (!writeOrigin.current) writeOrigin.current = nextWriteOrigin();
+
   const persistToIdb = useCallback((serialized: string) => {
     if (serialized === null || serialized === undefined || serialized === 'null') {
       idbRemoveSync(key);
     } else {
-      idbSetSync(key, serialized);
+      idbSetSync(key, serialized, writeOrigin.current);
     }
   }, [key]);
 
@@ -85,14 +108,55 @@ export function useLocalStorage<T>(
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, persistToIdb]);
 
+  // Refs so the sync listener below can use the CURRENT (de)serializer without
+  // re-registering on every render — `serializer` is usually an inline object
+  // literal, so it has a fresh identity each time.
+  const deserializeRef = useRef(deserialize);
+  deserializeRef.current = deserialize;
+
   // Sync with changes from other tabs (BroadcastChannel) and same page
   useEffect(() => {
     const ac = new AbortController();
-    const handleSync = (e: CustomEvent<{ key: string; value: unknown }>) => {
+    const handleSync = (e: CustomEvent<{ key: string; value: unknown; origin?: string }>) => {
       if (e.detail.key !== key) return;
-      const next = (e.detail.value === null ? defaultValue : e.detail.value) as T;
-      stateRef.current = next;
-      setState(next);
+      // Our own write coming back — state already holds it.
+      if (e.detail.origin && e.detail.origin === writeOrigin.current) return;
+      if (e.detail.value === null) {
+        stateRef.current = defaultValue;
+        setState(defaultValue);
+        return;
+      }
+
+      // Run the incoming value through the CALLER'S deserialize.
+      //
+      // lib/idb.ts dispatches `tryParse(rawString)` — a bare `JSON.parse`. Every
+      // other path into this hook (initial read, idbReady re-read) goes through
+      // `deserialize`, so a hook with a custom one — reviving a Set, migrating an
+      // old shape, clamping a range, applying a default for a missing field —
+      // had all of that silently skipped here, and only here. The value landed in
+      // state as whatever JSON.parse produced, so a cross-tab write or a backup
+      // restore could install a shape the component's own contract says is
+      // impossible, from the one code path that never validates. (L18)
+      const raw = e.detail.value;
+      try {
+        let next: T;
+        if (typeof raw === 'string') {
+          // A string may be the serialized form (custom serializer whose output
+          // isn't valid JSON, so tryParse handed it back untouched) or a genuine
+          // string value. Try it as the serialized form first, and fall back to
+          // the string itself only when deserializing actually threw — hence the
+          // explicit `ok` check rather than `??`, which would never fire on a
+          // result object that is always non-nullish.
+          const attempt = tryDeserialize(raw, deserializeRef.current);
+          next = attempt.ok ? attempt.value : (raw as unknown as T);
+        } else {
+          next = deserializeRef.current(JSON.stringify(raw));
+        }
+        stateRef.current = next;
+        setState(next);
+      } catch (error) {
+        console.warn(`Failed to deserialize synced value for ${key}:`, error);
+      }
     };
 
     window.addEventListener('idb-storage-sync', handleSync as EventListener, { signal: ac.signal });

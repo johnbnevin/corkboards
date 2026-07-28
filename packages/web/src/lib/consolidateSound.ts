@@ -148,6 +148,36 @@ const CHIME_SCALE = [523, 587, 659, 784, 880, 1047, 1175, 1319, 1568, 1760];
  *  otherwise stack into a smear. */
 let burstEndsAt = 0;
 
+/** Longest any single voice can ring for after its start offset (chime osc1 is
+ *  0.35 s; a little slack so we never cut a tail off). */
+const VOICE_TAIL_SECONDS = 0.4;
+
+/** Pending idle-suspend timer, so a new burst can cancel a scheduled suspend. */
+let suspendTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Suspend the shared context once the last voice has rung out.
+ *
+ * A `running` AudioContext keeps its audio render thread churning every
+ * 128-frame quantum for the life of the document — even with nothing connected
+ * to `destination` — and holds the output device open, which keeps the system
+ * audio daemon awake too. Before this, the first consolidate resumed the
+ * context and nothing ever suspended it, so the tab burned a slice of CPU on
+ * silence forever. That is invisible on a desktop and very much not invisible
+ * on a two-core laptop.
+ *
+ * Suspending between bursts is free: `readyContext` resumes on demand, and
+ * resume latency is orders of magnitude below the gap between two consolidates.
+ */
+function scheduleSuspend(afterSeconds: number): void {
+  if (suspendTimer !== null) clearTimeout(suspendTimer);
+  suspendTimer = setTimeout(() => {
+    suspendTimer = null;
+    // Re-check state: another burst may have resumed it while we waited.
+    if (ctx && ctx.state === 'running') void ctx.suspend().catch(() => {});
+  }, (afterSeconds + VOICE_TAIL_SECONDS) * 1000);
+}
+
 /**
  * Play the consolidate cascade for `blanks` removed notes.
  *
@@ -189,6 +219,7 @@ export async function playConsolidateSound(
 
   const span = offsets[offsets.length - 1] ?? 0;
   burstEndsAt = Date.now() + span * 1000;
+  scheduleSuspend(span);
 }
 
 /** Preview used by the sound picker: three voices, starting slow. */
@@ -204,10 +235,13 @@ export async function previewConsolidateSound(style: ConsolidateSoundStyle): Pro
     if (style === 'chimes') chime(c, t, scale[i]);
     else swoosh(c, t);
   }
+  scheduleSuspend(gaps[gaps.length - 1]);
 }
 
 /** Test seam — resets the module singletons between cases. */
 export function __resetConsolidateSoundForTests(): void {
+  if (suspendTimer !== null) clearTimeout(suspendTimer);
+  suspendTimer = null;
   ctx = null;
   burstEndsAt = 0;
 }

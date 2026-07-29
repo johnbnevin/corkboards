@@ -82,6 +82,37 @@ import { withoutTombstoneRecording } from '../storage/MmkvStorage';
 const LAST_BACKUP_TS_KEY = STORAGE_KEYS.LAST_BACKUP_TS;
 const CHECKPOINTS_KEY = STORAGE_KEYS.REMOTE_CHECKPOINTS;
 
+/**
+ * Cache of DECRYPTED manifest JSON keyed by manifest event id (immutable
+ * content, so cache-forever is safe). Manifests are NIP-44 encrypted since
+ * 0.8.1; without this cache every discovery pass paid a signer decrypt per
+ * manifest — a network round-trip on NIP-46 logins. Parity with web.
+ */
+const MANIFEST_PLAIN_CACHE_KEY = 'corkboard:manifest-plain-cache';
+const MANIFEST_CACHE_MAX = 40;
+
+function readManifestCache(): Record<string, string> {
+  try {
+    const raw = mobileStorage.getSync(MANIFEST_PLAIN_CACHE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, string> : {};
+  } catch { return {}; }
+}
+
+function getCachedManifestJson(eventId: string): string | null {
+  return readManifestCache()[eventId] ?? null;
+}
+
+function cacheManifestJson(eventId: string, json: string): void {
+  const cache = readManifestCache();
+  cache[eventId] = json;
+  const ids = Object.keys(cache);
+  if (ids.length > MANIFEST_CACHE_MAX) {
+    for (const old of ids.slice(0, ids.length - MANIFEST_CACHE_MAX)) delete cache[old];
+  }
+  mobileStorage.setSync(MANIFEST_PLAIN_CACHE_KEY, JSON.stringify(cache));
+}
+
 // Relay blacklist — persists across sessions (mirrors web)
 const BLOCKED_RELAYS_KEY = 'corkboard:blocked-relays';
 
@@ -731,11 +762,22 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       });
 
       const relays = getPublishRelays(pubkey);
+      let manifestPublished = 0;
       for (const url of relays) {
         const relay = createRelayFresh(url, { backoff: false });
-        try { await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) }); }
+        try {
+          await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
+          manifestPublished++;
+        }
         catch { /* continue */ }
         finally { try { relay.close(); } catch { /* */ } }
+      }
+
+      // A blob with no discoverable manifest is a failed save, not a green one
+      // — other devices find the backup through the manifest (parity with web).
+      if (manifestPublished === 0) {
+        if (__DEV__) console.warn('[backup] Auto-save: blob uploaded but NO relay accepted the manifest — reporting error');
+        return 'error';
       }
 
       // Update local state
@@ -833,19 +875,30 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       return;
     }
 
-    // Parse checkpoints from events (try plaintext first, then NIP-44 decrypt)
+    // Parse checkpoints from events (plaintext → cached decrypt → live decrypt).
+    // A signer timeout trips a circuit breaker for the rest of the pass —
+    // serially timing out per manifest is the "hangs then finds nothing" bug.
     const cps: RemoteCheckpoint[] = [];
+    let signerTimedOut = false;
     for (const ev of allEvents) {
       let data: Record<string, unknown> | null = null;
       try { data = JSON.parse(ev.content); } catch {
-        if (signer?.nip44) {
+        const cachedJson = getCachedManifestJson(ev.id);
+        if (cachedJson) {
+          try { data = JSON.parse(cachedJson); } catch { /* fall through */ }
+        }
+        if (!data && signer?.nip44 && !signerTimedOut) {
           try {
             const json = await Promise.race([
               signer.nip44.decrypt(pubkey, ev.content),
-              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), 3000)),
+              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), 10000)),
             ]);
             data = JSON.parse(json);
-          } catch { /* decrypt failed or timed out — skip */ }
+            cacheManifestJson(ev.id, json);
+          } catch (err) {
+            if (err instanceof Error && err.message === 'decrypt_timeout') signerTimedOut = true;
+            /* decrypt failed or timed out — skip */
+          }
         }
       }
       try {

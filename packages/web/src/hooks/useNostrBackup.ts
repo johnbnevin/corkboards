@@ -65,7 +65,12 @@ async function decryptSelfPayload(
   signer: { nip44?: { decrypt(pk: string, c: string): Promise<string> }; nip04?: { decrypt(pk: string, c: string): Promise<string> } },
   pubkey: string,
   ciphertext: string,
-  timeoutMs = 5000,
+  // Generous on purpose: with a NIP-46 bunker this is a network round-trip,
+  // and a cold bunker connection routinely takes >5s. Timing out here doesn't
+  // save anything — it makes the backup invisible (manifest unreadable), which
+  // on a phone meant sync NEVER happened. Successful decrypts are cached by
+  // event id (below), so the cost is paid once per manifest.
+  timeoutMs = 15000,
 ): Promise<string> {
   const withTimeout = <T>(p: Promise<T>) => Promise.race([
     p,
@@ -80,6 +85,44 @@ async function decryptSelfPayload(
     return withTimeout(signer.nip04.decrypt(pubkey, ciphertext));
   }
   throw firstErr ?? new Error('Signer supports neither NIP-44 nor NIP-04 decryption');
+}
+
+/**
+ * Cache of DECRYPTED manifest JSON, keyed by manifest event id.
+ *
+ * Since 0.8.1 manifests are NIP-44 encrypted (they leak corkboard names and
+ * the Blossom URL in plaintext), which made every backup-discovery pass cost
+ * one signer decrypt per manifest. For a NIP-46 (bunker) login that decrypt is
+ * a network round-trip — the periodic sync re-paid it every tick and the
+ * relay scan paid it ~20 times in a row, hanging for minutes and "finding
+ * nothing" whenever the bunker was slow. An event id names immutable content,
+ * so a successful decrypt can be cached forever; discovery is then as fast as
+ * the plaintext era without giving the plaintext back.
+ */
+const MANIFEST_PLAIN_CACHE_KEY = 'corkboard:manifest-plain-cache';
+const MANIFEST_CACHE_MAX = 40;
+
+function readManifestCache(): Record<string, string> {
+  try {
+    const raw = idbGetSync(MANIFEST_PLAIN_CACHE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, string> : {};
+  } catch { return {}; }
+}
+
+function getCachedManifestJson(eventId: string): string | null {
+  return readManifestCache()[eventId] ?? null;
+}
+
+function cacheManifestJson(eventId: string, json: string): void {
+  const cache = readManifestCache();
+  cache[eventId] = json;
+  const ids = Object.keys(cache);
+  if (ids.length > MANIFEST_CACHE_MAX) {
+    // Insertion order approximates age — drop the oldest overflow.
+    for (const old of ids.slice(0, ids.length - MANIFEST_CACHE_MAX)) delete cache[old];
+  }
+  idbSetSync(MANIFEST_PLAIN_CACHE_KEY, JSON.stringify(cache));
 }
 
 // Relay blacklist - persists across sessions
@@ -1114,11 +1157,24 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       });
 
       const { primary, fallback } = getPublishRelays(pubkey);
+      let manifestPublished = 0;
       for (const url of [...primary, ...fallback]) {
         const relay = createRelayFresh(url, { backoff: false });
-        try { await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) }); }
+        try {
+          await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
+          manifestPublished++;
+        }
         catch { /* continue */ }
         finally { try { relay.close(); } catch { /* */ } }
+      }
+
+      // The blob landing on Blossom is NOT a saved backup — other devices find
+      // it through the manifest, and this loop used to be fire-and-forget: if
+      // every relay rejected/timed out, the indicator still went green while
+      // no other device could ever discover the save. That is a failure.
+      if (manifestPublished === 0) {
+        debugWarn('[backup]', 'Auto-save: blob uploaded but NO relay accepted the manifest — reporting error');
+        return 'error';
       }
 
       // Update timestamp so auto-restore knows local is current
@@ -1523,17 +1579,28 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         // Encrypted manifest — NIP-44, or NIP-04 for backups written by older
         // builds. Trying only nip44 (what this did) made every legacy backup
         // permanently unrestorable. (M7a)
-        log('Manifest is not plaintext JSON, decrypting (NIP-44, then legacy NIP-04)...');
-        try {
-          const manifestJson = await decryptSelfPayload(user.signer, pubkey, bestManifestEvent.content);
-          manifest = JSON.parse(manifestJson);
-          manifestDataRef.current = manifest;
-          log(`Manifest (decrypted): v=${manifest!.v}, chunks=${manifest!.chunks}, ts=${manifest!.timestamp}`);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log(msg === 'decrypt_timeout'
-            ? 'Old encrypted manifest — signer timed out. Make a fresh backup from desktop.'
-            : `Decrypt failed: ${msg}`, 'warn');
+        const cachedJson = getCachedManifestJson(bestManifestEvent.id);
+        if (cachedJson) {
+          try {
+            manifest = JSON.parse(cachedJson);
+            manifestDataRef.current = manifest;
+            log(`Manifest (cached decrypt): v=${manifest!.v}, ts=${manifest!.timestamp}`);
+          } catch { /* fall through to live decrypt */ }
+        }
+        if (!manifest) {
+          log('Manifest is not plaintext JSON, decrypting (NIP-44, then legacy NIP-04)...');
+          try {
+            const manifestJson = await decryptSelfPayload(user.signer, pubkey, bestManifestEvent.content);
+            manifest = JSON.parse(manifestJson);
+            manifestDataRef.current = manifest;
+            cacheManifestJson(bestManifestEvent.id, manifestJson);
+            log(`Manifest (decrypted): v=${manifest!.v}, chunks=${manifest!.chunks}, ts=${manifest!.timestamp}`);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log(msg === 'decrypt_timeout'
+              ? 'Signer timed out decrypting the manifest — will retry on the next check.'
+              : `Decrypt failed: ${msg}`, 'warn');
+          }
         }
       }
 
@@ -2214,15 +2281,35 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         // Process at most 20 most-recent manifests — bunker signers (NIP-46) incur
         // a round-trip per decrypt, so iterating all 38+ would timeout in seconds.
         const recent = [...manifests].sort((a, b) => b.created_at - a.created_at).slice(0, 20);
+        // Circuit breaker: one signer timeout means the bunker is unresponsive
+        // right now — stop attempting live decrypts for the rest of this scan
+        // instead of serially timing out on every manifest (the "scanning
+        // relays hangs for 90 seconds and finds nothing" report). Cached
+        // decrypts still resolve.
+        let signerTimedOut = false;
         for (const ev of recent) {
           let m: Record<string, unknown> | null = null;
           try { m = JSON.parse(ev.content); } catch {
-            try {
-              // NIP-44 first, legacy NIP-04 fallback — otherwise older
-              // checkpoints are invisible to the scan. (M7a)
-              const json = await decryptSelfPayload(user.signer, user.pubkey, ev.content, 3000);
-              m = JSON.parse(json);
-            } catch { continue; }
+            const cachedJson = getCachedManifestJson(ev.id);
+            if (cachedJson) {
+              try { m = JSON.parse(cachedJson); } catch { /* fall through */ }
+            }
+            if (!m) {
+              if (signerTimedOut) continue;
+              try {
+                // NIP-44 first, legacy NIP-04 fallback — otherwise older
+                // checkpoints are invisible to the scan. (M7a)
+                const json = await decryptSelfPayload(user.signer, user.pubkey, ev.content, 10000);
+                m = JSON.parse(json);
+                cacheManifestJson(ev.id, json);
+              } catch (err) {
+                if (err instanceof Error && err.message === 'decrypt_timeout') {
+                  signerTimedOut = true;
+                  log('Signer unresponsive — skipping remaining manifest decrypts this scan', 'warn');
+                }
+                continue;
+              }
+            }
           }
           if (!m) continue;
           discovered.push({

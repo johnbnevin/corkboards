@@ -59,6 +59,9 @@ export function useUnresolvedRetry(): UseUnresolvedRetryResult {
     batch.forEach((noteId, i) => {
       timersRef.current.push(setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ['note', noteId] });
+        // Parent lookups live under their own keys (parity with web).
+        queryClient.invalidateQueries({ queryKey: ['parent-notes'] });
+        queryClient.invalidateQueries({ queryKey: ['parent-note', noteId] });
         if (i === batch.length - 1) inFlightRef.current = false;
       }, i * SWEEP_STAGGER_MS));
     });

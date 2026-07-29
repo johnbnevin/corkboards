@@ -17,7 +17,7 @@ import {
   type ThreadNode,
   type FlatThreadRow,
 } from '@core/threadTree';
-import { fetchEventWithOutbox, setCachedEvent, getCachedEvent, clearEventCache } from '../lib/fetchEvent';
+import { fetchEventWithOutbox, setCachedEvent, getCachedEvent } from '../lib/fetchEvent';
 
 const THREAD_STALE_TIME = 2 * 60 * 1000;
 const THREAD_GC_TIME = 10 * 60 * 1000;
@@ -161,7 +161,10 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
         events.push(targetEvent);
       }
 
-      return deduplicateEvents(events);
+      // Merge with what this key already held: a refetch that reaches fewer
+      // relays than the last one must never LOSE replies (parity with web).
+      const prev = queryClient.getQueryData<NostrEvent[]>(['thread-tree', rootId]) ?? [];
+      return deduplicateEvents([...prev, ...events]);
     },
     enabled: !!rootId && !!targetEvent,
     staleTime: THREAD_STALE_TIME,
@@ -202,7 +205,9 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
           ).catch(() => [] as NostrEvent[]),
         ),
       );
-      return results.flat();
+      // Same additive-merge as the tree pass — a weaker refetch never loses replies.
+      const prev = queryClient.getQueryData<NostrEvent[]>(['thread-outbox', rootId, participantAuthors]) ?? [];
+      return deduplicateEvents([...prev, ...results.flat()]);
     },
     enabled: !!rootId && !!targetEvent && participantAuthors.length > 0,
     staleTime: THREAD_STALE_TIME,
@@ -241,18 +246,20 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
   }, [tree, eventId, collapsedIds]);
 
   const refetch = useCallback(() => {
-    setInjectedReply(null);
-    // A manual refresh should hit the network fresh, not re-serve a stale/partial
-    // cached result. Drop the cached target so query 1 re-runs outbox discovery,
-    // and reset (not just invalidate) the tree/outbox passes so they refetch.
+    // ADDITIVE refresh: keep every reply already on screen and go looking for
+    // ones we don't have. resetQueries cleared the cache, which blanked the
+    // thread and — when a flaky relay answered with less than before — LOST
+    // replies the user was reading; it also nulled injectedReply, vanishing
+    // their own just-posted reply. The tree/outbox queryFns merge with the
+    // previous cache entry, so an invalidation can only ever add. (Parity
+    // with web useThreadQuery.)
     if (eventId) {
-      clearEventCache(eventId);
-      queryClient.resetQueries({ queryKey: ['thread-target', eventId] });
-      queryClient.resetQueries({ queryKey: ['thread-ancestors', eventId] });
+      queryClient.invalidateQueries({ queryKey: ['thread-target', eventId] });
+      queryClient.invalidateQueries({ queryKey: ['thread-ancestors', eventId] });
     }
     if (rootId) {
-      queryClient.resetQueries({ queryKey: ['thread-tree', rootId] });
-      queryClient.resetQueries({ queryKey: ['thread-outbox', rootId] });
+      queryClient.invalidateQueries({ queryKey: ['thread-tree', rootId] });
+      queryClient.invalidateQueries({ queryKey: ['thread-outbox', rootId] });
     }
   }, [eventId, rootId, queryClient]);
 

@@ -26,7 +26,7 @@ export function ThreadContent({
   onReactionPublished, onReplyPublished, autoReplyTo, onOpenEmojiSets, onNavigateThread,
 }: ThreadContentProps) {
   const {
-    tree, rows, isLoading, error,
+    tree, rows, isLoading, isFetching, error,
     refetch, injectReply, collapsedIds, toggleCollapse,
   } = useThreadQuery(eventId)
 
@@ -83,8 +83,8 @@ export function ThreadContent({
             <span className="text-xs text-muted-foreground">({totalReplies} {totalReplies === 1 ? 'reply' : 'replies'})</span>
           )}
         </div>
-        <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={refetch} title="Refresh">
-          {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={refetch} title="Check relays for missing replies">
+          {isLoading || isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
         </Button>
       </div>
 

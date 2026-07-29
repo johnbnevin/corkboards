@@ -19,12 +19,13 @@ export const SWEEP_INTERVAL_MS = 15_000
 /**
  * Minimum unresolved references before a sweep is worth doing.
  *
- * One stuck reference is usually a note that genuinely isn't on any relay we
- * can reach — retrying it forever is churn the user never sees the benefit of.
- * Two or more suggests something transient (a slow relay, a socket budget that
- * was momentarily exhausted), which is exactly what a retry fixes.
+ * Was 2, reasoning that one stuck reference is probably genuinely unreachable.
+ * In practice the user stares at exactly that one gray box: once the per-id
+ * miss decay hits its attempt ceiling, nothing but the sweep can revive it, so
+ * a threshold of 2 turned "one unresolved note" into "unresolved forever".
+ * The miss decay already bounds the retry cost of a truly-dead reference.
  */
-export const MIN_UNRESOLVED_TO_SWEEP = 2
+export const MIN_UNRESOLVED_TO_SWEEP = 1
 
 /**
  * Most references retried in one sweep.

@@ -73,6 +73,9 @@ export function useUnresolvedRetry(): UseUnresolvedRetryResult {
         // so this invalidates the family by prefix. Cheap: with the miss decay
         // cleared above, the refetch only re-queries ids that are still absent.
         queryClient.invalidateQueries({ queryKey: ['parent-notes'] });
+        // The SINGULAR key (useParentNote) was never invalidated — a stuck
+        // single-parent lookup sat out every sweep.
+        queryClient.invalidateQueries({ queryKey: ['parent-note', noteId] });
         // Release the guard after the last one is dispatched.
         if (i === batch.length - 1) inFlightRef.current = false;
       }, i * SWEEP_STAGGER_MS));

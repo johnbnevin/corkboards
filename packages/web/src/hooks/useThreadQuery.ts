@@ -23,7 +23,7 @@ import {
   type ThreadNode,
   type FlatThreadRow,
 } from '@core/threadTree'
-import { fetchEventWithOutbox, setCachedEvent, getCachedEvent, clearEventCache } from '@/lib/fetchEvent'
+import { fetchEventWithOutbox, setCachedEvent, getCachedEvent } from '@/lib/fetchEvent'
 
 const THREAD_STALE_TIME = 2 * 60 * 1000 // 2 minutes
 const THREAD_GC_TIME = 10 * 60 * 1000   // 10 minutes
@@ -51,8 +51,10 @@ export interface UseThreadQueryResult {
   rootId: string | null
   /** All raw events in the thread */
   allEvents: NostrEvent[]
-  /** Loading state */
+  /** Loading state (no data yet) */
   isLoading: boolean
+  /** A refetch is in flight while existing data stays on screen */
+  isFetching: boolean
   /** Error message */
   error: string | null
   /** Refetch the thread */
@@ -182,7 +184,7 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
   // This #e-tag query has no `authors`, so the pool routes it via the wide-net
   // "reference" tier (user read relays + fallbacks). It catches replies that
   // were broadcast to common relays and renders immediately.
-  const { data: threadEvents, isLoading: isLoadingThread, error: threadError } = useQuery({
+  const { data: threadEvents, isLoading: isLoadingThread, isFetching: isFetchingThread, error: threadError } = useQuery({
     queryKey: ['thread-tree', rootId, rootAddr],
     queryFn: async () => {
       if (!rootId) return []
@@ -215,7 +217,11 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
         events.push(targetEvent)
       }
 
-      return deduplicateEvents(events)
+      // Merge with what this key already held: a refetch that happens to reach
+      // fewer relays than the last one must never LOSE replies (the "refresh
+      // took away the comments" bug — refresh means find what's missing).
+      const prev = queryClient.getQueryData<NostrEvent[]>(['thread-tree', rootId, rootAddr]) ?? []
+      return deduplicateEvents([...prev, ...events])
     },
     enabled: !!rootId && !!targetEvent,
     staleTime: THREAD_STALE_TIME,
@@ -264,7 +270,9 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
           ).catch(() => [] as NostrEvent[])
         }),
       )
-      return results.flat()
+      // Same additive-merge as the tree pass — a weaker refetch never loses replies.
+      const prev = queryClient.getQueryData<NostrEvent[]>(['thread-outbox', rootId, rootAddr, participantAuthors]) ?? []
+      return deduplicateEvents([...prev, ...results.flat()])
     },
     enabled: !!rootId && !!targetEvent && participantAuthors.length > 0,
     staleTime: THREAD_STALE_TIME,
@@ -304,19 +312,20 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
   }, [tree, eventId, collapsedIds])
 
   const refetch = useCallback(() => {
-    setInjectedReply(null)
-    // A manual refresh should hit the network fresh, not re-serve a stale/partial
-    // cached result — the user reaching for refresh means what they have is wrong.
-    // Drop the cached target event so query 1 re-runs outbox discovery, and reset
-    // (not just invalidate) the tree/outbox passes so they refetch from relays.
+    // ADDITIVE refresh: keep every comment already on screen and go looking
+    // for ones we don't have. This used to resetQueries (clear-then-refetch),
+    // which blanked the modal and — whenever a flaky relay answered with less
+    // than before — permanently dropped comments the user was reading; it also
+    // nulled injectedReply, vanishing the user's own just-posted reply. The
+    // tree/outbox queryFns merge with the previous cache entry, so an
+    // invalidation can only ever add events.
     if (eventId) {
-      clearEventCache(eventId)
-      queryClient.resetQueries({ queryKey: ['thread-target', eventId] })
-      queryClient.resetQueries({ queryKey: ['thread-ancestors', eventId] })
+      queryClient.invalidateQueries({ queryKey: ['thread-target', eventId] })
+      queryClient.invalidateQueries({ queryKey: ['thread-ancestors', eventId] })
     }
     if (rootId) {
-      queryClient.resetQueries({ queryKey: ['thread-tree', rootId] })
-      queryClient.resetQueries({ queryKey: ['thread-outbox', rootId] })
+      queryClient.invalidateQueries({ queryKey: ['thread-tree', rootId] })
+      queryClient.invalidateQueries({ queryKey: ['thread-outbox', rootId] })
     }
   }, [eventId, rootId, queryClient])
 
@@ -361,6 +370,7 @@ export function useThreadQuery(eventId: string | null): UseThreadQueryResult {
     rootId,
     allEvents,
     isLoading,
+    isFetching: isFetchingThread,
     error,
     refetch,
     injectReply,

@@ -209,7 +209,17 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
           <div>
             <CardTitle className="text-lg">Saved for Later</CardTitle>
             <p className="text-sm text-muted-foreground">
+              {/* Show BOTH numbers. The list renders what it could fetch from
+                  relays, which is not always everything you have saved — and
+                  when those differ silently it reads as data loss (and as a
+                  sync failure when comparing devices) rather than as a relay
+                  that didn't answer. */}
               {savedIds.length} note{savedIds.length !== 1 ? 's' : ''} saved across all corkboards
+              {!isLoading && notes.length < savedIds.length && (
+                <span className="text-amber-600 dark:text-amber-500">
+                  {' '}· {notes.length} loaded right now
+                </span>
+              )}
             </p>
           </div>
         </div>

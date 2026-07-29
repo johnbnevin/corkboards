@@ -2512,8 +2512,8 @@ export function MultiColumnClient() {
         toast({ title: 'Synced', description: `Merged a newer backup saved ${agoOf(r.remoteTs)} from another device.` });
       } else if (r.status === 'up-to-date') {
         toast({
-          title: 'Can’t find newer',
-          description: `The newest backup on your relays is from ${agoOf(r.remoteTs)}; this device is already at or ahead of it. If another device just saved, give it a moment and try again.`,
+          title: 'Already in sync',
+          description: `${r.detail ?? ''} The newest backup on your relays is from ${agoOf(r.remoteTs)} and this device has already merged it. If another device shows a different number, compare against the counts above — the Saved corkboard lists only the notes it could fetch from relays just now.`.trim(),
         });
       } else if (r.status === 'none-found') {
         toast({

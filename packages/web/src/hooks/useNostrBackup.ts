@@ -2307,7 +2307,17 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
           return { status: 'none-found', localTs };
         }
         log('Manual sync: the newest manifest is one this device already holds');
-        return { status: 'up-to-date', remoteTs: summary.ts ?? undefined, localTs };
+        // Report what this device actually holds. "Already up to date" against
+        // a device showing a different number reads as a lie; the counts make
+        // it checkable, and they are counts of SAVED IDS — the Saved corkboard
+        // separately renders only what it can fetch from relays, which is the
+        // usual reason two devices seem to disagree.
+        return {
+          status: 'up-to-date',
+          remoteTs: summary.ts ?? undefined,
+          localTs,
+          detail: `This device already merged that backup and holds ${savedNoteCount()} saved notes and ${jsonLen('dismissed-notes')} dismissed.`,
+        };
       }
       log(`Manual sync: found a manifest this device has not merged (${remoteTs}) — merging`);
       // Not silent: this is user-initiated, so the normal restore UI is right.

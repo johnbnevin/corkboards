@@ -3776,15 +3776,18 @@ export function MultiColumnClient() {
         {isMobile ? (
           <div className="mb-0.5">
             {/* Mobile: single row — theme, settings, backup, relay | post, avatar,
-                with the full wordmark centered between the two groups. At h-6
-                the trimmed logo's "orkboards.me" text-bottom sits exactly 8px
-                below the row center — the bottom edge of the 16px menu icons
-                (text bottom is 83.2% of the trimmed image's height). */}
+                with the "Corkboards" wordmark centered between the two groups.
+                Text-bottom alignment with the 16px menu icons (8px below the
+                row center) is why the nudge exists: the wordmark's letter
+                bottom sits at 82.9% of the image height, so at h-5 it lands
+                6.6px below center and translate-y-[1px] takes it to ~7.6px.
+                The left group is pulled out of the page's px-4 gutter so the
+                first icon sits nearer the screen edge. */}
             <div className="relative flex items-center justify-between gap-1">
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                <img src="/Corkboards-Logo-Header.png?v=1" alt="corkboards.me" className="h-6 w-auto" draggable={false} />
+                <img src="/Corkboards-Wordmark.png?v=1" alt="Corkboards" className="h-5 w-auto translate-y-[1px]" draggable={false} />
               </div>
-              <div className="flex items-center gap-1">
+              <div className="-ml-2.5 flex items-center gap-0">
                 <Button variant="ghost" size="sm" onClick={toggleTheme} className="h-7 w-7 p-0" title={theme === 'dark' ? 'Light mode' : 'Dark mode'}>
                   {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
                 </Button>

@@ -682,7 +682,7 @@ export function HomeScreen() {
           <View style={styles.headerRow}>
             <View style={{ flex: 1 }}>
               {/* eslint-disable-next-line @typescript-eslint/no-require-imports -- RN static asset */}
-              <Image source={require('../../assets/corky-logo.png')} style={styles.headerLogo} resizeMode="contain" />
+              <Image source={require('../../assets/corky-wordmark.png')} style={styles.headerLogo} resizeMode="contain" />
               <Text style={styles.subtitle}>{feedLabel}</Text>
             </View>
             <TouchableOpacity
@@ -870,7 +870,7 @@ const styles = StyleSheet.create({
   header: { paddingHorizontal: 16, paddingTop: 60, paddingBottom: 8, borderBottomWidth: 0, borderBottomColor: '#404040' },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   title: { fontSize: 24, fontWeight: 'bold', color: '#f2f2f2' },
-  headerLogo: { height: 28, width: 129, alignSelf: 'flex-start' },
+  headerLogo: { height: 24, width: 96, alignSelf: 'flex-start' },
   subtitle: { fontSize: 12, color: '#b3b3b3', marginTop: 2 },
   composeBtn: {
     width: 36, height: 36, borderRadius: 18,

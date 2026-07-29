@@ -5,7 +5,8 @@
  * Platform differences:
  *   - Uses MMKV (synchronous) instead of IndexedDB
  *   - Blossom upload via fetch PUT (no File/Blob Web API)
- *   - No auto-save or change-detection (manual backup only)
+ *   - Auto-save/sync orchestration lives in AutoSaveManager (web:
+ *     useAutoSaveTrigger + useCloudSync)
  *
  * Architecture (identical to web):
  *   1. Serialize BACKED_UP_KEYS from MMKV → JSON
@@ -58,13 +59,18 @@ export interface RemoteCheckpoint {
 }
 
 const D_TAG_PREFIX = 'corkboard:backup';
+// Bounded ring for manual saves — same slots as web (`s0`..`s{N-1}`), so relay
+// storage stays capped and every platform's sync check can query the same tags.
+const MANUAL_BACKUP_SLOTS = 5;
 import {
   mergeState,
+  hasLocalContributions,
   STATE_FORMAT_VERSION,
   type StateSnapshot,
   type MergeResult,
   type TombstoneMap,
 } from '@core/stateMerge';
+import { SILENT_REMOVAL_LIMIT } from '@core/cacheConfig';
 import {
   getTombstones,
   mergeInTombstones,
@@ -195,7 +201,9 @@ function getActiveBlossomServers(): string[] {
 export type AutoSaveResult = 'saved' | 'skipped' | 'no-servers' | 'error';
 
 
-function getStoredCheckpoints(): RemoteCheckpoint[] {
+// Exported so AutoSaveManager can read the fresh list straight from storage
+// right after a check, without racing React state propagation.
+export function getStoredCheckpoints(): RemoteCheckpoint[] {
   const raw = mobileStorage.getSync(CHECKPOINTS_KEY);
   if (!raw) return [];
   try { return JSON.parse(raw); } catch { return []; }
@@ -257,9 +265,21 @@ function hasUnsavedChanges(): boolean {
   }
 }
 
-function saveSnapshot(): void {
+/**
+ * Persist the change-detection baseline. With no argument the baseline is the
+ * current local state ("everything is saved"). After a pull-merge where local
+ * contributed content the cloud lacks, pass the REMOTE snapshot's keys instead:
+ * the local-only content then reads as unsaved and the auto-save trigger pushes
+ * the union — baselining the merged state was why local-only work sat unpushed
+ * until the next unrelated edit.
+ */
+function saveSnapshot(baselineKeys?: Record<string, string | null>): void {
   const snapshot: Record<string, string> = {};
-  for (const key of SNAPSHOT_KEYS) snapshot[key] = mobileStorage.getSync(key) || '';
+  for (const key of SNAPSHOT_KEYS) {
+    snapshot[key] = baselineKeys
+      ? (baselineKeys[key] ?? '')
+      : (mobileStorage.getSync(key) || '');
+  }
   mobileStorage.setSync(STORAGE_KEYS.LAST_BACKUP_DATA, JSON.stringify(snapshot));
 }
 
@@ -327,8 +347,18 @@ function localSnapshot(): StateSnapshot {
  * so this is safe to run whenever the cloud is ahead, which is what lets a
  * second device pick up where the first left off. See @core/stateMerge.
  */
-function mergeBackupIntoLocal(json: string): { changed: number; removals: MergeResult['removals'] } {
+function mergeBackupIntoLocal(
+  json: string,
+  opts?: { dryRun?: boolean },
+): { changed: number; removals: MergeResult['removals'] } {
   const result = mergeState(localSnapshot(), parseBackup(json));
+
+  // Dry run: answer "would this take anything away?" without touching storage,
+  // so a background sync can apply small merges silently and hold a mass
+  // deletion for the user (mirrors web's loadRemoteBackup preview).
+  if (opts?.dryRun) {
+    return { changed: result.changedKeys.length, removals: result.removals };
+  }
 
   // The merged values are authoritative — recording removals off them would
   // tombstone ids the merge deliberately dropped.
@@ -512,9 +542,14 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       if (!blossomUrl) throw new Error('All Blossom servers failed');
       log(`Backup landed on ${blossomCount} Blossom server(s)`);
 
-      // Publish manifest (kind 30078) — manual saves use timestamp d-tags (matches web)
+      // Publish manifest (kind 30078). Manual saves rotate through a bounded
+      // ring of slot d-tags (matches web) — a timestamp d-tag per save leaked a
+      // fresh addressable event onto relays forever, and no other device ever
+      // queried those tags, so manual saves were invisible to sync.
       const now = Math.floor(Date.now() / 1000);
-      const dTag = `${D_TAG_PREFIX}:${now}`;
+      const slotCursor = parseInt(mobileStorage.getSync(STORAGE_KEYS.BACKUP_SLOT_CURSOR) || '0', 10) || 0;
+      const slot = ((slotCursor % MANUAL_BACKUP_SLOTS) + MANUAL_BACKUP_SLOTS) % MANUAL_BACKUP_SLOTS;
+      const dTag = `${D_TAG_PREFIX}:s${slot}`;
       const keysPresent = BACKED_UP_KEYS.filter(k => mobileStorage.getSync(k) !== null);
       const jsonLen = (k: string) => { try { return JSON.parse(mobileStorage.getSync(k) || '[]').length; } catch { return 0; } };
       const stats = {
@@ -579,6 +614,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       setCheckpoints(updated);
 
       mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(now));
+      mobileStorage.setSync(STORAGE_KEYS.BACKUP_SLOT_CURSOR, String(slotCursor + 1)); // advance the ring
       setLastBackupTs(now);
       saveSnapshot();
       setStatus('saved');
@@ -760,26 +796,34 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
 
     log(`Checking ${relays.length} relays…`);
 
-    // Query the autosave slot directly by d-tag — kind:30078 is addressable, so every
-    // relay stores exactly 1 event per d-tag. No crowding from other NIP-78 apps.
-    for (let i = 0; i < relays.length; i += 3) {
-      const batch = relays.slice(i, i + 3);
+    // Query every backup slot by d-tag — the autosave slot plus the manual
+    // slot ring. kind:30078 is addressable, so every relay stores exactly one
+    // event per d-tag, and relays can DISAGREE: ask ALL of them and let the
+    // newest event win. The old early-exit stopped at the first batch with any
+    // result, which let a lagging relay's stale manifest be treated as current
+    // simply because it answered fastest — and only `:auto` was queried, so a
+    // manual save on another device was invisible here entirely.
+    const slotDTags = [
+      `${D_TAG_PREFIX}:auto`,
+      ...Array.from({ length: MANUAL_BACKUP_SLOTS }, (_, i) => `${D_TAG_PREFIX}:s${i}`),
+    ];
+    for (let i = 0; i < relays.length; i += 4) {
+      const batch = relays.slice(i, i + 4);
       await Promise.allSettled(batch.map(async url => {
         const relay = createRelayFresh(url, { backoff: false });
         try {
           const events = await relay.query(
-            [{ kinds: [30078], authors: [pubkey], '#d': [`${D_TAG_PREFIX}:auto`], limit: 1 }],
+            [{ kinds: [30078], authors: [pubkey], '#d': slotDTags, limit: slotDTags.length }],
             { signal: AbortSignal.timeout(5000) },
           );
           for (const ev of events) {
             if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
           }
-          log(`  ${url}: ${events.length} autosave manifest(s)`);
+          log(`  ${url}: ${events.length} backup manifest(s)`);
         } catch { /* timeout ok */ } finally {
           try { relay.close(); } catch { /* */ }
         }
       }));
-      if (allEvents.length > 0) break; // Early exit
     }
 
     if (allEvents.length === 0) {
@@ -845,12 +889,24 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     log(`Found ${deduped.length} backups (${cps.length} raw, ${safeCps.length} passed safety check)`);
   }, [pubkey, signer, log]);
 
-  const restoreBackup = useCallback(async (checkpoint: RemoteCheckpoint) => {
+  /**
+   * Pull a checkpoint's state in via merge (see @core/stateMerge).
+   *
+   * `silent` keeps the UI out of restoring/restored states — a background sync
+   * should not look like a restore. In silent mode a merge that would remove
+   * more than SILENT_REMOVAL_LIMIT items applies NOTHING; small removals are
+   * another device's deliberate deletions and apply without asking (parity
+   * with web's loadRemoteBackup askOnRemovals path).
+   */
+  const restoreBackup = useCallback(async (checkpoint: RemoteCheckpoint, opts?: { silent?: boolean }) => {
+    const silent = opts?.silent ?? false;
     if (!pubkey || !signer || isRestoring.current) return;
     isRestoring.current = true;
 
-    setStatus('restoring');
-    setMessage('Downloading backup…');
+    if (!silent) {
+      setStatus('restoring');
+      setMessage('Downloading backup…');
+    }
 
     try {
       // Try primary URL, then fallback to other Blossom servers using hash
@@ -886,7 +942,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         log('Blossom hash verified');
       }
 
-      setMessage('Decrypting…');
+      if (!silent) setMessage('Decrypting…');
 
       // Unwrap AES key
       const keyHex = checkpoint.signerMethod === 'nip04'
@@ -898,19 +954,47 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       const json = await aesDecrypt(aesKey, encryptedData);
       log('Decrypted successfully');
 
-      setMessage('Restoring settings…');
+      if (silent) {
+        const preview = mergeBackupIntoLocal(json, { dryRun: true });
+        const count = preview.removals.reduce((n, r) => n + r.ids.length, 0);
+        if (count > SILENT_REMOVAL_LIMIT) {
+          log(`Silent sync held: merge would remove ${count} item(s) — user can restore manually`);
+          return;
+        }
+      }
+
+      // Capture BEFORE the merge writes — afterwards local IS the merged state.
+      const remoteSnapshot = parseBackup(json);
+      const localContributed = hasLocalContributions(localSnapshot(), remoteSnapshot);
+
+      if (!silent) setMessage('Restoring settings…');
       const { changed, removals } = mergeBackupIntoLocal(json);
       log(`Settings merged: ${changed} keys changed, ${removals.length} with removals`);
 
-      setStatus('restored');
-      setMessage('Backup restored! Restart the app to apply all settings.');
-      // Resume auto-save after a brief flash of "restored" status
-      setTimeout(() => setStatus('idle'), 3000);
+      // Record what we're now synced to, or the next sync tick re-merges the
+      // same snapshot forever and hasUnsavedChanges() misfires. Baseline is
+      // the remote state when local contributed content the cloud lacks, so
+      // the auto-save trigger pushes the union (see saveSnapshot).
+      mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(checkpoint.timestamp));
+      setLastBackupTs(checkpoint.timestamp);
+      saveSnapshot(localContributed ? remoteSnapshot.keys : undefined);
+      if (localContributed) log('Local content not yet in cloud — auto-save will push the merged state');
+
+      if (silent) {
+        log(`Background sync merged ${changed} keys`);
+      } else {
+        setStatus('restored');
+        setMessage('Backup restored! Restart the app to apply all settings.');
+        // Resume auto-save after a brief flash of "restored" status
+        setTimeout(() => setStatus('idle'), 3000);
+      }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log('Restore failed: ' + errMsg);
-      setStatus('restore-error');
-      setMessage('Restore failed: ' + errMsg);
+      if (!silent) {
+        setStatus('restore-error');
+        setMessage('Restore failed: ' + errMsg);
+      }
     } finally {
       isRestoring.current = false;
     }

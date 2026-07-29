@@ -4,12 +4,12 @@
  *   1. **Page-load cooldown.** No auto-save for AUTO_SAVE_COOLDOWN_MS after
  *      mount. Prevents overwriting a good cloud backup with empty/stale state
  *      after an unexpected refresh where IDB hasn't fully restored.
- *   2. **Inter-save minimum.** No more often than every 30s.
+ *   2. **Inter-save minimum.** No more often than AUTO_SAVE_MIN_INTERVAL_MS.
  *   3. **Change-detection debounce.** Once unsaved changes appear, wait
- *      another 30s before firing. Bundles rapid edits into one upload.
+ *      AUTO_SAVE_DEBOUNCE_MS before firing. Bundles rapid edits into one upload.
  *
  * Drives via two paths:
- *   - 30-second poll for ambient detection (and called once on mount)
+ *   - AUTO_SAVE_POLL_MS poll for ambient detection (and called once on mount)
  *   - Immediate fire on `visibilitychange:hidden` and `beforeunload`
  *
  * Extracted from MultiColumnClient because three production save-storm
@@ -19,9 +19,16 @@
 import { useEffect, useRef } from 'react';
 import { debugLog, debugWarn } from '@/lib/debug';
 import type { AutoSaveResult } from '@/hooks/useNostrBackup';
+import {
+  AUTO_SAVE_MIN_INTERVAL_MS,
+  AUTO_SAVE_DEBOUNCE_MS,
+  AUTO_SAVE_POLL_MS,
+} from '@core/cacheConfig';
 
-const MIN_INTERVAL_MS = 30 * 1000;
-const POLL_INTERVAL_MS = 30 * 1000;
+// Cadence lives in @core/cacheConfig so web and mobile cannot drift apart.
+const MIN_INTERVAL_MS = AUTO_SAVE_MIN_INTERVAL_MS;
+const DEBOUNCE_MS = AUTO_SAVE_DEBOUNCE_MS;
+const POLL_INTERVAL_MS = AUTO_SAVE_POLL_MS;
 
 export interface UseAutoSaveTriggerOptions {
   /** Whether the user is signed in. */
@@ -83,12 +90,12 @@ export function useAutoSaveTrigger({
       if (changeDetectedAt === null) {
         changeDetectedAt = Date.now();
         setBackupIndicator('unsaved');
-        debugLog(`[AutoSave] changes detected (${source}), will save in ${MIN_INTERVAL_MS / 1000}s`);
+        debugLog(`[AutoSave] changes detected (${source}), will save in ${DEBOUNCE_MS / 1000}s`);
         return;
       }
       const msSinceChange = Date.now() - changeDetectedAt;
-      if (msSinceChange < MIN_INTERVAL_MS) {
-        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceChange / 1000)}s since change, need ${MIN_INTERVAL_MS / 1000}s`);
+      if (msSinceChange < DEBOUNCE_MS) {
+        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceChange / 1000)}s since change, need ${DEBOUNCE_MS / 1000}s`);
         return;
       }
       debugLog(`[AutoSave] triggering (${source})`);

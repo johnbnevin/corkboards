@@ -106,6 +106,7 @@ import { useAccountIsolation } from '@/hooks/useAccountIsolation';
 import { useAutoRestoreGuard } from '@/hooks/useAutoRestoreGuard';
 import { useScrollPersistence } from '@/hooks/useScrollPersistence';
 import { useCloudSync } from '@/hooks/useCloudSync';
+import { AUTO_SAVE_STARTUP_COOLDOWN_MS } from '@core/cacheConfig';
 import { useKeychainHealth } from '@/hooks/useKeychainHealth';
 import { useAutoFetch } from '@/hooks/useAutoFetch';
 import { useAccountSwitchEffect } from '@/hooks/useAccountSwitchEffect';
@@ -152,7 +153,9 @@ const LAZY_ENGAGEMENT_LIMIT = 150;
 
 // Content-filter regexes now live in @core/contentFilters, next to the predicate
 // that uses them, so web and mobile evaluate identical rules.
-const AUTO_SAVE_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes after page load — prevents overwriting good backup with empty state
+// Post-launch auto-save cooldown — prevents overwriting a good backup with
+// empty state while IDB hydrates and the login check runs. Shared with mobile.
+const AUTO_SAVE_COOLDOWN_MS = AUTO_SAVE_STARTUP_COOLDOWN_MS;
 
 // Estimate note height for column balancing
 

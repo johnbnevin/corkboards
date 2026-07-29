@@ -300,3 +300,51 @@ export function mergeState(local: StateSnapshot, remote: StateSnapshot): MergeRe
 export function mergeRemovesLocalData(result: MergeResult): boolean {
   return result.removals.some(r => r.ids.length > 0)
 }
+
+/**
+ * True when the local snapshot holds content the remote one lacks — an id,
+ * board, or map entry that would be lost if the cloud were taken as-is.
+ *
+ * Used after a pull-merge to decide what the change-detection baseline should
+ * be. Setting the baseline to the merged local state (what both platforms used
+ * to do unconditionally) marks local-only content as "already saved", so it
+ * never pushed until the next unrelated edit. Setting it to the REMOTE state
+ * makes the auto-save trigger see the local-only content as unsaved and push
+ * the union. The check is membership-based, not string-based, on purpose:
+ * the set keys' ordering differs per device (merge keeps local order first),
+ * and a string comparison would see every reordering as a contribution —
+ * two devices pushing their own orderings at each other forever.
+ */
+export function hasLocalContributions(local: StateSnapshot, remote: StateSnapshot): boolean {
+  for (const key of SET_MERGE_KEYS) {
+    const localIds = parseArray(local.keys[key])
+    if (!localIds) continue
+    const remoteIds = new Set(parseArray(remote.keys[key]) ?? [])
+    for (const id of localIds) {
+      if (typeof id === 'string' && !remoteIds.has(id)) return true
+    }
+  }
+  for (const key of KEYED_MERGE_KEYS) {
+    const localList = parseArray(local.keys[key])
+    if (!localList) continue
+    const remoteIdSet = new Set(
+      (parseArray(remote.keys[key]) ?? [])
+        .map(v => (v && typeof v === 'object' && !Array.isArray(v)) ? (v as { id?: unknown }).id : null)
+        .filter((id): id is string => typeof id === 'string'),
+    )
+    for (const item of localList) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+      const id = (item as { id?: unknown }).id
+      if (typeof id === 'string' && !remoteIdSet.has(id)) return true
+    }
+  }
+  for (const key of MAP_MERGE_KEYS) {
+    const localMap = parseObject(local.keys[key])
+    if (!localMap) continue
+    const remoteMap = parseObject(remote.keys[key]) ?? {}
+    for (const id of Object.keys(localMap)) {
+      if (!(id in remoteMap)) return true
+    }
+  }
+  return false
+}

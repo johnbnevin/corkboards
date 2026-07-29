@@ -417,7 +417,7 @@ function RelaySection({
 function BlossomSection({ onBack }: { onBack: () => void }) {
   const [servers, setServersState] = useState<string[]>(getBlossomServers);
   const [newUrl, setNewUrl] = useState('');
-  const [testResults, setTestResults] = useState<Map<string, 'ok' | 'error'>>(new Map());
+  const [testResults, setTestResults] = useState<Map<string, 'ok' | 'reachable' | 'error'>>(new Map());
   // Servers that rejected the backup-blob content type (HTTP 415), auto-skipped
   // on save. App-local backup list only — never touches your Nostr profile.
   const [rejectedServers, setRejectedServers] = useState<string[]>(() => Array.from(getBlobRejectingServers()));
@@ -466,11 +466,25 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
     setBlossomServers([...DEFAULT_BLOSSOM_SERVERS]);
   };
 
+  /**
+   * Probe the BUD-06 upload endpoint, NOT the server root. Mirrors web's
+   * AdvancedSettings — keep the two in step.
+   *
+   * This used to `HEAD /` and call anything but 2xx/405 a failure. Blossom
+   * (BUD-01) defines nothing at the root, so a compliant server may return 404
+   * there; some public servers happen to serve a landing page and the check
+   * mistook that for health, marking working self-hosted servers red.
+   * `HEAD /upload` means the same thing everywhere, and 401/403 is the CORRECT
+   * unauthenticated answer rather than an error.
+   */
   const testServer = useCallback(async (url: string) => {
+    const base = url.replace(/\/+$/, '');
     try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(10000), method: 'HEAD' });
-      setTestResults(prev => new Map(prev).set(url, resp.ok || resp.status === 405 ? 'ok' : 'error'));
+      const resp = await fetch(`${base}/upload`, { signal: AbortSignal.timeout(10000), method: 'HEAD' });
+      const healthy = resp.status === 200 || resp.status === 401 || resp.status === 403 || resp.status === 405;
+      setTestResults(prev => new Map(prev).set(url, healthy ? 'ok' : 'reachable'));
     } catch {
+      // Only a THROWN fetch is a real failure — DNS, TLS, timeout or CORS.
       setTestResults(prev => new Map(prev).set(url, 'error'));
     }
   }, []);
@@ -501,7 +515,7 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
           <View key={url} style={styles.relayRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.relayUrl} numberOfLines={1}>
-                {rejected ? '⚠ ' : result === 'ok' ? '● ' : result === 'error' ? '○ ' : ''}
+                {rejected ? '⚠ ' : result === 'ok' ? '● ' : result === 'reachable' ? '◐ ' : result === 'error' ? '○ ' : ''}
                 {getHostname(url)}
                 {isDefault ? ' (default)' : ''}
               </Text>

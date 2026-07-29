@@ -25,12 +25,14 @@ import type { NUser } from '@nostrify/react/login';
 import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache, createRelayFresh } from '@/components/NostrProvider';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '@/lib/storageKeys';
 import { fnv1a32 } from '@core/hashCore';
+import { SILENT_REMOVAL_LIMIT } from '@core/cacheConfig';
 import { randomUuid } from '@core/cryptoUtils';
 import { formatTimeAgo } from '@/lib/formatTimeAgo';
 import { debugLog, debugWarn } from '@/lib/debug';
 import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy, withoutTombstoneRecording } from '@/lib/idb';
 import {
   mergeState,
+  hasLocalContributions,
   STATE_FORMAT_VERSION,
   type StateSnapshot,
   type MergeResult,
@@ -1417,11 +1419,19 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setMessage('Checking for backup...');
       }
 
-      // Query the autosave slot directly by d-tag — kind:30078 is addressable, so every
-      // relay stores exactly 1 event per d-tag. No crowding from other NIP-78 apps.
+      // Query every backup slot by d-tag — the autosave slot PLUS the manual
+      // slot ring. kind:30078 is addressable, so every relay stores exactly one
+      // event per d-tag. Checking only `:auto` (what this used to do) made a
+      // manual "Save now" invisible to every other device until the saving
+      // device happened to autosave again — the newest state existed in the
+      // cloud but nothing ever looked at it.
+      const slotDTags = [
+        `${D_TAG_PREFIX}:auto`,
+        ...Array.from({ length: MANUAL_BACKUP_SLOTS }, (_, i) => `${D_TAG_PREFIX}:s${i}`),
+      ];
       const allEvents = await queryAll(
-        { kinds: [30078], authors: [pubkey], '#d': [`${D_TAG_PREFIX}:auto`], limit: 1 },
-        'autosave manifest',
+        { kinds: [30078], authors: [pubkey], '#d': slotDTags, limit: slotDTags.length },
+        'backup manifest',
         undefined,
         // ALL relays, not a sample. `bestManifestEvent` below picks
         // max(created_at), and that is only correct if every relay was asked:
@@ -1435,7 +1445,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         5000,
       );
       const manifestEvents = allEvents; // relay already filtered by d-tag
-      log(`Total: ${manifestEvents.length} autosave manifest events`);
+      log(`Total: ${manifestEvents.length} backup manifest events`);
 
       if (manifestEvents.length === 0) {
         log(allEvents.length === 0 ? 'No events returned from relays' : 'No remote backup found');
@@ -1465,8 +1475,17 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // same bytes — no signer round-trip, which matters when signing goes
       // through a NIP-46 bunker. A couple of KB per lagging relay, fire and
       // forget, and only when the relays actually disagree.
-      const staleManifest = manifestEvents.some(ev => ev.created_at < bestManifestEvent.created_at)
-        || manifestEvents.length < _backupRelaysUsed.size;
+      // Staleness is judged per d-tag: with multiple slots queried, an old
+      // manual-slot event alongside a fresh autosave is normal, not divergence.
+      // Only an OBSERVED disagreement (two different events under the same
+      // d-tag) triggers the mirror — comparing event counts against relay
+      // counts (the old second condition) misfires constantly because events
+      // are deduped by id, and at sync cadence that meant republishing to
+      // every relay on every check.
+      const bestDTag = bestManifestEvent.tags.find(t => t[0] === 'd')?.[1];
+      const staleManifest = manifestEvents.some(ev =>
+        ev.tags.find(t => t[0] === 'd')?.[1] === bestDTag
+        && ev.created_at < bestManifestEvent.created_at);
       if (staleManifest) {
         const { primary, fallback } = getPublishRelays(pubkey);
         const targets = [...primary, ...fallback];
@@ -1610,7 +1629,15 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const newestRemoteTs = manifest?.timestamp || bestManifestEvent.created_at;
       const localIsCurrentOrNewer = localLastBackupTs > 0 && localLastBackupTs >= newestRemoteTs;
       log(`checkRemoteBackup: hasLocalData=${!!hasLocalData} localTs=${localLastBackupTs} newestRemoteTs=${newestRemoteTs} localIsCurrentOrNewer=${localIsCurrentOrNewer} force=${force}`);
-      if ((hasLocalData && localIsCurrentOrNewer) && !force) {
+      // Auto-dismiss applies to FORCED checks too. The periodic cloud sync
+      // forces a check every interval; when this branch required `!force`, a
+      // steady-state tick (cloud not newer, nothing to merge) fell through to
+      // setStatus('found') and stayed there — and 'found' is a state the
+      // auto-save trigger treats as "restore pending", so the poll-driven
+      // auto-save was dead from the first sync tick until the tab was hidden.
+      // remoteBackup stays populated either way, so the manual restore UI in
+      // Settings still works after a forced check that settles here.
+      if (hasLocalData && localIsCurrentOrNewer) {
         log('Local data is current — auto-dismissing');
         _checkedPubkey = user.pubkey;
         idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
@@ -1846,15 +1873,27 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // to be safe to run whenever the cloud is ahead — union the id sets, keep
       // both devices' corkboards, and let tombstones carry deletions. A replace
       // here is what forced the old "only when local looks empty" gate.
+      //
+      // Removals up to SILENT_REMOVAL_LIMIT apply without asking: a tombstone
+      // is a deliberate deletion on another device, and holding EVERY removal
+      // hostage to a prompt meant the merge never ran (and, worse, this
+      // device's next push carried the undeleted ids with a newer savedAt,
+      // resurrecting the deletion everywhere). Only a mass deletion is held
+      // for the user.
       if (opts?.askOnRemovals) {
         const preview = await mergeBackupIntoLocal(fullJson, undefined, { dryRun: true });
-        if (preview.removals.length > 0) {
-          const count = preview.removals.reduce((n, r) => n + r.ids.length, 0);
+        const count = preview.removals.reduce((n, r) => n + r.ids.length, 0);
+        if (count > SILENT_REMOVAL_LIMIT) {
           log(`Sync paused: merge would remove ${count} item(s) — leaving it for the user to confirm`);
           if (!silent) { setStatus('found'); setMessage('A newer backup is available'); }
           return;
         }
       }
+
+      // Capture BEFORE the merge writes: afterwards local IS the merged state
+      // and the contribution question can no longer be answered.
+      const remoteSnapshot = parseBackup(fullJson);
+      const localContributed = hasLocalContributions(localSnapshot(), remoteSnapshot);
 
       const { restored: restoredCount, removals } = await mergeBackupIntoLocal(fullJson, log);
 
@@ -1868,10 +1907,20 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       setLastBackupTs(backup.timestamp);
       const wasSilent = silent;
 
-      // Store snapshot of restored data for change detection
+      // Change-detection baseline. When local contributed nothing, baseline is
+      // the merged state (quiet — we match the cloud). When local HAD content
+      // the cloud lacks, baseline is the REMOTE state, so the auto-save trigger
+      // sees the local-only content as unsaved and pushes the union — a
+      // baseline of the merged state here is why local-only work used to sit
+      // unpushed until the next unrelated edit.
       const snapshot: Record<string, string> = {};
-      for (const key of SNAPSHOT_KEYS) snapshot[key] = idbGetSync(key) || '';
+      for (const key of SNAPSHOT_KEYS) {
+        snapshot[key] = localContributed
+          ? (remoteSnapshot.keys[key] ?? '')
+          : (idbGetSync(key) || '');
+      }
       persistSnapshotAndHashes(snapshot);
+      if (localContributed) log('Local content not yet in cloud — auto-save will push the merged state');
 
       // Mark as checked so future checks skip
       markBackupCheckedSync(user.pubkey);

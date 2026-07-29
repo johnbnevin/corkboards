@@ -20,9 +20,11 @@
  * tombstones. So the rule is simply "is the cloud newer than what we last
  * saw" — checked on load, on return to the foreground, and on an interval.
  *
- * Purely additive merges apply silently. A merge that would REMOVE something
- * this device has is never applied behind the user's back; it leaves the
- * existing restore prompt standing instead.
+ * Purely additive merges apply silently, and so do small tombstone-driven
+ * removals (deliberate deletions made on another device — propagating them IS
+ * the sync working). Only a merge that would remove more than
+ * SILENT_REMOVAL_LIMIT items is held back, leaving the restore prompt standing
+ * for the user to confirm a mass deletion.
  */
 import { useCallback, useEffect, useRef } from 'react';
 import { debugLog } from '@/lib/debug';

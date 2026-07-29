@@ -814,7 +814,7 @@ function BlossomSection() {
   const [includeFallbacks, setIncludeFallbacks] = useState(true);
   const [newUrl, setNewUrl] = useState('');
   const [testing, setTesting] = useState<string | null>(null);
-  const [testResults, setTestResults] = useState<Map<string, 'ok' | 'error'>>(new Map());
+  const [testResults, setTestResults] = useState<Map<string, 'ok' | 'reachable' | 'error'>>(new Map());
   // Servers that rejected the backup-blob content type (HTTP 415) and are being
   // skipped on save. They may still work for image uploads — this only affects
   // the app's backup list, never the server list on your Nostr profile.
@@ -880,12 +880,29 @@ function BlossomSection() {
     toast({ title: 'Server removed', description: 'Removed from the servers Corkboards uses for backups (your Nostr profile is unchanged).' });
   };
 
+  /**
+   * Probe the BUD-06 upload endpoint, NOT the server root.
+   *
+   * This used to `HEAD /` and call anything but 2xx/405 a failure. Blossom
+   * (BUD-01) defines nothing at the root, so a compliant server is free to
+   * return 404 there — blossom.band and blossom.primal.net just happen to serve
+   * a landing page, and the check mistook that for health. A self-hosted server
+   * returning a bare 404 at `/` was marked red while working perfectly.
+   *
+   * `HEAD /upload` is the one signal that means the same thing everywhere: a
+   * server that implements uploads answers it, and 401/403 is the CORRECT
+   * unauthenticated answer, not an error.
+   */
   const testServer = async (url: string) => {
     setTesting(url);
+    const base = url.replace(/\/+$/, '');
     try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(10000), method: 'HEAD' });
-      setTestResults(prev => new Map(prev).set(url, resp.ok || resp.status === 405 ? 'ok' : 'error'));
+      const resp = await fetch(`${base}/upload`, { signal: AbortSignal.timeout(10000), method: 'HEAD' });
+      const healthy = resp.status === 200 || resp.status === 401 || resp.status === 403 || resp.status === 405;
+      setTestResults(prev => new Map(prev).set(url, healthy ? 'ok' : 'reachable'));
     } catch {
+      // Only a THROWN fetch is a real failure — DNS, TLS, timeout or CORS. An
+      // HTTP response, whatever its status, proves the host is up.
       setTestResults(prev => new Map(prev).set(url, 'error'));
     }
     setTesting(null);
@@ -895,6 +912,10 @@ function BlossomSection() {
     if (isRejected(url)) return <AlertTriangle className="h-3 w-3 text-orange-500 shrink-0" />;
     const result = testResults.get(url);
     if (result === 'ok') return <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />;
+    // Answered, but not with a Blossom upload endpoint. Distinct from red on
+    // purpose: "I reached it and it isn't what you think it is" and "I could not
+    // reach it at all" need different fixes from the user.
+    if (result === 'reachable') return <AlertTriangle className="h-3 w-3 text-yellow-500 shrink-0" />;
     if (result === 'error') return <WifiOff className="h-3 w-3 text-red-500 shrink-0" />;
     return <Server className="h-3 w-3 text-muted-foreground shrink-0" />;
   };

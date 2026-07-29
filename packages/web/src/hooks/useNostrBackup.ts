@@ -720,7 +720,7 @@ const _backupMutex = { saving: false, restoring: false };
 // Defends against effect-deps changes during the (potentially slow, with
 // bunker signers) network phase — every extra concurrent call would
 // otherwise open a fresh set of relay sockets and flood the splash log.
-let _checkInFlight: { pubkey: string; promise: Promise<void> } | null = null;
+let _checkInFlight: { pubkey: string; promise: Promise<number | null> } | null = null;
 
 // Track which relays were used during backup check/restore so other fetches
 // can prefer different relays and avoid rate-limiting the same ones.
@@ -1266,13 +1266,18 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
   }, [log, user]);
 
    // Check for remote backup (runs on every login/refresh)
-   // Check for remote backup (runs on every login/refresh)
    // Set force=true to bypass the "already checked" guard (e.g. user-triggered re-check)
-   const checkRemoteBackup = useCallback(async (force = false) => {
+   //
+   // Returns the newest remote snapshot timestamp when one was found, else null.
+   // The return value exists for useCloudSync: reading the timestamp back
+   // through React state raced the render cycle — the sync tick right after the
+   // check compared against the PREVIOUS render's value (null on the first
+   // tick), so the merge that should follow a check could be skipped.
+   const checkRemoteBackup = useCallback(async (force = false): Promise<number | null> => {
      if (!user) {
        log('Check skipped: no user');
        setCheckSettled(true);
-       return;
+       return null;
      }
 
      // Concurrent-call dedupe: if a check is already running for this pubkey,
@@ -1289,7 +1294,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        const stored = getStoredCheckpoints();
        if (stored.length > 0 && checkpoints.length === 0) setCheckpoints(stored);
        setCheckSettled(true);
-       return;
+       return null;
      }
 
      // Skip if a file restore just happened (sessionStorage survives reload, unlike memCache)
@@ -1301,7 +1306,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        if (stored.length > 0) setCheckpoints(stored);
        setStatus('idle');
        setCheckSettled(true);
-       return;
+       return null;
      }
 
      // Fast path: localStorage mirror is written after every restore/dismiss and survives
@@ -1316,7 +1321,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
            if (stored.length > 0) setCheckpoints(stored);
            setStatus('idle');
            setCheckSettled(true);
-           return;
+           return null;
          }
        } catch { /* localStorage unavailable */ }
      }
@@ -1328,13 +1333,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
      // etc. into the splash log. This pairs with v0.7.6's later registration
      // (kept as a defence-in-depth no-op) and supersedes it as the primary
      // dedupe point.
-     let _resolveInFlight: () => void = () => {};
+     let _resolveInFlight: (ts: number | null) => void = () => {};
      _checkInFlight = {
        pubkey: user.pubkey,
-       promise: new Promise<void>((resolve) => { _resolveInFlight = resolve; }),
+       promise: new Promise<number | null>((resolve) => { _resolveInFlight = resolve; }),
      };
-     const _clearInFlight = () => {
-       _resolveInFlight();
+     const _clearInFlight = (ts: number | null = null) => {
+       _resolveInFlight(ts);
        if (_checkInFlight && _checkInFlight.pubkey === user.pubkey) _checkInFlight = null;
      };
 
@@ -1358,7 +1363,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
        if (stored.length > 0) setCheckpoints(stored);
        setStatus('idle');
        setCheckSettled(true);
-       return;
+       return null;
      }
 
     // Log signer diagnostics
@@ -1454,7 +1459,8 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         setStatus('no-backup');
         setCheckSettled(true);
         setMessage('No backup found');
-        return;
+        _clearInFlight();
+        return null;
       }
 
       // Pick the newest manifest by created_at
@@ -1645,13 +1651,16 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         markBackupCheckedSync(user.pubkey);
         setStatus('idle');
         setCheckSettled(true);
-        return;
+        _clearInFlight(newestRemoteTs);
+        return newestRemoteTs;
       }
 
       log(`Found restore point from ${ago}`);
       setStatus('found');
       setCheckSettled(true);
       setMessage(`Restore point from ${ago}`);
+      _clearInFlight(newestRemoteTs);
+      return newestRemoteTs;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log('Check failed: ' + errMsg, 'error');
@@ -1660,6 +1669,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     } finally {
       _clearInFlight();
     }
+    return null;
   // eslint-disable-next-line react-hooks/exhaustive-deps -- checkpoints declared after this hook (forward ref); deviceId is stable useState
   }, [user, queryAll, log, deviceId]);
 
@@ -1712,6 +1722,16 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       }
 
       const isV4Blossom = manifest && (manifest.v as number) >= 4 && manifest.blossomUrl;
+
+      // A background sync only handles v4 (Blossom) backups. Reaching here
+      // without one usually means the manifest didn't decrypt this round (e.g.
+      // a NIP-46 signer round-trip timed out) — falling through to the legacy
+      // chunk path then failed loudly with "missing chunks" every tick. Bail
+      // quietly; the next sync tick retries the decrypt from scratch.
+      if (silent && !isV4Blossom) {
+        log('Background sync: manifest unreadable this round — will retry next tick');
+        return;
+      }
 
       let fullJson: string;
 
@@ -1946,8 +1966,13 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         ? (err.message || (err as DOMException).name || err.constructor.name)
         : String(err);
       log('Restore failed: ' + errMsg, 'error');
-      setStatus('restore-error');
-      setMessage('Restore failed: ' + errMsg);
+      // A failed BACKGROUND merge is not a user-facing restore error — it
+      // retries on the next sync tick. Setting restore-error here flashed
+      // error UI (and status churn) every tick while e.g. Blossom was down.
+      if (!silent) {
+        setStatus('restore-error');
+        setMessage('Restore failed: ' + errMsg);
+      }
     } finally {
       _backupMutex.restoring = false;
     }

@@ -38,8 +38,9 @@ export interface UseCloudSyncOptions {
   enabled: boolean;
   /** Current backup status — skip while a restore or check is mid-flight. */
   backupStatus: string;
-  /** Force a check for a newer cloud snapshot; resolves when settled. */
-  checkRemoteBackup: (force: boolean) => Promise<void>;
+  /** Force a check for a newer cloud snapshot; resolves with the newest remote
+   *  snapshot timestamp (null when none/failed). */
+  checkRemoteBackup: (force: boolean) => Promise<number | null>;
   /** Timestamp of the newest cloud snapshot found by the last check. */
   remoteTimestamp: number | null;
   /** This device's last-synced timestamp. */
@@ -78,8 +79,13 @@ export function useCloudSync({
 
     (async () => {
       try {
-        await cur.checkRemoteBackup(true);
-        const remote = latest.current.remoteTimestamp;
+        // Use the RETURNED timestamp, not React state: state set inside the
+        // check hasn't re-rendered into `latest` by the time this continuation
+        // runs, so the old read compared against the previous tick's value —
+        // null on the first sync after load, which skipped the merge that the
+        // check had just found. (The state read stays as a fallback.)
+        const checked = await cur.checkRemoteBackup(true);
+        const remote = checked ?? latest.current.remoteTimestamp;
         const local = latest.current.lastBackupTs;
         if (!remote) return;
         // Strictly newer: equal timestamps mean this device wrote it.
@@ -88,6 +94,10 @@ export function useCloudSync({
           return;
         }
         debugLog(`[cloudSync] cloud ${remote} newer than local ${local} — merging`);
+        // Let React commit the check's setRemoteBackup before loading:
+        // loadRemoteBackup reads remoteBackup from its own closure, and the
+        // pre-commit closure still has the previous (possibly null) value.
+        await new Promise((r) => setTimeout(r, 100));
         await latest.current.loadRemoteBackup({ silent: true, askOnRemovals: true });
       } catch (err) {
         // Offline or relays unreachable: local stays authoritative until the

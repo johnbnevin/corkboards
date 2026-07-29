@@ -67,8 +67,15 @@ export function useAutoSaveTrigger({
     let changeDetectedAt: number | null = null;
 
     const triggerIfReady = (source: string) => {
-      // Never auto-save while a restore is in flight.
-      if (backupStatus === 'found' || backupStatus === 'restoring' || backupStatus === 'restored') {
+      // Never auto-save while a restore is in flight. 'found' is deliberately
+      // NOT in this list anymore: it means "a newer cloud snapshot exists",
+      // which can persist for a while (held mass-removal merge, a manifest
+      // that won't decrypt this round) — and while it persisted, this skip
+      // kept the device from ever saving its own changes: permanently red
+      // indicator, no uploads. The login-time window between 'found' and the
+      // auto-restore starting is already covered by the startup cooldown, and
+      // autoSaveBackup itself refuses to run during an actual restore.
+      if (backupStatus === 'restoring' || backupStatus === 'restored') {
         debugLog(`[AutoSave] skip (${source}): backup ${backupStatus}, waiting for restore to complete`);
         return;
       }

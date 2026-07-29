@@ -34,17 +34,19 @@ export const BACKUP_CHECKED_FLAG_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
  * Shared by web (useCloudSync) and mobile (AutoSaveManager) so the two ends
  * cannot drift apart — a sync cadence is only meaningful as a pair.
  *
- * One check is a single small relay query for a handful of addressable events
- * (the autosave slot plus the manual-save slots), so 30s is cheap. Paired with
- * the auto-save debounce below, a change on one device shows up on the other
- * inside roughly a minute worst case, typically half that.
+ * These were briefly halved/quartered (30s pull, 10s poll, 10s debounce, 15s
+ * upload floor). That multiplied concurrent relay traffic enough to regress
+ * things that had worked: profile resolution slowed, nested-note lookups
+ * starved, and phone saves started erroring mid-upload. Convergence speed is
+ * worthless if the extra traffic breaks the payloads it carries — these are
+ * the proven values; change them together or not at all.
  */
-export const CLOUD_SYNC_INTERVAL_MS = 30 * 1000;
+export const CLOUD_SYNC_INTERVAL_MS = 60 * 1000;
 
 /** Floor between two sync attempts however they were triggered — low enough
  *  that returning to the app feels immediate, high enough that app-switching
  *  cannot hammer the relays. */
-export const CLOUD_SYNC_MIN_GAP_MS = 10 * 1000;
+export const CLOUD_SYNC_MIN_GAP_MS = 20 * 1000;
 
 /**
  * Auto-save (push) cadence — shared by web (useAutoSaveTrigger) and mobile
@@ -52,17 +54,17 @@ export const CLOUD_SYNC_MIN_GAP_MS = 10 * 1000;
  * above only converges devices as fast as the slower of the two.
  */
 /** How often the change-detection poll runs. */
-export const AUTO_SAVE_POLL_MS = 10 * 1000;
+export const AUTO_SAVE_POLL_MS = 30 * 1000;
 /** After a change is first detected, wait this long before uploading, so a
  *  burst of edits becomes one upload instead of several. */
-export const AUTO_SAVE_DEBOUNCE_MS = 10 * 1000;
+export const AUTO_SAVE_DEBOUNCE_MS = 30 * 1000;
 /** Floor between two uploads. Each save is a blob to up to 3 Blossom servers
- *  plus a manifest publish, so this stays above the debounce. */
-export const AUTO_SAVE_MIN_INTERVAL_MS = 15 * 1000;
+ *  plus a manifest publish. */
+export const AUTO_SAVE_MIN_INTERVAL_MS = 30 * 1000;
 /** No auto-save for this long after launch — protects the cloud copy from
  *  being overwritten while local storage is still hydrating and the login
  *  backup check / auto-restore may still be in flight. */
-export const AUTO_SAVE_STARTUP_COOLDOWN_MS = 45 * 1000;
+export const AUTO_SAVE_STARTUP_COOLDOWN_MS = 2 * 60 * 1000;
 
 /**
  * A background sync merge may silently apply up to this many tombstone-driven

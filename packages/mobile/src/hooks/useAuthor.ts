@@ -7,6 +7,7 @@ import { NSchema as n } from '@nostrify/nostrify';
 import type { NostrEvent, NostrFilter, NostrMetadata } from '@nostrify/nostrify';
 import { useNostr, FALLBACK_RELAYS } from '../lib/NostrProvider';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
+import { fetchProfilesBulk, type ProfilePool } from '@core/profileBulkFetch';
 import { getCachedProfile, cacheProfile } from '../lib/cacheStore';
 import { PROFILE_TTL_MS } from '@core/cacheConfig';
 
@@ -179,11 +180,12 @@ export function useBulkAuthors() {
     for (const pk of toFetch) inFlightPubkeys.add(pk);
 
     try {
-      const events = await nostr.query(
-        [{ kinds: [0], authors: toFetch.slice(0, 100), limit: toFetch.length }],
-        { signal: signal ?? AbortSignal.timeout(8000) },
-      );
-      for (const event of events) {
+      // Pool + profile indexers per batch, indexer retry pass for stragglers
+      // (@core/profileBulkFetch, shared with web). The old version queried the
+      // pool only AND silently truncated to the first 100 pubkeys — everything
+      // else trickled through the 6-concurrent per-card path.
+      const events = await fetchProfilesBulk(nostr as unknown as ProfilePool, toFetch, { signal });
+      for (const event of events.values()) {
         try {
           const metadata = n.json().pipe(n.metadata()).parse(event.content);
           queryClient.setQueryData(['author', event.pubkey], { metadata, event });

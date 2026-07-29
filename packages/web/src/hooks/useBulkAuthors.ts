@@ -8,13 +8,11 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
 import { useCallback, useMemo } from 'react';
-import { debugLog, debugWarn } from '@/lib/debug';
+import { debugLog } from '@/lib/debug';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { NSchema as n } from '@nostrify/nostrify';
 import { getCachedProfiles, cacheProfile } from '@/lib/cacheStore';
-
-const BATCH_SIZE = 100;
-const MAX_PREFETCH = 500;
+import { fetchProfilesBulk, MAX_BULK_PROFILE_FETCH, type ProfilePool } from '@core/profileBulkFetch';
 
 // Pubkeys currently being fetched by ANY prefetch call. Concurrent calls skip
 // these instead of the old whole-call drop (which silently left every author
@@ -45,7 +43,7 @@ export function useBulkAuthors() {
     // the rest — dropping the whole call left new pages unresolved.
     const uniquePubkeys = [...new Set(pubkeys)]
       .filter(pk => !inFlightPubkeys.has(pk))
-      .slice(0, MAX_PREFETCH);
+      .slice(0, MAX_BULK_PROFILE_FETCH);
     if (uniquePubkeys.length === 0) return;
     for (const pk of uniquePubkeys) inFlightPubkeys.add(pk);
 
@@ -71,41 +69,24 @@ export function useBulkAuthors() {
 
       debugLog('[bulkAuthors] Fetching', uncachedPubkeys.length, 'profiles from network...');
 
-      const batches: string[][] = [];
-      for (let i = 0; i < uncachedPubkeys.length; i += BATCH_SIZE) {
-        batches.push(uncachedPubkeys.slice(i, i + BATCH_SIZE));
-      }
+      // Pool + profile indexers per batch, with an indexer retry pass for
+      // stragglers (@core/profileBulkFetch). The pool-only version of this left
+      // every miss to the 6-concurrent per-card trickle — minutes of gray
+      // placeholders after a cold start.
+      const events = await fetchProfilesBulk(nostr as unknown as ProfilePool, uncachedPubkeys, { signal });
 
       let fetched = 0;
-      const fetchPromises = batches.map(async (batch) => {
+      for (const event of events.values()) {
         try {
-          const events = await nostr.query(
-            [{ kinds: [0], authors: batch, limit: batch.length }],
-            { signal: signal ?? AbortSignal.timeout(8000) }
-          );
-
-          for (const event of events) {
-            try {
-              const metadata = n.json().pipe(n.metadata()).parse(event.content);
-
-              queryClient.setQueryData(['author', event.pubkey], {
-                metadata,
-                event,
-              });
-
-              cacheProfile(event.pubkey, metadata, event).catch(() => {});
-              fetched++;
-            } catch {
-              // Invalid metadata, skip
-            }
-          }
-        } catch (err) {
-          debugWarn('[bulkAuthors] Batch failed:', err);
+          const metadata = n.json().pipe(n.metadata()).parse(event.content);
+          queryClient.setQueryData(['author', event.pubkey], { metadata, event });
+          cacheProfile(event.pubkey, metadata, event).catch(() => {});
+          fetched++;
+        } catch {
+          // Invalid metadata, skip
         }
-      });
-
-      await Promise.allSettled(fetchPromises);
-      debugLog('[bulkAuthors] Fetched', fetched, 'profiles from network');
+      }
+      debugLog('[bulkAuthors] Fetched', fetched, 'of', uncachedPubkeys.length, 'profiles from network');
     } finally {
       for (const pk of uniquePubkeys) inFlightPubkeys.delete(pk);
     }

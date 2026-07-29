@@ -886,7 +886,13 @@ const _backupMutex = { saving: false, restoring: false };
 // Defends against effect-deps changes during the (potentially slow, with
 // bunker signers) network phase — every extra concurrent call would
 // otherwise open a fresh set of relay sockets and flood the splash log.
-let _checkInFlight: { pubkey: string; promise: Promise<number | null> } | null = null;
+let _checkInFlight: { pubkey: string; promise: Promise<number | null>; startedAt: number } | null = null;
+/** A check that has run longer than this is treated as wedged, and a new
+ *  caller starts its own rather than joining it. Without this, one hung check
+ *  (a bunker that never answers, a relay socket that never settles) would
+ *  wedge every future check — including the manual "Sync from another device"
+ *  — for the life of the session. */
+const CHECK_INFLIGHT_STALE_MS = 45_000;
 
 // Track which relays were used during backup check/restore so other fetches
 // can prefer different relays and avoid rate-limiting the same ones.
@@ -1537,7 +1543,8 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
      // is still waiting on the signer, so both raced to decrypt the identical
      // manifest through the same signer. Joining gives the caller the same
      // answer without a second round-trip.
-     if (_checkInFlight && _checkInFlight.pubkey === user.pubkey) {
+     if (_checkInFlight && _checkInFlight.pubkey === user.pubkey
+         && Date.now() - _checkInFlight.startedAt < CHECK_INFLIGHT_STALE_MS) {
        return _checkInFlight.promise;
      }
 
@@ -1591,6 +1598,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
      _checkInFlight = {
        pubkey: user.pubkey,
        promise: new Promise<number | null>((resolve) => { _resolveInFlight = resolve; }),
+       startedAt: Date.now(),
      };
      const _clearInFlight = (ts: number | null = null) => {
        _resolveInFlight(ts);

@@ -113,6 +113,11 @@ export function useAutoSaveTrigger({
         return;
       }
       if (!hasUnsavedChanges()) {
+        // Log the transition, not every tick: this branch returning silently
+        // made "the indicator says saved but my other device disagrees"
+        // impossible to tell apart from "the poll died" in a log — the poll
+        // looks identical to a stopped timer when it has nothing to do.
+        if (changeDetectedAt !== null) debugLog(`[AutoSave] nothing left to save (${source})`);
         changeDetectedAt = null;
         return;
       }

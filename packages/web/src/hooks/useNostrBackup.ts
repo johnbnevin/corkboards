@@ -367,7 +367,20 @@ async function uploadBlobWithRedundancy(
  * red indicator and no toast, saving nothing, indefinitely — which is the exact
  * data-loss scenario the guard exists to prevent, just moved to the other end.
  */
-export type AutoSaveResult = 'saved' | 'skipped' | 'blocked' | 'no-servers' | 'error';
+export type AutoSaveResult = 'saved' | 'skipped' | 'blocked' | 'no-servers' | 'no-relays' | 'error';
+
+/**
+ * Why the last auto-save failed, in words the user can act on.
+ *
+ * The catch in `autoSaveBackup` used to swallow the exception entirely and
+ * return a bare 'error', so the only thing the UI could say was "something
+ * went wrong while saving" — which names neither the stage that failed
+ * (encrypt / Blossom upload / relay publish) nor the reason, and sends people
+ * looking at their Blossom server list when the relay publish is what broke.
+ * Every failure path now records specifics here.
+ */
+let _lastAutoSaveError = '';
+export function getLastAutoSaveError(): string { return _lastAutoSaveError; }
 
 export type BackupStatus =
   | 'idle'
@@ -770,7 +783,7 @@ let _checkInFlight: { pubkey: string; promise: Promise<number | null> } | null =
 const _backupRelaysUsed = new Set<string>();
 export function getBackupRelaysUsed(): Set<string> { return _backupRelaysUsed; }
 
-export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
+export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
   const [status, setStatus] = useState<BackupStatus>('idle');
   // True once the single login check has resolved (found, no-backup, or error).
   // Starts settled if we already checked this session (module-level guard).
@@ -963,10 +976,19 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         created_at: now,
       });
 
-      // Publish manifest to write relays + fallbacks
+      // Publish manifest to write relays + fallbacks.
+      // Pool first (reuses working sockets; on desktop the per-relay loop below
+      // opens fresh WebKitGTK sockets, which is the documented failure path).
       const { primary, fallback } = getPublishRelays(pubkey);
       const allRelayUrls = [...primary, ...fallback];
       const succeeded: RelayResult[] = [];
+      try {
+        await nostr.event(manifestEvent, { signal: AbortSignal.timeout(10000) });
+        succeeded.push({ url: 'pool', success: true });
+        log('  pool <- manifest OK');
+      } catch (err) {
+        log(`  pool <- manifest FAILED: ${err instanceof Error ? err.message : err}`, 'warn');
+      }
       for (const url of allRelayUrls) {
         const relay = createRelayFresh(url, { backoff: false });
         try {
@@ -1044,7 +1066,7 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
     } finally {
       _backupMutex.saving = false;
     }
-  }, [user, log, deviceId]);
+  }, [user, log, deviceId, nostr]);
 
   // Ref for refreshing checkpoint React state from autoSaveBackup (defined before
   // checkpoint state, but populated after — avoids circular dependency).
@@ -1124,9 +1146,18 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       const file = new File([blob], 'corkboard-autosave.txt', { type: 'text/plain' });
 
       // Redundant, 415-aware upload (skips servers known to reject the blob type).
-      const { url: blossomUrl, hash: blossomHash } =
-        await uploadBlobWithRedundancy(file, signer, getActiveBlossomServers());
-      if (!blossomUrl) { _backupMutex.saving = false; return 'no-servers'; }
+      const activeServers = getActiveBlossomServers();
+      const { url: blossomUrl, hash: blossomHash, errors: uploadErrors } =
+        await uploadBlobWithRedundancy(file, signer, activeServers);
+      if (!blossomUrl) {
+        // Name the servers and their actual errors — "no servers" alone reads
+        // as "you have none configured" when the truth is "all N refused".
+        _lastAutoSaveError = `All ${activeServers.length} Blossom server(s) failed: ${uploadErrors.join('; ')}`;
+        debugWarn('[backup]', _lastAutoSaveError);
+        log('Auto-save: ' + _lastAutoSaveError, 'error');
+        _backupMutex.saving = false;
+        return 'no-servers';
+      }
 
       const keysPresent = BACKED_UP_KEYS.filter(k => idbGetSync(k) !== null);
       const stats = {
@@ -1156,15 +1187,36 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
         created_at: now,
       });
 
+      // Publish through the POOL first.
+      //
+      // The per-relay loop below opens a FRESH WebSocket per relay. On the
+      // Linux desktop build those are WebKitGTK sockets — the exact path the
+      // native Rust read-bridge exists to avoid — so on desktop every manifest
+      // publish could fail while posting notes (which goes through the pool's
+      // existing, long-lived sockets) worked fine. That combination is why the
+      // desktop reported a saved backup that no other device could ever find.
+      // The pool path is tried first because it reuses connections that are
+      // already known to work.
       const { primary, fallback } = getPublishRelays(pubkey);
+      const relayTargets = [...primary, ...fallback];
       let manifestPublished = 0;
-      for (const url of [...primary, ...fallback]) {
+      const relayErrors: string[] = [];
+      try {
+        await nostr.event(manifestEvent, { signal: AbortSignal.timeout(10000) });
+        manifestPublished++;
+      } catch (err) {
+        relayErrors.push(`pool: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      for (const url of relayTargets) {
         const relay = createRelayFresh(url, { backoff: false });
         try {
           await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
           manifestPublished++;
         }
-        catch { /* continue */ }
+        catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          try { relayErrors.push(`${new URL(url).hostname}: ${msg}`); } catch { relayErrors.push(msg); }
+        }
         finally { try { relay.close(); } catch { /* */ } }
       }
 
@@ -1173,8 +1225,12 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       // every relay rejected/timed out, the indicator still went green while
       // no other device could ever discover the save. That is a failure.
       if (manifestPublished === 0) {
-        debugWarn('[backup]', 'Auto-save: blob uploaded but NO relay accepted the manifest — reporting error');
-        return 'error';
+        _lastAutoSaveError = relayTargets.length === 0
+          ? 'No relays to publish to — your relay list is empty.'
+          : `Backup uploaded to Blossom, but none of the ${relayTargets.length} relay(s) accepted the manifest: ${relayErrors.slice(0, 3).join('; ')}`;
+        debugWarn('[backup]', _lastAutoSaveError);
+        log('Auto-save: ' + _lastAutoSaveError, 'error');
+        return 'no-relays';
       }
 
       // Update timestamp so auto-restore knows local is current
@@ -1224,14 +1280,21 @@ export function useNostrBackup(user: NUser | undefined, _nostr: NPool) {
       refreshCheckpointsRef.current();
 
       debugLog('[backup]', 'Auto-save complete');
+      _lastAutoSaveError = '';
       return 'saved';
-    } catch {
-      debugWarn('[backup]', 'Auto-save failed');
+    } catch (err) {
+      // Keep the reason. A bare `catch {}` here is why every failure in the
+      // encrypt/sign stages surfaced as an unexplained "something went wrong".
+      _lastAutoSaveError = err instanceof Error
+        ? (err.message || err.name || err.constructor.name)
+        : String(err);
+      debugWarn('[backup]', 'Auto-save failed: ' + _lastAutoSaveError);
+      log('Auto-save failed: ' + _lastAutoSaveError, 'error');
       return 'error';
     } finally {
       _backupMutex.saving = false;
     }
-  }, [user, hasUnsavedChanges, deviceId]);
+  }, [user, hasUnsavedChanges, deviceId, log, nostr]);
 
   // Query relays in small batches (2–3 at a time) — stop early when results found.
   // Avoids overwhelming mobile browsers with 10+ simultaneous WebSocket connections.

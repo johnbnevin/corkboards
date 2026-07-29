@@ -18,7 +18,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { debugLog, debugWarn } from '@/lib/debug';
-import type { AutoSaveResult } from '@/hooks/useNostrBackup';
+import { getLastAutoSaveError, type AutoSaveResult } from '@/hooks/useNostrBackup';
 import {
   AUTO_SAVE_MIN_INTERVAL_MS,
   AUTO_SAVE_DEBOUNCE_MS,
@@ -49,6 +49,16 @@ export interface UseAutoSaveTriggerOptions {
   cooldownMs: number;
 }
 
+/**
+ * Failure toasts are rate-limited per distinct message. Auto-save retries on
+ * every poll, so a persistent failure (a relay set that won't take the
+ * manifest, a Blossom outage) otherwise fires the same destructive toast every
+ * cycle — which reads as the app getting worse and buries whatever the user
+ * was doing. One toast per distinct problem per FAILURE_TOAST_GAP_MS; the
+ * indicator and the backup log still reflect every attempt.
+ */
+const FAILURE_TOAST_GAP_MS = 10 * 60 * 1000;
+
 export function useAutoSaveTrigger({
   enabled,
   backupStatus,
@@ -60,9 +70,21 @@ export function useAutoSaveTrigger({
   cooldownMs,
 }: UseAutoSaveTriggerOptions): void {
   const pageLoadTime = useRef(Date.now());
+  const lastFailureToast = useRef<{ key: string; at: number }>({ key: '', at: 0 });
 
   useEffect(() => {
     if (!enabled) return;
+
+    // One toast per distinct failure per gap — see FAILURE_TOAST_GAP_MS.
+    const toastOnce = (key: string, input: { title: string; description?: string; variant?: 'destructive' | 'default' }) => {
+      const prev = lastFailureToast.current;
+      if (prev.key === key && Date.now() - prev.at < FAILURE_TOAST_GAP_MS) {
+        debugLog(`[AutoSave] suppressing repeat failure toast (${key})`);
+        return;
+      }
+      lastFailureToast.current = { key, at: Date.now() };
+      toast(input);
+    };
 
     let changeDetectedAt: number | null = null;
 
@@ -121,23 +143,38 @@ export function useAutoSaveTrigger({
           // again — losing exactly the changes the guard was protecting.
           debugWarn('[AutoSave] blocked by a protective guard — surfacing to the user');
           setBackupIndicator('unsaved');
-          toast({
+          toastOnce('blocked', {
             title: 'Auto-save paused',
             description: 'Local data looks smaller than your last backup, so auto-save is holding off to avoid overwriting it. Use Save now in the backup menu to save anyway.',
             variant: 'destructive',
           });
         } else if (result === 'no-servers') {
-          debugWarn('[AutoSave] every Blossom server failed/rejected the backup');
-          toast({
-            title: 'Backup not saved',
-            description: 'Couldn’t reach any of your backup servers. Check your Blossom server list in Advanced Settings.',
+          const detail = getLastAutoSaveError();
+          debugWarn('[AutoSave] every Blossom server failed/rejected the backup:', detail);
+          toastOnce('no-servers', {
+            title: 'Backup not saved — no storage server accepted it',
+            description: `${detail || 'Every configured Blossom server refused the upload.'} Check your Blossom servers in Advanced Settings; the app keeps retrying.`,
+            variant: 'destructive',
+          });
+        } else if (result === 'no-relays') {
+          // Distinct from the Blossom failure on purpose: the file DID upload,
+          // so pointing at the storage-server list (what the old generic toast
+          // implied) sends the user to the one part that is working.
+          const detail = getLastAutoSaveError();
+          debugWarn('[AutoSave] no relay accepted the backup manifest:', detail);
+          toastOnce('no-relays', {
+            title: 'Backup stored, but not announced',
+            description: `${detail || 'No relay accepted the backup manifest.'} Your data reached storage, but other devices can’t discover it until a relay accepts the manifest. Check your relays in Advanced Settings.`,
             variant: 'destructive',
           });
         } else {
-          debugWarn('[AutoSave] unexpected error while saving backup');
-          toast({
+          const detail = getLastAutoSaveError();
+          debugWarn('[AutoSave] unexpected error while saving backup:', detail);
+          toastOnce('error', {
             title: 'Backup error',
-            description: 'Something went wrong while saving. Use the backup menu to retry or download a local copy.',
+            description: detail
+              ? `${detail} — use the backup menu to retry or download a local copy.`
+              : 'Something went wrong while saving. Use the backup menu to retry or download a local copy.',
             variant: 'destructive',
           });
         }

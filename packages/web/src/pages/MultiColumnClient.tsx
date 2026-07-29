@@ -868,7 +868,11 @@ export function MultiColumnClient() {
         } else {
           const reason = result === 'no-servers'
             ? 'Could not reach any Blossom server'
-            : 'Backup save error';
+            : result === 'no-relays'
+              ? 'Uploaded to Blossom, but no relay accepted the manifest'
+              : result === 'blocked'
+                ? 'Save held back by a safety guard (local data looks smaller than the backup)'
+                : 'Backup save error';
           const lastTs = lastBackupTs;
           if (lastTs) {
             const ago = Math.round((Date.now() / 1000 - lastTs) / 60);

@@ -24,7 +24,7 @@ import type { NSecSigner, NConnectSigner } from '@nostrify/nostrify';
 type BackupSigner = NSecSigner | NConnectSigner;
 import { mobileStorage, isStorageHealthy } from '../storage/MmkvStorage';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '../lib/storageKeys';
-import { FALLBACK_RELAYS, getUserRelays, getRelayCache, createRelayFresh } from '../lib/NostrProvider';
+import { FALLBACK_RELAYS, getUserRelays, getRelayCache, createRelayFresh, useNostr } from '../lib/NostrProvider';
 import {
   importAesKey, aesDecrypt, hexToRawKey, encryptForSelf,
 } from '../lib/nostrEncrypt';
@@ -507,6 +507,11 @@ async function blossomUploadWithRedundancy(
 }
 
 export function useNostrBackup(pubkey: string | null, signer: BackupSigner | null) {
+  // The pool publishes through connections that are already open; the
+  // per-relay loops below open a fresh socket each. Pool-first keeps a save
+  // from depending entirely on new connections succeeding. (Parity with web,
+  // where that dependency made every desktop manifest publish fail.)
+  const { nostr } = useNostr();
   const [status, setStatus] = useState<BackupStatus>('idle');
   const [message, setMessage] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
@@ -614,6 +619,13 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
 
       const relays = getPublishRelays(pubkey);
       let published = 0;
+      try {
+        await nostr.event(manifestEvent, { signal: AbortSignal.timeout(10000) });
+        published++;
+        log('  pool <- manifest OK');
+      } catch (err) {
+        log(`  pool <- manifest FAILED: ${err instanceof Error ? err.message : err}`);
+      }
       for (const url of relays) {
         const relay = createRelayFresh(url, { backoff: false });
         try {
@@ -659,7 +671,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     } finally {
       isSaving.current = false;
     }
-  }, [pubkey, signer, log, deviceId]);
+  }, [pubkey, signer, log, deviceId, nostr]);
 
   // Silent auto-save — same logic as saveBackup but no status/message updates.
   // Returns a status so callers can distinguish a real upload failure
@@ -763,6 +775,10 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
 
       const relays = getPublishRelays(pubkey);
       let manifestPublished = 0;
+      try {
+        await nostr.event(manifestEvent, { signal: AbortSignal.timeout(10000) });
+        manifestPublished++;
+      } catch { /* fall through to the per-relay loop */ }
       for (const url of relays) {
         const relay = createRelayFresh(url, { backoff: false });
         try {
@@ -823,7 +839,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     } finally {
       isSaving.current = false;
     }
-  }, [pubkey, signer, deviceId]);
+  }, [pubkey, signer, deviceId, nostr]);
 
   const checkForBackup = useCallback(async () => {
     if (!pubkey || !signer) return;

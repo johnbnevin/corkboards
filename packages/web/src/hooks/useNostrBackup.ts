@@ -1151,9 +1151,19 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       const { primary, fallback } = getPublishRelays(pubkey);
       const allRelayUrls = [...primary, ...fallback];
       const succeeded: RelayResult[] = [];
+      // Tracked separately from `succeeded`, which holds real relay URLs and
+      // is later used to CONSTRUCT relays. Pushing a pseudo-entry {url:'pool'}
+      // in here meant the legacy-chunk cleanup below did
+      // `createRelayFresh('pool')`, and NRelay1 threw "The string did not
+      // match the expected pattern" on the invalid URL — AFTER the blob and
+      // manifest had already been published. The save was reported as failed,
+      // its success bookkeeping (timestamp, synced-manifest id, snapshot
+      // baseline) never ran, so the next cycle saved the identical data again:
+      // an upload/merge loop that also hammered the remote signer.
+      let poolPublished = false;
       try {
         await nostr.event(manifestEvent, { signal: AbortSignal.timeout(10000) });
-        succeeded.push({ url: 'pool', success: true });
+        poolPublished = true;
         log('  pool <- manifest OK');
       } catch (err) {
         log(`  pool <- manifest FAILED: ${err instanceof Error ? err.message : err}`, 'warn');
@@ -1171,7 +1181,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         }
       }
 
-      log(`Results: manifest on ${succeeded.length}/${allRelayUrls.length} relays, backup at ${blossomUrl}`);
+      log(`Results: manifest on ${succeeded.length}/${allRelayUrls.length} relays${poolPublished ? ' + pool' : ''}, backup at ${blossomUrl}`);
       log(`Saved: ${stats.corkboards} corkboards, ${stats.savedForLater} saved-for-later, ${stats.dismissed} dismissed`);
 
       // Tombstone old chunk events from v3 backups
@@ -1183,14 +1193,15 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
             kind: 30078, content: '', tags: [['d', `${D_TAG_PREFIX}:${i}`]], created_at: now,
           });
           for (const r of succeeded) {
-            const relay = createRelayFresh(r.url, { backoff: false });
+            let relay;
+            try { relay = createRelayFresh(r.url, { backoff: false }); } catch { continue; }
             try { await relay.event(tombstone, { signal: AbortSignal.timeout(5000) }); } catch { /* ignore */ }
             finally { try { relay.close(); } catch { /* ignore */ } }
           }
         }
       }
 
-      if (succeeded.length === 0) {
+      if (succeeded.length === 0 && !poolPublished) {
         setStatus('save-error');
         setMessage('Backup failed: could not reach any relay');
         log('TOTAL FAILURE: no relays accepted', 'error');
@@ -2027,16 +2038,16 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
    * the remote-backup prompt standing so the user decides. A purely additive
    * merge needs no confirmation: it cannot lose anything.
    */
-  const loadRemoteBackup = useCallback(async (opts?: { silent?: boolean; askOnRemovals?: boolean }) => {
+  const loadRemoteBackup = useCallback(async (opts?: { silent?: boolean; askOnRemovals?: boolean }): Promise<{ applied: boolean; heldRemovals?: number }> => {
     const silent = opts?.silent ?? false;
     const currentRemote = remoteBackup ?? remoteBackupRef.current;
     if (!user || !currentRemote) {
       log('Restore skipped: ' + (!user ? 'no user' : 'no remote backup'));
-      return;
+      return { applied: false };
     }
     if (isRestoring()) {
       log('Restore skipped: already restoring');
-      return;
+      return { applied: false };
     }
     beginRestoring();
 
@@ -2075,7 +2086,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       // quietly; the next sync tick retries the decrypt from scratch.
       if (silent && !isV4Blossom) {
         log('Background sync: manifest unreadable this round — will retry next tick');
-        return;
+        return { applied: false };
       }
 
       let fullJson: string;
@@ -2171,7 +2182,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
           log('Missing chunks: ' + missingChunks.join(', '), 'error');
           setStatus('restore-error');
           setMessage(`Restore failed: missing chunks ${missingChunks.join(', ')}`);
-          return;
+          return { applied: false };
         }
 
         const encryption = backup.encryption || 'nip44';
@@ -2247,7 +2258,11 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         if (count > SILENT_REMOVAL_LIMIT) {
           log(`Sync paused: merge would remove ${count} item(s) — leaving it for the user to confirm`);
           if (!silent) { setStatus('found'); setMessage('A newer backup is available'); }
-          return;
+          // Report the hold. Returning silently here let the manual sync say
+          // "Synced" for a merge that applied nothing, which is the worst of
+          // both worlds: the user is told it worked AND their two devices
+          // still disagree.
+          return { applied: false, heldRemovals: count };
         }
       }
 
@@ -2264,7 +2279,10 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       }
 
       idbSetSync(LAST_BACKUP_TS_KEY, String(backup.timestamp));
-      idbSetSync(LAST_CHUNK_COUNT_KEY, String(backup.chunks));
+      // v4 backups are a single Blossom blob, not chunks. `backup.chunks`
+      // defaults to 1 when the manifest omits it, and storing that 1 armed the
+      // legacy chunk-tombstoning path on every later save for no reason.
+      idbSetSync(LAST_CHUNK_COUNT_KEY, isV4Blossom ? '0' : String(backup.chunks));
       setLastBackupTs(backup.timestamp);
       // We now hold this manifest's state; don't merge it again.
       if (manifestEventRef.current) setLastSyncedManifestId(manifestEventRef.current.id);
@@ -2304,6 +2322,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         // Resume auto-save after a brief flash of "restored" status
         setTimeout(() => setStatus('idle'), 3000);
       }
+      return { applied: true };
     } catch (err) {
       const errMsg = err instanceof Error
         ? (err.message || (err as DOMException).name || err.constructor.name)
@@ -2316,6 +2335,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         setStatus('restore-error');
         setMessage('Restore failed: ' + errMsg);
       }
+      return { applied: false };
     } finally {
       endRestoring();
     }
@@ -2336,7 +2356,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
    * other restore, so the worst case is "nothing changed".
    */
   const syncFromRemote = useCallback(async (): Promise<{
-    status: 'merged' | 'up-to-date' | 'none-found' | 'error';
+    status: 'merged' | 'up-to-date' | 'none-found' | 'held' | 'error';
     remoteTs?: number;
     localTs?: number;
     detail?: string;
@@ -2374,7 +2394,12 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       log(`Manual sync: found a manifest this device has not merged (${remoteTs}) — merging`);
       // Not silent: this is user-initiated, so the normal restore UI is right.
       // askOnRemovals still guards a mass deletion behind a confirmation.
-      await loadRemoteBackup({ askOnRemovals: true });
+      const outcome = await loadRemoteBackup({ askOnRemovals: true });
+      if (!outcome.applied) {
+        return outcome.heldRemovals
+          ? { status: 'held', remoteTs, localTs, detail: `That backup would remove ${outcome.heldRemovals} items this device still has, so nothing was applied.` }
+          : { status: 'error', remoteTs, localTs, detail: 'The backup was found but could not be applied — see the backup log.' };
+      }
       return { status: 'merged', remoteTs, localTs };
     } catch (err) {
       const detail = err instanceof Error ? (err.message || err.name) : String(err);

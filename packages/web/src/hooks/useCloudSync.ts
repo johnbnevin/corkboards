@@ -45,8 +45,8 @@ export interface UseCloudSyncOptions {
   remoteTimestamp: number | null;
   /** This device's last-synced timestamp. */
   lastBackupTs: number;
-  /** Merge the cloud state in. */
-  loadRemoteBackup: (opts?: { silent?: boolean; askOnRemovals?: boolean }) => Promise<void>;
+  /** Merge the cloud state in; resolves with whether it actually applied. */
+  loadRemoteBackup: (opts?: { silent?: boolean; askOnRemovals?: boolean }) => Promise<{ applied: boolean; heldRemovals?: number }>;
 }
 
 export function useCloudSync({

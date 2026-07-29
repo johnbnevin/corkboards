@@ -2510,6 +2510,12 @@ export function MultiColumnClient() {
       if (r.status === 'merged') {
         setBackupIndicator('saved');
         toast({ title: 'Synced', description: `Merged a newer backup saved ${agoOf(r.remoteTs)} from another device.` });
+      } else if (r.status === 'held') {
+        toast({
+          title: 'Sync paused — needs your say-so',
+          description: `${r.detail ?? ''} Open Backup & Restore to review it.`.trim(),
+          variant: 'destructive',
+        });
       } else if (r.status === 'up-to-date') {
         toast({
           title: 'Already in sync',

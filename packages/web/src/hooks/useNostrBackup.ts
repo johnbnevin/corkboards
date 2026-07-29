@@ -2054,16 +2054,16 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
    * the remote-backup prompt standing so the user decides. A purely additive
    * merge needs no confirmation: it cannot lose anything.
    */
-  const loadRemoteBackup = useCallback(async (opts?: { silent?: boolean; askOnRemovals?: boolean }): Promise<{ applied: boolean; heldRemovals?: number }> => {
+  const loadRemoteBackup = useCallback(async (opts?: { silent?: boolean; askOnRemovals?: boolean }): Promise<{ applied: boolean; heldRemovals?: number; error?: string }> => {
     const silent = opts?.silent ?? false;
     const currentRemote = remoteBackup ?? remoteBackupRef.current;
     if (!user || !currentRemote) {
       log('Restore skipped: ' + (!user ? 'no user' : 'no remote backup'));
-      return { applied: false };
+      return { applied: false, error: !user ? 'Not signed in.' : 'No backup metadata was loaded to restore from.' };
     }
     if (isRestoring()) {
       log('Restore skipped: already restoring');
-      return { applied: false };
+      return { applied: false, error: 'Another restore was already running.' };
     }
     beginRestoring();
 
@@ -2102,7 +2102,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       // quietly; the next sync tick retries the decrypt from scratch.
       if (silent && !isV4Blossom) {
         log('Background sync: manifest unreadable this round — will retry next tick');
-        return { applied: false };
+        return { applied: false, error: 'The backup manifest could not be read this round (the signer did not answer).' };
       }
 
       let fullJson: string;
@@ -2198,7 +2198,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
           log('Missing chunks: ' + missingChunks.join(', '), 'error');
           setStatus('restore-error');
           setMessage(`Restore failed: missing chunks ${missingChunks.join(', ')}`);
-          return { applied: false };
+          return { applied: false, error: `This is an old chunked backup and ${missingChunks.length} chunk(s) are missing from your relays.` };
         }
 
         const encryption = backup.encryption || 'nip44';
@@ -2356,7 +2356,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         setStatus('restore-error');
         setMessage('Restore failed: ' + errMsg);
       }
-      return { applied: false };
+      return { applied: false, error: errMsg };
     } finally {
       endRestoring();
     }
@@ -2423,7 +2423,17 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       if (!outcome.applied) {
         return outcome.heldRemovals
           ? { status: 'held', remoteTs, localTs, detail: `That backup would remove ${outcome.heldRemovals} items this device still has, so nothing was applied.` }
-          : { status: 'error', remoteTs, localTs, detail: 'The backup was found but could not be applied — see the backup log.' };
+          : {
+              status: 'error',
+              remoteTs,
+              localTs,
+              // The specific reason, not "could not be applied". The generic
+              // wording sent the user (and me) hunting with no lead; the two
+              // real causes here are a signer that never answered and a
+              // Blossom blob that would not download, and they need
+              // completely different responses.
+              detail: outcome.error ?? 'The backup was found but could not be applied — see the backup log.',
+            };
       }
       return { status: 'merged', remoteTs, localTs };
     } catch (err) {

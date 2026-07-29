@@ -2496,12 +2496,26 @@ export function MultiColumnClient() {
   // including the boring one ("nothing newer"), because the whole point is to
   // answer "did my other device's save reach this one?".
   const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const manualSyncStartedAt = useRef(0);
   const handleSyncFromAnotherDevice = useCallback(async () => {
-    if (isManualSyncing) return;
+    // Guarded, but never permanently: if a previous attempt never settled,
+    // `isManualSyncing` stayed true and every later tap did NOTHING, silently
+    // — the reported "sync from other device gives no error". Bounded below so
+    // the flag always clears, and a stuck attempt is superseded rather than
+    // blocking forever.
+    if (isManualSyncing && Date.now() - manualSyncStartedAt.current < 90_000) return;
+    manualSyncStartedAt.current = Date.now();
     setIsManualSyncing(true);
     toast({ title: 'Checking all relays for a newer backup…' });
     try {
-      const r = await syncFromRemote();
+      const r = await Promise.race([
+        syncFromRemote(),
+        new Promise<{ status: 'error'; detail: string }>((resolve) =>
+          setTimeout(() => resolve({
+            status: 'error',
+            detail: 'The check did not finish in 90 seconds — your relays or your remote signer are not responding.',
+          }), 90_000)),
+      ]);
       const agoOf = (ts?: number) => {
         if (!ts) return 'never';
         const mins = Math.round((Date.now() / 1000 - ts) / 60);

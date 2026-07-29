@@ -46,8 +46,21 @@ export interface UseCloudSyncOptions {
   /** This device's last-synced timestamp. */
   lastBackupTs: number;
   /** Merge the cloud state in; resolves with whether it actually applied. */
-  loadRemoteBackup: (opts?: { silent?: boolean; askOnRemovals?: boolean }) => Promise<{ applied: boolean; heldRemovals?: number }>;
+  loadRemoteBackup: (opts?: { silent?: boolean; askOnRemovals?: boolean }) => Promise<{ applied: boolean; heldRemovals?: number; error?: string }>;
 }
+
+/**
+ * A sync attempt that has not settled in this long is presumed dead.
+ *
+ * Both guards below are permanent wedges without it. `inFlight` is cleared in
+ * a `finally`, which never runs if an await inside never settles (a NIP-46
+ * signer that goes silent does exactly that) — and then every later tick
+ * returns at the guard, forever. Likewise a `backupStatus` stuck at 'checking'
+ * because that same check never finished. The reported symptom is stark: the
+ * device "never even looks" for a new state again, with nothing in the UI to
+ * say why.
+ */
+const SYNC_STALE_MS = 90_000;
 
 export function useCloudSync({
   enabled,
@@ -58,6 +71,8 @@ export function useCloudSync({
   loadRemoteBackup,
 }: UseCloudSyncOptions): { syncNow: () => void } {
   const inFlight = useRef(false);
+  const inFlightSince = useRef(0);
+  const statusBlockedSince = useRef(0);
   const lastSyncAt = useRef(0);
 
   // Read through refs so the interval and listener below can be registered once
@@ -68,13 +83,26 @@ export function useCloudSync({
 
   const syncNow = useCallback(() => {
     const cur = latest.current;
-    if (!cur.enabled || inFlight.current) return;
+    if (!cur.enabled) return;
     if (document.visibilityState === 'hidden') return;
-    // Never race a restore or a save that's already running.
-    if (cur.backupStatus === 'restoring' || cur.backupStatus === 'checking') return;
+    if (inFlight.current) {
+      if (Date.now() - inFlightSince.current < SYNC_STALE_MS) return;
+      debugLog('[cloudSync] previous sync never settled — starting a fresh one');
+      inFlight.current = false;
+    }
+    // Never race a restore or a save that's already running — but do not take
+    // that status on faith forever. A check that hung leaves 'checking' set,
+    // and honouring it indefinitely is what stops the device looking again.
+    if (cur.backupStatus === 'restoring' || cur.backupStatus === 'checking') {
+      if (statusBlockedSince.current === 0) statusBlockedSince.current = Date.now();
+      if (Date.now() - statusBlockedSince.current < SYNC_STALE_MS) return;
+      debugLog(`[cloudSync] backupStatus stuck at '${cur.backupStatus}' — syncing anyway`);
+    }
+    statusBlockedSince.current = 0;
     if (Date.now() - lastSyncAt.current < CLOUD_SYNC_MIN_GAP_MS) return;
 
     inFlight.current = true;
+    inFlightSince.current = Date.now();
     lastSyncAt.current = Date.now();
 
     (async () => {
@@ -89,7 +117,12 @@ export function useCloudSync({
         // checkRemoteBackup and replaces the timestamp comparison that used to
         // be here — a device whose clock said it was ahead (see the removed
         // stamp-now heuristic) would refuse to pull forever.
-        const checked = await cur.checkRemoteBackup(true);
+        // Bounded: an unsettled signer/relay promise must not hold the
+        // in-flight flag (and therefore every future tick) hostage.
+        const checked = await Promise.race([
+          cur.checkRemoteBackup(true),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), SYNC_STALE_MS)),
+        ]);
         if (!checked) return;
         debugLog(`[cloudSync] cloud manifest ${checked} not yet merged here — merging`);
         // Let React commit the check's setRemoteBackup before loading:

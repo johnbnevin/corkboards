@@ -72,7 +72,7 @@ const ComposeDialog = lazy(async () => {
   const fresh = await import('@/components/ComposeDialog');
   return { default: fresh.ComposeDialog };
 });
-import { PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, Volume2, Smile, Loader2, SlidersHorizontal, Wifi, Server, ScanLine } from 'lucide-react';
+import { PenSquare, Settings, Sun, Moon, Wallet, UserPlus, UserCheck, LogOut, Pin, Download, Upload, Trash2, HardDrive, CloudUpload, CloudDownload, Volume2, Smile, Loader2, SlidersHorizontal, Wifi, Server, ScanLine } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useAppContext } from '@/hooks/useAppContext';
 import { useRelayHealth } from '@/hooks/useRelayHealth';
@@ -791,7 +791,7 @@ export function MultiColumnClient() {
   }, [addBookmark, removeBookmark]);
 
   // Nostr backup/restore
-  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, getCheckpoints: _getCheckpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
+  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, syncFromRemote, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, getCheckpoints: _getCheckpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
 
   // Startup diagnostic log — emits once per user session
   useEffect(() => {
@@ -2483,6 +2483,43 @@ export function MultiColumnClient() {
     isDismissed,
   });
 
+  // "Sync from another device" — user-initiated pull. Reports every outcome,
+  // including the boring one ("nothing newer"), because the whole point is to
+  // answer "did my other device's save reach this one?".
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const handleSyncFromAnotherDevice = useCallback(async () => {
+    if (isManualSyncing) return;
+    setIsManualSyncing(true);
+    toast({ title: 'Checking all relays for a newer backup…' });
+    try {
+      const r = await syncFromRemote();
+      const agoOf = (ts?: number) => {
+        if (!ts) return 'never';
+        const mins = Math.round((Date.now() / 1000 - ts) / 60);
+        return mins < 1 ? 'just now' : mins < 60 ? `${mins}m ago` : `${Math.round(mins / 60)}h ago`;
+      };
+      if (r.status === 'merged') {
+        setBackupIndicator('saved');
+        toast({ title: 'Synced', description: `Merged a newer backup saved ${agoOf(r.remoteTs)} from another device.` });
+      } else if (r.status === 'up-to-date') {
+        toast({
+          title: 'Can’t find newer',
+          description: `The newest backup on your relays is from ${agoOf(r.remoteTs)}; this device is already at or ahead of it. If another device just saved, give it a moment and try again.`,
+        });
+      } else if (r.status === 'none-found') {
+        toast({
+          title: 'Can’t find newer',
+          description: 'No backup manifest was found on any of your relays. Check your relay list in Advanced Settings.',
+          variant: 'destructive',
+        });
+      } else {
+        toast({ title: 'Sync failed', description: r.detail ?? 'Could not reach your relays.', variant: 'destructive' });
+      }
+    } finally {
+      setIsManualSyncing(false);
+    }
+  }, [isManualSyncing, syncFromRemote, toast, setBackupIndicator]);
+
   // Wire the pagination setBatchProgress to the stable ref so feed hooks can call it
   useEffect(() => {
     batchProgressCallbackRef.current = _paginationSetBatchProgressInternal;
@@ -3870,6 +3907,14 @@ export function MultiColumnClient() {
                     >
                       <CloudUpload className="h-4 w-4" />Save Now
                     </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={isManualSyncing || backupStatus === 'restoring'}
+                      onClick={handleSyncFromAnotherDevice}
+                      className="gap-2"
+                    >
+                      <CloudDownload className="h-4 w-4" />
+                      {isManualSyncing ? 'Looking for newer…' : 'Sync from another device'}
+                    </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => {
                       // Just open the dialog — don't trigger a re-check that would
@@ -4065,6 +4110,14 @@ export function MultiColumnClient() {
                     className="gap-2"
                   >
                     <CloudUpload className="h-4 w-4" />Save Now
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={isManualSyncing || backupStatus === 'restoring'}
+                    onClick={handleSyncFromAnotherDevice}
+                    className="gap-2"
+                  >
+                    <CloudDownload className="h-4 w-4" />
+                    {isManualSyncing ? 'Looking for newer…' : 'Sync from another device'}
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={() => {

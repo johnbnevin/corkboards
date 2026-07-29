@@ -9,6 +9,7 @@ import { useCollapsedNotes } from '@/hooks/useCollapsedNotes';
 import { useBookmarks } from '@/hooks/useBookmarks';
 import { usePinnedNotes } from '@/hooks/usePinnedNotes';
 import { getUserRelays, FALLBACK_RELAYS } from '@/components/NostrProvider';
+import { useNostr } from '@nostrify/react';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/hooks/useToast';
@@ -36,6 +37,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
 }: SavedForLaterCorkboardProps) {
   // Own the collapsed state here — dismiss/expand only re-renders this component
   const { collapsedIds, expand } = useCollapsedNotes();
+  const { nostr } = useNostr();
   const { bookmarkIds } = useBookmarks();
   const { pinnedIds, togglePin } = usePinnedNotes();
 
@@ -53,54 +55,72 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
 
   const gridStyle = { gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` };
 
-  // Fetch notes by their IDs
+  // Fetch notes by their IDs.
+  //
+  // Goes through the POOL first. The old version opened a fresh WebSocket to
+  // every write+read+fallback relay simultaneously, per 100-id batch — on a
+  // phone that is far past what the browser will keep open, so a large saved
+  // list resolved only partially and the tab rendered (say) 58 of 130 notes as
+  // though the rest were gone. The pool routes id-only filters through its
+  // wide "unroutable lookup" tier (read relays + fallbacks + indexers), reuses
+  // existing connections, obeys the query governor, and on desktop runs over
+  // the native socket bridge. Direct relay queries stay as a SECOND pass for
+  // whatever the pool couldn't find.
   const fetchNotes = useCallback(async () => {
     if (savedIds.length === 0) {
       setNotes([]);
+      setFailedIds([]);
       return;
     }
 
     setIsLoading(true);
-    setFailedIds([]);
 
     try {
-      // Query write relays + read relays + fallbacks directly,
-      // because NPool's reqRouter can't route ids-only filters (no authors to look up)
-      const userRelays = getUserRelays();
-      const relaysToQuery = [...new Set([...userRelays.write, ...userRelays.read, ...FALLBACK_RELAYS])];
-
-      // Split into batches of 100 to avoid query limits
-      const batchSize = 100;
-      const allEvents: NostrEvent[] = [];
-      const foundIds = new Set<string>();
-
+      const found = new Map<string, NostrEvent>();
+      const batchSize = 50;
+      const batches: string[][] = [];
       for (let i = 0; i < savedIds.length; i += batchSize) {
-        const batch = savedIds.slice(i, i + batchSize);
-        // Query all relays in parallel using NRelay1 (via queryRelay), dedupe results
-        const results = await Promise.allSettled(
-          relaysToQuery.map(url =>
-            queryRelay(url, { ids: batch }, 8000)
-          )
-        );
-        for (const result of results) {
-          if (result.status === 'fulfilled') {
-            for (const event of result.value) {
-              if (!foundIds.has(event.id)) {
-                foundIds.add(event.id);
-                allEvents.push(event);
-              }
-            }
-          }
+        batches.push(savedIds.slice(i, i + batchSize));
+      }
+
+      // Pass 1 — pool, batches sequential so we never burst sockets.
+      for (const batch of batches) {
+        try {
+          const events = await nostr.query(
+            [{ ids: batch }],
+            { signal: AbortSignal.timeout(10000) },
+          );
+          for (const ev of events) if (!found.has(ev.id)) found.set(ev.id, ev);
+        } catch {
+          // Batch failed entirely — its ids fall through to pass 2.
         }
       }
 
-      // Find which IDs failed to fetch
-      const missing = savedIds.filter(id => !foundIds.has(id));
-      setFailedIds(missing);
+      // Pass 2 — direct relay queries for the stragglers only, a few relays at
+      // a time. Missing ids are usually on a relay the pool didn't pick, not
+      // genuinely gone.
+      let missing = savedIds.filter(id => !found.has(id));
+      if (missing.length > 0) {
+        const userRelays = getUserRelays();
+        const relays = [...new Set([...userRelays.write, ...userRelays.read, ...FALLBACK_RELAYS])];
+        const RELAY_CHUNK = 3;
+        for (let i = 0; i < relays.length && missing.length > 0; i += RELAY_CHUNK) {
+          const chunk = relays.slice(i, i + RELAY_CHUNK);
+          const results = await Promise.allSettled(
+            chunk.map(url => queryRelay(url, { ids: missing.slice(0, 100) }, 8000)),
+          );
+          for (const r of results) {
+            if (r.status !== 'fulfilled') continue;
+            for (const ev of r.value) if (!found.has(ev.id)) found.set(ev.id, ev);
+          }
+          missing = savedIds.filter(id => !found.has(id));
+        }
+      }
 
-      // Sort by created_at descending
-      const sortedNotes = allEvents.sort((a, b) => b.created_at - a.created_at);
-      setNotes(sortedNotes);
+      // Only now is an id "not found" — after the pool AND every relay missed
+      // it. This matters because the failed list drives a destructive action.
+      setFailedIds(missing);
+      setNotes([...found.values()].sort((a, b) => b.created_at - a.created_at));
     } catch (error) {
       console.error('Failed to fetch saved notes:', error);
       toast({
@@ -112,7 +132,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
       setIsLoading(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [savedIds.length]);
+  }, [savedIds.length, nostr]);
 
   // Refetch when the count changes (new note added or removed)
   useEffect(() => {
@@ -130,14 +150,27 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
     togglePin(noteId);
   }, [togglePin]);
 
+  // Two-step, because this is not a local tidy-up: removing a saved note
+  // records a tombstone that syncs, so it deletes those notes from every
+  // device permanently. A relay hiccup that hid 72 of 130 notes was one click
+  // away from destroying all 72 everywhere.
+  const [confirmRemoveFailed, setConfirmRemoveFailed] = useState(false);
   const handleRemoveFailed = useCallback(() => {
+    if (!confirmRemoveFailed) {
+      setConfirmRemoveFailed(true);
+      return;
+    }
     failedIds.forEach(id => expand(id));
-    toast({ 
+    toast({
       title: `Removed ${failedIds.length} unavailable notes`,
-      description: 'These notes could not be found on your relays.'
+      description: 'They are removed on your other devices too.',
     });
     setFailedIds([]);
-  }, [failedIds, expand, toast]);
+    setConfirmRemoveFailed(false);
+  }, [confirmRemoveFailed, failedIds, expand, toast]);
+
+  // A fresh fetch invalidates a pending confirmation.
+  useEffect(() => { setConfirmRemoveFailed(false); }, [failedIds]);
 
   const handleMinimizeNote = useCallback((noteId: string) => {
     setMinimizedNoteIds(prev => {
@@ -219,17 +252,32 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
             {failedIds.length > 0 && (
               <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 text-sm">
                 <p className="text-amber-800 dark:text-amber-200">
-                  <strong>{failedIds.length} note(s)</strong> could not be found on your relays. 
-                  They may have been deleted or your relays may not have them.
+                  <strong>{failedIds.length} of your {savedIds.length} saved notes</strong> could not be
+                  loaded from your relays right now. They are still saved — a relay that was slow or
+                  unreachable is the usual cause. Try again before removing anything.
                 </p>
-                <Button 
-                  variant="link" 
-                  size="sm" 
-                  className="text-amber-600 p-0 h-auto mt-1"
-                  onClick={handleRemoveFailed}
-                >
-                  Remove unavailable notes from saved list
-                </Button>
+                <div className="flex items-center gap-3 mt-1">
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="text-amber-700 p-0 h-auto"
+                    onClick={fetchNotes}
+                    disabled={isLoading}
+                  >
+                    <RotateCcw className="h-3 w-3 mr-1" />
+                    {isLoading ? 'Retrying…' : 'Try again'}
+                  </Button>
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="text-amber-600 p-0 h-auto"
+                    onClick={handleRemoveFailed}
+                  >
+                    {confirmRemoveFailed
+                      ? `Yes — permanently remove ${failedIds.length} from all devices`
+                      : 'Remove them from my saved list'}
+                  </Button>
+                </div>
               </div>
             )}
             

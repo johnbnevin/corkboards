@@ -789,7 +789,16 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
   // Starts settled if we already checked this session (module-level guard).
   const [checkSettled, setCheckSettled] = useState(() => _checkedPubkey === user?.pubkey);
   const [message, setMessage] = useState('');
-  const [remoteBackup, setRemoteBackup] = useState<RemoteBackup | null>(null);
+  const [remoteBackup, _setRemoteBackup] = useState<RemoteBackup | null>(null);
+  // React state is not readable by code that runs in the same tick as the
+  // setter — `checkRemoteBackup` sets this and a caller that immediately wants
+  // to restore would read the PREVIOUS value (null on the first run) and skip
+  // with "no remote backup". Mirror into a ref and read the ref as a fallback.
+  const remoteBackupRef = useRef<RemoteBackup | null>(null);
+  const setRemoteBackup = useCallback((b: RemoteBackup | null) => {
+    remoteBackupRef.current = b;
+    _setRemoteBackup(b);
+  }, []);
   const [logs, setLogs] = useState<string[]>([]);
   const [lastBackupTs, setLastBackupTs] = useState<number>(() => {
     return parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
@@ -1815,7 +1824,8 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
    */
   const loadRemoteBackup = useCallback(async (opts?: { silent?: boolean; askOnRemovals?: boolean }) => {
     const silent = opts?.silent ?? false;
-    if (!user || !remoteBackup) {
+    const currentRemote = remoteBackup ?? remoteBackupRef.current;
+    if (!user || !currentRemote) {
       log('Restore skipped: ' + (!user ? 'no user' : 'no remote backup'));
       return;
     }
@@ -1832,7 +1842,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
 
     try {
       const pubkey = user.pubkey;
-      let backup = remoteBackup;
+      let backup = currentRemote;
 
       // Use the decrypted manifest data (cached during checkRemoteBackup)
       const manifest = manifestDataRef.current as Record<string, unknown> | null;
@@ -2107,6 +2117,55 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       _backupMutex.restoring = false;
     }
   }, [user, queryAll, remoteBackup, log]);
+
+  /**
+   * Manual "sync from another device".
+   *
+   * Deliberately explicit and self-contained: force a fresh look across every
+   * relay and every backup slot, compare the newest manifest to what this
+   * device last saved, and either merge it or say plainly that nothing newer
+   * exists. The automatic sync has several reasons to stay quiet (guards,
+   * caches, an already-checked flag, a manifest that would not decrypt this
+   * round), all of which are correct for a background task and useless when
+   * the user is standing there knowing another device has newer data.
+   *
+   * Never destructive: applying goes through the same union merge as every
+   * other restore, so the worst case is "nothing changed".
+   */
+  const syncFromRemote = useCallback(async (): Promise<{
+    status: 'merged' | 'up-to-date' | 'none-found' | 'error';
+    remoteTs?: number;
+    localTs?: number;
+    detail?: string;
+  }> => {
+    if (!user) return { status: 'error', detail: 'Not signed in.' };
+    if (_backupMutex.restoring || _backupMutex.saving) {
+      return { status: 'error', detail: 'A backup operation is already running — try again in a moment.' };
+    }
+    try {
+      log('Manual sync: looking for a newer backup on all relays...');
+      // force=true bypasses the session/localStorage "already checked" guards.
+      const remoteTs = await checkRemoteBackup(true);
+      const localTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      if (!remoteTs) {
+        log('Manual sync: no backup manifest found on any relay');
+        return { status: 'none-found', localTs };
+      }
+      if (localTs && remoteTs <= localTs) {
+        log(`Manual sync: newest remote (${remoteTs}) is not newer than local (${localTs})`);
+        return { status: 'up-to-date', remoteTs, localTs };
+      }
+      log(`Manual sync: remote ${remoteTs} is newer than local ${localTs} — merging`);
+      // Not silent: this is user-initiated, so the normal restore UI is right.
+      // askOnRemovals still guards a mass deletion behind a confirmation.
+      await loadRemoteBackup({ askOnRemovals: true });
+      return { status: 'merged', remoteTs, localTs };
+    } catch (err) {
+      const detail = err instanceof Error ? (err.message || err.name) : String(err);
+      log('Manual sync failed: ' + detail, 'error');
+      return { status: 'error', detail };
+    }
+  }, [user, checkRemoteBackup, loadRemoteBackup, log]);
 
   const dismissRemoteBackup = useCallback(() => {
     setRemoteBackup(null);
@@ -2409,6 +2468,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     backupMessage: message,
     remoteBackup,
     loadRemoteBackup,
+    syncFromRemote,
     dismissRemoteBackup,
     saveBackup,
     autoSaveBackup,

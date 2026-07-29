@@ -5145,7 +5145,11 @@ export function MultiColumnClient() {
             })()}
             <div className="flex gap-2 justify-end mt-2">
               <Button variant="outline" size="sm" onClick={() => setCheckpointToRestoreIdx(null)}>Cancel</Button>
-              <Button size="sm" onClick={() => { if (checkpointToRestoreIdx !== null && checkpoints[checkpointToRestoreIdx]) { loadCheckpointFn(checkpoints[checkpointToRestoreIdx]); setCheckpointToRestoreIdx(null); } }}>Restore</Button>
+              {/* 'replace': the user explicitly picked this checkpoint to roll
+                  back to (the copy above says "replacing your current
+                  settings"). The automatic login/countdown restores stay on
+                  the default 'merge', which cannot subtract. */}
+              <Button size="sm" onClick={() => { if (checkpointToRestoreIdx !== null && checkpoints[checkpointToRestoreIdx]) { loadCheckpointFn(checkpoints[checkpointToRestoreIdx], 'replace'); setCheckpointToRestoreIdx(null); } }}>Restore</Button>
             </div>
           </DialogContent>
         </Dialog>

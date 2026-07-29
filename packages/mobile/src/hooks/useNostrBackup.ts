@@ -967,7 +967,15 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     const alreadySyncedId = getLastSyncedManifestId();
     const cps: RemoteCheckpoint[] = [];
     let signerTimedOut = false;
-    for (const ev of allEvents) {
+    // Newest first, and at most ONE live signer decrypt per check — the newest
+    // unseen manifest is the only one a sync decision needs. Older slot
+    // manifests still surface via plaintext or the decrypt cache; spending a
+    // bunker round-trip on each of up to six slots is what made a check crawl
+    // even when the signer was healthy. (Web pays at most one for the same
+    // reason.)
+    let liveDecryptSpent = false;
+    const eventsNewestFirst = [...allEvents].sort((a, b) => b.created_at - a.created_at);
+    for (const ev of eventsNewestFirst) {
       // The manifest we already hold needs no signer round-trip to re-read.
       if (ev.id === alreadySyncedId && !getCachedManifestJson(ev.id)) continue;
       let data: Record<string, unknown> | null = null;
@@ -976,7 +984,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         if (cachedJson) {
           try { data = JSON.parse(cachedJson); } catch { /* fall through */ }
         }
-        if (!data && signer?.nip44 && !signerTimedOut) {
+        if (!data && signer?.nip44 && !signerTimedOut && !liveDecryptSpent) {
           try {
             const json = await Promise.race([
               signer.nip44.decrypt(pubkey, ev.content),
@@ -984,8 +992,10 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
             ]);
             data = JSON.parse(json);
             cacheManifestJson(ev.id, json);
+            liveDecryptSpent = true;
           } catch (err) {
             if (err instanceof Error && err.message === 'decrypt_timeout') signerTimedOut = true;
+            liveDecryptSpent = true;
             /* decrypt failed or timed out — skip */
           }
         }

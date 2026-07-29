@@ -215,9 +215,12 @@ function setLastSyncedManifestId(eventId: string): void {
   idbSet(LAST_SYNCED_MANIFEST_KEY, eventId).catch(() => {});
 }
 
-/** What the last check saw, for callers that need more than the return value. */
-let _lastCheckSummary: { found: boolean; ts: number | null } = { found: false, ts: null };
-export function getLastCheckSummary(): { found: boolean; ts: number | null } { return _lastCheckSummary; }
+/** What the last check saw, for callers that need more than the return value.
+ *  Reset at the start of every real check — left stale, a later check that
+ *  found nothing (or failed) would still report the previous check's manifest,
+ *  and the manual sync would claim "already up to date" against thin air. */
+let _lastCheckSummary: { found: boolean; ts: number | null; failed?: boolean } = { found: false, ts: null };
+export function getLastCheckSummary(): { found: boolean; ts: number | null; failed?: boolean } { return _lastCheckSummary; }
 const LAST_CHUNK_COUNT_KEY = 'corkboard:last-chunk-count';
 const BACKUP_CHECKED_KEY = 'corkboard:backup-checked';
 // Synchronous mirror of BACKUP_CHECKED_KEY in localStorage so we can skip
@@ -1202,11 +1205,13 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       }
 
       if (succeeded.length === 0 && !poolPublished) {
+        _lastAutoSaveError = 'Backup uploaded to Blossom, but no relay accepted the manifest — other devices cannot discover it. Check your relay list.';
         setStatus('save-error');
         setMessage('Backup failed: could not reach any relay');
         log('TOTAL FAILURE: no relays accepted', 'error');
         return false;
       } else {
+        _lastAutoSaveError = '';
         setStatus('saved');
         idbSetSync(LAST_BACKUP_TS_KEY, String(now));
         setLastSyncedManifestId(manifestEvent.id);
@@ -1240,6 +1245,9 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
+      // Same store the auto-save failure paths use, so the Save Now toast can
+      // show THIS failure rather than a stale earlier one.
+      _lastAutoSaveError = errMsg;
       log('Save failed: ' + errMsg, 'error');
       setStatus('save-error');
       setMessage('Backup failed: ' + errMsg);
@@ -1650,14 +1658,19 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
      // (kept as a defence-in-depth no-op) and supersedes it as the primary
      // dedupe point.
      let _resolveInFlight: (ts: number | null) => void = () => {};
-     _checkInFlight = {
+     const _myRegistration = {
        pubkey: user.pubkey,
        promise: new Promise<number | null>((resolve) => { _resolveInFlight = resolve; }),
        startedAt: Date.now(),
      };
+     _checkInFlight = _myRegistration;
      const _clearInFlight = (ts: number | null = null) => {
        _resolveInFlight(ts);
-       if (_checkInFlight && _checkInFlight.pubkey === user.pubkey) _checkInFlight = null;
+       // Only clear OUR registration. A check that outlived the staleness
+       // window gets superseded by a fresh one; when the zombie finally
+       // resolves it must not null out the fresh check's registration, or a
+       // third caller would start yet another concurrent run.
+       if (_checkInFlight === _myRegistration) _checkInFlight = null;
      };
 
      // CRITICAL: Wait for IDB memCache to be populated before reading the checked flag.
@@ -1694,6 +1707,8 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     // Prevent concurrent calls (post-await; the in-flight Promise above
     // catches anyone who entered while we were awaiting IDB).
     _checkedPubkey = user.pubkey;
+    // Every real check starts with a clean summary — see its declaration.
+    _lastCheckSummary = { found: false, ts: null };
 
     try {
       const pubkey = user.pubkey;
@@ -2019,6 +2034,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log('Check failed: ' + errMsg, 'error');
+      _lastCheckSummary = { found: false, ts: null, failed: true };
       setStatus('idle');
       setCheckSettled(true);
     } finally {
@@ -2257,7 +2273,12 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         const count = preview.removals.reduce((n, r) => n + r.ids.length, 0);
         if (count > SILENT_REMOVAL_LIMIT) {
           log(`Sync paused: merge would remove ${count} item(s) — leaving it for the user to confirm`);
-          if (!silent) { setStatus('found'); setMessage('A newer backup is available'); }
+          // Surface the hold even from the background path. 'found' no longer
+          // blocks auto-save, and a silent hold that stayed invisible meant a
+          // device could sit un-synced indefinitely with the user never told
+          // there was a decision waiting for them.
+          setStatus('found');
+          setMessage(`A newer backup is waiting — applying it would remove ${count} item(s), so it needs your confirmation`);
           // Report the hold. Returning silently here let the manual sync say
           // "Synced" for a merge that applied nothing, which is the worst of
           // both worlds: the user is told it worked AND their two devices
@@ -2375,6 +2396,10 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       const summary = getLastCheckSummary();
       if (!remoteTs) {
         if (!summary.found) {
+          if (summary.failed) {
+            log('Manual sync: the relay check itself failed');
+            return { status: 'error', localTs, detail: 'Could not complete the relay check — see the backup log. Your relays may be unreachable right now.' };
+          }
           log('Manual sync: no backup manifest found on any relay');
           return { status: 'none-found', localTs };
         }
@@ -2600,6 +2625,12 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       const cpNewTs = mode === 'replace'
         ? cp.timestamp
         : Math.max(cp.timestamp, parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10));
+      // Merge: we now hold this manifest's state — the next sync tick must not
+      // re-merge it. Replace: deliberately NOT recorded. A rollback has not
+      // taken in the newest manifest, and saying otherwise would silence the
+      // sync that the user may still want; the tombstones written by the
+      // rollback are what keep that later merge from undoing it.
+      if (mode === 'merge') setLastSyncedManifestId(cp.eventId);
       idbSetSync(LAST_BACKUP_TS_KEY, String(cpNewTs));
       idbSetSync('corkboard:preferred-checkpoint', cp.eventId);
       setLastBackupTs(cpNewTs);

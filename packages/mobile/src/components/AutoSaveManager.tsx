@@ -13,7 +13,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 import { useAuth } from '../lib/AuthContext';
-import { useNostrBackup, getStoredCheckpoints } from '../hooks/useNostrBackup';
+import { useNostrBackup, getStoredCheckpoints, getLastSyncedManifestId } from '../hooks/useNostrBackup';
 import { registerBackupFlush } from '../lib/backupFlush';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { STORAGE_KEYS } from '../lib/storageKeys';
@@ -63,30 +63,18 @@ export function AutoSaveManager() {
         const cps = getStoredCheckpoints();
         if (!cps.length) return;
         const newest = cps.reduce((a, b) => (b.timestamp > a.timestamp ? b : a));
-        let localTs = parseInt(mobileStorage.getSync(STORAGE_KEYS.LAST_BACKUP_TS) || '0', 10);
 
-        // Local data that predates timestamping: stamp it NOW so it counts as
-        // newer than any existing cloud save (it holds changes no save has
-        // captured), and let the normal push/merge machinery take over from
-        // here. Mirrors web's checkRemoteBackup. The auto-save trigger will
-        // upload this state shortly, making the stamp honest.
-        if (localTs === 0) {
-          const feeds = mobileStorage.getSync('nostr-custom-feeds');
-          const filters = mobileStorage.getSync('corkboard:tab-filters');
-          const hasMeaningfulLocal =
-            (feeds && feeds !== '[]' && feeds !== 'null') ||
-            (filters && filters !== '{}' && filters !== 'null');
-          if (hasMeaningfulLocal) {
-            localTs = Math.floor(Date.now() / 1000);
-            mobileStorage.setSync(STORAGE_KEYS.LAST_BACKUP_TS, String(localTs));
-            if (__DEV__) console.log('[AutoSave] stamped LAST_BACKUP_TS to protect unsynced local data');
-            return;
-          }
-        }
-
-        // Strictly newer: equal timestamps mean this device wrote it.
-        if (newest.timestamp <= localTs) return;
-        if (__DEV__) console.log(`[AutoSave] cloud ${newest.timestamp} newer than local ${localTs} — merging`);
+        // Identity, not clocks: merge whenever the newest manifest is one this
+        // device has not already published or merged.
+        //
+        // This replaces a timestamp comparison AND the stamp-now heuristic that
+        // used to sit here (stamping LAST_BACKUP_TS to the current time for a
+        // device holding un-backed-up data, so a wholesale restore couldn't
+        // overwrite it). Restores are union merges now, so there was nothing to
+        // protect — and the stamp made the device permanently "newer" than every
+        // real cloud save, so it never pulled again.
+        if (newest.eventId === getLastSyncedManifestId()) return;
+        if (__DEV__) console.log(`[AutoSave] cloud manifest ${newest.timestamp} not yet merged here — merging`);
         await restoreBackup(newest, { silent: true });
       } catch (e) {
         if (__DEV__) console.warn('[AutoSave] sync failed (will retry):', e);

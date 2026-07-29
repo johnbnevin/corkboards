@@ -80,6 +80,19 @@ import {
 import { withoutTombstoneRecording } from '../storage/MmkvStorage';
 
 const LAST_BACKUP_TS_KEY = STORAGE_KEYS.LAST_BACKUP_TS;
+/**
+ * Event id of the newest manifest this device already holds (published or
+ * merged). "Have I seen THIS manifest?" replaces timestamp comparison as the
+ * sync criterion — a clock can be wrong or deliberately stamped ahead, an
+ * event id cannot. Parity with web.
+ */
+export const LAST_SYNCED_MANIFEST_KEY = 'corkboard:last-synced-manifest-id';
+export function getLastSyncedManifestId(): string {
+  return mobileStorage.getSync(LAST_SYNCED_MANIFEST_KEY) || '';
+}
+export function setLastSyncedManifestId(eventId: string): void {
+  if (eventId) mobileStorage.setSync(LAST_SYNCED_MANIFEST_KEY, eventId);
+}
 const CHECKPOINTS_KEY = STORAGE_KEYS.REMOTE_CHECKPOINTS;
 
 /**
@@ -705,6 +718,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       setCheckpoints(updated);
 
       mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(now));
+      setLastSyncedManifestId(manifestEvent.id);
       mobileStorage.setSync(STORAGE_KEYS.BACKUP_SLOT_CURSOR, String(slotCursor + 1)); // advance the ring
       setLastBackupTs(now);
       saveSnapshot();
@@ -846,6 +860,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
 
       // Update local state
       mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(now));
+      setLastSyncedManifestId(manifestEvent.id);
       setLastBackupTs(now);
       saveSnapshot();
 
@@ -949,12 +964,12 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     // Through a NIP-46 bunker each of those decrypts is a network round-trip,
     // and paying them just to re-learn "nothing changed" is what made a bunker
     // login crawl. Parity with web's checkRemoteBackup.
-    const localSeenTs = parseInt(mobileStorage.getSync(LAST_BACKUP_TS_KEY) || '0', 10);
+    const alreadySyncedId = getLastSyncedManifestId();
     const cps: RemoteCheckpoint[] = [];
     let signerTimedOut = false;
     for (const ev of allEvents) {
-      const isCached = !!getCachedManifestJson(ev.id);
-      if (!isCached && localSeenTs > 0 && ev.created_at <= localSeenTs) continue;
+      // The manifest we already hold needs no signer round-trip to re-read.
+      if (ev.id === alreadySyncedId && !getCachedManifestJson(ev.id)) continue;
       let data: Record<string, unknown> | null = null;
       try { data = JSON.parse(ev.content); } catch {
         const cachedJson = getCachedManifestJson(ev.id);
@@ -1101,6 +1116,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       // the remote state when local contributed content the cloud lacks, so
       // the auto-save trigger pushes the union (see saveSnapshot).
       mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(checkpoint.timestamp));
+      setLastSyncedManifestId(checkpoint.eventId);
       setLastBackupTs(checkpoint.timestamp);
       saveSnapshot(localContributed ? remoteSnapshot.keys : undefined);
       if (localContributed) log('Local content not yet in cloud — auto-save will push the merged state');

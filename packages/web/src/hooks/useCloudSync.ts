@@ -84,16 +84,14 @@ export function useCloudSync({
         // runs, so the old read compared against the previous tick's value —
         // null on the first sync after load, which skipped the merge that the
         // check had just found. (The state read stays as a fallback.)
+        // Non-null means: the newest manifest on the relays is one this device
+        // has not already published or merged. That identity check lives in
+        // checkRemoteBackup and replaces the timestamp comparison that used to
+        // be here — a device whose clock said it was ahead (see the removed
+        // stamp-now heuristic) would refuse to pull forever.
         const checked = await cur.checkRemoteBackup(true);
-        const remote = checked ?? latest.current.remoteTimestamp;
-        const local = latest.current.lastBackupTs;
-        if (!remote) return;
-        // Strictly newer: equal timestamps mean this device wrote it.
-        if (local && remote <= local) {
-          debugLog(`[cloudSync] cloud ${remote} not newer than local ${local}`);
-          return;
-        }
-        debugLog(`[cloudSync] cloud ${remote} newer than local ${local} — merging`);
+        if (!checked) return;
+        debugLog(`[cloudSync] cloud manifest ${checked} not yet merged here — merging`);
         // Let React commit the check's setRemoteBackup before loading:
         // loadRemoteBackup reads remoteBackup from its own closure, and the
         // pre-commit closure still has the previous (possibly null) value.

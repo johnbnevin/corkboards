@@ -190,6 +190,34 @@ export function isRelayBlocked(url: string): boolean {
 }
 
 const LAST_BACKUP_TS_KEY = 'corkboard:last-backup-ts';
+/**
+ * Event id of the newest backup manifest this device has already taken in —
+ * either because it published it, or because it merged it.
+ *
+ * "Have I already seen THIS manifest?" replaces "is the remote timestamp
+ * greater than mine?" as the sync criterion. Timestamps could not answer the
+ * question honestly: a device holding data it had never backed up stamped
+ * itself with the CURRENT time (to protect that data back when a restore
+ * could overwrite it), which made it permanently "newer" than every real
+ * cloud save, so it never pulled again — a desktop could save all day and the
+ * phone would answer "nothing newer" forever. Event ids are content-addressed
+ * and unique per save, so this comparison cannot be fooled by a clock, a
+ * stamp, or two devices saving in the same second.
+ */
+const LAST_SYNCED_MANIFEST_KEY = 'corkboard:last-synced-manifest-id';
+
+function getLastSyncedManifestId(): string {
+  return idbGetSync(LAST_SYNCED_MANIFEST_KEY) || '';
+}
+function setLastSyncedManifestId(eventId: string): void {
+  if (!eventId) return;
+  idbSetSync(LAST_SYNCED_MANIFEST_KEY, eventId);
+  idbSet(LAST_SYNCED_MANIFEST_KEY, eventId).catch(() => {});
+}
+
+/** What the last check saw, for callers that need more than the return value. */
+let _lastCheckSummary: { found: boolean; ts: number | null } = { found: false, ts: null };
+export function getLastCheckSummary(): { found: boolean; ts: number | null } { return _lastCheckSummary; }
 const LAST_CHUNK_COUNT_KEY = 'corkboard:last-chunk-count';
 const BACKUP_CHECKED_KEY = 'corkboard:backup-checked';
 // Synchronous mirror of BACKUP_CHECKED_KEY in localStorage so we can skip
@@ -1120,6 +1148,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       } else {
         setStatus('saved');
         idbSetSync(LAST_BACKUP_TS_KEY, String(now));
+        setLastSyncedManifestId(manifestEvent.id);
         idbSetSync(LAST_CHUNK_COUNT_KEY, '0'); // v4 uses Blossom, no chunks
         idbSetSync(BACKUP_SLOT_CURSOR_KEY, String(slotCursor + 1)); // advance the ring
         idbRemoveSync('corkboard:preferred-checkpoint'); // new save is now the latest
@@ -1327,6 +1356,8 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       // Update timestamp so auto-restore knows local is current
       idbSetSync(LAST_BACKUP_TS_KEY, String(now));
       setLastBackupTs(now);
+      // This manifest is ours — never merge our own save back into ourselves.
+      setLastSyncedManifestId(manifestEvent.id);
 
       // Snapshot for change detection
       const snapshot: Record<string, string> = {};
@@ -1747,17 +1778,9 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       // itself, unencrypted and signed. When it is not newer, skip the decrypt
       // entirely. Encryption is unchanged — we just stop paying for it when
       // the answer is "nothing to do".
-      const preLocalTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
-      const preHasLocal = (() => {
-        const f = idbGetSync('nostr-custom-feeds');
-        const d = idbGetSync('dismissed-notes');
-        const c = idbGetSync('collapsed-notes');
-        return (!!f && f !== '[]' && f !== 'null')
-          || (!!d && d !== '[]' && d !== 'null')
-          || (!!c && c !== '[]' && c !== 'null');
-      })();
-      if (preHasLocal && preLocalTs > 0 && preLocalTs >= bestManifestEvent.created_at) {
-        log(`Local (${preLocalTs}) is current vs remote (${bestManifestEvent.created_at}) — skipping manifest decrypt`);
+      _lastCheckSummary = { found: true, ts: bestManifestEvent.created_at };
+      if (getLastSyncedManifestId() === bestManifestEvent.id) {
+        log(`Already synced with this manifest (${bestManifestEvent.created_at}) — skipping decrypt`);
         _checkedPubkey = user.pubkey;
         idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
         idbSet(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true').catch(() => {});
@@ -1766,8 +1789,8 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         // action) can still compare without a decrypt.
         setStatus('idle');
         setCheckSettled(true);
-        _clearInFlight(bestManifestEvent.created_at);
-        return bestManifestEvent.created_at;
+        _clearInFlight(null);
+        return null;
       }
 
       type ManifestData = { v?: number; chunks?: number; timestamp?: number; keys?: string[]; relays?: string[]; corkboardNames?: string[]; encryption?: string; wrappedKey?: string; signerMethod?: string; blossomUrl?: string; blossomHash?: string; deviceId?: string; stats?: { corkboards: number; savedForLater: number; dismissed: number } };
@@ -1893,17 +1916,14 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         (localFeeds && localFeeds !== '[]' && localFeeds !== 'null') ||
         (localDismissed && localDismissed !== '[]' && localDismissed !== 'null') ||
         (localCollapsed && localCollapsed !== '[]' && localCollapsed !== 'null');
-      let localLastBackupTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
-      // If we see real local data with no timestamp yet, stamp it now so subsequent
-      // checks can rely on timestamp comparisons. Independent of the dismiss decision.
-      if (hasLocalData && localLastBackupTs === 0) {
-        const stamp = Math.floor(Date.now() / 1000);
-        idbSetSync(LAST_BACKUP_TS_KEY, String(stamp));
-        idbSet(LAST_BACKUP_TS_KEY, String(stamp)).catch(() => {});
-        setLastBackupTs(stamp);
-        log(`Stamped LAST_BACKUP_TS=${stamp} to protect existing local data`);
-        localLastBackupTs = stamp;
-      }
+      const localLastBackupTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      // NOTE: this deliberately no longer stamps LAST_BACKUP_TS = now for a
+      // device that has local data but has never backed up. That stamp existed
+      // to stop a wholesale restore from overwriting un-backed-up work — but
+      // restores are union merges now, so there is nothing to protect against,
+      // and the stamp actively broke sync: it made the device permanently
+      // "newer" than every real cloud save, so it never pulled again. Whether
+      // to pull is decided by manifest identity above, not by this clock.
       const newestRemoteTs = manifest?.timestamp || bestManifestEvent.created_at;
       const localIsCurrentOrNewer = localLastBackupTs > 0 && localLastBackupTs >= newestRemoteTs;
       log(`checkRemoteBackup: hasLocalData=${!!hasLocalData} localTs=${localLastBackupTs} newestRemoteTs=${newestRemoteTs} localIsCurrentOrNewer=${localIsCurrentOrNewer} force=${force}`);
@@ -2194,6 +2214,8 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       idbSetSync(LAST_BACKUP_TS_KEY, String(backup.timestamp));
       idbSetSync(LAST_CHUNK_COUNT_KEY, String(backup.chunks));
       setLastBackupTs(backup.timestamp);
+      // We now hold this manifest's state; don't merge it again.
+      if (manifestEventRef.current) setLastSyncedManifestId(manifestEventRef.current.id);
       const wasSilent = silent;
 
       // Change-detection baseline. When local contributed nothing, baseline is
@@ -2274,17 +2296,20 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     try {
       log('Manual sync: looking for a newer backup on all relays...');
       // force=true bypasses the session/localStorage "already checked" guards.
+      // Returns the timestamp only when the newest manifest is one this device
+      // has NOT already taken in; null means "nothing new" (or nothing found).
       const remoteTs = await checkRemoteBackup(true);
       const localTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      const summary = getLastCheckSummary();
       if (!remoteTs) {
-        log('Manual sync: no backup manifest found on any relay');
-        return { status: 'none-found', localTs };
+        if (!summary.found) {
+          log('Manual sync: no backup manifest found on any relay');
+          return { status: 'none-found', localTs };
+        }
+        log('Manual sync: the newest manifest is one this device already holds');
+        return { status: 'up-to-date', remoteTs: summary.ts ?? undefined, localTs };
       }
-      if (localTs && remoteTs <= localTs) {
-        log(`Manual sync: newest remote (${remoteTs}) is not newer than local (${localTs})`);
-        return { status: 'up-to-date', remoteTs, localTs };
-      }
-      log(`Manual sync: remote ${remoteTs} is newer than local ${localTs} — merging`);
+      log(`Manual sync: found a manifest this device has not merged (${remoteTs}) — merging`);
       // Not silent: this is user-initiated, so the normal restore UI is right.
       // askOnRemovals still guards a mass deletion behind a confirmation.
       await loadRemoteBackup({ askOnRemovals: true });

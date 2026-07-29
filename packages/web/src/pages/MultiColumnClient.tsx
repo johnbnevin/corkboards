@@ -747,7 +747,7 @@ export function MultiColumnClient() {
   const [isFiltersCollapsed, setIsFiltersCollapsed] = useLocalStorage<boolean>('filter-panel-collapsed', isMobile);
 
   // Collapsed notes management
-  const { dismissedCount, isDismissed, isCollapsedThisSession, isSoftDismissed, consolidate: rawConsolidate, clearDismissed, undismissMany, dismissedIds, collapsedCount: _collapsedCount, collapsedIds, dismiss, dismissMultiple, dismissThreadRoots, dismissedThreadRootSet } = useCollapsedNotes();
+  const { dismissedCount, isDismissed, isCollapsed, isCollapsedThisSession, isSoftDismissed, consolidate: rawConsolidate, clearDismissed, undismissMany, dismissedIds, collapsedCount: _collapsedCount, collapsedIds, dismiss, dismissMultiple, dismissThreadRoots, dismissedThreadRootSet } = useCollapsedNotes();
 
   // Restore only the dismissed notes the user authored. The dismissed store keeps
   // just event IDs, so we ask relays which of them are ours in one batched query
@@ -3153,6 +3153,12 @@ export function MultiColumnClient() {
       }
       filteredNotes = deduplicatedNotes.filter(note => {
         if (dismissedIds.has(note.id)) return false;
+        // Saved-for-later notes leave the feed the same way dismissed ones do
+        // — they live on the Saved corkboard now, and re-fetching them into a
+        // normal corkboard must not resurface them. Notes saved THIS session
+        // keep their placeholder so the blank-space/consolidate flow matches
+        // dismiss (instant removal would also yank the layout mid-read).
+        if (isCollapsed(note.id) && !isCollapsedThisSession(note.id)) return false;
         // Belongs to a dismissed thread root (persisted) — hide it even if it
         // arrived after the "dismiss all associated" action, or if the root
         // itself is no longer in view.
@@ -3279,7 +3285,7 @@ export function MultiColumnClient() {
     const allDismissed = deduplicatedNotes.length > 0 && finalNotes.length === 0 && !hasFiltersActive;
 
     return { notes: finalNotes, filteredHashtags: computedHashtags, hasFilteredNotes, allDismissed };
-  }, [deduplicatedNotes, eventLookup, noteClassifications, isDismissed, dismissedThreadRootSet, isOnboarding, isDiscoverTab, kindFilters, filterMode, hashtagFilters, hasActiveContentFilters, feedContentFilterConfig, debouncedHideExactText, pinnedIdSet, showOwnNotes, showPinned, showUnpinned, activeTab, user?.pubkey]);
+  }, [deduplicatedNotes, eventLookup, noteClassifications, isDismissed, isCollapsed, isCollapsedThisSession, dismissedThreadRootSet, isOnboarding, isDiscoverTab, kindFilters, filterMode, hashtagFilters, hasActiveContentFilters, feedContentFilterConfig, debouncedHideExactText, pinnedIdSet, showOwnNotes, showPinned, showUnpinned, activeTab, user?.pubkey]);
 
   // Keep allDismissed ref in sync for handleLoadMoreByCount callback
   allDismissedRef.current = allDismissed;

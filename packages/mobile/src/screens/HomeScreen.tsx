@@ -130,7 +130,7 @@ export function HomeScreen() {
   const { prefetchFromNotes } = useBulkAuthors();
   const { mutedPubkeys } = useMuteList();
   const { isBookmarked, toggleBookmark } = useBookmarks();
-  const { isDismissed, dismissedThreadRootSet } = useCollapsedNotes();
+  const { isDismissed, isCollapsed, isCollapsedThisSession, dismissedThreadRootSet } = useCollapsedNotes();
   // Pin hook runs once per screen; the set + toggler are threaded into each card.
   const { pinnedSet, togglePin } = usePinnedNotes();
 
@@ -439,6 +439,10 @@ export function HomeScreen() {
     // Filter dismissed notes
     result = result.filter(note => {
       if (isDismissed(note.id)) return false;
+      // Saved-for-later notes leave the feed the same way dismissed ones do —
+      // they live on the Saved corkboard now. Notes saved THIS session keep
+      // their placeholder for the consolidate flow (parity with web).
+      if (isCollapsed(note.id) && !isCollapsedThisSession(note.id)) return false;
       // Belongs to a dismissed thread root (persisted via "dismiss all
       // associated") — hide it even if it arrived after the dismissal, or if
       // the root itself is no longer in view.
@@ -452,7 +456,7 @@ export function HomeScreen() {
     });
 
     return result;
-  }, [events, kindFilters, filterMode, hashtagFilters, feedContentFilterConfig, debouncedHideExactText, hasContentFilters, eventLookup, isDismissed, dismissedThreadRootSet]);
+  }, [events, kindFilters, filterMode, hashtagFilters, feedContentFilterConfig, debouncedHideExactText, hasContentFilters, eventLookup, isDismissed, isCollapsed, isCollapsedThisSession, dismissedThreadRootSet]);
 
   // Count dismissed notes from the deduped set (before kind/hashtag filters)
   const dismissedCount = useMemo(

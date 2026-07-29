@@ -19,7 +19,6 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { triggerDownload } from '@/lib/triggerDownload';
-import { BlossomUploader } from '@nostrify/nostrify/uploaders';
 import type { NostrEvent, NPool } from '@nostrify/nostrify';
 import type { NUser } from '@nostrify/react/login';
 import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache, createRelayFresh } from '@/components/NostrProvider';
@@ -81,7 +80,13 @@ async function decryptSelfPayload(
     try { return await withTimeout(signer.nip44.decrypt(pubkey, ciphertext)); }
     catch (err) { firstErr = err; }
   }
-  if (signer.nip04) {
+  // Fall back to legacy NIP-04 only on a genuine decrypt ERROR — never on a
+  // timeout. NConnectSigner defines BOTH nip04 and nip44 unconditionally, so a
+  // bunker that is merely slow used to burn the timeout twice (15s + 15s)
+  // before giving up: a signer that cannot answer in time will not answer any
+  // faster for a different algorithm, and the login splash waited for both.
+  const timedOut = firstErr instanceof Error && firstErr.message === 'decrypt_timeout';
+  if (signer.nip04 && !timedOut) {
     return withTimeout(signer.nip04.decrypt(pubkey, ciphertext));
   }
   throw firstErr ?? new Error('Signer supports neither NIP-44 nor NIP-04 decryption');
@@ -123,6 +128,45 @@ function cacheManifestJson(eventId: string, json: string): void {
     for (const old of ids.slice(0, ids.length - MANIFEST_CACHE_MAX)) delete cache[old];
   }
   idbSetSync(MANIFEST_PLAIN_CACHE_KEY, JSON.stringify(cache));
+}
+
+/**
+ * Unwrapped AES keys, keyed by the wrappedKey ciphertext.
+ *
+ * Unwrapping is a signer decrypt — a bunker round-trip — and the SAME
+ * ciphertext gets unwrapped more than once on a normal login (the auto-restore
+ * applies a checkpoint, then the cloud-sync tick loads the same manifest).
+ * The ciphertext names its own plaintext, so caching for the session is safe.
+ * Session-only, deliberately: this is key material, so it never touches disk.
+ */
+const _aesKeyCache = new Map<string, string>();
+const AES_KEY_CACHE_MAX = 16;
+
+async function unwrapAesKey(
+  signer: { nip44?: { decrypt(pk: string, c: string): Promise<string> }; nip04?: { decrypt(pk: string, c: string): Promise<string> } },
+  pubkey: string,
+  wrappedKey: string,
+  signerMethod: string,
+  timeoutMs = 20000,
+): Promise<string> {
+  const cached = _aesKeyCache.get(wrappedKey);
+  if (cached) return cached;
+  const decryptor = signerMethod === 'nip04' ? signer.nip04 : signer.nip44;
+  if (!decryptor) throw new Error(`Signer does not support ${signerMethod} decryption`);
+  // Bounded, unlike the bare awaits this replaces — those inherited
+  // NConnectSigner's 60s ceiling, so a stalled bunker froze the restore (and
+  // the splash behind it) for a full minute with no message.
+  const hex = await Promise.race([
+    decryptor.decrypt(pubkey, wrappedKey),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Signer timed out unwrapping the backup key')), timeoutMs)),
+  ]);
+  if (_aesKeyCache.size >= AES_KEY_CACHE_MAX) {
+    const oldest = _aesKeyCache.keys().next();
+    if (!oldest.done) _aesKeyCache.delete(oldest.value);
+  }
+  _aesKeyCache.set(wrappedKey, hex);
+  return hex;
 }
 
 // Relay blacklist - persists across sessions
@@ -290,12 +334,6 @@ export function isBlobRejectingServer(url: string): boolean {
   return getBlobRejectingServers().has(normalizeServer(url));
 }
 
-/** True when an upload error indicates the server rejected the blob's content type. */
-function isContentTypeRejection(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /\b415\b/.test(msg) || /unsupported media type/i.test(msg);
-}
-
 // Resolved list used throughout this module. Skips servers known to reject the
 // backup-blob type; if that would leave nothing, falls back to the full list
 // (the flags may be stale / the network may have changed).
@@ -329,29 +367,73 @@ async function uploadBlobWithRedundancy(
   let hash: string | null = null;
   let count = 0;
   const errors: string[] = [];
+  if (servers.length === 0) return { url, hash, count, errors };
+
+  // ONE signature for every server.
+  //
+  // This used to build a `new BlossomUploader({ servers: [server] })` per
+  // server, and each instance signs its own kind-24242 auth event — so a save
+  // cost one signature PER SERVER. Through a NIP-46 bunker every signature is
+  // a network round-trip to the remote signer, on every save, every 30s; that
+  // flood is the likely source of Amber's "invalid ephemeral" errors and a big
+  // part of why saving felt slow. BUD-01 binds upload auth to the blob hash
+  // (`x`) and `t=upload` — NOT to a server — so one signed event authorises
+  // the upload everywhere. (BlossomUploader can take every server at once and
+  // does sign once, but it resolves via Promise.any, which cannot report how
+  // many copies actually landed; we need that count for redundancy.)
+  const body = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', body);
+  const x = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+  const nowSecs = Math.floor(Date.now() / 1000);
+
+  let authorization: string;
+  try {
+    const authEvent = await signer.signEvent({
+      kind: 24242,
+      content: `Upload ${file.name}`,
+      created_at: nowSecs,
+      tags: [
+        ['t', 'upload'],
+        ['x', x],
+        ['size', String(file.size)],
+        ['expiration', String(nowSecs + 3600)],
+      ],
+    });
+    authorization = `Nostr ${btoa(JSON.stringify(authEvent))}`;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    onLog?.(`  Could not sign the upload authorization: ${msg}`, 'error');
+    return { url, hash, count, errors: [`signer: ${msg}`] };
+  }
+
   for (const server of servers) {
     if (count >= REDUNDANT_COPIES) break;
     try {
-      const uploader = new BlossomUploader({ servers: [server], signer });
-      const tags = await Promise.race([
-        uploader.upload(file),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000)),
-      ]);
-      const urlTag = tags.find((t: string[]) => t[0] === 'url');
-      const hashTag = tags.find((t: string[]) => t[0] === 'x' || t[0] === 'sha256');
-      if (urlTag?.[1]) {
-        if (!url) { url = urlTag[1]; hash = hashTag?.[1] ?? null; }
-        count++;
-        onLog?.(`  Uploaded to ${server} (${count}/${REDUNDANT_COPIES})`);
+      const endpoint = server.replace(/\/+$/, '') + '/upload';
+      const response = await fetch(endpoint, {
+        method: 'PUT',
+        body,
+        headers: { authorization, 'content-type': file.type || 'text/plain' },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!response.ok) {
+        if (response.status === 415) {
+          markBlobRejectingServer(server);
+          onLog?.(`  ${server} rejects backup blobs (HTTP 415) — flagged; consider removing it`, 'warn');
+        } else {
+          onLog?.(`  ${server} failed: HTTP ${response.status}`, 'warn');
+        }
+        try { errors.push(`${new URL(server).hostname}: HTTP ${response.status}`); } catch { errors.push(`HTTP ${response.status}`); }
+        continue;
       }
+      const result = await response.json().catch(() => null) as { url?: string; sha256?: string } | null;
+      const blobUrl = result?.url || `${server.replace(/\/+$/, '')}/${x}`;
+      if (!url) { url = blobUrl; hash = result?.sha256 || x; }
+      count++;
+      onLog?.(`  Uploaded to ${server} (${count}/${REDUNDANT_COPIES})`);
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (isContentTypeRejection(err)) {
-        markBlobRejectingServer(server);
-        onLog?.(`  ${server} rejects backup blobs (HTTP 415) — flagged; consider removing it`, 'warn');
-      } else {
-        onLog?.(`  ${server} failed: ${errMsg}`, 'warn');
-      }
+      const errMsg = err instanceof Error ? (err.message || err.name) : String(err);
+      onLog?.(`  ${server} failed: ${errMsg}`, 'warn');
       try { errors.push(`${new URL(server).hostname}: ${errMsg}`); } catch { errors.push(errMsg); }
     }
   }
@@ -1294,8 +1376,14 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     } catch (err) {
       // Keep the reason. A bare `catch {}` here is why every failure in the
       // encrypt/sign stages surfaced as an unexplained "something went wrong".
+      // AggregateError is what NPool.event()'s Promise.any throws when EVERY
+      // routed relay rejected. Its `message` is empty, so the raw fallback
+      // surfaced the literal word "AggregateError" to the user — technically
+      // true and completely unactionable.
       _lastAutoSaveError = err instanceof Error
-        ? (err.message || err.name || err.constructor.name)
+        ? (err.name === 'AggregateError'
+            ? 'No relay accepted the backup — check your relay list in Advanced Settings.'
+            : (err.message || err.name || err.constructor.name))
         : String(err);
       debugWarn('[backup]', 'Auto-save failed: ' + _lastAutoSaveError);
       log('Auto-save failed: ' + _lastAutoSaveError, 'error');
@@ -1409,9 +1497,16 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
      }
 
      // Concurrent-call dedupe: if a check is already running for this pubkey,
-     // join its promise instead of starting a parallel run. Effective even if
-     // a future change re-introduces effect re-firing.
-     if (!force && _checkInFlight && _checkInFlight.pubkey === user.pubkey) {
+     // join its promise instead of starting a parallel run.
+     //
+     // This now applies to FORCED calls too. `force` is meant to bypass the
+     // "already checked this session" guards, not to run a second copy of a
+     // check that is happening right now — and it did: useCloudSync forces a
+     // check 4s after load, which on a slow bunker lands while the login check
+     // is still waiting on the signer, so both raced to decrypt the identical
+     // manifest through the same signer. Joining gives the caller the same
+     // answer without a second round-trip.
+     if (_checkInFlight && _checkInFlight.pubkey === user.pubkey) {
        return _checkInFlight.promise;
      }
 
@@ -1636,6 +1731,44 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
 
       // Store the raw manifest event for later use
       manifestEventRef.current = bestManifestEvent;
+
+      // ── Is this manifest even worth decrypting? ────────────────────────────
+      //
+      // The manifest is NIP-44 encrypted (deliberately — plaintext leaked
+      // corkboard names and the Blossom URL). With a local key that decrypt is
+      // free; through a NIP-46 bunker it is a network round-trip to the
+      // signer, and this runs on the login critical path and again on every
+      // sync tick. That is the whole "login hangs at 'Manifest is not
+      // plaintext JSON, decrypting…'" complaint, and it is why a bunker login
+      // felt instant in 0.8.0 (plaintext manifests) and slow afterwards.
+      //
+      // We do not need the contents to answer the only question the common
+      // case asks: is the cloud newer than us? `created_at` is on the event
+      // itself, unencrypted and signed. When it is not newer, skip the decrypt
+      // entirely. Encryption is unchanged — we just stop paying for it when
+      // the answer is "nothing to do".
+      const preLocalTs = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      const preHasLocal = (() => {
+        const f = idbGetSync('nostr-custom-feeds');
+        const d = idbGetSync('dismissed-notes');
+        const c = idbGetSync('collapsed-notes');
+        return (!!f && f !== '[]' && f !== 'null')
+          || (!!d && d !== '[]' && d !== 'null')
+          || (!!c && c !== '[]' && c !== 'null');
+      })();
+      if (preHasLocal && preLocalTs > 0 && preLocalTs >= bestManifestEvent.created_at) {
+        log(`Local (${preLocalTs}) is current vs remote (${bestManifestEvent.created_at}) — skipping manifest decrypt`);
+        _checkedPubkey = user.pubkey;
+        idbSetSync(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true');
+        idbSet(`${BACKUP_CHECKED_KEY}:${user.pubkey}`, 'true').catch(() => {});
+        markBackupCheckedSync(user.pubkey);
+        // Report the timestamp so callers (useCloudSync, the manual sync
+        // action) can still compare without a decrypt.
+        setStatus('idle');
+        setCheckSettled(true);
+        _clearInFlight(bestManifestEvent.created_at);
+        return bestManifestEvent.created_at;
+      }
 
       type ManifestData = { v?: number; chunks?: number; timestamp?: number; keys?: string[]; relays?: string[]; corkboardNames?: string[]; encryption?: string; wrappedKey?: string; signerMethod?: string; blossomUrl?: string; blossomHash?: string; deviceId?: string; stats?: { corkboards: number; savedForLater: number; dismissed: number } };
 
@@ -1920,9 +2053,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         const sm = m.signerMethod || 'nip44';
         log(`Unwrapping AES key via ${sm}...`);
         setMessage('Decrypting key via signer...');
-        const aesKeyHex = sm === 'nip04'
-          ? await user.signer.nip04!.decrypt(pubkey, m.wrappedKey)
-          : await user.signer.nip44!.decrypt(pubkey, m.wrappedKey);
+        const aesKeyHex = await unwrapAesKey(user.signer, pubkey, m.wrappedKey, sm);
 
         const aesRaw = hexToRawKey(aesKeyHex);
         const aesKey = await importAesKey(aesRaw);
@@ -1982,9 +2113,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
           const sm = mf.signerMethod || 'nip44';
           log(`Unwrapping AES key via ${sm}...`);
           setMessage('Decrypting key via signer...');
-          const aesKeyHex = sm === 'nip04'
-            ? await user.signer.nip04!.decrypt(pubkey, mf.wrappedKey)
-            : await user.signer.nip44!.decrypt(pubkey, mf.wrappedKey);
+          const aesKeyHex = await unwrapAesKey(user.signer, pubkey, mf.wrappedKey, sm);
 
           const aesRaw = hexToRawKey(aesKeyHex);
           const aesKey = await importAesKey(aesRaw);
@@ -2234,7 +2363,28 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     }
   }, [user]);
 
-  const loadCheckpointFn = useCallback(async (cp: RemoteCheckpoint) => {
+  /**
+   * Apply a checkpoint.
+   *
+   * `mode` decides whether this ADDS or REPLACES, and the distinction is the
+   * difference between a sync and a data loss:
+   *
+   *   'merge'   — the automatic login/idle restore. Unions id sets and lets
+   *               tombstones carry deletions, so applying a checkpoint that
+   *               turns out to be older than local state cannot subtract
+   *               anything. This is the default because the automatic path
+   *               cannot know the checkpoint is the newest: when the manifest
+   *               decrypt times out (routine on a slow bunker) the checkpoint
+   *               list never refreshes, and a wholesale replace then wrote a
+   *               STALE snapshot over newer local data — the reported "phone
+   *               logged back in with 129 saved notes while the desktop has
+   *               134".
+   *   'replace' — the user explicitly picked an older checkpoint from the
+   *               Checkpoints dialog. Rolling back is the whole point there,
+   *               so a merge (which would resurrect everything they are
+   *               rolling back past) would be wrong.
+   */
+  const loadCheckpointFn = useCallback(async (cp: RemoteCheckpoint, mode: 'merge' | 'replace' = 'merge') => {
     if (!user) return;
     setStatus('restoring');
     setMessage('Saving current state before restoring...');
@@ -2289,20 +2439,37 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       if (!encryptedData) throw new Error('Could not download backup from any Blossom server');
 
       log('Decrypting...');
-      const aesRaw = await hexToRawKey(
-        cp.signerMethod === 'nip44'
-          ? await user.signer.nip44!.decrypt(user.pubkey, cp.wrappedKey)
-          : await user.signer.nip04!.decrypt(user.pubkey, cp.wrappedKey)
+      const aesRaw = hexToRawKey(
+        await unwrapAesKey(user.signer, user.pubkey, cp.wrappedKey, cp.signerMethod)
       );
       const aesKey = await importAesKey(aesRaw);
       const json = await aesDecrypt(aesKey, encryptedData);
 
-      const restoredCount = await deserializeBackup(json, log);
-      log(`Checkpoint restored: ${restoredCount} keys`);
+      // Captured BEFORE any write — afterwards local IS the merged state.
+      const cpRemoteSnapshot = mode === 'merge' ? parseBackup(json) : null;
+      const cpLocalContributed = !!cpRemoteSnapshot && hasLocalContributions(localSnapshot(), cpRemoteSnapshot);
 
-      // Store snapshot of restored data for change detection
+      let restoredCount: number;
+      if (mode === 'replace') {
+        restoredCount = await deserializeBackup(json, log);
+        log(`Checkpoint restored (replace): ${restoredCount} keys`);
+      } else {
+        const merged = await mergeBackupIntoLocal(json, log);
+        restoredCount = merged.restored;
+        log(`Checkpoint merged: ${restoredCount} keys changed, ${merged.removals.length} keys had removals`);
+      }
+
+      // Change-detection baseline. On a merge that contributed local-only
+      // content, baseline on the REMOTE snapshot so the auto-save trigger sees
+      // that content as unsaved and pushes the union (same rule as
+      // loadRemoteBackup). On a replace, local IS the checkpoint.
       const cpSnapshot: Record<string, string> = {};
-      for (const key of SNAPSHOT_KEYS) cpSnapshot[key] = idbGetSync(key) || '';
+      if (mode === 'merge' && cpLocalContributed) {
+        for (const key of SNAPSHOT_KEYS) cpSnapshot[key] = cpRemoteSnapshot?.keys[key] ?? '';
+        log('Local content not yet in this checkpoint — auto-save will push the merged state');
+      } else {
+        for (const key of SNAPSHOT_KEYS) cpSnapshot[key] = idbGetSync(key) || '';
+      }
       persistSnapshotAndHashes(cpSnapshot);
 
       // Move this checkpoint to the top so it becomes the "most recent" for auto-restore
@@ -2313,9 +2480,17 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         setStoredCheckpoints(reordered);
       }
 
-      idbSetSync(LAST_BACKUP_TS_KEY, String(cp.timestamp));
+      // A MERGE never moves the clock backwards: local state that was already
+      // ahead of this checkpoint is still ahead after unioning it in, and
+      // lowering the stamp would make the next sync think the cloud is newer
+      // and re-merge forever. A replace is a deliberate rollback, so there the
+      // checkpoint's own timestamp is the truth.
+      const cpNewTs = mode === 'replace'
+        ? cp.timestamp
+        : Math.max(cp.timestamp, parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10));
+      idbSetSync(LAST_BACKUP_TS_KEY, String(cpNewTs));
       idbSetSync('corkboard:preferred-checkpoint', cp.eventId);
-      setLastBackupTs(cp.timestamp);
+      setLastBackupTs(cpNewTs);
 
       markBackupCheckedSync(user.pubkey);
       await Promise.all([

@@ -21,12 +21,18 @@ describe('shouldSweep', () => {
     expect(shouldSweep(base)).toEqual({ sweep: true })
   })
 
-  it('refuses a single unresolved reference', () => {
-    expect(shouldSweep({ ...base, unresolvedCount: 1 })).toEqual({
+  it('sweeps a single unresolved reference, and refuses only when there are none', () => {
+    // The threshold used to be 2, on the theory that one stuck reference is
+    // probably genuinely unreachable. In practice that one gray box is exactly
+    // what the user is staring at, and once its per-id miss decay hit the
+    // attempt ceiling nothing but the sweep could revive it — so "one
+    // unresolved" meant "unresolved forever". The decay already bounds the
+    // cost of retrying something truly dead.
+    expect(shouldSweep({ ...base, unresolvedCount: 1 })).toEqual({ sweep: true })
+    expect(shouldSweep({ ...base, unresolvedCount: MIN_UNRESOLVED_TO_SWEEP })).toEqual({ sweep: true })
+    expect(shouldSweep({ ...base, unresolvedCount: 0 })).toEqual({
       sweep: false, reason: 'below-threshold',
     })
-    // The threshold is inclusive at 2 — the boundary the user asked for.
-    expect(shouldSweep({ ...base, unresolvedCount: MIN_UNRESOLVED_TO_SWEEP })).toEqual({ sweep: true })
   })
 
   it('refuses while a sweep is already running', () => {

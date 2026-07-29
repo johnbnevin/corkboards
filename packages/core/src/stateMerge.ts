@@ -70,6 +70,22 @@ export const MAP_MERGE_KEYS: readonly string[] = [
   'corkboard:tab-filters',
 ]
 
+/**
+ * Keys whose value is a single number that only ever moves FORWARD, merged by
+ * taking the larger of the two.
+ *
+ * "I have seen notifications up to time T" is monotonic: reading more can only
+ * raise T. Left in the generic scalar bucket it was last-write-wins on the
+ * SNAPSHOT timestamp, so a device that had not opened notifications in weeks
+ * could push its older marker over a newer one purely by having saved more
+ * recently — and the badge would resurrect notifications the user had already
+ * read on the other device. Max-merge makes that impossible in both
+ * directions, without needing to know which device is "right".
+ */
+export const NUMERIC_MAX_MERGE_KEYS: readonly string[] = [
+  'corkboard:notifications-last-seen',
+]
+
 /** Removal log: key → id → unix seconds when it was removed. */
 export type TombstoneMap = Record<string, Record<string, number>>
 
@@ -280,6 +296,19 @@ export function mergeState(local: StateSnapshot, remote: StateSnapshot): MergeRe
       merged = mergeKeyedList(key, local, remote, tombstones)
     } else if (MAP_MERGE_KEYS.includes(key)) {
       merged = mergeMap(key, local, remote, tombstones)
+    } else if (NUMERIC_MAX_MERGE_KEYS.includes(key)) {
+      const localNum = Number(JSON.parse(local.keys[key] ?? 'null'))
+      const remoteNum = Number(JSON.parse(remote.keys[key] ?? 'null'))
+      const best = Math.max(
+        Number.isFinite(localNum) ? localNum : 0,
+        Number.isFinite(remoteNum) ? remoteNum : 0,
+      )
+      // Absent on both sides stays absent — writing a 0 would be a value the
+      // consumer then has to special-case.
+      merged = {
+        value: best > 0 ? JSON.stringify(best) : before,
+        removed: [],
+      }
     } else {
       // Scalars and anything unclassified: last-write-wins, but only when the
       // remote actually carries the key. A missing key means "this device never

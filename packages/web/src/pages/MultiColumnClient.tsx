@@ -340,6 +340,15 @@ export function MultiColumnClient() {
   // we can only read it after mount and correct the tab then. Skipped when the
   // session already had a tab (in-tab reload), for new users, or once the user
   // has navigated — so this never fights a deliberate choice.
+  // A cold start that lands on the notifications tab has to clear the badge
+  // too — markNotificationsSeen only ran from the tab-CHANGE handler, so
+  // relaunching straight onto notifications left the count stale until you
+  // navigated away and back.
+  useEffect(() => {
+    if (activeTab === 'notifications') markNotificationsSeen();
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- fire on tab identity only
+  }, [activeTab]);
+
   useEffect(() => {
     if (sessionStorage.getItem('corkboard:active-tab')) return;
     if (sessionStorage.getItem('corkboard:new-user')) return;
@@ -3796,7 +3805,21 @@ export function MultiColumnClient() {
   if (backupCheckSettled && backupStatus !== 'checking' && backupStatus !== 'found' && backupStatus !== 'restoring') {
     initialLoginDoneRef.current = true;
   }
-  const showLoginSplash = !initialLoginDoneRef.current && (!backupCheckSettled || backupStatus === 'checking' || backupStatus === 'found' || backupStatus === 'restoring');
+  // Block on the backup check ONLY when there is nothing to show yet.
+  //
+  // Waiting made sense when a restore could overwrite local data — you did not
+  // want the feed to flash stale content first. Restores are union merges now,
+  // so arriving early costs nothing and the wait is pure downside: with a
+  // NIP-46 bunker the check needs a network round-trip to the remote signer,
+  // and the user sat watching the splash log at "Manifest is not plaintext
+  // JSON, decrypting…" for as long as Amber took. If this device already has
+  // corkboards to render, render them; useCloudSync merges anything newer in
+  // the background. A genuinely empty device still waits, because there the
+  // restore IS the content.
+  const hasLocalDataToShow = customFeeds.length > 0;
+  const showLoginSplash = !initialLoginDoneRef.current
+    && !hasLocalDataToShow
+    && (!backupCheckSettled || backupStatus === 'checking' || backupStatus === 'found' || backupStatus === 'restoring');
   if (showLoginSplash) {
     return (
       <BackupSplashScreen

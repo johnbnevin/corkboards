@@ -14,8 +14,6 @@ import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { STORAGE_KEYS } from '@/lib/storageKeys';
 
 const QUERY_KEY_PREFIX = 'notification-count';
-// How far back to look when there's no prior last-seen timestamp (7 days)
-const DEFAULT_LOOKBACK_SECS = 7 * 24 * 60 * 60;
 
 export function useNotificationCount() {
   const { nostr } = useNostr();
@@ -41,12 +39,24 @@ export function useNotificationCount() {
     }
   }, [user?.pubkey]);
 
-  // Round to 5-minute intervals when there's no saved timestamp — without rounding,
-  // Date.now() drifts by 1 every second and each re-render during backup restore
-  // produces a unique query key, firing 8+ duplicate network requests.
-  const since = lastSeenAt > 0
-    ? lastSeenAt
-    : Math.floor(Date.now() / 1000 / 300) * 300 - DEFAULT_LOOKBACK_SECS;
+  // Seed the marker to NOW the first time a device has none, instead of
+  // counting backwards from today.
+  //
+  // The old fallback was `now - 7 days`, so any device without a marker — a
+  // fresh install, a cleared cache, an incognito session, an account switch —
+  // announced up to 50 notifications that the user had very often already
+  // read elsewhere ("17 new notifications, and they're all old"). There is no
+  // way to know what was read before this device existed, and claiming
+  // everything is unread is the more annoying of the two guesses. From the
+  // seed onward the count is exact.
+  useEffect(() => {
+    if (!user?.pubkey) return;
+    if (lastSeenAt > 0) return;
+    setLastSeenAt(Math.floor(Date.now() / 1000));
+  }, [user?.pubkey, lastSeenAt, setLastSeenAt]);
+
+  // Until the seed lands, ask for nothing rather than a week of history.
+  const since = lastSeenAt > 0 ? lastSeenAt : Math.floor(Date.now() / 1000);
 
   const { data: newCount } = useQuery({
     queryKey: [QUERY_KEY_PREFIX, user?.pubkey, since],
@@ -74,7 +84,10 @@ export function useNotificationCount() {
     refetchOnWindowFocus: true,
   });
 
-  /** Call when user navigates to the notifications tab */
+  /** Call when the notifications tab becomes visible — including on a cold
+   *  start that restores directly onto it, which the tab-change handler alone
+   *  never covers (the badge then stayed stale until you navigated away and
+   *  back). */
   const markSeen = useCallback(() => {
     const now = Math.floor(Date.now() / 1000);
     setLastSeenAt(now);

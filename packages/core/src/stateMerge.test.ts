@@ -163,3 +163,41 @@ describe('mergeState — safety', () => {
     expect(second.changedKeys).toEqual([])
   })
 })
+
+describe('mergeState — monotonic numeric keys (notifications last-seen)', () => {
+  const SEEN = 'corkboard:notifications-last-seen'
+
+  it('keeps the NEWER marker when the remote snapshot is newer but its marker is older', () => {
+    // The regression this exists for: a device that has not opened
+    // notifications in weeks saves more recently, and last-write-wins hands
+    // its stale marker to a device that had read further — resurrecting a
+    // badge for notifications the user already read.
+    const local = snap({ [SEEN]: JSON.stringify(5000) }, 100)
+    const remote = snap({ [SEEN]: JSON.stringify(1000) }, 200)
+    expect(JSON.parse(mergeState(local, remote).keys[SEEN]!)).toBe(5000)
+  })
+
+  it('adopts the remote marker when it is genuinely further ahead', () => {
+    const local = snap({ [SEEN]: JSON.stringify(1000) }, 200)
+    const remote = snap({ [SEEN]: JSON.stringify(5000) }, 100)
+    expect(JSON.parse(mergeState(local, remote).keys[SEEN]!)).toBe(5000)
+  })
+
+  it('takes the remote marker when this device has none', () => {
+    const local = snap({}, 100)
+    const remote = snap({ [SEEN]: JSON.stringify(4200) }, 50)
+    expect(JSON.parse(mergeState(local, remote).keys[SEEN]!)).toBe(4200)
+  })
+
+  it('leaves the key absent when neither side has one', () => {
+    const local = snap({ [DISMISSED]: JSON.stringify(['a']) }, 100)
+    const remote = snap({ [DISMISSED]: JSON.stringify(['b']) }, 200)
+    expect(mergeState(local, remote).keys[SEEN] ?? null).toBeNull()
+  })
+
+  it('does not report a change when the local marker already wins', () => {
+    const local = snap({ [SEEN]: JSON.stringify(5000) }, 100)
+    const remote = snap({ [SEEN]: JSON.stringify(1000) }, 200)
+    expect(mergeState(local, remote).changedKeys).not.toContain(SEEN)
+  })
+})

@@ -113,6 +113,39 @@ function cacheManifestJson(eventId: string, json: string): void {
   mobileStorage.setSync(MANIFEST_PLAIN_CACHE_KEY, JSON.stringify(cache));
 }
 
+/**
+ * Unwrapped AES keys, keyed by the wrappedKey ciphertext. Session-only — this
+ * is key material, so it never touches disk. Unwrapping is a signer decrypt
+ * (a bunker round-trip), and the same ciphertext is unwrapped more than once
+ * on a normal login. Parity with web.
+ */
+const _aesKeyCache = new Map<string, string>();
+const AES_KEY_CACHE_MAX = 16;
+
+async function unwrapAesKey(
+  signer: BackupSigner,
+  pubkey: string,
+  wrappedKey: string,
+  signerMethod: string,
+  timeoutMs = 20000,
+): Promise<string> {
+  const cached = _aesKeyCache.get(wrappedKey);
+  if (cached) return cached;
+  const decryptor = signerMethod === 'nip04' ? signer.nip04 : signer.nip44;
+  if (!decryptor) throw new Error(`Signer does not support ${signerMethod} decryption`);
+  const hex = await Promise.race([
+    decryptor.decrypt(pubkey, wrappedKey),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Signer timed out unwrapping the backup key')), timeoutMs)),
+  ]);
+  if (_aesKeyCache.size >= AES_KEY_CACHE_MAX) {
+    const oldest = _aesKeyCache.keys().next();
+    if (!oldest.done) _aesKeyCache.delete(oldest.value);
+  }
+  _aesKeyCache.set(wrappedKey, hex);
+  return hex;
+}
+
 // Relay blacklist — persists across sessions (mirrors web)
 const BLOCKED_RELAYS_KEY = 'corkboard:blocked-relays';
 
@@ -418,35 +451,17 @@ function getPublishRelays(pubkey: string): string[] {
   return Array.from(relays);
 }
 
-/** Upload encrypted text to a Blossom server using fetch PUT + kind 24242 auth */
+/** Upload encrypted text to one Blossom server with a PRE-SIGNED auth header.
+ *  The signature is made once per save by the caller and reused across every
+ *  server (BUD-01 binds it to the blob hash, not to a server). */
 async function blossomUpload(
   server: string,
   content: string,
-  signer: BackupSigner,
+  authHeader: string,
+  hashHex: string,
 ): Promise<{ url: string; hash?: string } | null> {
   try {
-    // Compute SHA-256 of content for auth event
-    const encoder = new TextEncoder();
-    const data = encoder.encode(content);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-    const now = Math.floor(Date.now() / 1000);
-    const authEvent = await signer.signEvent({
-      kind: 24242,
-      content: 'Upload corkboard backup',
-      tags: [
-        ['t', 'upload'],
-        ['x', hashHex],
-        ['expiration', String(now + 3600)],
-      ],
-      created_at: now,
-    });
-
-    const authHeader = 'Nostr ' + btoa(JSON.stringify(authEvent));
-    const uploadUrl = server.replace(/\/$/, '') + '/upload';
-
+    const uploadUrl = server.replace(/\/+$/, '') + '/upload';
     const response = await fetch(uploadUrl, {
       method: 'PUT',
       body: content,
@@ -469,9 +484,10 @@ async function blossomUpload(
       return null;
     }
 
-    const result = await response.json();
-    const url = result.url || result.nip94_event?.tags?.find((t: string[]) => t[0] === 'url')?.[1];
-    const hash = result.sha256 || hashHex;
+    const result = await response.json().catch(() => null);
+    const url = result?.url || result?.nip94_event?.tags?.find((t: string[]) => t[0] === 'url')?.[1]
+      || `${server.replace(/\/+$/, '')}/${hashHex}`;
+    const hash = result?.sha256 || hashHex;
     if (!url) return null;
     return { url, hash };
   } catch (err) {
@@ -494,9 +510,41 @@ async function blossomUploadWithRedundancy(
   let url: string | null = null;
   let hash: string | undefined;
   let count = 0;
+  if (servers.length === 0) return { url, hash, count };
+
+  // Sign the upload authorization ONCE for every server. blossomUpload used to
+  // sign its own kind-24242 event per call, so a save cost one signature per
+  // server — through a NIP-46 bunker that is a network round-trip each, every
+  // save. BUD-01 binds this auth to the blob hash (`x`) and `t=upload`, not to
+  // any server, so one signature is valid everywhere. Parity with web.
+  const encoder = new TextEncoder();
+  const data = encoder.encode(content);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashHex = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+  const now = Math.floor(Date.now() / 1000);
+
+  let authHeader: string;
+  try {
+    const authEvent = await signer.signEvent({
+      kind: 24242,
+      content: 'Upload corkboard backup',
+      tags: [
+        ['t', 'upload'],
+        ['x', hashHex],
+        ['size', String(data.length)],
+        ['expiration', String(now + 3600)],
+      ],
+      created_at: now,
+    });
+    authHeader = 'Nostr ' + btoa(JSON.stringify(authEvent));
+  } catch (err) {
+    if (__DEV__) console.warn('[backup] Could not sign upload authorization:', err);
+    return { url, hash, count };
+  }
+
   for (const server of servers) {
     if (count >= REDUNDANT_COPIES) break;
-    const result = await blossomUpload(server, content, signer);
+    const result = await blossomUpload(server, content, authHeader, hashHex);
     if (result) {
       if (!url) { url = result.url; hash = result.hash; }
       count++;
@@ -894,9 +942,19 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     // Parse checkpoints from events (plaintext → cached decrypt → live decrypt).
     // A signer timeout trips a circuit breaker for the rest of the pass —
     // serially timing out per manifest is the "hangs then finds nothing" bug.
+    //
+    // Manifests that are NOT newer than what this device already has are
+    // skipped without decrypting at all: `created_at` is on the signed event,
+    // so "is there anything new?" is answerable without a signer round-trip.
+    // Through a NIP-46 bunker each of those decrypts is a network round-trip,
+    // and paying them just to re-learn "nothing changed" is what made a bunker
+    // login crawl. Parity with web's checkRemoteBackup.
+    const localSeenTs = parseInt(mobileStorage.getSync(LAST_BACKUP_TS_KEY) || '0', 10);
     const cps: RemoteCheckpoint[] = [];
     let signerTimedOut = false;
     for (const ev of allEvents) {
+      const isCached = !!getCachedManifestJson(ev.id);
+      if (!isCached && localSeenTs > 0 && ev.created_at <= localSeenTs) continue;
       let data: Record<string, unknown> | null = null;
       try { data = JSON.parse(ev.content); } catch {
         const cachedJson = getCachedManifestJson(ev.id);
@@ -1013,10 +1071,8 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
 
       if (!silent) setMessage('Decrypting…');
 
-      // Unwrap AES key
-      const keyHex = checkpoint.signerMethod === 'nip04'
-        ? await signer.nip04!.decrypt(pubkey, checkpoint.wrappedKey)
-        : await signer.nip44!.decrypt(pubkey, checkpoint.wrappedKey);
+      // Unwrap AES key (cached + bounded — see unwrapAesKey)
+      const keyHex = await unwrapAesKey(signer, pubkey, checkpoint.wrappedKey, checkpoint.signerMethod);
 
       const raw = hexToRawKey(keyHex);
       const aesKey = await importAesKey(raw);

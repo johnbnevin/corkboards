@@ -1,16 +1,23 @@
 /**
- * useAutoSaveTrigger — orchestrates cloud backup saves with three safety gates:
+ * useAutoSaveTrigger — orchestrates cloud backup saves.
  *
- *   1. **Page-load cooldown.** No auto-save for AUTO_SAVE_COOLDOWN_MS after
- *      mount. Prevents overwriting a good cloud backup with empty/stale state
- *      after an unexpected refresh where IDB hasn't fully restored.
- *   2. **Inter-save minimum.** No more often than AUTO_SAVE_MIN_INTERVAL_MS.
- *   3. **Change-detection debounce.** Once unsaved changes appear, wait
- *      AUTO_SAVE_DEBOUNCE_MS before firing. Bundles rapid edits into one upload.
+ * Detection is EVENT-DRIVEN: the storage layer marks the backup dirty at its
+ * write choke point (lib/backupDirty), and each dirty event (re)arms a short
+ * trailing debounce — a burst of edits becomes one upload, and a lone edit
+ * uploads ~AUTO_SAVE_DEBOUNCE_MS after it happens instead of waiting out a
+ * 30-second poll. A slow safety-net poll remains as belt-and-braces for any
+ * write path that somehow bypassed the choke point.
  *
- * Drives via two paths:
- *   - AUTO_SAVE_POLL_MS poll for ambient detection (and called once on mount)
- *   - Immediate fire on `visibilitychange:hidden` and `beforeunload`
+ * Safety gates, DEFERRING instead of dropping:
+ *   1. **Page-load cooldown.** No auto-save for `cooldownMs` after mount —
+ *      protects the cloud copy while IDB is still hydrating. A change made
+ *      during the cooldown is saved at the cooldown's END, not forgotten.
+ *   2. **Inter-save floor.** No more often than AUTO_SAVE_MIN_INTERVAL_MS;
+ *      a fire landing inside the floor is rescheduled to the floor's expiry.
+ *   3. **hasUnsavedChanges()** (the content hash) remains the arbiter — dirty
+ *      events only schedule the check, they never force an upload.
+ *
+ * Immediate flush on `visibilitychange:hidden` and `beforeunload` as before.
  *
  * Extracted from MultiColumnClient because three production save-storm
  * incidents traced to one of these gates being subtly wrong; isolating the
@@ -18,7 +25,10 @@
  */
 import { useEffect, useRef } from 'react';
 import { debugLog, debugWarn } from '@/lib/debug';
-import { getLastAutoSaveError, type AutoSaveResult } from '@/hooks/useNostrBackup';
+import { registerBackupDirtyListener } from '@/lib/backupDirty';
+import { resetCloudSyncIdle } from '@/hooks/useCloudSync';
+import { getLastAutoSaveError, takeLastAutoSaveWarning, type AutoSaveResult } from '@/hooks/useNostrBackup';
+import type { BackupIndicatorState } from '@/components/BackupIndicatorIcon';
 import {
   AUTO_SAVE_MIN_INTERVAL_MS,
   AUTO_SAVE_DEBOUNCE_MS,
@@ -41,8 +51,8 @@ export interface UseAutoSaveTriggerOptions {
   hasUnsavedChanges: () => boolean;
   /** Perform the actual upload; resolves with a status describing the outcome. */
   autoSaveBackup: () => Promise<AutoSaveResult>;
-  /** Indicator state setter for UI ("unsaved" / "saved"). */
-  setBackupIndicator: (state: 'idle' | 'unsaved' | 'saved') => void;
+  /** Indicator state setter for UI. */
+  setBackupIndicator: (state: BackupIndicatorState) => void;
   /** Toast for surfacing failures. */
   toast: (input: { title: string; description?: string; variant?: 'destructive' | 'default' }) => void;
   /** Page-load cooldown in ms. */
@@ -86,57 +96,62 @@ export function useAutoSaveTrigger({
       toast(input);
     };
 
-    let changeDetectedAt: number | null = null;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const triggerIfReady = (source: string) => {
+    /** One pending fire at a time; a new schedule replaces the old one.
+     *  Dirty events re-arm the trailing debounce; gate deferrals reuse it. */
+    const scheduleAttempt = (delayMs: number, source: string) => {
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        attemptSave(source);
+      }, delayMs);
+    };
+
+    const attemptSave = (source: string) => {
       // Never auto-save while a restore is in flight. 'found' is deliberately
       // NOT in this list anymore: it means "a newer cloud snapshot exists",
       // which can persist for a while (held mass-removal merge, a manifest
       // that won't decrypt this round) — and while it persisted, this skip
       // kept the device from ever saving its own changes: permanently red
-      // indicator, no uploads. The login-time window between 'found' and the
-      // auto-restore starting is already covered by the startup cooldown, and
-      // autoSaveBackup itself refuses to run during an actual restore.
+      // indicator, no uploads. The safety poll retries once the restore ends.
       if (backupStatus === 'restoring' || backupStatus === 'restored') {
         debugLog(`[AutoSave] skip (${source}): backup ${backupStatus}, waiting for restore to complete`);
         return;
       }
       const msSinceLoad = Date.now() - pageLoadTime.current;
       if (msSinceLoad < cooldownMs) {
-        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceLoad / 1000)}s since page load, need ${cooldownMs / 1000}s cooldown`);
+        // Defer to the cooldown's end — a change made 30s after load must
+        // save when the cooldown lifts, not wait for another change.
+        debugLog(`[AutoSave] defer (${source}): ${Math.round(msSinceLoad / 1000)}s since page load, will fire at cooldown end`);
+        scheduleAttempt(cooldownMs - msSinceLoad + 250, `${source}→cooldown-end`);
         return;
       }
       const lastUploadMs = (lastBackupTs ?? 0) * 1000;
       const msSinceLast = Date.now() - lastUploadMs;
       if (msSinceLast < MIN_INTERVAL_MS) {
-        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceLast / 1000)}s since last upload, need ${MIN_INTERVAL_MS / 1000}s`);
+        debugLog(`[AutoSave] defer (${source}): ${Math.round(msSinceLast / 1000)}s since last upload, will fire at floor expiry`);
+        scheduleAttempt(MIN_INTERVAL_MS - msSinceLast + 250, `${source}→floor-end`);
         return;
       }
       if (!hasUnsavedChanges()) {
-        // Log the transition, not every tick: this branch returning silently
-        // made "the indicator says saved but my other device disagrees"
-        // impossible to tell apart from "the poll died" in a log — the poll
-        // looks identical to a stopped timer when it has nothing to do.
-        if (changeDetectedAt !== null) debugLog(`[AutoSave] nothing left to save (${source})`);
-        changeDetectedAt = null;
-        return;
-      }
-      if (changeDetectedAt === null) {
-        changeDetectedAt = Date.now();
-        setBackupIndicator('unsaved');
-        debugLog(`[AutoSave] changes detected (${source}), will save in ${DEBOUNCE_MS / 1000}s`);
-        return;
-      }
-      const msSinceChange = Date.now() - changeDetectedAt;
-      if (msSinceChange < DEBOUNCE_MS) {
-        debugLog(`[AutoSave] skip (${source}): ${Math.round(msSinceChange / 1000)}s since change, need ${DEBOUNCE_MS / 1000}s`);
+        debugLog(`[AutoSave] nothing to save (${source})`);
         return;
       }
       debugLog(`[AutoSave] triggering (${source})`);
-      changeDetectedAt = null;
       autoSaveBackup().then((result) => {
         if (result === 'saved') {
           setBackupIndicator('saved');
+          // A local save gives other devices something new — and symmetric
+          // activity means they may be saving too, so resume pull checks.
+          resetCloudSyncIdle('local-save');
+          // Informational, not destructive: the save went through.
+          if (takeLastAutoSaveWarning() === 'saved-cleanup') {
+            toastOnce('saved-cleanup', {
+              title: 'Saved notes cleaned up',
+              description: 'Looks like you just cleaned your Saved for Later notes — if not, something may be wrong. Checkpoints in the backup menu can restore an earlier state.',
+            });
+          }
         } else if (result === 'skipped') {
           // Genuinely benign: nothing to save, or a save already running.
           debugLog('[AutoSave] skipped (nothing to save)');
@@ -150,12 +165,13 @@ export function useAutoSaveTrigger({
           setBackupIndicator('unsaved');
           toastOnce('blocked', {
             title: 'Auto-save paused',
-            description: 'Local data looks smaller than your last backup, so auto-save is holding off to avoid overwriting it. Use Save now in the backup menu to save anyway.',
+            description: `${getLastAutoSaveError() || 'Local data looks smaller than your last backup, so auto-save is holding off to avoid overwriting it.'} Use Save now in the backup menu to save anyway.`,
             variant: 'destructive',
           });
         } else if (result === 'no-servers') {
           const detail = getLastAutoSaveError();
           debugWarn('[AutoSave] every Blossom server failed/rejected the backup:', detail);
+          setBackupIndicator('error');
           toastOnce('no-servers', {
             title: 'Backup not saved — no storage server accepted it',
             description: `${detail || 'Every configured Blossom server refused the upload.'} Check your Blossom servers in Advanced Settings; the app keeps retrying.`,
@@ -167,6 +183,7 @@ export function useAutoSaveTrigger({
           // implied) sends the user to the one part that is working.
           const detail = getLastAutoSaveError();
           debugWarn('[AutoSave] no relay accepted the backup manifest:', detail);
+          setBackupIndicator('error');
           toastOnce('no-relays', {
             title: 'Backup stored, but not announced',
             description: `${detail || 'No relay accepted the backup manifest.'} Your data reached storage, but other devices can’t discover it until a relay accepts the manifest. Check your relays in Advanced Settings.`,
@@ -175,6 +192,7 @@ export function useAutoSaveTrigger({
         } else {
           const detail = getLastAutoSaveError();
           debugWarn('[AutoSave] unexpected error while saving backup:', detail);
+          setBackupIndicator('error');
           toastOnce('error', {
             title: 'Backup error',
             description: detail
@@ -185,6 +203,16 @@ export function useAutoSaveTrigger({
         }
       }).catch((e) => debugWarn('[AutoSave] Unexpected error during Blossom auto-save:', e));
     };
+
+    // Event-driven detection: a SNAPSHOT_KEY write lands → indicator flips to
+    // 'unsaved' immediately → the trailing debounce (re)arms. The hash check
+    // filters writes that didn't actually change anything vs the baseline.
+    const unregisterDirty = registerBackupDirtyListener((key) => {
+      if (!hasUnsavedChanges()) return;
+      setBackupIndicator('unsaved');
+      debugLog(`[AutoSave] dirty (${key}), will save in ${DEBOUNCE_MS / 1000}s of quiet`);
+      scheduleAttempt(DEBOUNCE_MS, `dirty:${key}`);
+    });
 
     const onVisibilityChange = () => {
       const pastCooldown = Date.now() - pageLoadTime.current >= cooldownMs;
@@ -213,12 +241,23 @@ export function useAutoSaveTrigger({
       }
     };
 
-    const pollInterval = setInterval(() => triggerIfReady('poll-30s'), POLL_INTERVAL_MS);
+    // Safety net only — detection is event-driven above. Also repairs the
+    // indicator if a dirty event was missed entirely.
+    const pollInterval = setInterval(() => {
+      if (pendingTimer) return; // a fire is already scheduled
+      if (!hasUnsavedChanges()) return;
+      setBackupIndicator('unsaved');
+      attemptSave('safety-poll');
+    }, POLL_INTERVAL_MS);
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('beforeunload', onBeforeUnload);
-    triggerIfReady('mount');
+    // Pick up pre-existing unsaved changes (mount, or effect re-run after a
+    // dependency change cleared a pending timer).
+    if (hasUnsavedChanges()) attemptSave('mount');
 
     return () => {
+      if (pendingTimer) clearTimeout(pendingTimer);
+      unregisterDirty();
       clearInterval(pollInterval);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('beforeunload', onBeforeUnload);

@@ -19,6 +19,7 @@ import { ToastProvider } from './src/hooks/useToast';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { NostrSync } from './src/components/NostrSync';
 import { AutoSaveManager } from './src/components/AutoSaveManager';
+import { BackupIndicatorDot } from './src/components/BackupIndicatorDot';
 import { EmojiSetsModalProvider } from './src/components/EmojiSetsModalProvider';
 import { HomeScreen } from './src/screens/HomeScreen';
 import { DiscoverScreen } from './src/screens/DiscoverScreen';
@@ -187,6 +188,7 @@ export default function App() {
       <AutoSaveManager />
       <EmojiSetsModalProvider>
         <AppTabs />
+        <BackupIndicatorDot />
       </EmojiSetsModalProvider>
       </NwcProvider>
       </AuthProvider>

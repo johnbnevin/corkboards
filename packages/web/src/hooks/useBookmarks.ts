@@ -6,19 +6,135 @@
  * - Publishes updated kind 10003 events on add/remove
  * - Caches bookmark IDs in IDB for instant startup
  * - Designed to work alongside useCollapsedNotes for backward compatibility
+ *
+ * ## One store, not one per hook instance
+ *
+ * The id list lives in a module-level store that every hook instance reads
+ * via useSyncExternalStore. It used to be per-instance useState kept in sync
+ * only by a union-only IDB listener — which is structurally incapable of
+ * propagating a REMOVAL, so unsaving a note updated whichever component did
+ * it and left every other consumer (the saved-page header count, the tab
+ * badge) frozen at the old number until reload. Removals are ordinary state
+ * transitions now: one store shrinks, every subscriber re-renders.
  */
 
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import { useNostr } from '@nostrify/react'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { debugLog, debugWarn, debugError } from '@/lib/debug'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getUserRelays, FALLBACK_RELAYS } from '@/components/NostrProvider'
-import { idbGetSync, idbSetSync } from '@/lib/idb'
+import { idbGetSync, idbSetSync, getStoredTombstones } from '@/lib/idb'
 import { STORAGE_KEYS } from '@/lib/storageKeys'
+import { mergeBookmarkSnapshot } from '@core/stateMerge'
 import type { NostrEvent } from '@nostrify/nostrify'
 
 const IDB_KEY = 'nostr-bookmark-ids'
+const STORE_WRITE_ORIGIN = 'bookmarks-store'
+
+// ─── Module store ───────────────────────────────────────────────────────────
+
+let _bookmarkIds: string[] = []
+let _bookmarkHydrated = false
+let _storeInitialized = false
+const _bookmarkListeners = new Set<() => void>()
+
+/** Ids the user explicitly un-bookmarked this session. The publish wipe guard
+ *  exempts these: a shrink the user asked for is a cleanup, a shrink nobody
+ *  asked for is state damage that must not reach the replaceable event. */
+const _sessionRemovedBookmarkIds = new Set<string>()
+
+let _needsPublish = false
+let _publishTimer: ReturnType<typeof setTimeout> | undefined
+let _publishing = false
+
+function readStoredBookmarks(): string[] {
+  try {
+    const stored = idbGetSync(IDB_KEY)
+    const parsed = stored ? JSON.parse(stored) : []
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function sameIds(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((id, i) => b[i] === id)
+}
+
+function setBookmarkStore(next: string[], persist: boolean): void {
+  if (sameIds(next, _bookmarkIds)) return
+  _bookmarkIds = next
+  // Persist only once hydrated: before the IDB re-read lands, the store may
+  // hold a partial list, and writing that would clobber restored data.
+  if (persist && _bookmarkHydrated) {
+    try {
+      idbSetSync(IDB_KEY, JSON.stringify(next), STORE_WRITE_ORIGIN)
+    } catch (e) {
+      if (import.meta.env.DEV) console.error('[bookmarks] Failed to save to IDB:', e)
+    }
+  }
+  for (const listener of _bookmarkListeners) listener()
+}
+
+function subscribeBookmarkStore(onChange: () => void): () => void {
+  _bookmarkListeners.add(onChange)
+  return () => { _bookmarkListeners.delete(onChange) }
+}
+
+function getBookmarkSnapshot(): string[] {
+  return _bookmarkIds
+}
+
+/** Clear all module state (logout / account switch) — mirrors
+ *  clearCollapsedNotesModuleState. */
+export function clearBookmarksModuleState(): void {
+  _bookmarkIds = []
+  _bookmarkHydrated = false
+  _storeInitialized = false
+  _sessionRemovedBookmarkIds.clear()
+  _needsPublish = false
+  if (_publishTimer) { clearTimeout(_publishTimer); _publishTimer = undefined }
+  for (const listener of _bookmarkListeners) listener()
+}
+
+function initBookmarkStore(): void {
+  if (_storeInitialized) return
+  _storeInitialized = true
+  _bookmarkIds = readStoredBookmarks()
+  debugLog('[bookmarks] IDB cache:', _bookmarkIds.length, 'ids')
+
+  // External writes: restore/merge, account switch, cross-tab. REPLACE, don't
+  // union — every write to this key passed the tombstone choke point, so the
+  // stored value is authoritative and a union would resurrect removals.
+  if (typeof window !== 'undefined') {
+    window.addEventListener('idb-storage-sync', (e: Event) => {
+      const detail = (e as CustomEvent<{ key: string; value: unknown; origin?: string }>).detail
+      if (detail.key !== IDB_KEY || detail.origin === STORE_WRITE_ORIGIN) return
+      if (detail.value === null) {
+        // Key deleted (account switch stash / wipe).
+        setBookmarkStore([], false)
+        return
+      }
+      setBookmarkStore(readStoredBookmarks(), false)
+    })
+  }
+
+  // Re-read once IDB warms up — memCache may have been empty at init. Union
+  // with whatever the session added in the window, then persistence is safe.
+  import('@/lib/idb').then(({ idbReady }) => idbReady).then(() => {
+    const stored = readStoredBookmarks()
+    const merged = [...new Set([...stored, ..._bookmarkIds])]
+    _bookmarkHydrated = true
+    if (!sameIds(merged, stored)) {
+      setBookmarkStore(merged, true)
+    } else {
+      setBookmarkStore(merged, false)
+    }
+  }).catch(() => { _bookmarkHydrated = true })
+}
+
+// ─── Relay shapes ───────────────────────────────────────────────────────────
 
 /**
  * What we read off the user's kind-10003, including the parts this app doesn't
@@ -40,6 +156,8 @@ interface BookmarkListResult {
   ids: string[]
   /** True when a relay actually returned a kind-10003. */
   found: boolean
+  /** The event's created_at — lets the tombstone merge age the relay copy. */
+  createdAt: number
   /** True when note ids were present as PUBLIC tags. */
   hasPublicTags: boolean
   /** Every public tag that is not one of OUR `e` tags — other clients' data. */
@@ -53,7 +171,7 @@ interface BookmarkListResult {
 }
 
 const EMPTY_BOOKMARK_RESULT: BookmarkListResult = {
-  ids: [], found: false, hasPublicTags: false,
+  ids: [], found: false, createdAt: 0, hasPublicTags: false,
   foreignPublicTags: [], foreignPrivateTags: [],
   privateSectionUnreadable: false, rawContent: '',
 }
@@ -83,22 +201,12 @@ export function useBookmarks(fetchEnabled = true) {
   const { user } = useCurrentUser(false)
   const { nostr } = useNostr()
   const queryClient = useQueryClient()
-  const publishingRef = useRef(false)
   // Ref to avoid stale closure when setTimeout fires after user changes
   const userRef = useRef(user)
   userRef.current = user
 
-  // Local bookmark IDs for instant UI (synced from relay + IDB cache)
-  const [bookmarkIds, setBookmarkIds] = useState<string[]>(() => {
-    try {
-      const stored = idbGetSync(IDB_KEY)
-      const parsed = stored ? JSON.parse(stored) : []
-      debugLog('[bookmarks] IDB cache:', parsed.length, 'ids')
-      return parsed
-    } catch {
-      return []
-    }
-  })
+  initBookmarkStore()
+  const bookmarkIds = useSyncExternalStore(subscribeBookmarkStore, getBookmarkSnapshot, getBookmarkSnapshot)
 
   // Track whether we've done the initial migration from collapsed-notes (persisted in IDB)
   const hasMigrated = useRef(() => {
@@ -113,57 +221,6 @@ export function useBookmarks(fetchEnabled = true) {
       if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
     }
   }, [])
-
-  // Listen for external writes to bookmark IDs (e.g. restoreFromBackupFile, cross-tab sync).
-  // Also re-reads after idbReady to pick up data from IDB when memCache was empty on mount.
-  useEffect(() => {
-    const mergeFromIdb = () => {
-      try {
-        const stored = idbGetSync(IDB_KEY)
-        if (!stored) return
-        const ids: string[] = JSON.parse(stored)
-        if (ids.length > 0) {
-          setBookmarkIds(prev => {
-            const merged = [...new Set([...ids, ...prev])]
-            if (merged.length === prev.length && merged.every(id => prev.includes(id))) return prev
-            persistPendingRef.current = true
-            return merged
-          })
-        }
-      } catch { /* ignore */ }
-    }
-
-    // Sync event from idbSetSync (fired by restoreFromBackupFile and cross-tab writes)
-    const handleSync = (e: Event) => {
-      const detail = (e as CustomEvent<{ key: string }>).detail
-      if (detail.key === IDB_KEY) mergeFromIdb()
-    }
-    window.addEventListener('idb-storage-sync', handleSync)
-
-    // Also re-read after IDB warms up (memCache may have been empty on mount)
-    let cancelled = false
-    import('@/lib/idb').then(({ idbReady }) => idbReady).then(() => {
-      if (!cancelled) mergeFromIdb()
-    })
-
-    return () => {
-      cancelled = true
-      window.removeEventListener('idb-storage-sync', handleSync)
-    }
-  }, [])
-
-  // Persist to IDB — but ONLY when triggered by explicit user action (add/remove/toggle).
-  // Never persist the initial [] or relay-synced state, which could overwrite restored data.
-  const persistPendingRef = useRef(false)
-  useEffect(() => {
-    if (!persistPendingRef.current) return
-    persistPendingRef.current = false
-    try {
-      idbSetSync(IDB_KEY, JSON.stringify(bookmarkIds))
-    } catch (e) {
-      if (import.meta.env.DEV) console.error('[bookmarks] Failed to save to IDB:', e)
-    }
-  }, [bookmarkIds])
 
   // Fetch bookmark list (kind 10003) from relays
   const { data: relayResult, isLoading } = useQuery({
@@ -232,6 +289,7 @@ export function useBookmarks(fetchEnabled = true) {
       return {
         ids,
         found: true,
+        createdAt: bookmarkEvent.created_at,
         hasPublicTags: publicIds.length > 0,
         foreignPublicTags,
         foreignPrivateTags,
@@ -261,7 +319,7 @@ export function useBookmarks(fetchEnabled = true) {
       debugError('[bookmarks] Publish skipped — signer does not support NIP-44 encryption')
       return
     }
-    if (publishingRef.current) {
+    if (_publishing) {
       debugWarn('[bookmarks] Publish skipped — already publishing')
       return
     }
@@ -271,11 +329,27 @@ export function useBookmarks(fetchEnabled = true) {
     const remote = relayResultRef.current
     if (remote?.privateSectionUnreadable) {
       debugError('[bookmarks] Publish refused — existing private bookmark section could not be decrypted; refusing to overwrite it')
-      publishingRef.current = false
       return
     }
+    // Wipe guard (mirrors @core/contactList's "nothing confirmable → abort"):
+    // kind 10003 is replaceable, so a publish derived from damaged local state
+    // (an empty memCache at startup, a half-hydrated store) would erase the
+    // user's bookmarks account-wide. A mass shrink is allowed only for ids the
+    // user removed by explicit action this session.
+    if (remote?.found && remote.ids.length > 10) {
+      const newIdSet = new Set(newIds)
+      const unexplained = remote.ids.filter(
+        id => !newIdSet.has(id) && !_sessionRemovedBookmarkIds.has(id),
+      )
+      if (unexplained.length > remote.ids.length / 2) {
+        debugError(
+          `[bookmarks] Publish refused — would drop ${unexplained.length} of ${remote.ids.length} remote bookmarks that were never explicitly removed this session; local state may be damaged`,
+        )
+        return
+      }
+    }
 
-    publishingRef.current = true
+    _publishing = true
 
     const isPublic = getPublicBookmarksPref()
     debugLog('[bookmarks] Publishing kind 10003 with', newIds.length, 'bookmarks (public:', isPublic, ')')
@@ -308,7 +382,7 @@ export function useBookmarks(fetchEnabled = true) {
     } catch (err) {
       debugError('[bookmarks] Publish failed:', err)
     } finally {
-      publishingRef.current = false
+      _publishing = false
     }
   }, [nostr, queryClient])
 
@@ -319,16 +393,18 @@ export function useBookmarks(fetchEnabled = true) {
     debugLog('[bookmarks] Sync effect — relay found:', relayResult.found, 'ids:', relayResult.ids.length, 'hasPublicTags:', relayResult.hasPublicTags)
 
     if (relayResult.found && relayResult.ids.length > 0) {
-      setBookmarkIds(prev => {
-        const merged = [...new Set([...relayResult.ids, ...prev])]
-        if (merged.length === prev.length && merged.every(id => prev.includes(id))) {
-          debugLog('[bookmarks] Relay bookmarks already in local state')
-          return prev
-        }
-        debugLog('[bookmarks] Merged relay bookmarks:', prev.length, '→', merged.length)
-        persistPendingRef.current = true
-        return merged
-      })
+      // Newest-wins with tombstones, NOT a blind union: an id removed locally
+      // (or by a restore) whose grave is newer than this relay event stays
+      // removed — the relay copy is stale, and re-unioning it was exactly the
+      // "count reverts five minutes later" resurrection bug.
+      const graves = getStoredTombstones()[IDB_KEY] ?? {}
+      const merged = mergeBookmarkSnapshot(_bookmarkIds, relayResult.ids, relayResult.createdAt, graves)
+      if (merged.changed) {
+        debugLog('[bookmarks] Merged relay bookmarks:', _bookmarkIds.length, '→', merged.ids.length)
+        setBookmarkStore(merged.ids, true)
+      } else {
+        debugLog('[bookmarks] Relay bookmarks already reflected in local state')
+      }
 
       // NOTE: this used to silently re-publish the whole kind-10003 three seconds
       // after load whenever the on-relay public/private shape didn't match the
@@ -356,9 +432,8 @@ export function useBookmarks(fetchEnabled = true) {
           const legacyIds: string[] = JSON.parse(legacy)
           debugLog('[bookmarks] Found', legacyIds.length, 'legacy collapsed-notes to migrate')
           if (legacyIds.length > 0) {
-            const idsToPublish = [...new Set(legacyIds)]
-            persistPendingRef.current = true
-            setBookmarkIds(idsToPublish)
+            const idsToPublish = [...new Set([..._bookmarkIds, ...legacyIds])]
+            setBookmarkStore(idsToPublish, true)
             if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
             syncTimerRef.current = setTimeout(() => {
               if (isMountedRef.current && userRef.current) publishBookmarkList(idsToPublish)
@@ -373,69 +448,53 @@ export function useBookmarks(fetchEnabled = true) {
     }
   }, [relayResult, user?.pubkey, publishBookmarkList])
 
-  const bookmarkSet = useMemo(() => new Set(bookmarkIds), [bookmarkIds])
-
-  // Track pending publish — avoids side effects inside state setters
-  const needsPublish = useRef(false)
+  const bookmarkSet = useSetMemo(bookmarkIds)
 
   useEffect(() => {
     // Publish after any explicit add/remove — INCLUDING removing the last one.
     // The old `bookmarkIds.length === 0` guard meant clearing your final bookmark
     // never published the emptied kind-10003, so the relay's stale copy resurrected
-    // it next session. needsPublish is set only by user actions, never initial load.
-    if (!needsPublish.current) return
-    needsPublish.current = false
+    // it next session. _needsPublish is set only by user actions, never initial load.
+    if (!_needsPublish) return
+    _needsPublish = false
     debugLog('[bookmarks] Scheduling publish for', bookmarkIds.length, 'bookmarks')
-    if (publishTimer.current) clearTimeout(publishTimer.current)
-    publishTimer.current = setTimeout(() => {
-      publishBookmarkList(bookmarkIds)
+    if (_publishTimer) clearTimeout(_publishTimer)
+    _publishTimer = setTimeout(() => {
+      _publishTimer = undefined
+      publishBookmarkList(_bookmarkIds)
     }, 1500)
   }, [bookmarkIds, publishBookmarkList])
 
-  // Debounce publishing to batch rapid toggles
-  const publishTimer = useRef<ReturnType<typeof setTimeout>>()
-
-  // Clear any pending publish timer on unmount to prevent stale callbacks
-  useEffect(() => {
-    return () => {
-      if (publishTimer.current) clearTimeout(publishTimer.current)
-    }
-  }, [])
-
   const addBookmark = useCallback((noteId: string) => {
+    if (_bookmarkIds.includes(noteId)) return
     debugLog('[bookmarks] addBookmark:', noteId.slice(0, 8))
-    persistPendingRef.current = true
-    setBookmarkIds(prev => {
-      if (prev.includes(noteId)) return prev
-      needsPublish.current = true
-      return [...prev, noteId]
-    })
+    _sessionRemovedBookmarkIds.delete(noteId)
+    _needsPublish = true
+    setBookmarkStore([..._bookmarkIds, noteId], true)
   }, [])
 
   const removeBookmark = useCallback((noteId: string) => {
+    if (!_bookmarkIds.includes(noteId)) return
     debugLog('[bookmarks] removeBookmark:', noteId.slice(0, 8))
-    persistPendingRef.current = true
-    setBookmarkIds(prev => {
-      if (!prev.includes(noteId)) return prev
-      needsPublish.current = true
-      return prev.filter(id => id !== noteId)
-    })
+    _sessionRemovedBookmarkIds.add(noteId)
+    _needsPublish = true
+    setBookmarkStore(_bookmarkIds.filter(id => id !== noteId), true)
   }, [])
 
   const toggleBookmark = useCallback((noteId: string) => {
-    if (bookmarkSet.has(noteId)) {
+    if (_bookmarkIds.includes(noteId)) {
       removeBookmark(noteId)
     } else {
       addBookmark(noteId)
     }
-  }, [bookmarkSet, addBookmark, removeBookmark])
+  }, [addBookmark, removeBookmark])
 
   const isBookmarked = useCallback((noteId: string) => bookmarkSet.has(noteId), [bookmarkSet])
 
   /** Re-publish current bookmarks (e.g. after toggling public/private preference) */
   const republishBookmarks = useCallback(() => {
-    if (bookmarkIds.length > 0) publishBookmarkList(bookmarkIds)
-  }, [bookmarkIds, publishBookmarkList])
+    if (_bookmarkIds.length > 0) publishBookmarkList(_bookmarkIds)
+  }, [publishBookmarkList])
 
   return {
     bookmarkIds,
@@ -447,4 +506,16 @@ export function useBookmarks(fetchEnabled = true) {
     republishBookmarks,
     isLoading,
   }
+}
+
+// Small helper: a Set memo keyed on the array identity (the store swaps the
+// array only on real change, so this recomputes exactly when needed).
+const _setMemoCache = new WeakMap<string[], Set<string>>()
+function useSetMemo(ids: string[]): Set<string> {
+  let cached = _setMemoCache.get(ids)
+  if (!cached) {
+    cached = new Set(ids)
+    _setMemoCache.set(ids, cached)
+  }
+  return cached
 }

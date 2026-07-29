@@ -10,7 +10,10 @@
  * Dismissed = removed from feed entirely on consolidate
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { mobileStorage } from '../storage/MmkvStorage';
+import { AppState } from 'react-native';
+import { mobileStorage, clearStoredTombstones } from '../storage/MmkvStorage';
+import { storeAddBookmark, storeRemoveBookmark } from './useBookmarks';
+import { subscribeStorageSync } from '../lib/storageSync';
 import { STORAGE_KEYS } from '../lib/storageKeys';
 
 const MAX_COLLAPSED_NOTES = 10000;
@@ -36,6 +39,23 @@ let _sessionCollapsedIds: Set<string> = new Set();
 let _sessionCollapsedCounter = 0;
 const _dismissedUndoMap = new Map<string, number>();
 const listeners = new Set<() => void>();
+
+// Saved-page dismissals waiting out their undo window (noteId → dismissedAt).
+// A dismiss from Saved means "un-save AND hide from feeds", but the hide is
+// only committed to `dismissed-notes` once the 20s undo window closes (or the
+// app is backgrounding), so an undo never has to race the backup sync.
+// Mirrors web.
+const _pendingSavedDismissals = new Map<string, number>();
+let _savedCommitTimer: ReturnType<typeof setTimeout> | undefined;
+// The most recently rendered hook instance's commit callback (same pattern as
+// _liveActions below — every instance drives the same module state).
+let _liveCommitPending: ((flushAll: boolean) => void) | null = null;
+
+// Commit pending saved-dismissals when the app leaves the foreground, so they
+// land in dismissed-notes and ride the background backup flush.
+AppState.addEventListener('change', (state) => {
+  if (state !== 'active') _liveCommitPending?.(true);
+});
 
 function notifyListeners() {
   notifyNoteState();
@@ -144,6 +164,8 @@ export function useNoteCollapsedState(noteId: string): NoteCollapsedState {
 export function clearCollapsedNotesModuleState(): void {
   _softDismissedSet = new Set();
   _dismissedUndoMap.clear();
+  _pendingSavedDismissals.clear();
+  if (_savedCommitTimer) { clearTimeout(_savedCommitTimer); _savedCommitTimer = undefined; }
   _sessionCollapsedIds = new Set();
   _sessionCollapsedCounter = 0;
   _collapsedSet = new Set();
@@ -152,6 +174,7 @@ export function clearCollapsedNotesModuleState(): void {
 }
 
 export interface CollapsedNotesActions {
+  dismissFromSaved: (noteId: string) => void;
   toggleCollapsed: (noteId: string) => void;
   collapse: (noteId: string) => void;
   expand: (noteId: string) => void;
@@ -173,6 +196,7 @@ const _stableActions: CollapsedNotesActions = {
   collapse: (noteId) => _liveActions?.collapse(noteId),
   expand: (noteId) => _liveActions?.expand(noteId),
   dismiss: (noteId) => _liveActions?.dismiss(noteId),
+  dismissFromSaved: (noteId) => _liveActions?.dismissFromSaved(noteId),
   undoDismiss: (noteId) => _liveActions?.undoDismiss(noteId),
   dismissMultiple: (noteIds) => _liveActions?.dismissMultiple(noteIds),
   dismissThreadRoots: (rootIds) => _liveActions?.dismissThreadRoots(rootIds),
@@ -236,6 +260,30 @@ export function useCollapsedNotes() {
     return () => { listeners.delete(fn); };
   }, []);
 
+  // Follow external storage writes (a backup merge applying another device's
+  // state). Without this, a silent merge changed MMKV and every mounted hook
+  // kept rendering its stale copy until app restart — the phone half of
+  // "restore never sticks". The stored value already passed the tombstone
+  // choke point, so REPLACE, don't union.
+  useEffect(() => {
+    return subscribeStorageSync((key, value) => {
+      const parse = (): string[] => {
+        if (!value) return [];
+        try { const a = JSON.parse(value); return Array.isArray(a) ? a : []; } catch { return []; }
+      };
+      if (key === COLLAPSED_KEY) {
+        const next = parse();
+        setCollapsedIdsState(next);
+        _collapsedSet = new Set(next);
+        notifyNoteState();
+      } else if (key === DISMISSED_KEY) {
+        setDismissedIdsState(parse());
+      } else if (key === DISMISSED_THREAD_ROOTS_KEY) {
+        setDismissedThreadRootsState(parse());
+      }
+    });
+  }, []);
+
   const collapsedSet = useMemo(() => new Set(collapsedIds), [collapsedIds]);
   const dismissedSet = useMemo(() => new Set(dismissedIds), [dismissedIds]);
   const softDismissedSet = useMemo(() => new Set(softDismissedIds), [softDismissedIds]);
@@ -262,7 +310,6 @@ export function useCollapsedNotes() {
     if (!hasCleanedUp.current) {
       hasCleanedUp.current = true;
       if (collapsedIds.length > MAX_COLLAPSED_NOTES) {
-        // eslint-disable-next-line react-hooks/set-state-in-effect
         setCollapsedIds(collapsedIds.slice(-MAX_COLLAPSED_NOTES));
       }
       if (dismissedIds.length > MAX_DISMISSED_NOTES) {
@@ -340,6 +387,66 @@ export function useCollapsedNotes() {
     notifyListeners();
   }, [setCollapsedIds]);
 
+  /**
+   * Commit saved-page dismissals whose undo window has closed into the
+   * permanent `dismissed-notes` list ("un-save and hide from feeds").
+   * `flushAll` commits regardless of the window — used on app background so a
+   * dismissal made just before leaving still lands and rides the backup
+   * flush. An undo after an early flush still works: undoDismiss removes the
+   * id from `dismissed-notes` again. Mirrors web.
+   */
+  const commitPendingSavedDismissals = useCallback((flushAll: boolean) => {
+    if (_pendingSavedDismissals.size === 0) return;
+    const now = Date.now();
+    const toCommit: string[] = [];
+    for (const [id, at] of _pendingSavedDismissals) {
+      if (flushAll || now - at > UNDO_WINDOW_MS) toCommit.push(id);
+    }
+    if (toCommit.length === 0) return;
+    for (const id of toCommit) _pendingSavedDismissals.delete(id);
+    setDismissedIds(prev => {
+      const unique = [...new Set([...prev, ...toCommit])];
+      return unique.length > MAX_DISMISSED_NOTES ? unique.slice(-MAX_DISMISSED_NOTES) : unique;
+    });
+    let changed = false;
+    for (const id of toCommit) { if (_softDismissedSet.delete(id)) changed = true; }
+    if (changed) {
+      _softDismissedSet = new Set(_softDismissedSet);
+      _setSoftDismissedIds([..._softDismissedSet]);
+    }
+    setUndoMapVersion(v => v + 1);
+    notifyListeners();
+  }, [setDismissedIds]);
+
+  const armSavedCommitTimer = useCallback(function arm() {
+    if (_savedCommitTimer) clearTimeout(_savedCommitTimer);
+    _savedCommitTimer = setTimeout(() => {
+      _savedCommitTimer = undefined;
+      _liveCommitPending?.(false);
+      if (_pendingSavedDismissals.size > 0) arm();
+    }, UNDO_WINDOW_MS + 250);
+  }, []);
+
+  /**
+   * Dismiss from the Saved screen: un-save (collapsed + bookmark) and, once
+   * the undo window closes, hide from feeds permanently. In-place undo uses
+   * the same 20s machinery as the feed's dismiss. Mirrors web.
+   */
+  const dismissFromSaved = useCallback((noteId: string) => {
+    dismiss(noteId);
+    storeRemoveBookmark(noteId);
+    _pendingSavedDismissals.set(noteId, Date.now());
+    setUndoMapVersion(v => v + 1);
+    armSavedCommitTimer();
+    notifyListeners();
+  }, [dismiss, armSavedCommitTimer]);
+
+  /** True while a saved-page dismissal awaits its undo window / commit. */
+  const isPendingSavedDismissal = useCallback((noteId: string) => {
+    return _pendingSavedDismissals.has(noteId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- undoMapVersion is an intentional re-run trigger
+  }, [undoMapVersion]);
+
   const undoDismiss = useCallback((noteId: string) => {
     const dismissedAt = _dismissedUndoMap.get(noteId);
     if (!dismissedAt || Date.now() - dismissedAt > UNDO_WINDOW_MS) return;
@@ -349,9 +456,22 @@ export function useCollapsedNotes() {
     _softDismissedSet = next;
     _setSoftDismissedIds([..._softDismissedSet]);
     _dismissedUndoMap.delete(noteId);
+
+    // Saved-screen dismissals additionally restore the save itself: re-collapse,
+    // re-bookmark, un-dismiss if a background flush already committed it, and
+    // erase the graves the removal wrote — with a grave standing, the next pull
+    // merge would delete the undone save again. Mirrors web.
+    if (_pendingSavedDismissals.delete(noteId)) {
+      setDismissedIds(prev => (prev.includes(noteId) ? prev.filter(id => id !== noteId) : prev));
+      collapse(noteId);
+      storeAddBookmark(noteId);
+      clearStoredTombstones(COLLAPSED_KEY, [noteId]);
+      clearStoredTombstones('nostr-bookmark-ids', [noteId]);
+    }
+
     setUndoMapVersion(v => v + 1);
     notifyListeners();
-  }, []);
+  }, [collapse, setDismissedIds]);
 
   const canUndoDismiss = useCallback((noteId: string) => {
     const dismissedAt = _dismissedUndoMap.get(noteId);
@@ -447,8 +567,9 @@ export function useCollapsedNotes() {
   // assignment during render is safe here: it's idempotent, and every instance
   // drives the same module-level state.
   _liveActions = {
-    toggleCollapsed, collapse, expand, dismiss, undoDismiss, dismissMultiple, dismissThreadRoots,
+    toggleCollapsed, collapse, expand, dismiss, dismissFromSaved, undoDismiss, dismissMultiple, dismissThreadRoots,
   };
+  _liveCommitPending = commitPendingSavedDismissals;
 
   return {
     isCollapsed,
@@ -459,6 +580,8 @@ export function useCollapsedNotes() {
     collapse,
     expand,
     dismiss,
+    dismissFromSaved,
+    isPendingSavedDismissal,
     undoDismiss,
     canUndoDismiss,
     consolidate,

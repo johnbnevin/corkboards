@@ -1,5 +1,7 @@
 import { useState, useEffect, useMemo, memo, useCallback } from 'react';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { RSS_PUBKEY } from '@core/rss';
+import { getParentId } from '@core/threadTree';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { NoteCard } from '@/components/NoteCard';
 import { Button } from '@/components/ui/button';
@@ -7,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Save, RotateCcw } from 'lucide-react';
 import { useCollapsedNotes } from '@/hooks/useCollapsedNotes';
 import { useBookmarks } from '@/hooks/useBookmarks';
+import { useParentNotes } from '@/hooks/useParentNotes';
 import { usePinnedNotes } from '@/hooks/usePinnedNotes';
 import { getUserRelays, FALLBACK_RELAYS } from '@/components/NostrProvider';
 import { useNostr } from '@nostrify/react';
@@ -37,7 +40,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
   columnCount = 3,
 }: SavedForLaterCorkboardProps) {
   // Own the collapsed state here — dismiss/expand only re-renders this component
-  const { collapsedIds, expand } = useCollapsedNotes();
+  const { collapsedIds, expand, dismissFromSaved, isPendingSavedDismissal } = useCollapsedNotes();
   const { nostr } = useNostr();
   const { bookmarkIds } = useBookmarks();
   const { pinnedIds, togglePin } = usePinnedNotes();
@@ -58,14 +61,16 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
     idbReady.then(() => { if (!cancelled) setHydrated(true); });
     return () => { cancelled = true; };
   }, []);
-  const [isLoading, setIsLoading] = useState(false);
-  const [notes, setNotes] = useState<NostrEvent[]>([]);
-  const [failedIds, setFailedIds] = useState<string[]>([]);
   const [zapTargetNote, setZapTargetNote] = useState<NostrEvent | null>(null);
   const [minimizedNoteIds, setMinimizedNoteIds] = useLocalStorage<string[]>('saved-minimized-notes', []);
-  const [locallyDismissedIds, setLocallyDismissedIds] = useState<Set<string>>(new Set());
 
   const gridStyle = { gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` };
+
+  // Key the fetch on the ids' CONTENT, not their count. Keyed on
+  // `savedIds.length`, a restore that swapped ids without changing the count
+  // never refetched, and every single dismiss re-keyed and blanked the grid.
+  const savedIdSet = useMemo(() => new Set(savedIds), [savedIds]);
+  const savedIdsKey = useMemo(() => [...savedIds].sort().join(','), [savedIds]);
 
   // Fetch notes by their IDs.
   //
@@ -78,30 +83,31 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
   // existing connections, obeys the query governor, and on desktop runs over
   // the native socket bridge. Direct relay queries stay as a SECOND pass for
   // whatever the pool couldn't find.
-  const fetchNotes = useCallback(async () => {
-    if (!hydrated) return;
-    if (savedIds.length === 0) {
-      setNotes([]);
-      setFailedIds([]);
-      return;
-    }
-
-    setIsLoading(true);
-
-    try {
+  //
+  // React Query owns the lifecycle: `keepPreviousData` keeps the current grid
+  // rendered while a re-keyed fetch runs (a dismiss no longer flashes the
+  // whole page to skeletons), and `signal` cancels a superseded run instead of
+  // letting two full passes race each other's setState.
+  const savedQuery = useQuery({
+    queryKey: ['saved-notes', savedIdsKey],
+    enabled: hydrated && savedIds.length > 0,
+    placeholderData: keepPreviousData,
+    queryFn: async ({ signal }): Promise<{ events: NostrEvent[]; missingIds: string[] }> => {
+      const ids = savedIdsKey.split(',');
       const found = new Map<string, NostrEvent>();
       const batchSize = 50;
       const batches: string[][] = [];
-      for (let i = 0; i < savedIds.length; i += batchSize) {
-        batches.push(savedIds.slice(i, i + batchSize));
+      for (let i = 0; i < ids.length; i += batchSize) {
+        batches.push(ids.slice(i, i + batchSize));
       }
 
       // Pass 1 — pool, batches sequential so we never burst sockets.
       for (const batch of batches) {
+        if (signal.aborted) break;
         try {
           const events = await nostr.query(
             [{ ids: batch }],
-            { signal: AbortSignal.timeout(10000) },
+            { signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]) },
           );
           for (const ev of events) if (!found.has(ev.id)) found.set(ev.id, ev);
         } catch {
@@ -112,12 +118,13 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
       // Pass 2 — direct relay queries for the stragglers only, a few relays at
       // a time. Missing ids are usually on a relay the pool didn't pick, not
       // genuinely gone.
-      let missing = savedIds.filter(id => !found.has(id));
+      let missing = ids.filter(id => !found.has(id));
       if (missing.length > 0) {
         const userRelays = getUserRelays();
         const relays = [...new Set([...userRelays.write, ...userRelays.read, ...FALLBACK_RELAYS])];
         const RELAY_CHUNK = 3;
         for (let i = 0; i < relays.length && missing.length > 0; i += RELAY_CHUNK) {
+          if (signal.aborted) break;
           const chunk = relays.slice(i, i + RELAY_CHUNK);
           const results = await Promise.allSettled(
             chunk.map(url => queryRelay(url, { ids: missing.slice(0, 100) }, 8000)),
@@ -126,31 +133,65 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
             if (r.status !== 'fulfilled') continue;
             for (const ev of r.value) if (!found.has(ev.id)) found.set(ev.id, ev);
           }
-          missing = savedIds.filter(id => !found.has(id));
+          missing = ids.filter(id => !found.has(id));
         }
       }
 
       // Only now is an id "not found" — after the pool AND every relay missed
       // it. This matters because the failed list drives a destructive action.
-      setFailedIds(missing);
-      setNotes([...found.values()].sort((a, b) => b.created_at - a.created_at));
-    } catch (error) {
-      console.error('Failed to fetch saved notes:', error);
+      return {
+        events: [...found.values()].sort((a, b) => b.created_at - a.created_at),
+        missingIds: missing,
+      };
+    },
+  });
+  const isLoading = savedQuery.isLoading;
+
+  useEffect(() => {
+    if (savedQuery.isError) {
       toast({
         title: 'Failed to load saved notes',
         description: 'Some notes may not be available on your relays.',
         variant: 'destructive',
       });
-    } finally {
-      setIsLoading(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [savedIds.length, nostr, hydrated]);
+  }, [savedQuery.isError, toast]);
 
-  // Refetch when the count changes (new note added or removed)
-  useEffect(() => {
-    fetchNotes();
-  }, [fetchNotes]);
+  // Derived, never set: ids removed externally (a dismiss on this device, a
+  // restore, another tab) disappear instantly without waiting for a refetch,
+  // and stale events can't outlive their ids. A just-dismissed note stays in
+  // the grid while its undo window runs — NoteCard renders it as the in-place
+  // undo placeholder — then leaves when the dismissal commits.
+  const notes = useMemo(
+    () => (savedQuery.data?.events ?? []).filter(n => savedIdSet.has(n.id) || isPendingSavedDismissal(n.id)),
+    [savedQuery.data, savedIdSet, isPendingSavedDismissal],
+  );
+  const failedIds = useMemo(
+    () => (savedQuery.data?.missingIds ?? []).filter(id => savedIdSet.has(id)),
+    [savedQuery.data, savedIdSet],
+  );
+
+  // Reply parents. NoteCard only receives `parentNote` as a prop — without
+  // this query every saved reply rendered the unresolved-parent placeholder
+  // forever, and its "Retry now" invalidated a query key nothing here
+  // observed, so even a successful retry changed nothing on screen. Mounting
+  // the shared batch query completes that circuit and registers still-missing
+  // parents with the background retry sweep.
+  const parentRequests = useMemo(() => {
+    const requests = new Map<string, { eventId: string; hints: string[]; authorPubkey?: string }>();
+    for (const note of notes) {
+      if (note.kind !== 1 && note.kind !== 1111) continue;
+      if (note.kind === 1 && note.tags.some(t => t[0] === 'q')) continue;
+      const parentId = getParentId(note);
+      if (!parentId || requests.has(parentId)) continue;
+      const replyETag = note.tags.find(t => t[0] === 'e' && t[1] === parentId);
+      const hints = replyETag?.[2] ? [replyETag[2]] : [];
+      const authorPubkey = note.tags.find(t => t[0] === 'p')?.[1];
+      requests.set(parentId, { eventId: parentId, hints, authorPubkey });
+    }
+    return Array.from(requests.values());
+  }, [notes]);
+  const { data: parentNotes } = useParentNotes(parentRequests);
 
   // Separate pinned and regular notes
   const { pinnedNotesList, regularNotes } = useMemo(() => {
@@ -178,7 +219,6 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
       title: `Removed ${failedIds.length} unavailable notes`,
       description: 'They are removed on your other devices too.',
     });
-    setFailedIds([]);
     setConfirmRemoveFailed(false);
   }, [confirmRemoveFailed, failedIds, expand, toast]);
 
@@ -197,19 +237,15 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
   }, [setMinimizedNoteIds]);
 
   const handleDismissNote = useCallback((noteId: string) => {
-    // Remove from saved list (persists, updates badge count in parent)
-    expand(noteId);
-    // Hide locally immediately — no wait for re-fetch
-    setLocallyDismissedIds(prev => {
-      const newSet = new Set(prev);
-      newSet.add(noteId);
-      return newSet;
-    });
-  }, [expand]);
+    // Un-save AND hide from feeds, with a 20s in-place undo. The card turns
+    // into the undo placeholder immediately; counts drop immediately too,
+    // because both the collapsed store and the bookmark store shrink.
+    dismissFromSaved(noteId);
+  }, [dismissFromSaved]);
 
   const displayNotes = useMemo(
-    () => [...pinnedNotesList, ...regularNotes].filter(n => !locallyDismissedIds.has(n.id)),
-    [pinnedNotesList, regularNotes, locallyDismissedIds]
+    () => [...pinnedNotesList, ...regularNotes],
+    [pinnedNotesList, regularNotes]
   );
 
   return (
@@ -265,7 +301,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
             <p className="text-sm max-w-md mx-auto mb-4">
               None of your {savedIds.length} saved notes could be found on your current relays.
             </p>
-            <Button onClick={fetchNotes} variant="outline">
+            <Button onClick={() => savedQuery.refetch()} variant="outline">
               <RotateCcw className="h-4 w-4 mr-2" />
               Try Again
             </Button>
@@ -284,11 +320,11 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
                     variant="link"
                     size="sm"
                     className="text-amber-700 p-0 h-auto"
-                    onClick={fetchNotes}
-                    disabled={isLoading}
+                    onClick={() => savedQuery.refetch()}
+                    disabled={savedQuery.isFetching}
                   >
                     <RotateCcw className="h-3 w-3 mr-1" />
-                    {isLoading ? 'Retrying…' : 'Try again'}
+                    {savedQuery.isFetching ? 'Retrying…' : 'Try again'}
                   </Button>
                   <Button
                     variant="link"
@@ -312,6 +348,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
                     onThreadClick={() => onThreadClick(note.id)}
                     onOpenThread={onOpenThread}
                     onZapClick={note.pubkey !== RSS_PUBKEY ? () => setZapTargetNote(note) : undefined}
+                    parentNote={parentNotes?.[getParentId(note) ?? ''] ?? undefined}
                     isPinned={pinnedIds.includes(note.id)}
                     showPinButton
                     onPinClick={() => handlePinNote(note.id)}

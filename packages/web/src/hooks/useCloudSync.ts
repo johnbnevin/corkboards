@@ -28,10 +28,28 @@
  */
 import { useCallback, useEffect, useRef } from 'react';
 import { debugLog } from '@/lib/debug';
-import { CLOUD_SYNC_INTERVAL_MS, CLOUD_SYNC_MIN_GAP_MS } from '@core/cacheConfig';
+import { getLastCheckSummary } from '@/hooks/useNostrBackup';
+import { CLOUD_SYNC_INTERVAL_MS, CLOUD_SYNC_MIN_GAP_MS, CLOUD_SYNC_IDLE_STRIKES } from '@core/cacheConfig';
+import { createSyncScheduler, type SchedulerResetReason } from '@core/syncScheduler';
 
 // Cadence lives in @core/cacheConfig so web and mobile cannot drift apart.
 export { CLOUD_SYNC_INTERVAL_MS } from '@core/cacheConfig';
+
+/**
+ * The 3-strike idle stop: after CLOUD_SYNC_IDLE_STRIKES consecutive checks
+ * that found nothing new, interval ticks stop checking until something happens
+ * (focus, visibility, network return, a local save). This is what makes the
+ * 30-second interval NET CHEAPER than the old always-on 60-second loop — an
+ * unattended tab goes quiet instead of polling forever. Module-level because
+ * there is one logical sync loop per app, and the auto-save path (a different
+ * hook) must be able to reset it when a local save gives peers something new.
+ */
+const _scheduler = createSyncScheduler(CLOUD_SYNC_IDLE_STRIKES);
+
+/** Resume idle-stopped checking — call on any sign of life. */
+export function resetCloudSyncIdle(reason: SchedulerResetReason): void {
+  _scheduler.reset(reason);
+}
 
 export interface UseCloudSyncOptions {
   /** Whether a user is logged in. */
@@ -81,10 +99,16 @@ export function useCloudSync({
   const latest = useRef({ enabled, backupStatus, checkRemoteBackup, remoteTimestamp, lastBackupTs, loadRemoteBackup });
   latest.current = { enabled, backupStatus, checkRemoteBackup, remoteTimestamp, lastBackupTs, loadRemoteBackup };
 
-  const syncNow = useCallback(() => {
+  const syncNow = useCallback((resetReason?: SchedulerResetReason) => {
     const cur = latest.current;
     if (!cur.enabled) return;
     if (document.visibilityState === 'hidden') return;
+    if (resetReason) _scheduler.reset(resetReason);
+    else if (_scheduler.isIdle()) {
+      // Interval tick with nothing to learn: three consecutive checks found
+      // nothing new, so stay quiet until a back-from-idle signal resets us.
+      return;
+    }
     if (inFlight.current) {
       if (Date.now() - inFlightSince.current < SYNC_STALE_MS) return;
       debugLog('[cloudSync] previous sync never settled — starting a fresh one');
@@ -123,7 +147,14 @@ export function useCloudSync({
           cur.checkRemoteBackup(true),
           new Promise<null>((resolve) => setTimeout(() => resolve(null), SYNC_STALE_MS)),
         ]);
-        if (!checked) return;
+        if (!checked) {
+          // Nothing new is a strike toward the idle stop; a FAILED check is
+          // not — an outage must not be mistaken for idleness.
+          const summary = getLastCheckSummary();
+          _scheduler.recordCheckResult(summary?.failed ? 'failed' : 'nothing-new');
+          return;
+        }
+        _scheduler.recordCheckResult('found-new');
         debugLog(`[cloudSync] cloud manifest ${checked} not yet merged here — merging`);
         // Let React commit the check's setRemoteBackup before loading:
         // loadRemoteBackup reads remoteBackup from its own closure, and the
@@ -134,6 +165,7 @@ export function useCloudSync({
         // Offline or relays unreachable: local stays authoritative until the
         // next attempt. This is the only case where local "wins", and only
         // because there is nothing to merge with.
+        _scheduler.recordCheckResult('failed');
         debugLog('[cloudSync] sync failed (will retry):', err);
       } finally {
         inFlight.current = false;
@@ -145,30 +177,39 @@ export function useCloudSync({
   // been away. Delayed slightly so it doesn't compete with first paint.
   useEffect(() => {
     if (!enabled) return;
-    const t = setTimeout(syncNow, 4000);
+    const t = setTimeout(() => syncNow('login'), 4000);
     return () => clearTimeout(t);
   }, [enabled, syncNow]);
 
-  // On return to the foreground.
+  // On return to the foreground — resets the idle stop and checks immediately
+  // (still under the CLOUD_SYNC_MIN_GAP_MS floor, so app-switch flapping can't
+  // hammer relays).
   useEffect(() => {
     if (!enabled) return;
-    const onVisible = () => { if (document.visibilityState === 'visible') syncNow(); };
+    const onVisible = () => { if (document.visibilityState === 'visible') syncNow('visible'); };
+    // visibilitychange alone misses focus moving between two visible windows.
+    const onFocus = () => syncNow('focus');
     document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onFocus);
+    };
   }, [enabled, syncNow]);
 
   // And on an interval while the app is open, so two devices in use at the same
-  // time converge without either being touched.
+  // time converge without either being touched. Ticks pass no reason, so the
+  // 3-strike idle stop applies to them alone.
   useEffect(() => {
     if (!enabled) return;
-    const id = setInterval(syncNow, CLOUD_SYNC_INTERVAL_MS);
+    const id = setInterval(() => syncNow(), CLOUD_SYNC_INTERVAL_MS);
     return () => clearInterval(id);
   }, [enabled, syncNow]);
 
   // Retry as soon as connectivity returns — the offline case above.
   useEffect(() => {
     if (!enabled) return;
-    const onOnline = () => syncNow();
+    const onOnline = () => syncNow('online');
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
   }, [enabled, syncNow]);

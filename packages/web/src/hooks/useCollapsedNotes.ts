@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useEffect, useRef, useState, useSyncExternalStore, createContext, useContext, createElement, type ReactNode } from 'react'
 import { useLocalStorage } from './useLocalStorage'
+import { clearStoredTombstones } from '@/lib/idb'
 
 const MAX_COLLAPSED_NOTES = 10000 // Keep memory bounded
 
@@ -35,6 +36,13 @@ const UNDO_WINDOW_MS = 20000 // 20 seconds to undo
 // Undoing the trigger undoes the entire batch; undoing a non-trigger undoes only that note.
 const _dismissBatchMap = new Map<string, Set<string>>()
 const LAST_DISMISSED_EVENT = 'last-dismissed-sync'
+
+// Saved-page dismissals waiting out their undo window (noteId → dismissedAt).
+// A dismiss from Save for Later means "un-save AND hide from feeds", but the
+// hide is only committed to `dismissed-notes` once the 20s undo window closes
+// (or the tab is leaving), so an undo never has to race the backup sync.
+const _pendingSavedDismissals = new Map<string, number>()
+let _savedCommitTimer: ReturnType<typeof setTimeout> | undefined
 
 function notifyLastDismissedChange() {
   notifyNoteState()
@@ -159,6 +167,8 @@ export function clearCollapsedNotesModuleState(): void {
   _softDismissedSet = new Set()
   _dismissedUndoMap.clear()
   _dismissBatchMap.clear()
+  _pendingSavedDismissals.clear()
+  if (_savedCommitTimer) { clearTimeout(_savedCommitTimer); _savedCommitTimer = undefined }
   _sessionCollapsedIds = new Set()
   _sessionCollapsedCounter = 0
   _collapsedSet = new Set()
@@ -340,6 +350,84 @@ function useCollapsedNotesState() {
     notifyLastDismissedChange()
   }, [setCollapsedIds])
 
+  /**
+   * Commit saved-page dismissals whose undo window has closed into the
+   * permanent `dismissed-notes` list ("un-save and hide from feeds").
+   * `flushAll` commits regardless of the window — used when the tab is going
+   * away, so a dismissal made just before leaving still lands and rides the
+   * backup flush. An undo after an early flush still works: undoDismiss
+   * removes the id from `dismissed-notes` again.
+   */
+  const commitPendingSavedDismissals = useCallback((flushAll: boolean) => {
+    if (_pendingSavedDismissals.size === 0) return
+    const now = Date.now()
+    const toCommit: string[] = []
+    for (const [id, at] of _pendingSavedDismissals) {
+      if (flushAll || now - at > UNDO_WINDOW_MS) toCommit.push(id)
+    }
+    if (toCommit.length === 0) return
+    for (const id of toCommit) _pendingSavedDismissals.delete(id)
+    setDismissedIds(prev => {
+      const unique = [...new Set([...prev, ...toCommit])]
+      return unique.length > MAX_DISMISSED_NOTES ? unique.slice(-MAX_DISMISSED_NOTES) : unique
+    })
+    // Clear their soft-dismiss placeholders — the cards leave the grid now.
+    let changed = false
+    for (const id of toCommit) { if (_softDismissedSet.delete(id)) changed = true }
+    if (changed) {
+      _softDismissedSet = new Set(_softDismissedSet)
+      _setSoftDismissedIds([..._softDismissedSet])
+      persistSoftDismissed()
+      notifySoftDismissChange()
+    }
+    setUndoMapVersion(v => v + 1)
+    notifyLastDismissedChange()
+  }, [setDismissedIds])
+  const commitPendingRef = useRef(commitPendingSavedDismissals)
+  commitPendingRef.current = commitPendingSavedDismissals
+
+  const armSavedCommitTimer = useCallback(function arm() {
+    if (_savedCommitTimer) clearTimeout(_savedCommitTimer)
+    _savedCommitTimer = setTimeout(() => {
+      _savedCommitTimer = undefined
+      commitPendingRef.current(false)
+      if (_pendingSavedDismissals.size > 0) arm()
+    }, UNDO_WINDOW_MS + 250)
+  }, [])
+
+  // Flush pending saved-dismissals when the tab is leaving, so they are
+  // committed (and picked up by the on-hidden backup save) rather than lost.
+  useEffect(() => {
+    const flush = () => commitPendingRef.current(true)
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flush() }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('beforeunload', flush)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('beforeunload', flush)
+    }
+  }, [])
+
+  /**
+   * Dismiss from the Save for Later page: un-save (collapsed + bookmark) and,
+   * once the undo window closes, hide from feeds permanently. In-place undo
+   * uses the same 20s machinery as the feed's dismiss.
+   */
+  const dismissFromSaved = useCallback((noteId: string) => {
+    dismiss(noteId)
+    // Also drop the NIP-51 bookmark — the saved list is the union of both.
+    notifyBookmarkSync(noteId, 'remove')
+    _pendingSavedDismissals.set(noteId, Date.now())
+    setUndoMapVersion(v => v + 1)
+    armSavedCommitTimer()
+  }, [dismiss, armSavedCommitTimer])
+
+  /** True while a saved-page dismissal awaits its undo window / commit. */
+  const isPendingSavedDismissal = useCallback((noteId: string) => {
+    return _pendingSavedDismissals.has(noteId)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- undoMapVersion is an intentional re-run trigger to invalidate downstream useMemos
+  }, [undoMapVersion])
+
   /** Undo a dismiss (within its 20 second window).
    *  If this note was the trigger of a batch dismiss, undo the entire batch. */
   const undoDismiss = useCallback((noteId: string) => {
@@ -360,9 +448,26 @@ function useCollapsedNotesState() {
     persistSoftDismissed()
     notifySoftDismissChange()
     _dismissBatchMap.delete(noteId)
+
+    // Saved-page dismissals additionally restore the save itself: re-collapse,
+    // re-bookmark, un-dismiss if an exit flush already committed it, and erase
+    // the graves the removal wrote — with a grave standing, the next pull merge
+    // would delete the undone save again (its removal timestamp outranks the
+    // last backup's add-time).
+    const savedUndos = idsToUndo.filter(id => _pendingSavedDismissals.delete(id))
+    if (savedUndos.length > 0) {
+      const undoSet = new Set(savedUndos)
+      setDismissedIds(prev => (prev.some(id => undoSet.has(id)) ? prev.filter(id => !undoSet.has(id)) : prev))
+      for (const id of savedUndos) {
+        collapse(id) // re-save; its session-collapsed update re-adds the bookmark
+        clearStoredTombstones('collapsed-notes', [id])
+        clearStoredTombstones('nostr-bookmark-ids', [id])
+      }
+    }
+
     setUndoMapVersion(v => v + 1)
     notifyLastDismissedChange()
-  }, [])
+  }, [collapse, setDismissedIds])
 
   /** Check if a note can be undone (was dismissed within its 20 second window) */
   const canUndoDismiss = useCallback((noteId: string) => {
@@ -507,6 +612,8 @@ function useCollapsedNotesState() {
     collapse,
     expand,
     dismiss,
+    dismissFromSaved,
+    isPendingSavedDismissal,
     undoDismiss,
     canUndoDismiss,
     isBatchTrigger,
@@ -526,7 +633,8 @@ function useCollapsedNotesState() {
     softDismissedCount: softDismissedIds.length,
   }), [
     isCollapsed, isCollapsedThisSession, isDismissed, isSoftDismissed, toggleCollapsed, collapse, expand,
-    dismiss, undoDismiss, canUndoDismiss, isBatchTrigger, consolidate, dismissMultiple, dismissThreadRoots,
+    dismiss, dismissFromSaved, isPendingSavedDismissal, undoDismiss, canUndoDismiss, isBatchTrigger,
+    consolidate, dismissMultiple, dismissThreadRoots,
     isDismissedThreadRoot, dismissedThreadRootSet, dismissAllCollapsed, clearAll, clearDismissed, undismissMany,
     collapsedIds, dismissedIds, softDismissedIds,
   ])
@@ -553,6 +661,7 @@ export interface CollapsedNotesActions {
   collapse: (noteId: string) => void
   expand: (noteId: string) => void
   dismiss: (noteId: string) => void
+  dismissFromSaved: (noteId: string) => void
   undoDismiss: (noteId: string) => void
   dismissMultiple: (noteIds: string[], triggerId?: string) => void
   dismissThreadRoots: (rootIds: string[]) => void
@@ -580,6 +689,7 @@ export function CollapsedNotesProvider({ children }: { children: ReactNode }) {
     collapse: (noteId) => latest.current.collapse(noteId),
     expand: (noteId) => latest.current.expand(noteId),
     dismiss: (noteId) => latest.current.dismiss(noteId),
+    dismissFromSaved: (noteId) => latest.current.dismissFromSaved(noteId),
     undoDismiss: (noteId) => latest.current.undoDismiss(noteId),
     dismissMultiple: (noteIds, triggerId) => latest.current.dismissMultiple(noteIds, triggerId),
     dismissThreadRoots: (rootIds) => latest.current.dismissThreadRoots(rootIds),

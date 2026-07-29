@@ -94,7 +94,7 @@ import { ThroughputSettings } from '@/components/ThroughputSettings';
 // their chunks past first paint.
 const AdvancedSettings = lazy(() => import('@/components/AdvancedSettings').then(m => ({ default: m.AdvancedSettings })));
 const EmojiSetEditor = lazy(() => import('@/components/EmojiSetEditor').then(m => ({ default: m.EmojiSetEditor })));
-import { useNostrBackup, getLastAutoSaveError, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
+import { useNostrBackup, getLastAutoSaveError, describeIncompleteCheck, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 import { MAX_RETAINED_NOTES } from '@core/feedConstants';
 import { bumpQueryEpoch, getQueryEpoch, withQueryBudget, StaleEpochError } from '@core/queryGovernor';
@@ -132,6 +132,7 @@ import { getNoteCategories, noteMatchesHashtags, noteMatchesKindFilters, compute
 import { noteMatchesContentFilters, hasActiveContentFilters as hasActiveContentFiltersFor } from '@core/contentFilters';
 import { getCachedEvent } from '@/lib/fetchEvent';
 import { StatusBar } from '@/components/StatusBar';
+import { BackupIndicatorIcon, type BackupIndicatorState } from '@/components/BackupIndicatorIcon';
 import { TabBar } from '@/components/TabBar';
 import { NotificationsCorkboard } from '@/components/NotificationsCorkboard';
 import { playConsolidateSound, previewConsolidateSound } from '@/lib/consolidateSound';
@@ -799,6 +800,22 @@ export function MultiColumnClient() {
     return () => window.removeEventListener(BOOKMARK_SYNC_EVENT, handler);
   }, [addBookmark, removeBookmark]);
 
+  // Informational notices from the sync merge (e.g. a big Saved for Later
+  // cleanup from another device was applied) — heads-up, not an error.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { kind, count } = (e as CustomEvent<{ kind: string; count: number }>).detail;
+      if (kind === 'saved-cleanup') {
+        toast({
+          title: 'Saved notes cleaned up',
+          description: `A sync from another device removed ${count} Saved for Later notes. Looks like you just cleaned them up — if not, something may be wrong; checkpoints in the backup menu can restore an earlier state.`,
+        });
+      }
+    };
+    window.addEventListener('corkboard:sync-notice', handler);
+    return () => window.removeEventListener('corkboard:sync-notice', handler);
+  }, [toast]);
+
   // Nostr backup/restore
   const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, syncFromRemote, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, getCheckpoints: _getCheckpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
 
@@ -958,7 +975,12 @@ export function MultiColumnClient() {
 
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
   const [showBackupConfirm, setShowBackupConfirm] = useState(false);
-  const [backupIndicator, setBackupIndicator] = useState<'idle' | 'unsaved' | 'saved'>('idle');
+  const [backupIndicator, setBackupIndicator] = useState<BackupIndicatorState>('idle');
+  // 'saving' is derived, not stored: backupStatus covers both manual saveBackup
+  // and autoSaveBackup from start to result, so the orange blink needs no
+  // per-call-site wiring and cannot be forgotten.
+  const effectiveBackupIndicator: BackupIndicatorState =
+    backupStatus === 'encrypting' || backupStatus === 'saving' ? 'saving' : backupIndicator;
   const [showDownloadPrompt, setShowDownloadPrompt] = useState(false);
 
   // Prompt to download settings backup every 30 days
@@ -2521,24 +2543,28 @@ export function MultiColumnClient() {
         const mins = Math.round((Date.now() / 1000 - ts) / 60);
         return mins < 1 ? 'just now' : mins < 60 ? `${mins}m ago` : `${Math.round(mins / 60)}h ago`;
       };
+      // A decision point — if some backup relays never answered, say so here
+      // (never on background ticks): the "newest" we just acted on may not be
+      // the true newest.
+      const incomplete = describeIncompleteCheck();
       if (r.status === 'merged') {
         setBackupIndicator('saved');
-        toast({ title: 'Synced', description: `Merged a newer backup saved ${agoOf(r.remoteTs)} from another device.` });
+        toast({ title: 'Synced', description: `Merged a newer backup saved ${agoOf(r.remoteTs)} from another device.${incomplete ? ` Note: ${incomplete}.` : ''}` });
       } else if (r.status === 'held') {
         toast({
           title: 'Sync paused — needs your say-so',
-          description: `${r.detail ?? ''} Open Backup & Restore to review it.`.trim(),
+          description: `${r.detail ?? ''} Open Backup & Restore to review it.${incomplete ? ` Note: ${incomplete}.` : ''}`.trim(),
           variant: 'destructive',
         });
       } else if (r.status === 'up-to-date') {
         toast({
           title: 'Already in sync',
-          description: `${r.detail ?? ''} The newest backup on your relays is from ${agoOf(r.remoteTs)} and this device has already merged it. If another device shows a different number, compare against the counts above — the Saved corkboard lists only the notes it could fetch from relays just now.`.trim(),
+          description: `${r.detail ?? ''} The newest backup on your relays is from ${agoOf(r.remoteTs)} and this device has already merged it.${incomplete ? ` Note: ${incomplete}.` : ''} If another device shows a different number, compare against the counts above — the Saved corkboard lists only the notes it could fetch from relays just now.`.trim(),
         });
       } else if (r.status === 'none-found') {
         toast({
           title: 'Can’t find newer',
-          description: 'No backup manifest was found on any of your relays. Check your relay list in Advanced Settings.',
+          description: `No backup manifest was found on any of your relays.${incomplete ? ` ${incomplete}.` : ' Check your relay list in Advanced Settings.'}`,
           variant: 'destructive',
         });
       } else {
@@ -3931,7 +3957,7 @@ export function MultiColumnClient() {
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Backup & Restore">
-                      <HardDrive className={`h-4 w-4 transition-colors duration-700 ${backupIndicator === 'unsaved' ? 'text-red-500' : backupIndicator === 'saved' ? 'text-green-500' : ''}`} />
+                      <BackupIndicatorIcon state={effectiveBackupIndicator} />
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start">
@@ -3949,6 +3975,7 @@ export function MultiColumnClient() {
                             setBackupIndicator('saved');
                             toast({ title: 'Saved', description: 'Backup saved to Blossom.' });
                           } else {
+                            setBackupIndicator('error');
                             toast({
                               title: 'Not saved',
                               description: getLastAutoSaveError() || 'The save could not start — another backup operation is still running. Try again in a moment.',
@@ -3956,6 +3983,7 @@ export function MultiColumnClient() {
                             });
                           }
                         } catch (err) {
+                          setBackupIndicator('error');
                           toast({
                             title: 'Save failed',
                             description: err instanceof Error ? (err.message || err.name) : 'Could not save to Blossom.',
@@ -4152,19 +4180,36 @@ export function MultiColumnClient() {
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Backup & Restore">
-                    <HardDrive className={`h-4 w-4 transition-colors duration-700 ${backupIndicator === 'unsaved' ? 'text-red-500' : backupIndicator === 'saved' ? 'text-green-500' : ''}`} />
+                    <BackupIndicatorIcon state={effectiveBackupIndicator} />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
                   <DropdownMenuItem
                     disabled={backupStatus === 'saving' || backupStatus === 'encrypting'}
                     onClick={async () => {
-                      const ok = await saveBackup();
-                      if (ok) {
-                        setBackupIndicator('saved');
-                        toast({ title: 'Saved', description: 'Backup saved to Blossom.' });
-                      } else {
-                        toast({ title: 'Save failed', description: 'Could not save to Blossom — check your server list in Advanced Settings.', variant: 'destructive' });
+                      // Same contract as the mobile-width copy: saveBackup
+                      // RETURNS false when it declines — surface the actual
+                      // reason instead of a generic guess.
+                      try {
+                        const ok = await saveBackup();
+                        if (ok) {
+                          setBackupIndicator('saved');
+                          toast({ title: 'Saved', description: 'Backup saved to Blossom.' });
+                        } else {
+                          setBackupIndicator('error');
+                          toast({
+                            title: 'Not saved',
+                            description: getLastAutoSaveError() || 'The save could not start — another backup operation is still running. Try again in a moment.',
+                            variant: 'destructive',
+                          });
+                        }
+                      } catch (err) {
+                        setBackupIndicator('error');
+                        toast({
+                          title: 'Save failed',
+                          description: err instanceof Error ? (err.message || err.name) : 'Could not save to Blossom.',
+                          variant: 'destructive',
+                        });
                       }
                     }}
                     className="gap-2"

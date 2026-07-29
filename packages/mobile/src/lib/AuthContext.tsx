@@ -18,6 +18,7 @@ import { flushBackupBeforeSwitch } from '../lib/backupFlush';
 import { clearRelayCache, createRelay, registerAuthRelay } from './NostrProvider';
 import { isSecureRelay } from '@core/nostrUtils';
 import { clearCollapsedNotesModuleState } from '../hooks/useCollapsedNotes';
+import { clearBookmarksModuleState } from '../hooks/useBookmarks';
 import { clearNotesCache } from './notesCache';
 import { evictCachedProfile, clearProfileCache } from '../lib/cacheStore';
 import { mobileStorage } from '../storage/MmkvStorage';
@@ -409,6 +410,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       switchActiveUser(oldPubkey, pubkey);
       clearRelayCache();
       clearCollapsedNotesModuleState();
+      clearBookmarksModuleState();
       evictCachedProfile(pubkey);
     }
     setStoredActiveAccount(pubkey);
@@ -430,6 +432,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     clearRelayCache();
     clearCollapsedNotesModuleState();
+    clearBookmarksModuleState();
 
     // Re-enumerate after the keychain deletion above; the removed pubkey is
     // automatically excluded.
@@ -466,6 +469,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setStoredActiveAccount(null);
     clearRelayCache();
     clearCollapsedNotesModuleState();
+    clearBookmarksModuleState();
     clearProfileCache();
     // Cached note BODIES also have to go, or they linger in MMKV and surface
     // under the next account that signs in (clearNotesCache had no callers).

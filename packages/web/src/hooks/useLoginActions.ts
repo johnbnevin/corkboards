@@ -48,6 +48,7 @@ import { IMAGE_PROXY_TEMPLATE_KEY } from '@/lib/imageProxySettings';
 import { clearNotesCache } from '@/lib/notesCache';
 import { clearCache as clearProfileCacheDb, clearMemCache as clearProfileMemCache } from '@/lib/cacheStore';
 import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
+import { clearBookmarksModuleState } from '@/hooks/useBookmarks';
 import { clearNoteCardCache } from '@/components/NoteCard';
 import { handleLogoutStorageAsync } from '@/lib/storageKeys';
 import { isTauri, keychainStore, keychainDelete, tauriLog } from '@/lib/tauri';
@@ -523,6 +524,7 @@ export function useLoginActions() {
       // Clear in-memory caches (they're from the departing user)
       clearProfileMemCache();
       clearCollapsedNotesModuleState();
+      clearBookmarksModuleState();
       clearNoteCardCache();
       await clearNotesCache().catch(() => {});
 
@@ -593,6 +595,7 @@ export function useLoginActions() {
       log('Clearing in-memory caches...');
       clearProfileMemCache();
       clearCollapsedNotesModuleState();
+      clearBookmarksModuleState();
       clearNoteCardCache();
 
       document.querySelectorAll<HTMLInputElement>('input').forEach(el => { el.value = ''; });

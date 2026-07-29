@@ -19,10 +19,12 @@ import {
   RefreshControl,
 } from 'react-native';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
+import { getParentId } from '@core/threadTree';
 import { useAuth } from '../lib/AuthContext';
 import { useNostr, FALLBACK_RELAYS, getUserRelays } from '../lib/NostrProvider';
 import { useBookmarks } from '../hooks/useBookmarks';
+import { useParentNotes } from '../hooks/useParentNotes';
 import { usePinnedNotes } from '../hooks/usePinnedNotes';
 import { useCollapsedNotes } from '../hooks/useCollapsedNotes';
 import { useToast } from '../hooks/useToast';
@@ -36,23 +38,29 @@ export function SavedScreen() {
   const _queryClient = useQueryClient();
   const { bookmarkIds, toggleBookmark, isBookmarked, isLoading: bookmarksLoading } = useBookmarks();
   const { pinnedIds, togglePin } = usePinnedNotes();
-  const { collapsedIds, expand } = useCollapsedNotes();
+  const { collapsedIds, expand, dismissFromSaved, isPendingSavedDismissal, undoDismiss } = useCollapsedNotes();
   const { toast } = useToast();
 
   const [zapTarget, setZapTarget] = useState<NostrEvent | null>(null);
-  const [failedIds, setFailedIds] = useState<string[]>([]);
   const [retrying, setRetrying] = useState(false);
 
   // Merge collapsed IDs with bookmark IDs (union) for backward compat
   const savedIds = useMemo(() => {
     return [...new Set([...collapsedIds, ...bookmarkIds])];
   }, [collapsedIds, bookmarkIds]);
+  const savedIdSet = useMemo(() => new Set(savedIds), [savedIds]);
+  // Content-keyed and SORTED — the union's order depends on which store loads
+  // first, and an order-sensitive key refetched identical content.
+  const savedIdsKey = useMemo(() => [...savedIds].sort().join(','), [savedIds]);
 
   // Fetch the actual events for saved IDs using batch relay fetching
-  const { data: events, isLoading: eventsLoading, refetch } = useQuery<NostrEvent[]>({
-    queryKey: ['saved-notes', savedIds.join(',')],
+  const { data: savedData, isLoading: eventsLoading, refetch } = useQuery<{
+    events: NostrEvent[];
+    missingIds: string[];
+  }>({
+    queryKey: ['saved-notes', savedIdsKey],
     queryFn: async ({ signal }) => {
-      if (savedIds.length === 0) return [];
+      const ids = savedIdsKey.split(',');
 
       // Query write relays + read relays + fallbacks directly
       const userRelays = getUserRelays();
@@ -62,8 +70,8 @@ export function SavedScreen() {
       const allEvents: NostrEvent[] = [];
       const foundIds = new Set<string>();
 
-      for (let i = 0; i < savedIds.length; i += batchSize) {
-        const batch = savedIds.slice(i, i + batchSize);
+      for (let i = 0; i < ids.length; i += batchSize) {
+        const batch = ids.slice(i, i + batchSize);
         // Query all relays in parallel, dedupe results
         const results = await Promise.allSettled(
           relaysToQuery.map(url => {
@@ -90,29 +98,60 @@ export function SavedScreen() {
         }
       }
 
-      // Track failed IDs
-      const missing = savedIds.filter(id => !foundIds.has(id));
-      setFailedIds(missing);
-
-      return allEvents.sort((a, b) => b.created_at - a.created_at);
+      // Missing ids are data, not a side effect — setState inside a queryFn
+      // ran against whatever render happened to be current.
+      return {
+        events: allEvents.sort((a, b) => b.created_at - a.created_at),
+        missingIds: ids.filter(id => !foundIds.has(id)),
+      };
     },
     enabled: savedIds.length > 0,
     staleTime: 2 * 60_000,
+    placeholderData: keepPreviousData,
   });
+
+  // Derived, never set: an id removed on this device or by a sync merge
+  // disappears immediately, and stale events can't outlive their ids.
+  const failedIds = useMemo(
+    () => (savedData?.missingIds ?? []).filter(id => savedIdSet.has(id)),
+    [savedData, savedIdSet],
+  );
 
   // Sort: pinned first, then by time. When the last saved note is removed the
   // query disables (enabled: savedIds.length > 0) and its stale data would keep
-  // rendering — treat an empty savedIds list as an empty screen.
+  // rendering — filtering on the live id set treats it as an empty screen.
+  // A just-dismissed note stays while its undo window runs (rendered as the
+  // in-place undo card), then leaves when the dismissal commits.
   const sortedEvents = useMemo(() => {
-    if (!events || savedIds.length === 0) return [];
-    return [...events].sort((a, b) => {
+    const events = (savedData?.events ?? []).filter(e => savedIdSet.has(e.id) || isPendingSavedDismissal(e.id));
+    return events.sort((a, b) => {
       const aPinned = pinnedIds.includes(a.id);
       const bPinned = pinnedIds.includes(b.id);
       if (aPinned && !bPinned) return -1;
       if (!aPinned && bPinned) return 1;
       return b.created_at - a.created_at;
     });
-  }, [events, pinnedIds, savedIds]);
+  }, [savedData, savedIdSet, pinnedIds, isPendingSavedDismissal]);
+
+  // Reply parents — mobile NoteCard takes `parentNote` as a prop only, so
+  // without this batch query every saved reply showed the unresolved-parent
+  // placeholder forever and its "Retry now" invalidated a query key nothing
+  // on this screen observed.
+  const parentRequests = useMemo(() => {
+    const requests = new Map<string, { eventId: string; hints: string[]; authorPubkey?: string }>();
+    for (const note of sortedEvents) {
+      if (note.kind !== 1 && note.kind !== 1111) continue;
+      if (note.kind === 1 && note.tags.some(t => t[0] === 'q')) continue;
+      const parentId = getParentId(note);
+      if (!parentId || requests.has(parentId)) continue;
+      const replyETag = note.tags.find(t => t[0] === 'e' && t[1] === parentId);
+      const hints = replyETag?.[2] ? [replyETag[2]] : [];
+      const authorPubkey = note.tags.find(t => t[0] === 'p')?.[1];
+      requests.set(parentId, { eventId: parentId, hints, authorPubkey });
+    }
+    return Array.from(requests.values());
+  }, [sortedEvents]);
+  const { data: parentNotes } = useParentNotes(parentRequests);
 
   const handleRetryFailed = useCallback(async () => {
     setRetrying(true);
@@ -130,42 +169,55 @@ export function SavedScreen() {
       title: `Removed ${count} unavailable notes`,
       description: 'These notes could not be found on your relays.',
     });
-    setFailedIds([]);
   }, [failedIds, expand, isBookmarked, toggleBookmark, toast]);
 
   const renderNote = useCallback(
-    ({ item }: { item: NostrEvent }) => (
-      <View style={styles.cardWrapper}>
-        {pinnedIds.includes(item.id) && (
-          <Text style={styles.pinnedBadge}>Pinned</Text>
-        )}
-        <NoteCard
-          event={item}
-          isBookmarked={isBookmarked(item.id)}
-          onToggleBookmark={toggleBookmark}
-        />
-        <View style={styles.savedActions}>
-          <TouchableOpacity style={styles.actionBtn} onPress={() => togglePin(item.id)}>
-            <Text style={styles.actionText}>
-              {pinnedIds.includes(item.id) ? 'Unpin' : 'Pin'}
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.actionBtn} onPress={() => setZapTarget(item)}>
-            <Text style={styles.zapText}>Zap</Text>
-          </TouchableOpacity>
+    ({ item }: { item: NostrEvent }) => {
+      // In-place undo card while the dismissal's 20s window runs (parity with
+      // web's dashed undo placeholder).
+      if (isPendingSavedDismissal(item.id)) {
+        return (
           <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={() => {
-              toggleBookmark(item.id);
-              expand(item.id);
-            }}
+            style={styles.undoCard}
+            onPress={() => undoDismiss(item.id)}
+            accessibilityRole="button"
+            accessibilityLabel="Undo removing this saved note"
           >
-            <Text style={styles.removeText}>Remove</Text>
+            <Text style={styles.undoText}>Removed — tap to undo</Text>
           </TouchableOpacity>
+        );
+      }
+      return (
+        <View style={styles.cardWrapper}>
+          {pinnedIds.includes(item.id) && (
+            <Text style={styles.pinnedBadge}>Pinned</Text>
+          )}
+          <NoteCard
+            event={item}
+            isBookmarked={isBookmarked(item.id)}
+            onToggleBookmark={toggleBookmark}
+            parentNote={parentNotes?.[getParentId(item) ?? ''] ?? undefined}
+          />
+          <View style={styles.savedActions}>
+            <TouchableOpacity style={styles.actionBtn} onPress={() => togglePin(item.id)}>
+              <Text style={styles.actionText}>
+                {pinnedIds.includes(item.id) ? 'Unpin' : 'Pin'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.actionBtn} onPress={() => setZapTarget(item)}>
+              <Text style={styles.zapText}>Zap</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.actionBtn}
+              onPress={() => dismissFromSaved(item.id)}
+            >
+              <Text style={styles.removeText}>Remove</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-      </View>
-    ),
-    [pinnedIds, isBookmarked, toggleBookmark, togglePin, expand],
+      );
+    },
+    [pinnedIds, isBookmarked, toggleBookmark, togglePin, parentNotes, dismissFromSaved, isPendingSavedDismissal, undoDismiss],
   );
 
   if (!pubkey) {
@@ -268,6 +320,16 @@ const styles = StyleSheet.create({
   cardWrapper: {
     gap: 0,
   },
+  // In-place undo card for a just-dismissed saved note
+  undoCard: {
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: '#404040',
+    borderRadius: 10,
+    paddingVertical: 22,
+    alignItems: 'center',
+  },
+  undoText: { color: '#b3b3b3', fontSize: 13 },
   pinnedBadge: { fontSize: 11, color: '#f97316', fontWeight: '600', paddingHorizontal: 14, paddingBottom: 4 },
   savedActions: {
     flexDirection: 'row',

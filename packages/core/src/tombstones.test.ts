@@ -6,6 +6,7 @@ import {
   loadTombstones,
   serializeTombstones,
   mergeInTombstones,
+  clearTombstonesFor,
   tombstoneCount,
   prune,
   isMergeClassifiedKey,
@@ -120,5 +121,30 @@ describe('pruning', () => {
     expect(tombstoneCount()).toBe(MAX_TOMBSTONES)
     expect(getTombstones()[DISMISSED]['id0']).toBeUndefined()
     expect(getTombstones()[DISMISSED][`id${MAX_TOMBSTONES + 49}`]).toBeDefined()
+  })
+})
+
+describe('clearTombstonesFor — the undo path', () => {
+  it('erases exactly the given graves and nothing else', () => {
+    loadTombstones(JSON.stringify({
+      [DISMISSED]: { a: NOW, b: NOW, c: NOW },
+      'collapsed-notes': { a: NOW },
+    }))
+    expect(clearTombstonesFor(DISMISSED, ['a', 'b'])).toBe(true)
+    expect(getTombstones()[DISMISSED]).toEqual({ c: NOW })
+    expect(getTombstones()['collapsed-notes']).toEqual({ a: NOW })
+  })
+
+  it('drops the key entirely once its last grave is erased', () => {
+    loadTombstones(JSON.stringify({ [DISMISSED]: { a: NOW } }))
+    clearTombstonesFor(DISMISSED, ['a'])
+    expect(getTombstones()[DISMISSED]).toBeUndefined()
+  })
+
+  it('returns false when nothing matched', () => {
+    loadTombstones(JSON.stringify({ [DISMISSED]: { a: NOW } }))
+    expect(clearTombstonesFor(DISMISSED, ['zzz'])).toBe(false)
+    expect(clearTombstonesFor('collapsed-notes', ['a'])).toBe(false)
+    expect(getTombstones()[DISMISSED]).toEqual({ a: NOW })
   })
 })

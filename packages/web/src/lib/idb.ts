@@ -13,8 +13,13 @@ import {
   recordRemovalsFromWrite,
   serializeTombstones,
   loadTombstones,
+  getTombstones,
+  clearTombstonesFor,
   TOMBSTONE_STORAGE_KEY,
 } from '@core/tombstones';
+import type { TombstoneMap } from '@core/stateMerge';
+import { isSnapshotKey } from '@core/backupKeys';
+import { notifyBackupDirty } from './backupDirty';
 
 const DB_NAME = 'corkboard';
 const STORE_NAME = 'kv';
@@ -383,11 +388,39 @@ function recordRemovals(key: string, next: string | null): void {
   });
 }
 
+/** The persisted removal log, loading it first if no write has yet. */
+export function getStoredTombstones(): TombstoneMap {
+  if (!tombstonesLoaded) {
+    loadTombstones(memCache.get(TOMBSTONE_STORAGE_KEY) ?? null);
+    tombstonesLoaded = true;
+  }
+  return getTombstones();
+}
+
+/**
+ * Erase specific graves and persist the shrunken log — the undo path.
+ * Without this, an undone dismissal is re-deleted by the next pull merge,
+ * because the grave outlives the re-add (see @core/tombstones).
+ */
+export function clearStoredTombstones(key: string, ids: string[]): void {
+  getStoredTombstones();
+  if (!clearTombstonesFor(key, ids)) return;
+  withoutTombstoneRecording(() => {
+    const serialized = serializeTombstones();
+    memCache.set(TOMBSTONE_STORAGE_KEY, serialized);
+    idbSet(TOMBSTONE_STORAGE_KEY, serialized).catch(err =>
+      console.warn('[idb] failed to persist tombstones', err));
+  });
+}
+
 /** Synchronous write – updates cache immediately and schedules IDB write.
  *  `origin` (see `nextWriteOrigin`) is echoed back on the sync event so the
  *  writer can skip re-applying a value it already has. */
 export function idbSetSync(key: string, value: string, origin?: string): void {
   recordRemovals(key, value);
+  // Mark the backup dirty from the same choke point that diffs tombstones —
+  // no write path can forget to. The hash check downstream filters no-ops.
+  if (isSnapshotKey(key)) notifyBackupDirty(key);
   // Only skip memCache for the same blacklist used at init. A size threshold
   // here would create a sync/IDB read mismatch — idbGetSync would return null
   // for a value that exists on disk, silently breaking every reader.
@@ -413,6 +446,7 @@ export function idbPrimeCache(key: string, value: string): void {
     evictForNewKey(key);
     memCache.set(key, value);
   }
+  if (isSnapshotKey(key)) notifyBackupDirty(key);
   dispatchSyncEvent(key, tryParse(value));
 }
 
@@ -421,6 +455,7 @@ export function idbRemoveSync(key: string): void {
   // Deleting a merge-classified key removes everything in it, so every id it
   // held needs a tombstone — otherwise the next merge restores the lot.
   recordRemovals(key, null);
+  if (isSnapshotKey(key)) notifyBackupDirty(key);
   memCache.delete(key);
   idbRemove(key).catch(console.warn);
   dispatchSyncEvent(key, null);

@@ -34,14 +34,22 @@ export const BACKUP_CHECKED_FLAG_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
  * Shared by web (useCloudSync) and mobile (AutoSaveManager) so the two ends
  * cannot drift apart — a sync cadence is only meaningful as a pair.
  *
- * These were briefly halved/quartered (30s pull, 10s poll, 10s debounce, 15s
- * upload floor). That multiplied concurrent relay traffic enough to regress
- * things that had worked: profile resolution slowed, nested-note lookups
- * starved, and phone saves started erroring mid-upload. Convergence speed is
- * worthless if the extra traffic breaks the payloads it carries — these are
- * the proven values; change them together or not at all.
+ * History: an earlier attempt at a 30s pull (plus 10s poll / 10s debounce /
+ * 15s floor, all running unconditionally) multiplied concurrent relay traffic
+ * enough to regress working features — profile resolution slowed, nested-note
+ * lookups starved, phone saves erroring mid-upload. What makes 30s safe now
+ * is that it no longer runs unconditionally: after CLOUD_SYNC_IDLE_STRIKES
+ * consecutive checks that found nothing new, checking STOPS until the app
+ * comes back from idle (visible / focus / online / a local save). Steady-state
+ * background traffic is therefore lower than the old always-on 60s loop, and
+ * the push side is event-driven rather than a poll. The strike logic and this
+ * interval are a unit — do not flip one without the other.
  */
-export const CLOUD_SYNC_INTERVAL_MS = 60 * 1000;
+export const CLOUD_SYNC_INTERVAL_MS = 30 * 1000;
+
+/** Consecutive nothing-new checks before the pull loop goes quiet until the
+ *  next back-from-idle signal. */
+export const CLOUD_SYNC_IDLE_STRIKES = 3;
 
 /** Floor between two sync attempts however they were triggered — low enough
  *  that returning to the app feels immediate, high enough that app-switching
@@ -52,15 +60,21 @@ export const CLOUD_SYNC_MIN_GAP_MS = 20 * 1000;
  * Auto-save (push) cadence — shared by web (useAutoSaveTrigger) and mobile
  * (AutoSaveManager). Push and pull cadences are a pair: the sync interval
  * above only converges devices as fast as the slower of the two.
+ *
+ * Detection is event-driven: the storage layer marks the backup dirty at the
+ * write choke point (the same place tombstones are diffed), so a save costs
+ * nothing until the user actually changes something.
  */
-/** How often the change-detection poll runs. */
-export const AUTO_SAVE_POLL_MS = 30 * 1000;
-/** After a change is first detected, wait this long before uploading, so a
- *  burst of edits becomes one upload instead of several. */
-export const AUTO_SAVE_DEBOUNCE_MS = 30 * 1000;
+/** Safety-net poll only — catches any write path that somehow bypassed the
+ *  dirty-marking choke point. Detection itself is event-driven. */
+export const AUTO_SAVE_POLL_MS = 60 * 1000;
+/** Trailing quiet window after the LAST change before uploading — each new
+ *  write re-arms it, so a burst of edits becomes one upload. */
+export const AUTO_SAVE_DEBOUNCE_MS = 3 * 1000;
 /** Floor between two uploads. Each save is a blob to up to 3 Blossom servers
- *  plus a manifest publish. */
-export const AUTO_SAVE_MIN_INTERVAL_MS = 30 * 1000;
+ *  plus a manifest publish. A fire landing inside the floor is DEFERRED to
+ *  the floor's expiry, never dropped. */
+export const AUTO_SAVE_MIN_INTERVAL_MS = 10 * 1000;
 /** No auto-save for this long after launch — protects the cloud copy from
  *  being overwritten while local storage is still hydrating and the login
  *  backup check / auto-restore may still be in flight. */

@@ -331,6 +331,41 @@ export function mergeRemovesLocalData(result: MergeResult): boolean {
 }
 
 /**
+ * Merge a relay-fetched NIP-51 bookmark list (kind 10003) into local state.
+ *
+ * The old rule was a blind union, which made removal impossible: an id
+ * removed locally (or by a restore) was re-added five minutes later when the
+ * relay copy refreshed, because the union had no idea the absence was
+ * deliberate. This is the same id-survives-unless-a-newer-grave-says-otherwise
+ * rule as `mergeIdSet`, specialized for the relay direction:
+ *
+ * - every LOCAL id survives — local state is the live truth, and a grave for
+ *   an id that is still present locally means it was re-added after removal;
+ * - a RELAY id merges in unless a tombstone for it is at-or-after the relay
+ *   event's created_at, in which case the removal is the newer fact and the
+ *   relay copy is stale.
+ */
+export function mergeBookmarkSnapshot(
+  localIds: string[],
+  relayIds: string[],
+  relayCreatedAtSecs: number,
+  graves: Record<string, number> = {},
+): { ids: string[]; changed: boolean } {
+  const out = [...localIds]
+  const seen = new Set(localIds)
+  let changed = false
+  for (const id of relayIds) {
+    if (seen.has(id)) continue
+    const removedAt = graves[id]
+    if (removedAt !== undefined && removedAt >= relayCreatedAtSecs) continue
+    seen.add(id)
+    out.push(id)
+    changed = true
+  }
+  return { ids: changed ? out : localIds, changed }
+}
+
+/**
  * True when the local snapshot holds content the remote one lacks — an id,
  * board, or map entry that would be lost if the cloud were taken as-is.
  *

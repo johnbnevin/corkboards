@@ -32,8 +32,13 @@ import {
   recordRemovalsFromWrite,
   serializeTombstones,
   loadTombstones,
+  getTombstones,
+  clearTombstonesFor,
   TOMBSTONE_STORAGE_KEY,
 } from '@core/tombstones';
+import type { TombstoneMap } from '@core/stateMerge';
+import { isSnapshotKey } from '@core/backupKeys';
+import { notifyBackupDirty } from '../lib/backupDirty';
 
 const KEYCHAIN_SERVICE = 'me.corkboards.mmkv';
 const KEYCHAIN_USERNAME = 'mmkv-encryption-key';
@@ -109,6 +114,32 @@ function recordRemovalsForWrite(key: string, next: string | null): void {
   }
 }
 
+
+/** The persisted removal log, loading it first if no write has yet. */
+export function getStoredTombstones(): TombstoneMap {
+  if (!tombstonesLoaded) {
+    loadTombstones(readThroughBuffer(TOMBSTONE_STORAGE_KEY) ?? null);
+    tombstonesLoaded = true;
+  }
+  return getTombstones();
+}
+
+/**
+ * Erase specific graves and persist the shrunken log — the undo path.
+ * Without this, an undone dismissal is re-deleted by the next pull merge,
+ * because the grave outlives the re-add (see @core/tombstones). Mirrors web.
+ */
+export function clearStoredTombstones(key: string, ids: string[]): void {
+  try {
+    getStoredTombstones();
+    if (!clearTombstonesFor(key, ids)) return;
+    withoutTombstoneRecording(() => {
+      writeThroughBuffer(TOMBSTONE_STORAGE_KEY, serializeTombstones());
+    });
+  } catch {
+    // Never let bookkeeping break an undo.
+  }
+}
 
 /** Returns true if storage writes are succeeding. Auto-save should check this. */
 export function isStorageHealthy(): boolean {
@@ -379,6 +410,9 @@ export const mobileStorage: KVStorage = {
   setSync(key: string, value: string): void {
     try {
       recordRemovalsForWrite(key, value);
+      // Mark the backup dirty from the same choke point that diffs tombstones
+      // — no write path can forget to. The hash check downstream filters no-ops.
+      if (isSnapshotKey(key)) notifyBackupDirty(key);
       writeThroughBuffer(key, value);
       consecutiveWriteFailures = 0;
     } catch (err) {
@@ -393,6 +427,7 @@ export const mobileStorage: KVStorage = {
     // Deleting a merge-classified key removes everything in it, so every id it
     // held needs a tombstone or the next merge restores the lot.
     recordRemovalsForWrite(key, null);
+    if (isSnapshotKey(key)) notifyBackupDirty(key);
     writeThroughBuffer(key, null);
   },
 

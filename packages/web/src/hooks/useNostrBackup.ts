@@ -28,7 +28,13 @@ import { SILENT_REMOVAL_LIMIT } from '@core/cacheConfig';
 import { randomUuid } from '@core/cryptoUtils';
 import { formatTimeAgo } from '@/lib/formatTimeAgo';
 import { debugLog, debugWarn } from '@/lib/debug';
-import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy, withoutTombstoneRecording } from '@/lib/idb';
+import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy, withoutTombstoneRecording, getStoredTombstones } from '@/lib/idb';
+import {
+  evaluateAutoSaveGuard,
+  evaluateManifestThinness,
+  evaluateMergeHold,
+  verifyBlobMatchesManifest,
+} from '@core/backupGuards';
 import {
   mergeState,
   hasLocalContributions,
@@ -38,7 +44,6 @@ import {
   type TombstoneMap,
 } from '@core/stateMerge';
 import {
-  getTombstones,
   mergeInTombstones,
   serializeTombstones,
   TOMBSTONE_STORAGE_KEY,
@@ -495,6 +500,33 @@ export type AutoSaveResult = 'saved' | 'skipped' | 'blocked' | 'no-servers' | 'n
 let _lastAutoSaveError = '';
 export function getLastAutoSaveError(): string { return _lastAutoSaveError; }
 
+/** Which backup relays were asked / answered / failed on the last full check. */
+export interface RelayCheckReport { asked: string[]; answered: string[]; failed: string[] }
+let _lastCheckRelayReport: RelayCheckReport | null = null;
+export function getLastCheckRelayReport(): RelayCheckReport | null { return _lastCheckRelayReport; }
+
+/** Human-readable "N of M backup relays didn't respond" line, or null when the
+ *  last check heard from every relay it asked. For decision points only —
+ *  routine ticks must not nag. */
+export function describeIncompleteCheck(): string | null {
+  const r = _lastCheckRelayReport;
+  if (!r || r.failed.length === 0) return null;
+  const names = r.failed.map(u => u.replace(/^wss?:\/\//, '').replace(/\/$/, '')).join(', ');
+  return `${r.failed.length} of ${r.asked.length} backup relays didn't respond — the newest backup may not have been visible: ${names}`;
+}
+
+/**
+ * Non-blocking notice from the last save — e.g. 'saved-cleanup' when the
+ * saved-notes count halved but the save proceeded (a cleanup, not damage).
+ * Consumed once: reading clears it, so the toast fires per occurrence.
+ */
+let _lastAutoSaveWarning: 'saved-cleanup' | null = null;
+export function takeLastAutoSaveWarning(): 'saved-cleanup' | null {
+  const w = _lastAutoSaveWarning;
+  _lastAutoSaveWarning = null;
+  return w;
+}
+
 export type BackupStatus =
   | 'idle'
   | 'encrypting'
@@ -583,8 +615,11 @@ function serializeBackup(): string {
   return JSON.stringify({
     v: STATE_FORMAT_VERSION,
     savedAt: Math.floor(Date.now() / 1000),
-    keys,
-    tombstones: getTombstones(),
+    // getStoredTombstones, not getTombstones: the log loads lazily on first
+    // write, and a manual save before any local write this session would
+    // otherwise upload an EMPTY removal log — a fresh device restoring from
+    // that snapshot would miss every deletion this one knows about.
+    tombstones: getStoredTombstones(),
   });
 }
 
@@ -613,7 +648,10 @@ function localSnapshot(): StateSnapshot {
   return {
     keys,
     savedAt: parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10),
-    tombstones: getTombstones(),
+    // getStoredTombstones, not getTombstones: the log loads lazily on first
+    // WRITE, so a merge running before any local write this session would
+    // otherwise see an empty log and re-import ids this device deleted.
+    tombstones: getStoredTombstones(),
   };
 }
 
@@ -1292,28 +1330,29 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     // Reads the small last-backup-counts companion key (which IS in memCache)
     // instead of the LAST_BACKUP_DATA full blob (which isn't). Three real
     // production data-loss incidents were caused by this guard being dead
-    // code; now it actually runs.
+    // code; now it actually runs — via the shared, tested rules in
+    // @core/backupGuards. Only DISMISSED regression and feeds→0 block; a
+    // saved-notes cleanup proceeds with an informational warning (blocking it
+    // silently paused auto-save after the user cleaned Save for Later).
     const lastCountsRaw = idbGetSync('corkboard:last-backup-counts');
     if (lastCountsRaw) {
       try {
         const prev = JSON.parse(lastCountsRaw) as LastBackupCounts;
-
-        const currDismissed = countArrayJson(dismissed);
-        if (prev.dismissed > 20 && currDismissed < prev.dismissed * 0.5) {
-          debugWarn('[backup]', `Auto-save blocked: dismissed notes dropped from ${prev.dismissed} to ${currDismissed} — IDB may be partially cleared`);
+        const curr: LastBackupCounts = {
+          dismissed: countArrayJson(dismissed),
+          feeds: countArrayJson(feeds),
+          collapsed: countArrayJson(collapsed),
+          bookmarks: countArrayJson(idbGetSync(STORAGE_KEYS.BOOKMARK_IDS)),
+        };
+        const verdict = evaluateAutoSaveGuard(prev, curr);
+        if (verdict.action === 'block') {
+          debugWarn('[backup]', `Auto-save blocked: ${verdict.detail}`);
+          _lastAutoSaveError = `Auto-save blocked: ${verdict.detail}`;
           return 'blocked';
         }
-
-        const currFeeds = countArrayJson(feeds);
-        if (prev.feeds > 0 && currFeeds === 0) {
-          debugWarn('[backup]', 'Auto-save blocked: custom feeds dropped to zero — IDB may be partially cleared');
-          return 'blocked';
-        }
-
-        const currCollapsed = countArrayJson(collapsed);
-        if (prev.collapsed > 10 && currCollapsed < prev.collapsed * 0.5) {
-          debugWarn('[backup]', `Auto-save blocked: saved notes dropped from ${prev.collapsed} to ${currCollapsed} — IDB may be partially cleared`);
-          return 'blocked';
+        if (verdict.warning === 'saved-cleanup') {
+          debugWarn('[backup]', `Saved notes dropped from ${prev.collapsed + prev.bookmarks} to ${curr.collapsed + curr.bookmarks} — proceeding (cleanup), surfacing an informational notice`);
+          _lastAutoSaveWarning = 'saved-cleanup';
         }
       } catch { /* ignore parse errors — don't block save on unexpected format */ }
     }
@@ -1527,6 +1566,12 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     const overallAbort = new AbortController();
     const overallTimeout = setTimeout(() => overallAbort.abort(), overallTimeoutMs);
 
+    // Per-relay accountability: "newest across ALL relays" is only as true as
+    // the set that actually answered. The report lets decision points say
+    // "N of M backup relays didn't respond — the newest backup may not have
+    // been visible" instead of silently presenting a partial view as total.
+    const report: RelayCheckReport = { asked: [...activeRelayUrls], answered: [], failed: [] };
+
     const queryRelay = async (url: string): Promise<NostrEvent[]> => {
       try {
         // Bypass backoff — backup queries are critical for login
@@ -1535,10 +1580,12 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         const events = await relay.query([filter], { signal });
         log(`  ${url}: ${events.length} ${label}`);
         _backupRelaysUsed.add(url);
+        report.answered.push(url);
         try { relay.close(); } catch { /* */ }
         return events;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        report.failed.push(url);
         if (!msg.includes('abort')) {
           log(`  ${url}: ${msg.includes('aborted') ? 'timeout' : msg}`, 'warn');
         }
@@ -1577,6 +1624,8 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     }
 
     clearTimeout(overallTimeout);
+    // Only the newest-wins path claims completeness, so only it owns the report.
+    if (_checkAll) _lastCheckRelayReport = report;
     log(`  Total: ${allEvents.length} unique ${label}`);
     return allEvents;
   }, [log, user]);
@@ -1927,11 +1976,14 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         };
         const stored = getStoredCheckpoints();
         const newestStored = stored.length > 0 ? stored[0] : null;
-        const isThinnerThanStored = !!(newestStored?.stats && manifest.stats
-          && (newestStored.stats.savedForLater - manifest.stats.savedForLater > 10
-            || newestStored.stats.dismissed - manifest.stats.dismissed > 50));
-        if (isThinnerThanStored) {
-          log(`Manifest is thinner than stored checkpoint (saved:${manifest.stats?.savedForLater} vs stored:${newestStored?.stats?.savedForLater}) — skipping checkpoint update`, 'warn');
+        // Only a DISMISSED regression is a worry (a fresh install autosaving an
+        // empty dismissed list over a full one). Fewer saved notes is normal
+        // life — the old rule also rejected manifests with a lower
+        // savedForLater, which made a legitimate Save for Later cleanup on one
+        // device invisible to every other device forever.
+        const thinness = evaluateManifestThinness(newestStored?.stats, manifest.stats);
+        if (thinness === 'dismissed-regressed') {
+          log(`Manifest's dismissed count regressed vs stored checkpoint (${manifest.stats?.dismissed} vs stored:${newestStored?.stats?.dismissed}) — skipping checkpoint update`, 'warn');
         } else {
           const nameMap = new Map(stored.filter(c => c.name).map(c => [c.eventId, c.name!]));
           if (nameMap.has(newCp.eventId)) newCp.name = nameMap.get(newCp.eventId);
@@ -2123,19 +2175,27 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
             if (fallbackUrl !== m.blossomUrl) urls.push(fallbackUrl);
           }
         }
+        const failedHosts: string[] = [];
         for (const url of urls) {
           try {
             setMessage(`Downloading from ${new URL(url).hostname}...`);
             const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
-            if (!response.ok) { log(`  ${url}: HTTP ${response.status}`, 'warn'); continue; }
+            if (!response.ok) {
+              log(`  ${url}: HTTP ${response.status}`, 'warn');
+              failedHosts.push(`${new URL(url).hostname} (HTTP ${response.status})`);
+              continue;
+            }
             encryptedData = await response.text();
             log(`Downloaded: ${encryptedData.length} chars from ${new URL(url).hostname}`);
             break;
           } catch (err) {
             log(`  ${url}: ${err instanceof Error ? err.message : err}`, 'warn');
+            try { failedHosts.push(new URL(url).hostname); } catch { /* ignore */ }
           }
         }
-        if (!encryptedData) throw new Error('Could not download backup from any Blossom server');
+        // Name the servers — "any Blossom server" told the user nothing about
+        // WHICH servers are down, which is the one thing they can act on.
+        if (!encryptedData) throw new Error(`Could not download the backup from any Blossom server (tried: ${failedHosts.join(', ') || 'none reachable'})`);
 
         // Verify Blossom hash if present in manifest (v4+ integrity check)
         if (m.blossomHash) {
@@ -2257,6 +2317,21 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         throw new Error('Backup data is corrupt. Make a fresh backup from your computer first, then restore.');
       }
 
+      // The blob must actually belong to the manifest that named it: the
+      // manifest carries the claimed save time, and a v5 blob embeds its own.
+      // Applying a mismatched blob as "the newest" would silently roll the
+      // user back to some other save's data. Hash integrity is separate (and
+      // already checked above) — this is about WHICH save, not corruption.
+      if (isV4Blossom) {
+        const claimedTs = Number((manifest as Record<string, unknown>).timestamp) || 0;
+        const blobSavedAt = parseBackup(fullJson).savedAt;
+        if (claimedTs && !verifyBlobMatchesManifest(blobSavedAt, claimedTs)) {
+          throw new Error(
+            `Backup content does not match its manifest (data written ${new Date(blobSavedAt * 1000).toISOString()}, manifest claims ${new Date(claimedTs * 1000).toISOString()}) — not applying it. Try an earlier checkpoint from the backup menu.`,
+          );
+        }
+      }
+
       // MERGE, not replace. This is the automatic cloud-restore path, so it has
       // to be safe to run whenever the cloud is ahead — union the id sets, keep
       // both devices' corkboards, and let tombstones carry deletions. A replace
@@ -2270,20 +2345,36 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       // for the user.
       if (opts?.askOnRemovals) {
         const preview = await mergeBackupIntoLocal(fullJson, undefined, { dryRun: true });
-        const count = preview.removals.reduce((n, r) => n + r.ids.length, 0);
-        if (count > SILENT_REMOVAL_LIMIT) {
-          log(`Sync paused: merge would remove ${count} item(s) — leaving it for the user to confirm`);
+        // Saved-for-later removals NEVER hold: "whatever the newest state is
+        // should be restored" — a cleanup on one device must land on the
+        // others, and holding it was exactly why the phone kept showing notes
+        // the desktop had removed. Only a mass removal of guarded data
+        // (dismissed notes, boards, pins) still deserves a human.
+        const hold = evaluateMergeHold(preview.removals, SILENT_REMOVAL_LIMIT);
+        if (hold.hold) {
+          log(`Sync paused: merge would remove ${hold.guardedCount} guarded item(s) — leaving it for the user to confirm`);
           // Surface the hold even from the background path. 'found' no longer
           // blocks auto-save, and a silent hold that stayed invisible meant a
           // device could sit un-synced indefinitely with the user never told
           // there was a decision waiting for them.
           setStatus('found');
-          setMessage(`A newer backup is waiting — applying it would remove ${count} item(s), so it needs your confirmation`);
+          const incomplete = describeIncompleteCheck();
+          setMessage(
+            `A newer backup is waiting — applying it would remove ${hold.guardedCount} item(s), so it needs your confirmation${incomplete ? `. Note: ${incomplete}` : ''}`,
+          );
           // Report the hold. Returning silently here let the manual sync say
           // "Synced" for a merge that applied nothing, which is the worst of
           // both worlds: the user is told it worked AND their two devices
           // still disagree.
-          return { applied: false, heldRemovals: count };
+          return { applied: false, heldRemovals: hold.guardedCount };
+        }
+        if (hold.savedCleanupCount > SILENT_REMOVAL_LIMIT) {
+          // Applied, not held — but a big cleanup deserves a heads-up in case
+          // it WASN'T the user. MultiColumnClient listens and shows an
+          // informational (non-destructive) toast.
+          window.dispatchEvent(new CustomEvent('corkboard:sync-notice', {
+            detail: { kind: 'saved-cleanup', count: hold.savedCleanupCount },
+          }));
         }
       }
 

@@ -150,6 +150,32 @@ export function clearTombstones(): void {
   log = {}
 }
 
+/**
+ * Erase specific graves — the undo path.
+ *
+ * A dismiss tombstones the id at time T; an undo re-adds it, but the local
+ * snapshot's add-time is whenever the LAST backup ran, which is usually
+ * before T — so `mergeIdSet` reads the tombstone as the newer fact and the
+ * next pull-merge deletes the undone item again. Undo must therefore erase
+ * the grave, not just re-add the id. Scoped strictly to the given ids so an
+ * undo can never resurrect anything else.
+ *
+ * Returns true when anything was actually erased.
+ */
+export function clearTombstonesFor(key: string, ids: string[]): boolean {
+  const graves = log[key]
+  if (!graves) return false
+  let cleared = false
+  for (const id of ids) {
+    if (id in graves) {
+      delete graves[id]
+      cleared = true
+    }
+  }
+  if (Object.keys(graves).length === 0) delete log[key]
+  return cleared
+}
+
 /** Count of remembered removals across all keys. */
 export function tombstoneCount(): number {
   let n = 0

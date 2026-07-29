@@ -3,6 +3,7 @@ import {
   mergeState,
   mergeTombstones,
   mergeRemovesLocalData,
+  mergeBookmarkSnapshot,
   type StateSnapshot,
 } from './stateMerge'
 
@@ -199,5 +200,71 @@ describe('mergeState — monotonic numeric keys (notifications last-seen)', () =
     const local = snap({ [SEEN]: JSON.stringify(5000) }, 100)
     const remote = snap({ [SEEN]: JSON.stringify(1000) }, 200)
     expect(mergeState(local, remote).changedKeys).not.toContain(SEEN)
+  })
+})
+
+describe('mergeState — undo after dismiss (the grave must be erased)', () => {
+  const SAVED = 'collapsed-notes'
+
+  it('an incoming merge deletes an undone re-add while its grave stands', () => {
+    // Dismiss at T=150 tombstones the id. Undo re-adds it locally, but the
+    // local snapshot's savedAt is still the LAST backup time (100 < 150), so
+    // with the grave in place the merge reads the removal as the newer fact.
+    const local = snap({ [SAVED]: JSON.stringify(['x']) }, 100, { [SAVED]: { x: 150 } })
+    const remote = snap({ [SAVED]: JSON.stringify([]) }, 140)
+    const out = mergeState(local, remote)
+    expect(JSON.parse(out.keys[SAVED]!)).toEqual([])
+    expect(mergeRemovesLocalData(out)).toBe(true)
+  })
+
+  it('with the grave cleared, the undone id survives the same merge', () => {
+    // This is why undo calls clearTombstonesFor: same snapshots, no grave.
+    const local = snap({ [SAVED]: JSON.stringify(['x']) }, 100, {})
+    const remote = snap({ [SAVED]: JSON.stringify([]) }, 140)
+    const out = mergeState(local, remote)
+    expect(JSON.parse(out.keys[SAVED]!)).toEqual(['x'])
+    expect(mergeRemovesLocalData(out)).toBe(false)
+  })
+
+  it('a remote-carried grave cannot delete an id re-added after it', () => {
+    // Another device may still carry the old grave in its snapshot. The undo
+    // is safe as long as the re-adding side's snapshot is newer than the grave.
+    const local = snap({ [SAVED]: JSON.stringify(['x']) }, 200, {})
+    const remote = snap({ [SAVED]: JSON.stringify([]) }, 140, { [SAVED]: { x: 150 } })
+    const out = mergeState(local, remote)
+    expect(JSON.parse(out.keys[SAVED]!)).toEqual(['x'])
+  })
+})
+
+describe('mergeBookmarkSnapshot — relay kind-10003 vs local state', () => {
+  it('merges genuinely-new relay ids in', () => {
+    const out = mergeBookmarkSnapshot(['a'], ['a', 'b'], 500, {})
+    expect(out.ids).toEqual(['a', 'b'])
+    expect(out.changed).toBe(true)
+  })
+
+  it('a local removal beats an OLDER relay copy — no resurrection', () => {
+    // The live bug: dismiss a saved note, and five minutes later the stale
+    // relay list re-unioned the id straight back into the count.
+    const out = mergeBookmarkSnapshot(['a'], ['a', 'removed'], 500, { removed: 600 })
+    expect(out.ids).toEqual(['a'])
+    expect(out.changed).toBe(false)
+  })
+
+  it('a relay event NEWER than the grave re-adds the id (re-bookmarked elsewhere)', () => {
+    const out = mergeBookmarkSnapshot(['a'], ['a', 'x'], 700, { x: 600 })
+    expect(out.ids).toEqual(['a', 'x'])
+  })
+
+  it('every local id survives, grave or not — local state is the live truth', () => {
+    const out = mergeBookmarkSnapshot(['undone'], [], 500, { undone: 999 })
+    expect(out.ids).toEqual(['undone'])
+  })
+
+  it('returns the same array identity when nothing changed', () => {
+    const local = ['a', 'b']
+    const out = mergeBookmarkSnapshot(local, ['b', 'a'], 500, {})
+    expect(out.ids).toBe(local)
+    expect(out.changed).toBe(false)
   })
 })

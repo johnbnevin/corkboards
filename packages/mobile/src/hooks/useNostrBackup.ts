@@ -62,6 +62,9 @@ const D_TAG_PREFIX = 'corkboard:backup';
 // Bounded ring for manual saves — same slots as web (`s0`..`s{N-1}`), so relay
 // storage stays capped and every platform's sync check can query the same tags.
 const MANUAL_BACKUP_SLOTS = 5;
+/** A save/restore mutex older than this is presumed dead (hung signer) and may
+ *  be superseded — parity with web's MUTEX_STALE_MS. */
+const MUTEX_STALE_MS = 90_000;
 import {
   mergeState,
   hasLocalContributions,
@@ -72,12 +75,20 @@ import {
 } from '@core/stateMerge';
 import { SILENT_REMOVAL_LIMIT } from '@core/cacheConfig';
 import {
-  getTombstones,
   mergeInTombstones,
   serializeTombstones,
   TOMBSTONE_STORAGE_KEY,
 } from '@core/tombstones';
-import { withoutTombstoneRecording } from '../storage/MmkvStorage';
+import {
+  evaluateAutoSaveGuard,
+  evaluateManifestThinness,
+  evaluateMergeHold,
+  verifyBlobMatchesManifest,
+  type BackupCounts,
+} from '@core/backupGuards';
+import { SNAPSHOT_KEYS } from '@core/backupKeys';
+import { withoutTombstoneRecording, getStoredTombstones } from '../storage/MmkvStorage';
+import { emitStorageSync } from '../lib/storageSync';
 
 const LAST_BACKUP_TS_KEY = STORAGE_KEYS.LAST_BACKUP_TS;
 /**
@@ -235,29 +246,53 @@ export function setBlossomServersUpdatedAt(ts: number): void {
  * Servers that have rejected the backup-blob content type (HTTP 415). They still
  * work for image/media uploads (separate path), but are useless for the backup
  * blob, so we skip them on save and surface them in Settings.
+ *
+ * Flags EXPIRE after 24 hours (parity with web's BLOB_REJECT_TTL_MS): a
+ * permanent flag from one transient misread quietly removed a server from the
+ * redundancy set for the life of the profile. Stored as url → flaggedAt ms;
+ * the legacy plain-array format is read as flagged-now once and migrates on
+ * the next write.
  */
-export function getBlobRejectingServers(): Set<string> {
+const BLOB_REJECT_TTL_MS = 24 * 60 * 60 * 1000;
+
+function readBlobRejectMap(): Record<string, number> {
   const stored = mobileStorage.getSync(BLOSSOM_BLOB_REJECTS_KEY);
-  if (!stored) return new Set();
+  if (!stored) return {};
   try {
-    const arr = JSON.parse(stored);
-    return Array.isArray(arr) ? new Set(arr.map(normalizeServer)) : new Set();
-  } catch { return new Set(); }
+    const parsed = JSON.parse(stored);
+    if (Array.isArray(parsed)) {
+      const now = Date.now();
+      const map: Record<string, number> = {};
+      for (const url of parsed) if (typeof url === 'string') map[normalizeServer(url)] = now;
+      return map;
+    }
+    if (parsed && typeof parsed === 'object') {
+      const map: Record<string, number> = {};
+      for (const [url, ts] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof ts === 'number') map[normalizeServer(url)] = ts;
+      }
+      return map;
+    }
+    return {};
+  } catch { return {}; }
+}
+
+export function getBlobRejectingServers(): Set<string> {
+  const map = readBlobRejectMap();
+  const now = Date.now();
+  return new Set(Object.entries(map).filter(([, ts]) => now - ts < BLOB_REJECT_TTL_MS).map(([url]) => url));
 }
 
 export function markBlobRejectingServer(url: string): void {
-  const set = getBlobRejectingServers();
-  const norm = normalizeServer(url);
-  if (!set.has(norm)) {
-    set.add(norm);
-    mobileStorage.setSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(Array.from(set)));
-  }
+  const map = readBlobRejectMap();
+  map[normalizeServer(url)] = Date.now();
+  mobileStorage.setSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(map));
 }
 
 export function clearBlobRejectingServer(url: string): void {
-  const set = getBlobRejectingServers();
-  if (set.delete(normalizeServer(url))) {
-    mobileStorage.setSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(Array.from(set)));
+  const map = readBlobRejectMap();
+  if (delete map[normalizeServer(url)]) {
+    mobileStorage.setSync(BLOSSOM_BLOB_REJECTS_KEY, JSON.stringify(map));
   }
 }
 
@@ -265,17 +300,21 @@ export function isBlobRejectingServer(url: string): boolean {
   return getBlobRejectingServers().has(normalizeServer(url));
 }
 
-// Skips servers known to reject the blob type; falls back to the full list if
-// that would leave nothing (flags may be stale / network may have changed).
+// DEMOTES servers known to reject the blob type to the back of the list rather
+// than dropping them (parity with web): flags may be stale, and losing a
+// redundancy target entirely is worse than trying it last.
 function getActiveBlossomServers(): string[] {
   const all = getBlossomServers();
   const rejects = getBlobRejectingServers();
   const usable = all.filter(s => !rejects.has(normalizeServer(s)));
-  return usable.length > 0 ? usable : all;
+  const flagged = all.filter(s => rejects.has(normalizeServer(s)));
+  return [...usable, ...flagged];
 }
 
-/** Result of an auto-save attempt — lets callers show accurate messaging. */
-export type AutoSaveResult = 'saved' | 'skipped' | 'no-servers' | 'error';
+/** Result of an auto-save attempt — lets callers show accurate messaging.
+ *  'blocked' = a protective guard refused (data regressed vs last backup);
+ *  distinct from a benign 'skipped' so it is never silent (parity with web). */
+export type AutoSaveResult = 'saved' | 'skipped' | 'blocked' | 'no-servers' | 'error';
 
 
 // Exported so AutoSaveManager can read the fresh list straight from storage
@@ -304,14 +343,10 @@ function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
   mobileStorage.setSync(CHECKPOINTS_KEY, JSON.stringify(trimmed));
 }
 
-// Keys checked for change detection — subset of BACKED_UP_KEYS that
-// represent meaningful user data (mirrors web's SNAPSHOT_KEYS).
-const SNAPSHOT_KEYS = [
-  'nostr-custom-feeds', 'collapsed-notes', 'dismissed-notes', 'nostr-friends',
-  'nostr-browse-relays', 'nostr-rss-feeds', 'saved-minimized-notes',
-  'corkboard:tab-filters', 'corkboard:onboarding-skipped',
-  'corkboard:banner-height-pct', 'corkboard:banner-fit-mode',
-] as const;
+// Keys checked for change detection — now the SHARED list in @core/backupKeys.
+// Mobile's own copy had drifted four keys behind web's (bookmark ids,
+// dismissed thread roots, pins, markdown pref), so edits to those on mobile
+// never triggered a backup.
 
 /**
  * Detect whether any backed-up key has changed since the last snapshot.
@@ -388,8 +423,10 @@ function serializeBackup(): string {
   return JSON.stringify({
     v: STATE_FORMAT_VERSION,
     savedAt: Math.floor(Date.now() / 1000),
-    keys,
-    tombstones: getTombstones(),
+    // getStoredTombstones, not getTombstones: the log loads lazily on first
+    // write, and a save before any local write this session would otherwise
+    // upload an EMPTY removal log (parity with web).
+    tombstones: getStoredTombstones(),
   });
 }
 
@@ -413,7 +450,9 @@ function localSnapshot(): StateSnapshot {
   return {
     keys,
     savedAt: parseInt(mobileStorage.getSync(LAST_BACKUP_TS_KEY) || '0', 10),
-    tombstones: getTombstones(),
+    // Loaded, not just in-memory — a merge before any local write this
+    // session must still see this device's graves (parity with web).
+    tombstones: getStoredTombstones(),
   };
 }
 
@@ -452,6 +491,15 @@ function mergeBackupIntoLocal(
   withoutTombstoneRecording(() => {
     mobileStorage.setSync(TOMBSTONE_STORAGE_KEY, serializeTombstones());
   });
+
+  // Tell mounted hooks their keys changed — web dispatches idb-storage-sync
+  // here; mobile had NO equivalent, so a silent merge was invisible until app
+  // restart, which was the phone half of "restore never sticks".
+  for (const key of result.changedKeys) {
+    if (!(BACKED_UP_KEYS as readonly string[]).includes(key)) continue;
+    const value = result.keys[key];
+    emitStorageSync(key, value ?? null);
+  }
 
   return { changed: result.changedKeys.length, removals: result.removals };
 }
@@ -594,8 +642,15 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     return id;
   });
 
-  const isSaving = useRef(false);
-  const isRestoring = useRef(false);
+  // Timestamped mutexes with a staleness escape (parity with web's
+  // MUTEX_STALE_MS): a NIP-46 signer that never answers used to leave the
+  // old boolean stuck true, wedging every save/restore for the session.
+  const savingSince = useRef(0);
+  const restoringSince = useRef(0);
+  const isSavingNow = useCallback(() =>
+    savingSince.current > 0 && Date.now() - savingSince.current < MUTEX_STALE_MS, []);
+  const isRestoringNow = useCallback(() =>
+    restoringSince.current > 0 && Date.now() - restoringSince.current < MUTEX_STALE_MS, []);
 
   const log = useCallback((msg: string) => {
     if (__DEV__) console.log('[backup]', msg);
@@ -604,7 +659,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
   }, []);
 
   const saveBackup = useCallback(async () => {
-    if (!pubkey || !signer || isSaving.current) return;
+    if (!pubkey || !signer || isSavingNow()) return;
     // NIP-44 only on the write path (see @core/nostrEncrypt.encryptForSelf).
     // NIP-04 stays supported for *reading* legacy backups below.
     if (!signer.nip44) {
@@ -613,7 +668,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       return;
     }
 
-    isSaving.current = true;
+    savingSince.current = Date.now();
     setStatus('encrypting');
     setMessage('Encrypting backup…');
 
@@ -731,15 +786,15 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       setStatus('save-error');
       setMessage('Backup failed: ' + errMsg);
     } finally {
-      isSaving.current = false;
+      savingSince.current = 0;
     }
-  }, [pubkey, signer, log, deviceId, nostr]);
+  }, [pubkey, signer, log, deviceId, nostr, isSavingNow]);
 
   // Silent auto-save — same logic as saveBackup but no status/message updates.
   // Returns a status so callers can distinguish a real upload failure
   // ('no-servers'/'error') from a benign protective skip ('skipped', silent).
   const autoSaveBackup = useCallback(async (): Promise<AutoSaveResult> => {
-    if (!pubkey || !signer || isSaving.current || isRestoring.current) return 'skipped';
+    if (!pubkey || !signer || isSavingNow() || isRestoringNow()) return 'skipped';
     if (!signer.nip44) return 'skipped'; // NIP-44 only on the write path
     if (!hasUnsavedChanges()) return 'skipped';
 
@@ -761,38 +816,42 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       return 'skipped';
     }
 
-    // Guard: don't save if key data regressed significantly vs last snapshot.
-    // Large sudden regressions suggest MMKV was partially cleared, not intentional user action.
-    // Block save to protect the cloud backup.
+    // Guard: don't save if key data regressed significantly vs last snapshot —
+    // via the shared, tested rules in @core/backupGuards. Only DISMISSED
+    // regression and feeds→0 block ('blocked', so the caller can surface it —
+    // the old bare 'skipped' hid the refusal entirely); a saved-notes cleanup
+    // proceeds with a logged notice (parity with web).
     const lastSnapshotRaw = mobileStorage.getSync(STORAGE_KEYS.LAST_BACKUP_DATA);
     if (lastSnapshotRaw) {
       try {
         const prevSnap = JSON.parse(lastSnapshotRaw) as Record<string, string>;
-
-        const prevDismissed = JSON.parse(prevSnap[STORAGE_KEYS.DISMISSED_NOTES] || '[]').length as number;
-        const currDismissed = JSON.parse(dismissed || '[]').length as number;
-        if (prevDismissed > 20 && currDismissed < prevDismissed * 0.5) {
-          if (__DEV__) console.warn(`[backup] Auto-save blocked: dismissed notes dropped from ${prevDismissed} to ${currDismissed} — MMKV may be partially cleared`);
-          return 'skipped';
+        const countOf = (raw: string | null | undefined) => {
+          try { const a = JSON.parse(raw || '[]'); return Array.isArray(a) ? a.length : 0; } catch { return 0; }
+        };
+        const prev: BackupCounts = {
+          dismissed: countOf(prevSnap[STORAGE_KEYS.DISMISSED_NOTES]),
+          feeds: countOf(prevSnap[STORAGE_KEYS.CUSTOM_FEEDS]),
+          collapsed: countOf(prevSnap[STORAGE_KEYS.COLLAPSED_NOTES]),
+          bookmarks: countOf(prevSnap[STORAGE_KEYS.BOOKMARK_IDS]),
+        };
+        const curr: BackupCounts = {
+          dismissed: countOf(dismissed),
+          feeds: countOf(feeds),
+          collapsed: countOf(collapsed),
+          bookmarks: countOf(mobileStorage.getSync(STORAGE_KEYS.BOOKMARK_IDS)),
+        };
+        const verdict = evaluateAutoSaveGuard(prev, curr);
+        if (verdict.action === 'block') {
+          if (__DEV__) console.warn(`[backup] Auto-save blocked: ${verdict.detail}`);
+          return 'blocked';
         }
-
-        const prevFeeds = JSON.parse(prevSnap[STORAGE_KEYS.CUSTOM_FEEDS] || '[]') as unknown[];
-        const currFeeds = JSON.parse(feeds || '[]') as unknown[];
-        if (prevFeeds.length > 0 && currFeeds.length === 0) {
-          if (__DEV__) console.warn('[backup] Auto-save blocked: custom feeds dropped to zero — MMKV may be partially cleared');
-          return 'skipped';
-        }
-
-        const prevCollapsed = JSON.parse(prevSnap[STORAGE_KEYS.COLLAPSED_NOTES] || '[]').length as number;
-        const currCollapsed = JSON.parse(collapsed || '[]').length as number;
-        if (prevCollapsed > 10 && currCollapsed < prevCollapsed * 0.5) {
-          if (__DEV__) console.warn(`[backup] Auto-save blocked: saved notes dropped from ${prevCollapsed} to ${currCollapsed} — MMKV may be partially cleared`);
-          return 'skipped';
+        if (verdict.warning === 'saved-cleanup' && __DEV__) {
+          console.log('[backup] Saved notes dropped by half — proceeding (looks like a cleanup)');
         }
       } catch { /* ignore parse errors — don't block save on unexpected format */ }
     }
 
-    isSaving.current = true;
+    savingSince.current = Date.now();
     try {
       const json = serializeBackup();
 
@@ -900,9 +959,9 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       if (__DEV__) console.warn('[backup] Auto-save failed');
       return 'error';
     } finally {
-      isSaving.current = false;
+      savingSince.current = 0;
     }
-  }, [pubkey, signer, deviceId, nostr]);
+  }, [pubkey, signer, deviceId, nostr, isSavingNow, isRestoringNow]);
 
   const checkForBackup = useCallback(async () => {
     if (!pubkey || !signer) return;
@@ -1016,16 +1075,14 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       } catch { /* ignore malformed */ }
     }
 
-    // Safety: merge with stored checkpoints; don't let a thin manifest wipe a richer stored one.
+    // Safety: merge with stored checkpoints. Only a DISMISSED regression is a
+    // worry (a fresh install autosaving an empty list over a full one) —
+    // fewer saved notes is a legitimate cleanup that must stay visible to
+    // other devices (parity with web; shared rule in @core/backupGuards).
     const stored = getStoredCheckpoints();
     const newestStored = stored.length > 0 ? stored[0] : null;
-    const safeCps = cps.filter(cp => {
-      if (!newestStored?.stats || !cp.stats) return true;
-      const isThinnerThanStored =
-        (newestStored.stats.savedForLater - cp.stats.savedForLater > 10
-          || newestStored.stats.dismissed - cp.stats.dismissed > 50);
-      return !isThinnerThanStored;
-    });
+    const safeCps = cps.filter(cp =>
+      evaluateManifestThinness(newestStored?.stats, cp.stats) === 'ok');
     // Merge: prefer fresh events over stored, preserve named checkpoints
     const merged = new Map<string, RemoteCheckpoint>();
     for (const cp of [...safeCps, ...stored]) {
@@ -1052,8 +1109,8 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
    */
   const restoreBackup = useCallback(async (checkpoint: RemoteCheckpoint, opts?: { silent?: boolean }) => {
     const silent = opts?.silent ?? false;
-    if (!pubkey || !signer || isRestoring.current) return;
-    isRestoring.current = true;
+    if (!pubkey || !signer || isRestoringNow()) return;
+    restoringSince.current = Date.now();
 
     if (!silent) {
       setStatus('restoring');
@@ -1070,19 +1127,26 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
           if (fallbackUrl !== checkpoint.blossomUrl) urls.push(fallbackUrl);
         }
       }
+      const failedHosts: string[] = [];
       for (const url of urls) {
         try {
           log(`Fetching from ${url}…`);
           const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
-          if (!response.ok) { log(`  ${url}: HTTP ${response.status}`); continue; }
+          if (!response.ok) {
+            log(`  ${url}: HTTP ${response.status}`);
+            try { failedHosts.push(`${new URL(url).hostname} (HTTP ${response.status})`); } catch { /* ignore */ }
+            continue;
+          }
           encryptedData = await response.text();
           log(`Downloaded: ${encryptedData.length} chars`);
           break;
         } catch (err) {
           log(`  ${url}: ${err instanceof Error ? err.message : err}`);
+          try { failedHosts.push(new URL(url).hostname); } catch { /* ignore */ }
         }
       }
-      if (!encryptedData) throw new Error('Could not download backup from any Blossom server');
+      // Name the servers — the one thing the user can act on (parity with web).
+      if (!encryptedData) throw new Error(`Could not download the backup from any Blossom server (tried: ${failedHosts.join(', ') || 'none reachable'})`);
 
       // Verify Blossom hash if present (integrity check)
       if (checkpoint.blossomHash) {
@@ -1104,12 +1168,29 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       const json = await aesDecrypt(aesKey, encryptedData);
       log('Decrypted successfully');
 
+      // The blob must actually belong to the manifest that named it: hash
+      // integrity is checked above; this is about WHICH save. Applying a
+      // mismatched blob as "the newest" silently rolls the user back.
+      const blobSavedAt = parseBackup(json).savedAt;
+      if (checkpoint.timestamp && !verifyBlobMatchesManifest(blobSavedAt, checkpoint.timestamp)) {
+        throw new Error('Backup content does not match its manifest — not applying it. Try an earlier checkpoint.');
+      }
+
       if (silent) {
         const preview = mergeBackupIntoLocal(json, { dryRun: true });
-        const count = preview.removals.reduce((n, r) => n + r.ids.length, 0);
-        if (count > SILENT_REMOVAL_LIMIT) {
-          log(`Silent sync held: merge would remove ${count} item(s) — user can restore manually`);
+        // Saved-for-later removals never hold — a cleanup on one device must
+        // land here. Only a mass removal of guarded data (dismissed notes,
+        // boards, pins) is held, and the hold is SURFACED: the old bare
+        // `return` left the user never told a decision was waiting.
+        const hold = evaluateMergeHold(preview.removals, SILENT_REMOVAL_LIMIT);
+        if (hold.hold) {
+          log(`Silent sync held: merge would remove ${hold.guardedCount} guarded item(s) — needs your confirmation`);
+          setStatus('found');
+          setMessage(`A newer backup is waiting — applying it would remove ${hold.guardedCount} item(s), so it needs your confirmation`);
           return;
+        }
+        if (hold.savedCleanupCount > SILENT_REMOVAL_LIMIT) {
+          log(`Applying a large Saved for Later cleanup from another device (${hold.savedCleanupCount} notes)`);
         }
       }
 
@@ -1147,9 +1228,9 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         setMessage('Restore failed: ' + errMsg);
       }
     } finally {
-      isRestoring.current = false;
+      restoringSince.current = 0;
     }
-  }, [pubkey, signer, log]);
+  }, [pubkey, signer, log, isRestoringNow]);
 
   const lastBackupAgo = lastBackupTs > 0 ? formatTimeAgo(lastBackupTs) : null;
 

@@ -6,6 +6,7 @@
  * Mobile equivalent of packages/web/src/components/NoteCard.tsx.
  */
 import { memo, useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   View,
   Text,
@@ -23,6 +24,10 @@ import { useIsDeletedAuthor } from '../contexts/deletedAuthors';
 import { visibleLength, findVisibleCutoff } from '@core/textTruncation';
 import { verifyEmbeddedEvent } from '../lib/embeddedEvent';
 import { useNoteCollapsedState, useCollapsedNotesActions } from '../hooks/useCollapsedNotes';
+import { useNostr } from '../lib/NostrProvider';
+import { fetchEventWithOutbox } from '../lib/fetchEvent';
+import { forgetParentMiss, cacheParentNote } from '../hooks/useParentNotes';
+import { getParentId } from '@core/threadTree';
 
 // ============================================================================
 // Repost author name — shows the actual author for reposts
@@ -71,6 +76,63 @@ function ParentContext({ parentNote, onViewThread }: { parentNote: NostrEvent; o
       </View>
       <Text style={styles.parentPreview} numberOfLines={2}>{preview.replace(/<[^>]*>/g, '')}</Text>
     </TouchableOpacity>
+  );
+}
+
+/**
+ * Placeholder for a replied-to note that has not resolved yet, with a
+ * prioritized "Retry now" — fetches THIS parent immediately (clearing its
+ * miss-decay) while the background sweep keeps retrying everything else, and
+ * says so plainly when the note can't be found. Parity with web.
+ */
+function UnresolvedParentContext({ note }: { note: NostrEvent }) {
+  const { nostr } = useNostr();
+  const queryClient = useQueryClient();
+  const [retryState, setRetryState] = useState<'idle' | 'retrying' | 'notfound'>('idle');
+  const parentId = useMemo(() => getParentId(note), [note]);
+
+  const retryNow = async () => {
+    if (!parentId || retryState === 'retrying') return;
+    setRetryState('retrying');
+    forgetParentMiss(parentId);
+    try {
+      const found = await fetchEventWithOutbox(parentId, nostr);
+      if (found) {
+        cacheParentNote(parentId, found);
+        queryClient.invalidateQueries({ queryKey: ['parent-notes'] });
+        queryClient.invalidateQueries({ queryKey: ['parent-note', parentId] });
+        setRetryState('idle');
+      } else {
+        setRetryState('notfound');
+      }
+    } catch {
+      setRetryState('notfound');
+    }
+  };
+
+  return (
+    <View style={styles.parentContext}>
+      <View style={styles.parentHeader}>
+        <Text style={styles.parentReplyIcon}>{'<'}</Text>
+        <Text style={styles.parentLabel}>
+          {retryState === 'retrying'
+            ? 'Replying to — searching relays…'
+            : retryState === 'notfound'
+              ? 'Replying to a note that couldn’t be found'
+              : 'Replying to a note that hasn’t loaded yet'}
+        </Text>
+        {parentId && retryState !== 'retrying' && (
+          <TouchableOpacity onPress={retryNow} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Text style={styles.parentName}>Retry now</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      <Text style={styles.parentPreview} numberOfLines={2}>
+        {retryState === 'notfound'
+          ? 'Not on its author’s relays or any fallback — it may be deleted or unreachable. Background retries continue.'
+          : 'Retrying automatically in the background.'}
+      </Text>
+    </View>
   );
 }
 
@@ -246,6 +308,12 @@ function NoteCardImpl({
       {/* Reply context */}
       {isReply && parentNote && (
         <ParentContext parentNote={parentNote} onViewThread={onViewThread} />
+      )}
+      {/* Unresolved parent: named state + prioritized "Retry now" (parity with
+          web). Kind-gated: reactions/reposts also carry e-tags but are not
+          replies, and must not claim to be. */}
+      {!isReply && (displayEvent.kind === 1 || displayEvent.kind === 1111) && !!getParentId(displayEvent) && (
+        <UnresolvedParentContext note={displayEvent} />
       )}
 
       {/* Card header: avatar, name, time */}

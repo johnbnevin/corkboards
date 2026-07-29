@@ -37,7 +37,6 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { HashtagActionContext } from '@/contexts/hashtagAction';
 import { DeletedAuthorsContext } from '@/contexts/deletedAuthors';
-import { BrandIcon } from '@/components/BrandIcon';
 import { BrandLogo } from '@/components/BrandLogo';
 import { useDeletedAuthors } from '@/hooks/useDeletedAuthors';
 import { ProfileCard } from '@/components/ProfileCard';
@@ -3776,10 +3775,16 @@ export function MultiColumnClient() {
         {/* Header — responsive: stacked on mobile, single row on desktop */}
         {isMobile ? (
           <div className="mb-0.5">
-            {/* Mobile: single row — pin, theme, settings, backup, relay | post, avatar */}
-            <div className="flex items-center justify-between gap-1">
+            {/* Mobile: single row — theme, settings, backup, relay | post, avatar,
+                with the full wordmark centered between the two groups. At h-6
+                the trimmed logo's "orkboards.me" text-bottom sits exactly 8px
+                below the row center — the bottom edge of the 16px menu icons
+                (text bottom is 83.2% of the trimmed image's height). */}
+            <div className="relative flex items-center justify-between gap-1">
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <img src="/Corkboards-Logo-Header.png?v=1" alt="corkboards.me" className="h-6 w-auto" draggable={false} />
+              </div>
               <div className="flex items-center gap-1">
-                <BrandIcon className="h-5 w-5 shrink-0 px-0.5" />
                 <Button variant="ghost" size="sm" onClick={toggleTheme} className="h-7 w-7 p-0" title={theme === 'dark' ? 'Light mode' : 'Dark mode'}>
                   {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
                 </Button>

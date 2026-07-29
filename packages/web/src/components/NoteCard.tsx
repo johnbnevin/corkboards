@@ -8,6 +8,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuthor } from '@/hooks/useAuthor'
 import { useNoteCollapsedState, useCollapsedNotesActions } from '@/hooks/useCollapsedNotes'
 import { fetchEventWithOutbox } from '@/lib/fetchEvent'
+import { forgetParentMiss, cacheParentNote } from '@/hooks/useParentNotes'
+import { getParentId } from '@core/threadTree'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -264,6 +266,84 @@ interface NoteCardProps {
   hashtagTaggedLabel?: string;
   /** Open the custom emoji set builder ("Manage Sets") from the reaction picker. */
   onOpenEmojiSets?: () => void;
+}
+
+/**
+ * Placeholder for a replied-to note that has not resolved yet.
+ *
+ * Replaces the endless "Replying to" skeleton: after the automatic lookup has
+ * had a moment, this states what is happening, offers a "Retry now" that
+ * fetches THIS parent immediately (clearing its miss-decay and going straight
+ * to author-relay discovery — ahead of the background sweep, which keeps
+ * retrying everything else), and says so plainly when the note can't be found.
+ */
+function UnresolvedParentContext({ note }: { note: NostrEvent }) {
+  const { nostr } = useNostr()
+  const queryClient = useQueryClient()
+  const [retryState, setRetryState] = useState<'idle' | 'retrying' | 'notfound'>('idle')
+  const parentId = useMemo(() => getParentId(note), [note])
+
+  const retryNow = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!parentId || retryState === 'retrying') return
+    setRetryState('retrying')
+    // Clear the negative cache first or the lookup short-circuits to "miss".
+    forgetParentMiss(parentId)
+    try {
+      const found = await fetchEventWithOutbox(parentId, nostr)
+      if (found) {
+        cacheParentNote(parentId, found)
+        // Wake the feed's batch query — with the event now cached this is an
+        // instant hit, and the placeholder is replaced by the real parent.
+        queryClient.invalidateQueries({ queryKey: ['parent-notes'] })
+        queryClient.invalidateQueries({ queryKey: ['parent-note', parentId] })
+        setRetryState('idle')
+      } else {
+        setRetryState('notfound')
+      }
+    } catch {
+      setRetryState('notfound')
+    }
+  }, [parentId, retryState, nostr, queryClient])
+
+  return (
+    <div className="mb-3 p-2.5 bg-muted/40 rounded-lg border-l-2 border-muted-foreground/30">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-col gap-0.5 min-w-0">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Reply className="h-3 w-3 shrink-0" />
+            <span>
+              {retryState === 'retrying'
+                ? 'Replying to — searching its author’s relays…'
+                : retryState === 'notfound'
+                  ? 'Replying to a note that couldn’t be found'
+                  : 'Replying to a note that hasn’t loaded yet'}
+            </span>
+          </div>
+          <span className="text-[10px] text-muted-foreground/60">
+            {retryState === 'notfound'
+              ? 'Not on its author’s relays or any fallback — it may be deleted or on an unreachable relay. Background retries continue.'
+              : retryState === 'retrying'
+                ? 'This lookup is running ahead of the queue.'
+                : 'Retrying automatically in the background.'}
+          </span>
+        </div>
+        {parentId && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 shrink-0 gap-1 px-2 text-[10px]"
+            onClick={retryNow}
+            disabled={retryState === 'retrying'}
+            title="Retry this lookup immediately"
+          >
+            <RotateCw className={`h-3 w-3${retryState === 'retrying' ? ' animate-spin' : ''}`} />
+            Retry now
+          </Button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 /** Compact display of the parent note for replies */
@@ -1097,17 +1177,9 @@ export const NoteCard = React.memo(function NoteCard({
             isPinned={!!isPinned}
           />
         )}
-        {/* Loading skeleton when we know it's a reply but parent data hasn't arrived yet */}
+        {/* Unresolved parent: named state + prioritized "Retry now" (was an endless skeleton) */}
         {!discoverMode && isReply && !parentNote && (
-          <div className="mb-3 p-2.5 bg-muted/40 rounded-lg border-l-2 border-muted-foreground/30">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-              <Reply className="h-3 w-3" />
-              <span>Replying to</span>
-              <Skeleton className="h-4 w-4 rounded-lg" />
-              <Skeleton className="h-3 w-16" />
-            </div>
-            <Skeleton className="h-3 w-3/4 mt-1" />
-          </div>
+          <UnresolvedParentContext note={note} />
         )}
 
         {/* Main note header */}
@@ -1197,15 +1269,7 @@ export const NoteCard = React.memo(function NoteCard({
             )}
             {isReply && !parentNote && (
               <div className="px-4 pt-2">
-                <div className="mb-3 p-2.5 bg-muted/40 rounded-lg border-l-2 border-muted-foreground/30">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-                    <Reply className="h-3 w-3" />
-                    <span>Replying to</span>
-                    <Skeleton className="h-4 w-4 rounded-full" />
-                    <Skeleton className="h-3 w-16" />
-                  </div>
-                  <Skeleton className="h-3 w-3/4 mt-1" />
-                </div>
+                <UnresolvedParentContext note={note} />
               </div>
             )}
             {/* More from this author — uses featured pubkey so we show the original author */}

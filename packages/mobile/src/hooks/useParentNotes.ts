@@ -239,3 +239,14 @@ export function clearParentNoteCache(): void {
   parentNoteCache.clear();
   parentMisses.clear();
 }
+
+/** Store a parent event resolved by an out-of-band lookup (e.g. "Retry now"). */
+export function cacheParentNote(id: string, event: NostrEvent): void {
+  parentNoteCache.set(id, event);
+  parentMisses.recordHit(id);
+}
+
+/** Clear one id's miss-decay so the next lookup goes back out to the relays. */
+export function forgetParentMiss(eventId: string): void {
+  parentMisses.recordHit(eventId);
+}

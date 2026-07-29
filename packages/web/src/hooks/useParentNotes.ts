@@ -18,7 +18,7 @@ const MAX_PARENT_NOTE_CACHE = 1500;
 const parentNoteCache = new Map<string, NostrEvent>();
 
 /** LRU insert: re-inserting moves a key to the end of Map iteration order. */
-function cacheParentNote(id: string, event: NostrEvent): void {
+export function cacheParentNote(id: string, event: NostrEvent): void {
   parentNoteCache.delete(id);
   while (parentNoteCache.size >= MAX_PARENT_NOTE_CACHE) {
     parentNoteCache.delete(parentNoteCache.keys().next().value!);

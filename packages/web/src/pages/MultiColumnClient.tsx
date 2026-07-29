@@ -94,7 +94,7 @@ import { ThroughputSettings } from '@/components/ThroughputSettings';
 // their chunks past first paint.
 const AdvancedSettings = lazy(() => import('@/components/AdvancedSettings').then(m => ({ default: m.AdvancedSettings })));
 const EmojiSetEditor = lazy(() => import('@/components/EmojiSetEditor').then(m => ({ default: m.EmojiSetEditor })));
-import { useNostrBackup, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
+import { useNostrBackup, getLastAutoSaveError, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 import { MAX_RETAINED_NOTES } from '@core/feedConstants';
 import { bumpQueryEpoch, getQueryEpoch, withQueryBudget, StaleEpochError } from '@core/queryGovernor';
@@ -3918,12 +3918,29 @@ export function MultiColumnClient() {
                     <DropdownMenuItem
                       disabled={backupStatus === 'saving' || backupStatus === 'encrypting'}
                       onClick={async () => {
+                        // saveBackup RETURNS false when it declines (another
+                        // save in flight, signer can't encrypt) — it does not
+                        // throw. Ignoring the result reported "Backup saved to
+                        // Blossom" instantly for a save that never ran, which
+                        // is the most misleading thing this menu could say.
                         try {
-                          await saveBackup();
-                          setBackupIndicator('saved');
-                          toast({ title: 'Saved', description: 'Backup saved to Blossom.' });
-                        } catch {
-                          toast({ title: 'Save failed', description: 'Could not save to Blossom.', variant: 'destructive' });
+                          const ok = await saveBackup();
+                          if (ok) {
+                            setBackupIndicator('saved');
+                            toast({ title: 'Saved', description: 'Backup saved to Blossom.' });
+                          } else {
+                            toast({
+                              title: 'Not saved',
+                              description: getLastAutoSaveError() || 'The save could not start — another backup operation is still running. Try again in a moment.',
+                              variant: 'destructive',
+                            });
+                          }
+                        } catch (err) {
+                          toast({
+                            title: 'Save failed',
+                            description: err instanceof Error ? (err.message || err.name) : 'Could not save to Blossom.',
+                            variant: 'destructive',
+                          });
                         }
                       }}
                       className="gap-2"

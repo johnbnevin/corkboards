@@ -15,6 +15,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/hooks/useToast';
 import { ZapDialog } from '@/components/ZapDialog';
 import { queryRelay } from '@/lib/fetchEvent';
+import { idbReady } from '@/lib/idb';
 
 interface SavedForLaterCorkboardProps {
   onThreadClick: (eventId: string) => void;
@@ -46,6 +47,17 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
     return [...new Set([...collapsedIds, ...bookmarkIds])];
   }, [collapsedIds, bookmarkIds]);
   const { toast } = useToast();
+  // The saved-id list lives in IndexedDB and is read through a synchronous
+  // memory cache that is EMPTY until idbReady resolves. Rendering before then
+  // shows a partial list as though it were the whole thing — "137 saved" one
+  // moment and "70 saved" the next, which reads as data loss and, across two
+  // devices, as a sync failure. Wait for hydration before showing any count.
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    idbReady.then(() => { if (!cancelled) setHydrated(true); });
+    return () => { cancelled = true; };
+  }, []);
   const [isLoading, setIsLoading] = useState(false);
   const [notes, setNotes] = useState<NostrEvent[]>([]);
   const [failedIds, setFailedIds] = useState<string[]>([]);
@@ -67,6 +79,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
   // the native socket bridge. Direct relay queries stay as a SECOND pass for
   // whatever the pool couldn't find.
   const fetchNotes = useCallback(async () => {
+    if (!hydrated) return;
     if (savedIds.length === 0) {
       setNotes([]);
       setFailedIds([]);
@@ -132,7 +145,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
       setIsLoading(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [savedIds.length, nostr]);
+  }, [savedIds.length, nostr, hydrated]);
 
   // Refetch when the count changes (new note added or removed)
   useEffect(() => {
@@ -226,7 +239,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
       </CardHeader>
 
       <CardContent>
-        {isLoading ? (
+        {!hydrated || isLoading ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {Array.from({ length: Math.min(savedIds.length, 6) }).map((_, i) => (
               <Card key={i} className="p-4">

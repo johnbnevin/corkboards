@@ -879,7 +879,51 @@ let _checkedPubkey: string | null = null;
 // IDB as the canonical cloud state; with a per-instance ref, a restore running
 // in one component simply did not stop an auto-save in another. Backup state is
 // process-global, so its mutex must be too. (L19)
-const _backupMutex = { saving: false, restoring: false };
+const _backupMutex = { saving: false, restoring: false, savingSince: 0, restoringSince: 0 };
+
+/**
+ * How long a save/restore may hold the mutex before it is presumed dead.
+ *
+ * The mutex is released in a `finally`, which covers every way an operation
+ * can END — but not the one where it never ends at all. A signer call that
+ * neither resolves nor rejects (a NIP-46 bunker that goes silent mid-request
+ * is exactly this) leaves the await pending forever, the `finally` unreached,
+ * and the flag stuck true. Everything then refuses in that operation's name:
+ * auto-save skips, so the device sits red and never uploads; "Sync from
+ * another device" answers "a backup operation is already running" minutes
+ * later; and a manual save returns instantly having done nothing. One hung
+ * bunker request took the entire backup subsystem down for the session.
+ *
+ * Nothing is corrupted by letting a second attempt start after this window:
+ * uploads are content-addressed, manifests are addressable events, and
+ * applying is a union merge.
+ */
+const MUTEX_STALE_MS = 90_000;
+
+function isSaving(): boolean {
+  if (!_backupMutex.saving) return false;
+  if (Date.now() - _backupMutex.savingSince > MUTEX_STALE_MS) {
+    debugWarn('[backup]', 'Previous save never finished — releasing the lock so this one can run');
+    _backupMutex.saving = false;
+    return false;
+  }
+  return true;
+}
+
+function isRestoring(): boolean {
+  if (!_backupMutex.restoring) return false;
+  if (Date.now() - _backupMutex.restoringSince > MUTEX_STALE_MS) {
+    debugWarn('[backup]', 'Previous restore never finished — releasing the lock so this one can run');
+    _backupMutex.restoring = false;
+    return false;
+  }
+  return true;
+}
+
+function beginSaving(): void { _backupMutex.saving = true; _backupMutex.savingSince = Date.now(); }
+function endSaving(): void { _backupMutex.saving = false; _backupMutex.savingSince = 0; }
+function beginRestoring(): void { _backupMutex.restoring = true; _backupMutex.restoringSince = Date.now(); }
+function endRestoring(): void { _backupMutex.restoring = false; _backupMutex.restoringSince = 0; }
 
 // Module-level in-flight dedupe: if a check is already running for a pubkey,
 // concurrent callers share that promise instead of starting a parallel run.
@@ -999,11 +1043,11 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
 
   // Save backup to Nostr
   const saveBackup = useCallback(async (): Promise<boolean> => {
-    if (!user || _backupMutex.saving) {
+    if (!user || isSaving()) {
       log('Save skipped: ' + (!user ? 'no user' : 'already saving'));
       return false;
     }
-    _backupMutex.saving = true;
+    beginSaving();
     log('Starting save...');
 
     try {
@@ -1028,7 +1072,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         log('Signer does not support NIP-44 encryption', 'error');
         setStatus('save-error');
         setMessage('Backup failed: your signer does not support NIP-44 encryption, which is required to encrypt a backup.');
-        _backupMutex.saving = false;
+        endSaving();
         return false;
       }
 
@@ -1190,7 +1234,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       setMessage('Backup failed: ' + errMsg);
       return false;
     } finally {
-      _backupMutex.saving = false;
+      endSaving();
     }
   }, [user, log, deviceId, nostr]);
 
@@ -1204,7 +1248,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
   // ('skipped', silent) — the two used to collapse into a bare false and
   // surface the same misleading "Could not save to Blossom" toast.
   const autoSaveBackup = useCallback(async (): Promise<AutoSaveResult> => {
-    if (!user || _backupMutex.saving || _backupMutex.restoring) return 'skipped';
+    if (!user || isSaving() || isRestoring()) return 'skipped';
     if (!hasUnsavedChanges()) return 'skipped';
 
     // Guard: don't overwrite a good cloud backup with empty/corrupt local state.
@@ -1255,14 +1299,14 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       } catch { /* ignore parse errors — don't block save on unexpected format */ }
     }
 
-    _backupMutex.saving = true;
+    beginSaving();
 
     try {
       const json = serializeBackup();
       const pubkey = user.pubkey;
       const signer = user.signer;
       // NIP-44 only on the write path — same reasoning as saveBackup. (M7b)
-      if (!signer.nip44) { _backupMutex.saving = false; return 'skipped'; }
+      if (!signer.nip44) { endSaving(); return 'skipped'; }
 
       const now = Math.floor(Date.now() / 1000);
       const { content: encryptedData, wrappedKey, signerMethod } =
@@ -1281,7 +1325,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         _lastAutoSaveError = `All ${activeServers.length} Blossom server(s) failed: ${uploadErrors.join('; ')}`;
         debugWarn('[backup]', _lastAutoSaveError);
         log('Auto-save: ' + _lastAutoSaveError, 'error');
-        _backupMutex.saving = false;
+        endSaving();
         return 'no-servers';
       }
 
@@ -1426,7 +1470,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       log('Auto-save failed: ' + _lastAutoSaveError, 'error');
       return 'error';
     } finally {
-      _backupMutex.saving = false;
+      endSaving();
     }
   }, [user, hasUnsavedChanges, deviceId, log, nostr]);
 
@@ -1990,11 +2034,11 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       log('Restore skipped: ' + (!user ? 'no user' : 'no remote backup'));
       return;
     }
-    if (_backupMutex.restoring) {
+    if (isRestoring()) {
       log('Restore skipped: already restoring');
       return;
     }
-    _backupMutex.restoring = true;
+    beginRestoring();
 
     if (!silent) {
       setStatus('restoring');
@@ -2273,7 +2317,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         setMessage('Restore failed: ' + errMsg);
       }
     } finally {
-      _backupMutex.restoring = false;
+      endRestoring();
     }
   }, [user, queryAll, remoteBackup, log]);
 
@@ -2298,7 +2342,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     detail?: string;
   }> => {
     if (!user) return { status: 'error', detail: 'Not signed in.' };
-    if (_backupMutex.restoring || _backupMutex.saving) {
+    if (isRestoring() || isSaving()) {
       return { status: 'error', detail: 'A backup operation is already running — try again in a moment.' };
     }
     try {
@@ -2455,7 +2499,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     // this checkpoint path (auto-restore, idle-return, manual restore) never did.
     // Set it AFTER the intentional pre-restore save above, or that save would be
     // skipped and the newer current state lost.
-    _backupMutex.restoring = true;
+    beginRestoring();
     try {
       // Try the original Blossom URL first, then fall back to other servers using the hash
       let encryptedData: string | null = null;
@@ -2555,7 +2599,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       // Restore writes are done (or failed) — let auto-save resume. The 3s
       // 'restored'→'idle' status flash above is only cosmetic; data safety is
       // governed by this ref, which autoSaveBackup checks.
-      _backupMutex.restoring = false;
+      endRestoring();
     }
   }, [user, log, autoSaveBackup]);
 

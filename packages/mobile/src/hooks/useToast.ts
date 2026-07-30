@@ -1,9 +1,15 @@
 /**
  * Lightweight toast system for React Native.
- * Uses ToastAndroid on Android, a simple context-based overlay on iOS.
+ *
+ * Toasts REMAIN UNTIL DISMISSED (tap) — parity with web, where the Radix
+ * provider runs with duration=Infinity. The old version auto-hid after 3s
+ * (and on Android used the native ToastAndroid, which cannot persist and
+ * bypassed our state entirely — while on iOS the state was never rendered at
+ * all, so toasts silently went nowhere). Both platforms now share the same
+ * state, rendered by components/ToastOverlay, and an error stays on screen
+ * until the user has actually read it.
  */
-import React, { createContext, useContext, useCallback, useState, useRef } from 'react';
-import { Platform, ToastAndroid } from 'react-native';
+import React, { createContext, useContext, useCallback, useState } from 'react';
 
 export type ToastType = 'default' | 'success' | 'error';
 
@@ -27,6 +33,9 @@ interface ToastContextValue {
   dismiss: (id?: string) => void;
 }
 
+/** Sticky toasts must not fill the screen — oldest drop off past this. */
+const MAX_VISIBLE_TOASTS = 4;
+
 /** Normalize either signature down to `{ message, type }`. */
 function normalizeToast(input: string | ToastInput, type?: ToastType): { message: string; type: ToastType } {
   if (typeof input === 'string') {
@@ -48,54 +57,25 @@ function genId(): string {
 
 const ToastContext = createContext<ToastContextValue | undefined>(undefined);
 
-const AUTO_DISMISS_MS = 3000;
-
 /**
  * Provider component for the toast system.
- * Wrap your app root with this to enable useToast().
+ * Wrap your app root with this (plus a mounted <ToastOverlay />) to enable useToast().
  */
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   const dismiss = useCallback((id?: string) => {
     if (id) {
-      const timer = timersRef.current.get(id);
-      if (timer) {
-        clearTimeout(timer);
-        timersRef.current.delete(id);
-      }
       setToasts((prev) => prev.filter((t) => t.id !== id));
     } else {
-      // Dismiss all
-      for (const timer of timersRef.current.values()) {
-        clearTimeout(timer);
-      }
-      timersRef.current.clear();
       setToasts([]);
     }
   }, []);
 
   const toast = useCallback((input: string | ToastInput, type?: ToastType): string => {
     const { message, type: resolvedType } = normalizeToast(input, type);
-
-    // On Android, use native toast for simple messages
-    if (Platform.OS === 'android') {
-      ToastAndroid.show(message, ToastAndroid.SHORT);
-      return genId();
-    }
-
-    // On iOS, use context-based state
     const id = genId();
-    setToasts((prev) => [...prev, { id, message, type: resolvedType }]);
-
-    // Auto-dismiss after timeout
-    const timer = setTimeout(() => {
-      timersRef.current.delete(id);
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, AUTO_DISMISS_MS);
-    timersRef.current.set(id, timer);
-
+    setToasts((prev) => [...prev, { id, message, type: resolvedType }].slice(-MAX_VISIBLE_TOASTS));
     return id;
   }, []);
 

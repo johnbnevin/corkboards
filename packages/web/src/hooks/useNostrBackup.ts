@@ -1937,10 +1937,23 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       const localBackupTsBeforePick = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
       if (localBackupTsBeforePick === 0 && manifestEvents.length > 1) {
         log(`Cold restore with ${manifestEvents.length} candidates — comparing content, not just the clock`);
-        const decrypted = await Promise.all(manifestEvents.map(async (ev) => ({
-          ev,
-          data: await decryptManifestEventContent(ev, user.signer, pubkey, log),
-        })));
+        // Sequential, with a circuit breaker on the first signer timeout — same
+        // discipline as scanOlderStates. A NIP-46 bunker pays a network
+        // round-trip per decrypt; firing all of them at once risks hammering a
+        // connection that was never built to serve concurrent requests, and
+        // serially timing out on every candidate after the bunker has already
+        // gone quiet just makes a slow login slower for no benefit. Plaintext
+        // and cached candidates cost nothing either way.
+        const decrypted: { ev: NostrEvent; data: ManifestData | null }[] = [];
+        let signerTimedOut = false;
+        for (const ev of manifestEvents) {
+          if (signerTimedOut) break;
+          const data = await decryptManifestEventContent(ev, user.signer, pubkey, (msg, level) => {
+            if (msg.includes('signer timed out')) signerTimedOut = true;
+            log(msg, level);
+          });
+          decrypted.push({ ev, data });
+        }
         const withStats = decrypted.filter(
           (d): d is { ev: NostrEvent; data: ManifestData } => !!d.data,
         );

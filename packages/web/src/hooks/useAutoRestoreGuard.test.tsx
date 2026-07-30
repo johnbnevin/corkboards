@@ -11,6 +11,9 @@ const checkpointA = {
   timestamp: 1000,
   stats: { corkboards: 5, savedForLater: 0, dismissed: 0 },
 };
+// Newer by clock, but has NO corkboards — the case the richest-pick exists
+// for. A clock-skewed device (or a save that raced a richer one) must not
+// win just because its timestamp is bigger.
 const checkpointB = {
   timestamp: 2000,
   stats: { corkboards: 0, savedForLater: 10, dismissed: 0 },
@@ -37,7 +40,12 @@ describe('useAutoRestoreGuard', () => {
     expect(loadCheckpoint).not.toHaveBeenCalled();
   });
 
-  it('calls loadCheckpoint with the newest checkpoint when local is empty', async () => {
+  it('picks the RICHEST checkpoint when local is empty, not merely the newest by clock', async () => {
+    // checkpointB has the bigger timestamp but zero corkboards; checkpointA
+    // has fewer saved/dismissed but 5 corkboards. This is the exact bug: a
+    // clock-skewed or merely-later save must not permanently outrank a far
+    // more complete backup on the one read with nothing local to check it
+    // against.
     const loadCheckpoint = vi.fn();
     renderHook(() => useAutoRestoreGuard({
       backupCheckSettled: true,
@@ -48,7 +56,22 @@ describe('useAutoRestoreGuard', () => {
     }));
     await new Promise(r => setTimeout(r, 50));
     expect(loadCheckpoint).toHaveBeenCalledTimes(1);
-    expect(loadCheckpoint).toHaveBeenCalledWith(checkpointB); // newest timestamp
+    expect(loadCheckpoint).toHaveBeenCalledWith(checkpointA);
+  });
+
+  it('falls back to the newest by timestamp when corkboard counts tie', async () => {
+    const tieA = { timestamp: 1000, stats: { corkboards: 3, savedForLater: 5, dismissed: 5 } };
+    const tieB = { timestamp: 2000, stats: { corkboards: 3, savedForLater: 5, dismissed: 5 } };
+    const loadCheckpoint = vi.fn();
+    renderHook(() => useAutoRestoreGuard({
+      backupCheckSettled: true,
+      backupStatus: 'found',
+      checkpoints: [tieA, tieB],
+      lastBackupTs: 0,
+      loadCheckpoint,
+    }));
+    await new Promise(r => setTimeout(r, 50));
+    expect(loadCheckpoint).toHaveBeenCalledWith(tieB);
   });
 
   it('does NOT trigger when backupStatus is not "found"', async () => {

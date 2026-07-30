@@ -36,6 +36,7 @@ import {
   AUTO_SAVE_STARTUP_COOLDOWN_MS,
 } from '@core/cacheConfig';
 import { createSyncScheduler, type SchedulerResetReason } from '@core/syncScheduler';
+import { pickRichestManifest } from '@core/backupGuards';
 
 /** A sync attempt that has not settled in this long is presumed dead —
  *  without the escape, a hung check wedges every future tick (parity with
@@ -125,9 +126,20 @@ export function AutoSaveManager() {
           _scheduler.recordCheckResult('nothing-new');
           return;
         }
-        const newest = cps.reduce((a, b) => (b.timestamp > a.timestamp ? b : a));
+        // Richest, not merely newest-by-clock: a clock-skewed device (or a
+        // save that raced a richer one) can produce a manifest that is only
+        // LATER, not better — and picking by timestamp let it win forever,
+        // since every tick rediscovers it as "not yet synced" and re-merges
+        // it. Corkboards weigh most (few, hand-curated), then combined
+        // saved+dismissed, then timestamp as the final tiebreaker — so this
+        // agrees with the plain newest pick whenever there's nothing to
+        // disagree about. Cheap: `cps` already carries every candidate's
+        // stats from checkForBackup, no extra decrypt.
+        const newest = pickRichestManifest(
+          cps.map(cp => ({ id: cp.eventId, timestamp: cp.timestamp, stats: cp.stats, _cp: cp })),
+        )._cp;
 
-        // Identity, not clocks: merge whenever the newest manifest is one this
+        // Identity, not clocks: merge whenever the chosen manifest is one this
         // device has not already published or merged.
         //
         // This replaces a timestamp comparison AND the stamp-now heuristic that

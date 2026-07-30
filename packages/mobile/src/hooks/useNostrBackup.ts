@@ -84,7 +84,9 @@ import {
   evaluateManifestThinness,
   evaluateMergeHold,
   verifyBlobMatchesManifest,
+  shouldSuppressSilentSync,
   type BackupCounts,
+  type ExplicitRestoreRecord,
 } from '@core/backupGuards';
 import { SNAPSHOT_KEYS } from '@core/backupKeys';
 import { withoutTombstoneRecording, getStoredTombstones } from '../storage/MmkvStorage';
@@ -103,6 +105,28 @@ export function getLastSyncedManifestId(): string {
 }
 export function setLastSyncedManifestId(eventId: string): void {
   if (eventId) mobileStorage.setSync(LAST_SYNCED_MANIFEST_KEY, eventId);
+}
+
+/**
+ * The checkpoint the USER explicitly restored (`restoreBackup` called with
+ * `silent` falsy), as opposed to `LAST_SYNCED_MANIFEST_KEY`, which a silent
+ * background merge also advances. See `@core/backupGuards.shouldSuppressSilentSync`
+ * for why the distinction exists: without it, a manifest that is merely
+ * LATER by clock (not better) permanently outranks whatever the user
+ * deliberately chose, and every periodic check silently re-applies it.
+ * Parity with web.
+ */
+function getLastExplicitRestore(): ExplicitRestoreRecord | null {
+  const raw = mobileStorage.getSync(STORAGE_KEYS.LAST_EXPLICIT_RESTORE);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<ExplicitRestoreRecord>;
+    if (typeof parsed.id === 'string' && typeof parsed.timestamp === 'number') return parsed as ExplicitRestoreRecord;
+    return null;
+  } catch { return null; }
+}
+function setLastExplicitRestore(record: ExplicitRestoreRecord): void {
+  mobileStorage.setSync(STORAGE_KEYS.LAST_EXPLICIT_RESTORE, JSON.stringify(record));
 }
 const CHECKPOINTS_KEY = STORAGE_KEYS.REMOTE_CHECKPOINTS;
 
@@ -1117,6 +1141,23 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       setMessage('Downloading backup…');
     }
 
+    // A SILENT sync must not fight a choice the user already made. The
+    // "newest" manifest is picked by wall-clock timestamp, and a
+    // clock-skewed device (or a save that raced a richer one) can outrank an
+    // explicit restore forever — every tick rediscovers it as "a different
+    // event, not yet synced" and silently reapplies it. A manual restore
+    // (silent falsy) always goes through — this only suppresses the
+    // automatic path. Parity with web.
+    if (silent) {
+      const explicit = getLastExplicitRestore();
+      const localTsNow = parseInt(mobileStorage.getSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      if (shouldSuppressSilentSync(explicit, checkpoint.eventId, localTsNow)) {
+        log(`Background sync suppressed: manifest ${checkpoint.eventId.slice(0, 8)} conflicts with your explicit restore of ${explicit!.id.slice(0, 8)}`);
+        restoringSince.current = 0;
+        return;
+      }
+    }
+
     try {
       // Try primary URL, then fallback to other Blossom servers using hash
       let encryptedData: string | null = null;
@@ -1208,6 +1249,10 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       // the auto-save trigger pushes the union (see saveSnapshot).
       mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(checkpoint.timestamp));
       setLastSyncedManifestId(checkpoint.eventId);
+      // Only a MANUAL restore counts as an explicit choice worth protecting
+      // against a later silent override — a silent merge just following the
+      // clock is not a deliberate decision to defend.
+      if (!silent) setLastExplicitRestore({ id: checkpoint.eventId, timestamp: checkpoint.timestamp });
       setLastBackupTs(checkpoint.timestamp);
       saveSnapshot(localContributed ? remoteSnapshot.keys : undefined);
       if (localContributed) log('Local content not yet in cloud — auto-save will push the merged state');
@@ -1234,6 +1279,44 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
 
   const lastBackupAgo = lastBackupTs > 0 ? formatTimeAgo(lastBackupTs) : null;
 
+  // Ship this device's log ring buffer as a NIP-44 self-encrypted event (kind
+  // 30078, replaceable per device) so it's readable from web/desktop without
+  // physical access to the phone. Publish-only here — web/desktop own the
+  // fetch+decrypt+view side. Parity with web's publishDebugLog.
+  const publishDebugLog = useCallback(async (): Promise<{ published: number; error?: string }> => {
+    if (!pubkey || !signer?.nip44) return { published: 0, error: 'Not signed in, or signer lacks NIP-44.' };
+    try {
+      const payload = JSON.stringify({
+        deviceId,
+        platform: 'mobile',
+        savedAt: Math.floor(Date.now() / 1000),
+        lines: logs,
+      });
+      const encrypted = await signer.nip44.encrypt(pubkey, payload);
+      const event = await signer.signEvent({
+        kind: 30078,
+        content: encrypted,
+        tags: [['d', `corkboard:debug-log:${deviceId}`]],
+        created_at: Math.floor(Date.now() / 1000),
+      });
+      const relays = getPublishRelays(pubkey);
+      let published = 0;
+      try { await nostr.event(event, { signal: AbortSignal.timeout(10000) }); published++; } catch { /* fall through */ }
+      for (const url of relays) {
+        const relay = createRelayFresh(url, { backoff: false });
+        try { await relay.event(event, { signal: AbortSignal.timeout(8000) }); published++; }
+        catch { /* continue */ }
+        finally { try { relay.close(); } catch { /* */ } }
+      }
+      log(`Debug log published to ${published} relay target(s)`);
+      return { published };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log('Debug log publish failed: ' + msg);
+      return { published: 0, error: msg };
+    }
+  }, [pubkey, signer, deviceId, logs, log, nostr]);
+
   return {
     status,
     message,
@@ -1246,6 +1329,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     hasUnsavedChanges,
     checkForBackup,
     restoreBackup,
+    publishDebugLog,
   };
 }
 

@@ -94,7 +94,7 @@ import { ThroughputSettings } from '@/components/ThroughputSettings';
 // their chunks past first paint.
 const AdvancedSettings = lazy(() => import('@/components/AdvancedSettings').then(m => ({ default: m.AdvancedSettings })));
 const EmojiSetEditor = lazy(() => import('@/components/EmojiSetEditor').then(m => ({ default: m.EmojiSetEditor })));
-import { useNostrBackup, getLastAutoSaveError, describeIncompleteCheck, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS } from '@/hooks/useNostrBackup';
+import { useNostrBackup, getLastAutoSaveError, describeIncompleteCheck, getBlossomServers, setBlossomServers, getBlossomServersUpdatedAt, setBlossomServersUpdatedAt, DEFAULT_BLOSSOM_SERVERS, type RemoteDebugLog } from '@/hooks/useNostrBackup';
 import { PROFILE_INDEXER_RELAYS } from '@core/relayConstants';
 import { MAX_RETAINED_NOTES } from '@core/feedConstants';
 import { bumpQueryEpoch, getQueryEpoch, withQueryBudget, StaleEpochError } from '@core/queryGovernor';
@@ -817,7 +817,7 @@ export function MultiColumnClient() {
   }, [toast]);
 
   // Nostr backup/restore
-  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, syncFromRemote, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, getCheckpoints: _getCheckpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning } = useNostrBackup(user, nostr);
+  const { backupStatus, backupCheckSettled, backupMessage, remoteBackup, loadRemoteBackup, syncFromRemote, dismissRemoteBackup, saveBackup, autoSaveBackup, downloadBackupAsFile, checkRemoteBackup, lastBackupTs, hasUnsavedChanges, checkpoints, getCheckpoints: _getCheckpoints, loadCheckpoint: loadCheckpointFn, logs: backupLogs, scanOlderStates, isScanning, publishDebugLog, fetchDeviceDebugLogs } = useNostrBackup(user, nostr);
 
   // Startup diagnostic log — emits once per user session
   useEffect(() => {
@@ -975,6 +975,11 @@ export function MultiColumnClient() {
 
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
   const [showBackupConfirm, setShowBackupConfirm] = useState(false);
+  // Cross-device debug logs: fetched on demand, decrypted client-side. Not
+  // persisted — this is a debugging aid, not app state.
+  const [deviceDebugLogs, setDeviceDebugLogs] = useState<RemoteDebugLog[] | null>(null);
+  const [isFetchingDeviceLogs, setIsFetchingDeviceLogs] = useState(false);
+  const [isPublishingDebugLog, setIsPublishingDebugLog] = useState(false);
   const [backupIndicator, setBackupIndicator] = useState<BackupIndicatorState>('idle');
   // 'saving' is derived, not stored: backupStatus covers both manual saveBackup
   // and autoSaveBackup from start to result, so the orange blink needs no
@@ -4457,6 +4462,66 @@ export function MultiColumnClient() {
                     <>Search for more</>
                   )}
                 </Button>
+              </div>
+
+              {/* Cross-device debug logs — for diagnosing a sync issue across
+                  devices without physically reaching each one. Self-encrypted
+                  (NIP-44), readable only by this account's own signer. */}
+              <div className="border-t pt-3 space-y-2">
+                <p className="text-xs text-muted-foreground">Debug logs (this account's devices)</p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 text-xs gap-2"
+                    disabled={isPublishingDebugLog}
+                    onClick={async () => {
+                      setIsPublishingDebugLog(true);
+                      try {
+                        const r = await publishDebugLog();
+                        toast(r.published > 0
+                          ? { title: `Log published to ${r.published} relay(s)` }
+                          : { title: 'Publish failed', description: r.error, variant: 'destructive' });
+                      } finally {
+                        setIsPublishingDebugLog(false);
+                      }
+                    }}
+                  >
+                    {isPublishingDebugLog ? <><Loader2 className="h-3 w-3 animate-spin" />Publishing...</> : 'Publish my log'}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 text-xs gap-2"
+                    disabled={isFetchingDeviceLogs}
+                    onClick={async () => {
+                      setIsFetchingDeviceLogs(true);
+                      try {
+                        const logs = await fetchDeviceDebugLogs();
+                        setDeviceDebugLogs(logs);
+                        if (logs.length === 0) toast({ title: 'No published device logs found' });
+                      } finally {
+                        setIsFetchingDeviceLogs(false);
+                      }
+                    }}
+                  >
+                    {isFetchingDeviceLogs ? <><Loader2 className="h-3 w-3 animate-spin" />Fetching...</> : 'Fetch device logs'}
+                  </Button>
+                </div>
+                {deviceDebugLogs && deviceDebugLogs.length > 0 && (
+                  <div className="space-y-2 max-h-56 overflow-y-auto">
+                    {deviceDebugLogs.map((d) => (
+                      <details key={d.deviceId} className="border rounded-md p-2" open={deviceDebugLogs.length === 1}>
+                        <summary className="text-xs font-medium cursor-pointer">
+                          {d.platform ?? 'unknown'} · {d.deviceId.slice(0, 8)} · {new Date(d.savedAt * 1000).toLocaleString()} · {d.lines.length} lines
+                        </summary>
+                        <pre className="text-[10px] leading-tight whitespace-pre-wrap mt-1 max-h-40 overflow-y-auto">
+                          {d.lines.join('\n')}
+                        </pre>
+                      </details>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </DialogContent>

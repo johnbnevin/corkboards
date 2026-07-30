@@ -4,6 +4,8 @@ import {
   evaluateManifestThinness,
   evaluateMergeHold,
   verifyBlobMatchesManifest,
+  pickRichestManifest,
+  shouldSuppressSilentSync,
   BLOB_MANIFEST_MAX_SKEW_SECS,
   type BackupCounts,
 } from './backupGuards'
@@ -88,6 +90,28 @@ describe('evaluateManifestThinness', () => {
     expect(evaluateManifestThinness(undefined, { dismissed: 5 })).toBe('ok')
     expect(evaluateManifestThinness({ dismissed: 40 }, undefined)).toBe('ok')
   })
+
+  it('worries about ANY corkboard regression, however small', () => {
+    // Corkboards are few and hand-curated — unlike dismissed/saved counts,
+    // there is no "routine churn" floor for them.
+    expect(
+      evaluateManifestThinness({ corkboards: 5 }, { corkboards: 4 }),
+    ).toBe('corkboards-regressed')
+    expect(
+      evaluateManifestThinness({ corkboards: 5 }, { corkboards: 1 }),
+    ).toBe('corkboards-regressed')
+  })
+
+  it('missing corkboards on both sides is not a regression', () => {
+    expect(evaluateManifestThinness({ corkboards: 0 }, { corkboards: 0 })).toBe('ok')
+    expect(evaluateManifestThinness(undefined, { corkboards: 3 })).toBe('ok')
+  })
+
+  it('a saved-for-later cleanup does not trip the corkboards check', () => {
+    expect(
+      evaluateManifestThinness({ corkboards: 4, savedForLater: 130 }, { corkboards: 4, savedForLater: 5 }),
+    ).toBe('ok')
+  })
 })
 
 describe('evaluateMergeHold', () => {
@@ -134,13 +158,95 @@ describe('evaluateMergeHold', () => {
     expect(v.guardedCount).toBe(2)
   })
 
-  it('holds on mass removals of other guarded keys (pins, boards)', () => {
+  it('holds on mass removals of other guarded keys (pins)', () => {
     const v = evaluateMergeHold(
       [{ key: 'nostr-pinned-note-ids', ids: Array.from({ length: 30 }, (_, i) => `p${i}`) }],
       LIMIT,
     )
     expect(v.hold).toBe(true)
     expect(v.reason).toBe('other-removals')
+  })
+
+  it('holds on ANY corkboard removal, even just one — never lumped under the note-id limit', () => {
+    const v = evaluateMergeHold(
+      [{ key: 'nostr-custom-feeds', ids: ['board-1'] }],
+      LIMIT,
+    )
+    expect(v.hold).toBe(true)
+    expect(v.reason).toBe('corkboards-removed')
+  })
+
+  it('a single corkboard removal holds even alongside a huge, otherwise-silent saved cleanup', () => {
+    const v = evaluateMergeHold(
+      [
+        { key: 'collapsed-notes', ids: Array.from({ length: 200 }, (_, i) => `c${i}`) },
+        { key: 'nostr-custom-feeds', ids: ['board-1'] },
+      ],
+      LIMIT,
+    )
+    expect(v.hold).toBe(true)
+    expect(v.reason).toBe('corkboards-removed')
+  })
+})
+
+describe('pickRichestManifest', () => {
+  it('prefers more corkboards over a later timestamp', () => {
+    const winner = pickRichestManifest([
+      { id: 'thin-but-newer', timestamp: 200, stats: { corkboards: 1, savedForLater: 5, dismissed: 5 } },
+      { id: 'rich-but-older', timestamp: 100, stats: { corkboards: 4, savedForLater: 160, dismissed: 1863 } },
+    ])
+    expect(winner.id).toBe('rich-but-older')
+  })
+
+  it('falls back to combined saved+dismissed when corkboard counts tie', () => {
+    const winner = pickRichestManifest([
+      { id: 'less-data', timestamp: 200, stats: { corkboards: 2, savedForLater: 5, dismissed: 5 } },
+      { id: 'more-data', timestamp: 100, stats: { corkboards: 2, savedForLater: 50, dismissed: 50 } },
+    ])
+    expect(winner.id).toBe('more-data')
+  })
+
+  it('falls back to timestamp when everything else ties — agrees with the plain newest pick', () => {
+    const winner = pickRichestManifest([
+      { id: 'older', timestamp: 100, stats: { corkboards: 2, savedForLater: 10, dismissed: 10 } },
+      { id: 'newer', timestamp: 200, stats: { corkboards: 2, savedForLater: 10, dismissed: 10 } },
+    ])
+    expect(winner.id).toBe('newer')
+  })
+
+  it('treats missing stats as zero', () => {
+    const winner = pickRichestManifest([
+      { id: 'no-stats', timestamp: 999 },
+      { id: 'has-stats', timestamp: 1, stats: { corkboards: 1 } },
+    ])
+    expect(winner.id).toBe('has-stats')
+  })
+
+  it('throws on an empty candidate list rather than silently returning undefined', () => {
+    expect(() => pickRichestManifest([])).toThrow()
+  })
+})
+
+describe('shouldSuppressSilentSync', () => {
+  it('never suppresses when there is no explicit choice on record', () => {
+    expect(shouldSuppressSilentSync(null, 'anything', 100)).toBe(false)
+  })
+
+  it('never suppresses when the candidate IS the explicit choice', () => {
+    expect(shouldSuppressSilentSync({ id: 'x', timestamp: 100 }, 'x', 100)).toBe(false)
+  })
+
+  it('suppresses a different, clock-ahead candidate while local has not moved past the choice', () => {
+    // The exact bug: the user restores checkpoint A (timestamp 100), the cloud's
+    // clock-newest manifest is a DIFFERENT event B — every silent tick must not
+    // re-apply B just because its timestamp looks bigger.
+    expect(shouldSuppressSilentSync({ id: 'A', timestamp: 100 }, 'B', 100)).toBe(true)
+  })
+
+  it('stops suppressing once local has genuinely moved past the explicit choice', () => {
+    // A fresh local save after the explicit restore means the guard's job here
+    // is done — it must not keep defending a decision that's been superseded.
+    expect(shouldSuppressSilentSync({ id: 'A', timestamp: 100 }, 'B', 150)).toBe(false)
   })
 })
 

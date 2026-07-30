@@ -26,6 +26,7 @@ import { BACKED_UP_KEYS, STORAGE_KEYS } from '@/lib/storageKeys';
 import { fnv1a32 } from '@core/hashCore';
 import { SILENT_REMOVAL_LIMIT } from '@core/cacheConfig';
 import { randomUuid } from '@core/cryptoUtils';
+import { isTauri } from '@/lib/tauri';
 import { formatTimeAgo } from '@/lib/formatTimeAgo';
 import { debugLog, debugWarn } from '@/lib/debug';
 import { idbGetSync, idbGet, idbSetSync, idbRemoveSync, idbKeys, idbSet, idbReady, isIdbHealthy, withoutTombstoneRecording, getStoredTombstones } from '@/lib/idb';
@@ -34,6 +35,9 @@ import {
   evaluateManifestThinness,
   evaluateMergeHold,
   verifyBlobMatchesManifest,
+  pickRichestManifest,
+  shouldSuppressSilentSync,
+  type ExplicitRestoreRecord,
 } from '@core/backupGuards';
 import {
   mergeState,
@@ -122,6 +126,40 @@ function readManifestCache(): Record<string, string> {
 
 function getCachedManifestJson(eventId: string): string | null {
   return readManifestCache()[eventId] ?? null;
+}
+
+type ManifestData = { v?: number; chunks?: number; timestamp?: number; keys?: string[]; relays?: string[]; corkboardNames?: string[]; encryption?: string; wrappedKey?: string; signerMethod?: string; blossomUrl?: string; blossomHash?: string; deviceId?: string; stats?: { corkboards: number; savedForLater: number; dismissed: number } };
+
+/**
+ * Decrypt one manifest event's content — plaintext, then the plain-decrypt
+ * cache, then a live signer decrypt (NIP-44, legacy NIP-04 fallback via
+ * decryptSelfPayload). One place that knows how to read a manifest event,
+ * shared by the single-winner path in checkRemoteBackup, the cold-restore
+ * multi-candidate comparison below, and scanOlderStates.
+ */
+async function decryptManifestEventContent(
+  event: NostrEvent,
+  signer: { nip44?: { decrypt(pk: string, c: string): Promise<string> }; nip04?: { decrypt(pk: string, c: string): Promise<string> } },
+  pubkey: string,
+  log: (msg: string, level?: 'log' | 'warn' | 'error') => void,
+): Promise<ManifestData | null> {
+  try {
+    return JSON.parse(event.content) as ManifestData;
+  } catch {
+    const cachedJson = getCachedManifestJson(event.id);
+    if (cachedJson) {
+      try { return JSON.parse(cachedJson) as ManifestData; } catch { /* fall through */ }
+    }
+    try {
+      const manifestJson = await decryptSelfPayload(signer, pubkey, event.content);
+      cacheManifestJson(event.id, manifestJson);
+      return JSON.parse(manifestJson) as ManifestData;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`  ${event.id.slice(0, 8)}: ${msg === 'decrypt_timeout' ? 'signer timed out' : msg}`, 'warn');
+      return null;
+    }
+  }
 }
 
 function cacheManifestJson(eventId: string, json: string): void {
@@ -218,6 +256,27 @@ function setLastSyncedManifestId(eventId: string): void {
   if (!eventId) return;
   idbSetSync(LAST_SYNCED_MANIFEST_KEY, eventId);
   idbSet(LAST_SYNCED_MANIFEST_KEY, eventId).catch(() => {});
+}
+
+/**
+ * The checkpoint the USER explicitly restored (merge or replace), as opposed
+ * to `LAST_SYNCED_MANIFEST_KEY`, which a silent background merge also
+ * advances. See `@core/backupGuards.shouldSuppressSilentSync` for why the
+ * distinction exists: without it, a manifest that is merely LATER by clock
+ * (not better) permanently outranks whatever the user deliberately chose, and
+ * every periodic check silently re-applies it within moments.
+ */
+function getLastExplicitRestore(): ExplicitRestoreRecord | null {
+  const raw = idbGetSync(STORAGE_KEYS.LAST_EXPLICIT_RESTORE);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<ExplicitRestoreRecord>;
+    if (typeof parsed.id === 'string' && typeof parsed.timestamp === 'number') return parsed as ExplicitRestoreRecord;
+    return null;
+  } catch { return null; }
+}
+function setLastExplicitRestore(record: ExplicitRestoreRecord): void {
+  idbSetSync(STORAGE_KEYS.LAST_EXPLICIT_RESTORE, JSON.stringify(record));
 }
 
 /** What the last check saw, for callers that need more than the return value.
@@ -569,6 +628,15 @@ export interface RemoteCheckpoint {
 }
 
 const CHECKPOINTS_KEY = STORAGE_KEYS.REMOTE_CHECKPOINTS;
+
+/** One device's shipped debug log — see publishDebugLog / fetchDeviceDebugLogs. */
+export interface RemoteDebugLog {
+  deviceId: string;
+  platform?: string;
+  savedAt: number;
+  lines: string[];
+}
+const DEBUG_LOG_D_TAG_PREFIX = 'corkboard:debug-log';
 
 function getStoredCheckpoints(): RemoteCheckpoint[] {
   const raw = idbGetSync(CHECKPOINTS_KEY);
@@ -1845,10 +1913,71 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       }
 
       // Pick the newest manifest by created_at
-      const bestManifestEvent = manifestEvents.reduce((best, ev) =>
+      let bestManifestEvent = manifestEvents.reduce((best, ev) =>
         ev.created_at > best.created_at ? ev : best
       );
       log(`Found backup event (created_at: ${bestManifestEvent.created_at})`);
+
+      // ── Cold-restore reconciliation ─────────────────────────────────────
+      //
+      // Picking purely by wall-clock created_at is unsafe exactly once: the
+      // FIRST restore on a device with nothing local yet to sanity-check the
+      // pick against. A clock-skewed device, or a save that raced a richer
+      // one, produces a manifest that is merely LATER, not better — and it
+      // then wins FOREVER, because every later check rediscovers it as "a
+      // different, not-yet-synced event" and silently re-applies it. That is
+      // the "restored an old/thin state, and a richer one visible in the
+      // menu would not load" failure.
+      //
+      // So: only when local has never backed up before, and only when there
+      // is more than one candidate, pay the cost of decrypting all of them
+      // (bounded — at most 6 slots) to compare their STATS instead of the
+      // clock. Steady-state checks (the overwhelming majority) never pay
+      // this — they hit "already synced, skip decrypt" below untouched.
+      const localBackupTsBeforePick = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      if (localBackupTsBeforePick === 0 && manifestEvents.length > 1) {
+        log(`Cold restore with ${manifestEvents.length} candidates — comparing content, not just the clock`);
+        const decrypted = await Promise.all(manifestEvents.map(async (ev) => ({
+          ev,
+          data: await decryptManifestEventContent(ev, user.signer, pubkey, log),
+        })));
+        const withStats = decrypted.filter(
+          (d): d is { ev: NostrEvent; data: ManifestData } => !!d.data,
+        );
+        if (withStats.length > 0) {
+          const richest = pickRichestManifest(withStats.map(({ ev, data }) => ({
+            id: ev.id,
+            timestamp: data.timestamp || ev.created_at,
+            stats: data.stats,
+          })));
+          if (richest.id !== bestManifestEvent.id) {
+            const winnerEntry = withStats.find(({ ev }) => ev.id === richest.id)!;
+            log(`Content comparison overrides the clock-newest pick: ${richest.id.slice(0, 8)} (${richest.stats?.corkboards ?? 0} corkboards) over ${bestManifestEvent.id.slice(0, 8)} (created_at ${bestManifestEvent.created_at})`, 'warn');
+            bestManifestEvent = winnerEntry.ev;
+          }
+          // Feed every successfully-decrypted candidate into the checkpoint
+          // list too — same as a manual "scan for older states" — so
+          // whichever one is NOT picked is still visible and selectable in
+          // the restore menu, and the user can override this pick as well.
+          const discoveredCps: RemoteCheckpoint[] = withStats
+            .filter(({ data }) => data.blossomUrl && data.wrappedKey && data.signerMethod)
+            .map(({ ev, data }) => ({
+              eventId: ev.id,
+              dTag: ev.tags.find(t => t[0] === 'd')?.[1] || '',
+              timestamp: data.timestamp || ev.created_at,
+              blossomUrl: data.blossomUrl!,
+              ...(data.blossomHash ? { blossomHash: data.blossomHash } : {}),
+              wrappedKey: data.wrappedKey!,
+              signerMethod: (data.signerMethod as 'nip44' | 'nip04') || 'nip44',
+              stats: data.stats,
+              corkboardNames: data.corkboardNames,
+            }));
+          if (discoveredCps.length > 0) {
+            setStoredCheckpoints([...getStoredCheckpoints(), ...discoveredCps]);
+            setCheckpoints(getStoredCheckpoints());
+          }
+        }
+      }
 
       // Heal the divergence instead of only routing around it.
       //
@@ -1920,8 +2049,6 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         return null;
       }
 
-      type ManifestData = { v?: number; chunks?: number; timestamp?: number; keys?: string[]; relays?: string[]; corkboardNames?: string[]; encryption?: string; wrappedKey?: string; signerMethod?: string; blossomUrl?: string; blossomHash?: string; deviceId?: string; stats?: { corkboards: number; savedForLater: number; dismissed: number } };
-
       // Parse the best (newest) manifest for the restore flow
       let manifest: ManifestData | null = null;
 
@@ -1976,14 +2103,15 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         };
         const stored = getStoredCheckpoints();
         const newestStored = stored.length > 0 ? stored[0] : null;
-        // Only a DISMISSED regression is a worry (a fresh install autosaving an
-        // empty dismissed list over a full one). Fewer saved notes is normal
-        // life — the old rule also rejected manifests with a lower
-        // savedForLater, which made a legitimate Save for Later cleanup on one
-        // device invisible to every other device forever.
+        // A DISMISSED regression, or ANY corkboard regression, is a worry (a
+        // fresh install autosaving a near-empty state over a full one).
+        // Fewer saved notes alone is normal life — the old rule also rejected
+        // manifests with a lower savedForLater, which made a legitimate Save
+        // for Later cleanup on one device invisible to every other device
+        // forever.
         const thinness = evaluateManifestThinness(newestStored?.stats, manifest.stats);
-        if (thinness === 'dismissed-regressed') {
-          log(`Manifest's dismissed count regressed vs stored checkpoint (${manifest.stats?.dismissed} vs stored:${newestStored?.stats?.dismissed}) — skipping checkpoint update`, 'warn');
+        if (thinness !== 'ok') {
+          log(`Manifest looks thinner than the stored checkpoint (${thinness}: ${manifest.stats?.corkboards} corkboards/${manifest.stats?.dismissed} dismissed vs stored ${newestStored?.stats?.corkboards}/${newestStored?.stats?.dismissed}) — skipping checkpoint update`, 'warn');
         } else {
           const nameMap = new Map(stored.filter(c => c.name).map(c => [c.eventId, c.name!]));
           if (nameMap.has(newCp.eventId)) newCp.name = nameMap.get(newCp.eventId);
@@ -2127,6 +2255,24 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     try {
       const pubkey = user.pubkey;
       let backup = currentRemote;
+
+      // A SILENT sync must not fight a choice the user already made. The
+      // "newest" manifest is picked by wall-clock created_at, and a
+      // clock-skewed device (or a save that raced a richer one) can outrank
+      // an explicit restore forever — every tick rediscovers it as "a
+      // different event, not yet synced" and silently reapplies it, undoing
+      // the user's choice within moments. A manual sync still goes through
+      // and surfaces the disagreement (see syncFromRemote below); only the
+      // automatic path is suppressed here.
+      if (silent) {
+        const candidateId = manifestEventRef.current?.id;
+        const explicit = getLastExplicitRestore();
+        const localTsNow = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
+        if (candidateId && shouldSuppressSilentSync(explicit, candidateId, localTsNow)) {
+          log(`Background sync suppressed: manifest ${candidateId.slice(0, 8)} conflicts with your explicit restore of ${explicit!.id.slice(0, 8)} — review it manually if you want it`, 'warn');
+          return { applied: false, error: 'A different backup exists on the relays but conflicts with a restore you chose explicitly. Use Sync from another device to review it.' };
+        }
+      }
 
       // Use the decrypted manifest data (cached during checkRemoteBackup)
       const manifest = manifestDataRef.current as Record<string, unknown> | null;
@@ -2727,11 +2873,16 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         ? cp.timestamp
         : Math.max(cp.timestamp, parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10));
       // Merge: we now hold this manifest's state — the next sync tick must not
-      // re-merge it. Replace: deliberately NOT recorded. A rollback has not
-      // taken in the newest manifest, and saying otherwise would silence the
-      // sync that the user may still want; the tombstones written by the
-      // rollback are what keep that later merge from undoing it.
+      // re-merge it. Replace: deliberately NOT recorded here — a rollback has
+      // not "taken in" the newest manifest, and saying otherwise would
+      // silence a sync the user may still want to see surfaced. What DOES
+      // protect a replace rollback from being immediately undone is the
+      // explicit-restore record below: a clock-newer-but-not-actually-newer
+      // manifest cannot silently re-apply over EITHER mode's deliberate
+      // choice, regardless of whether its own event id ever gets recorded as
+      // "synced".
       if (mode === 'merge') setLastSyncedManifestId(cp.eventId);
+      setLastExplicitRestore({ id: cp.eventId, timestamp: cpNewTs });
       idbSetSync(LAST_BACKUP_TS_KEY, String(cpNewTs));
       idbSetSync('corkboard:preferred-checkpoint', cp.eventId);
       setLastBackupTs(cpNewTs);
@@ -2881,6 +3032,104 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     }
   }, [user, isScanning, queryAll, log]);
 
+  // ── Cross-device debug log sharing ──────────────────────────────────────
+  //
+  // Debugging a sync/restore issue across a phone, a desktop and a browser
+  // means three separate log files nobody but each device's own owner can
+  // read. This ships the SAME small ring buffer already shown in the backup
+  // splash as one NIP-44 self-encrypted event per device (kind 30078,
+  // replaceable, so publishing again just updates it — no accumulation).
+  // Only readable by this account's own signer/bunker, same as everything
+  // else self-encrypted here.
+  const publishDebugLog = useCallback(async (): Promise<{ published: number; error?: string }> => {
+    if (!user) return { published: 0, error: 'Not signed in.' };
+    if (!user.signer.nip44) return { published: 0, error: 'Signer does not support NIP-44 encryption.' };
+    try {
+      const payload = JSON.stringify({
+        deviceId,
+        platform: isTauri ? 'desktop' : 'web',
+        savedAt: Math.floor(Date.now() / 1000),
+        lines: logs,
+      });
+      const encrypted = await user.signer.nip44.encrypt(user.pubkey, payload);
+      const event = await user.signer.signEvent({
+        kind: 30078,
+        content: encrypted,
+        tags: [['d', `${DEBUG_LOG_D_TAG_PREFIX}:${deviceId}`]],
+        created_at: Math.floor(Date.now() / 1000),
+      });
+      const { primary, fallback } = getPublishRelays(user.pubkey);
+      let published = 0;
+      try {
+        await nostr.event(event, { signal: AbortSignal.timeout(10000) });
+        published++;
+      } catch { /* fall through to the per-relay loop */ }
+      for (const url of [...primary, ...fallback]) {
+        const relay = createRelayFresh(url, { backoff: false });
+        try {
+          await relay.event(event, { signal: AbortSignal.timeout(8000) });
+          published++;
+        } catch { /* continue */ }
+        finally { try { relay.close(); } catch { /* */ } }
+      }
+      log(`Debug log published to ${published} relay target(s)`);
+      return { published };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log('Debug log publish failed: ' + msg, 'warn');
+      return { published: 0, error: msg };
+    }
+  }, [user, deviceId, logs, log, nostr]);
+
+  // Fetch + decrypt every device's published log (self-published only —
+  // authors:[pubkey] — never another account's).
+  const fetchDeviceDebugLogs = useCallback(async (): Promise<RemoteDebugLog[]> => {
+    if (!user) return [];
+    const { primary, fallback } = getPublishRelays(user.pubkey);
+    const relays = [...new Set([...primary, ...fallback])];
+    const seen = new Set<string>();
+    const events: NostrEvent[] = [];
+    await Promise.all(relays.map(async (url) => {
+      const relay = createRelayFresh(url, { backoff: false });
+      try {
+        const evs = await relay.query(
+          [{ kinds: [30078], authors: [user.pubkey], limit: 20 }],
+          { signal: AbortSignal.timeout(8000) },
+        );
+        for (const ev of evs) {
+          const dTag = ev.tags.find(t => t[0] === 'd')?.[1];
+          if (dTag?.startsWith(`${DEBUG_LOG_D_TAG_PREFIX}:`) && !seen.has(ev.id)) {
+            seen.add(ev.id);
+            events.push(ev);
+          }
+        }
+      } catch { /* try the next relay */ }
+      finally { try { relay.close(); } catch { /* */ } }
+    }));
+
+    // Replaceable per d-tag (one per device) — keep only the newest event
+    // per device in case a relay is lagging.
+    const byDTag = new Map<string, NostrEvent>();
+    for (const ev of events) {
+      const dTag = ev.tags.find(t => t[0] === 'd')?.[1] ?? '';
+      const existing = byDTag.get(dTag);
+      if (!existing || ev.created_at > existing.created_at) byDTag.set(dTag, ev);
+    }
+
+    const results: RemoteDebugLog[] = [];
+    for (const ev of byDTag.values()) {
+      if (!user.signer.nip44) continue;
+      try {
+        const json = await decryptSelfPayload(user.signer, user.pubkey, ev.content, 10000);
+        results.push(JSON.parse(json) as RemoteDebugLog);
+      } catch (err) {
+        log(`Debug log decrypt failed for ${ev.id.slice(0, 8)}: ${err instanceof Error ? err.message : err}`, 'warn');
+      }
+    }
+    results.sort((a, b) => b.savedAt - a.savedAt);
+    return results;
+  }, [user, log]);
+
   return {
     backupStatus: status,
     backupCheckSettled: checkSettled,
@@ -2904,6 +3153,8 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     loadCheckpoint: loadCheckpointFn,
     scanOlderStates,
     isScanning,
+    publishDebugLog,
+    fetchDeviceDebugLogs,
   };
 }
 

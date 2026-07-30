@@ -13,10 +13,13 @@
  */
 import { useEffect, useRef } from 'react';
 import { idbGet, idbGetSync } from '@/lib/idb';
+import { pickRichestManifest } from '@core/backupGuards';
 
 export interface CheckpointSummary {
   timestamp: number;
   stats?: { corkboards?: number; savedForLater?: number; dismissed?: number };
+  /** Only used to label the pick internally — never compared. */
+  eventId?: string;
 }
 
 export interface UseAutoRestoreGuardOptions<T extends CheckpointSummary> {
@@ -62,8 +65,14 @@ export function useAutoRestoreGuard<T extends CheckpointSummary>({
         (cp.stats?.savedForLater ?? 0) > 0 ||
         (cp.stats?.dismissed ?? 0) > 0,
       );
-      const best = (withData.length > 0 ? withData : checkpoints)
-        .reduce((a, b) => b.timestamp > a.timestamp ? b : a);
+      const pool = withData.length > 0 ? withData : checkpoints;
+      // Richest, not merely newest-by-clock — a clock-skewed device, or a
+      // save that raced a richer one, can otherwise auto-restore a manifest
+      // that is only LATER, not better, on the single highest-stakes read
+      // (a device with nothing local yet to sanity-check the pick against).
+      const best = pickRichestManifest(
+        pool.map(cp => ({ id: cp.eventId ?? '', timestamp: cp.timestamp, stats: cp.stats, _cp: cp })),
+      )._cp;
       if (lastBackupTs && lastBackupTs >= best.timestamp) return;
       if (cancelled) return;
       loadCheckpoint(best);

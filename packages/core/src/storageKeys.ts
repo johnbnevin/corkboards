@@ -121,6 +121,14 @@ export const STORAGE_KEYS = {
   LAST_BACKUP_HASHES: 'corkboard:last-backup-hashes',
   LAST_BACKUP_COUNTS: 'corkboard:last-backup-counts',
   RESTORE_HISTORY: 'corkboard:restore-history',
+  // The last checkpoint the USER explicitly chose (merge or replace) — as
+  // opposed to LAST_SYNCED_MANIFEST_KEY, which also gets set by silent
+  // background merges. `{eventId, timestamp}`, JSON. Lets a silent sync tell
+  // "the cloud's clock-newest manifest" apart from "what the user actually
+  // asked for", so a manifest with a merely-later created_at (clock skew, or
+  // a thinner save that raced the real one) can't silently re-impose itself
+  // over a deliberate choice. NOT backed up — a per-device decision.
+  LAST_EXPLICIT_RESTORE: 'corkboard:last-explicit-restore',
   // Persistent device identifier for cross-device sync (NOT backed up — stays local)
   DEVICE_ID: 'corkboard:device-id',
 } as const;
@@ -267,6 +275,7 @@ function getAllPerUserKeys(): string[] {
     STORAGE_KEYS.LAST_BACKUP_HASHES,
     STORAGE_KEYS.LAST_BACKUP_COUNTS,
     STORAGE_KEYS.RESTORE_HISTORY,
+    STORAGE_KEYS.LAST_EXPLICIT_RESTORE,
   ];
   for (const baseKey of PLATFORM_SPECIFIC_KEYS) {
     keys.push(baseKey); // unprefixed (migration)

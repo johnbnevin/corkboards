@@ -12,7 +12,7 @@ import { mobileStorage } from '../storage/MmkvStorage';
 import { isSecureRelay } from '@core/nostrUtils';
 import { RELAY_CACHE_TTL_MS } from '@core/cacheConfig';
 import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
-import { withQueryBudget, configureQueryGovernor, defaultMaxConcurrent } from '@core/queryGovernor';
+import { withQueryBudget, configureQueryGovernor, defaultMaxConcurrent, lookupPriority } from '@core/queryGovernor';
 import { getSessionSignal } from '../hooks/useSessionAbort';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS } from '@core/relayConstants';
 import { useAuth } from './AuthContext';
@@ -367,7 +367,7 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
     await waitForRateLimit(url);
     try { const r = await origQuery(filters, qOpts); recordRelaySuccess(url); return r; }
     catch (e) { recordRelayFailure(url); throw e; }
-  });
+  }, { priority: lookupPriority(filters) });
   inner.event = async (event, eOpts) => {
     await waitForRateLimit(url);
     try { await origEvent(event, eOpts); recordRelaySuccess(url); }
@@ -395,7 +395,7 @@ export function createRelayFresh(url: string, opts?: ConstructorParameters<typeo
     await waitForRateLimit(url);
     try { const r = await origQuery(filters, qOpts); recordRelaySuccess(url); return r; }
     catch (e) { recordRelayFailure(url); throw e; }
-  });
+  }, { priority: lookupPriority(filters) });
   inner.event = async (event, eOpts) => {
     await waitForRateLimit(url);
     try { await origEvent(event, eOpts); recordRelaySuccess(url); }

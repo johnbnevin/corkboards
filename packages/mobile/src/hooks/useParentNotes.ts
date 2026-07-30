@@ -134,6 +134,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
       );
 
       if (uncachedIds.length > 0) {
+        let passCompleted = false;
         try {
           const events = await withPoolQueryLimit(() => {
             if (signal.aborted) return Promise.resolve([] as NostrEvent[]);
@@ -142,6 +143,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
               { signal: AbortSignal.any([signal, AbortSignal.timeout(FIRST_PASS_TIMEOUT_MS)]) }
             );
           });
+          passCompleted = true;
           for (const event of events) {
             parentNoteCache.set(event.id, event);
           }
@@ -149,11 +151,15 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
           // Pool query failed
         }
 
+        // A query that timed out or aborted is evidence of congestion, not of
+        // absence — recording misses for it retired reachable parents for up
+        // to 15 minutes. Only a completed query gets to advance the miss decay
+        // (mirrors web).
         for (const id of uncachedIds) {
-          if (!parentNoteCache.has(id)) {
-            parentMisses.recordMiss(id);
-          } else {
+          if (parentNoteCache.has(id)) {
             parentMisses.recordHit(id);
+          } else if (passCompleted) {
+            parentMisses.recordMiss(id);
           }
         }
       }

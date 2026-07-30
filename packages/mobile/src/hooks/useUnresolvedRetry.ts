@@ -26,6 +26,7 @@ import {
   SWEEP_STAGGER_MS,
 } from '@core/unresolvedSweep';
 import { getUnresolvedIds, unresolvedCount } from '@core/failedNotes';
+import { forgetParentMiss } from './useParentNotes';
 
 export interface UseUnresolvedRetryResult {
   /** Attempt a sweep now. Refused unless the shared policy allows it. */
@@ -56,14 +57,30 @@ export function useUnresolvedRetry(): UseUnresolvedRetryResult {
     inFlightRef.current = true;
     lastSweepAtRef.current = Date.now();
 
+    // Drop the NEGATIVE cache for the whole batch BEFORE any refetch — ids
+    // still inside their miss cooldown are otherwise skipped by the parent
+    // query's shouldRetry gate, making the sweep a silent no-op for exactly
+    // the ids it exists to revive. (Mobile never cleared it at all; parity
+    // with web.)
+    for (const noteId of batch) forgetParentMiss(noteId);
+
+    // ONE family invalidation for the batched reply-parent query — per-id
+    // invalidations re-ran the same query up to 40 times per sweep.
+    queryClient.invalidateQueries({ queryKey: ['parent-notes'] });
+
+    // Per-id refetches, staggered but capped so a full batch fits inside the
+    // sweep interval (a fixed 500ms × 40 overran the 15s interval and made
+    // every other sweep refuse as in-flight).
+    const staggerMs = Math.min(
+      SWEEP_STAGGER_MS,
+      Math.max(50, Math.floor((SWEEP_INTERVAL_MS - 2000) / batch.length)),
+    );
     batch.forEach((noteId, i) => {
       timersRef.current.push(setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ['note', noteId] });
-        // Parent lookups live under their own keys (parity with web).
-        queryClient.invalidateQueries({ queryKey: ['parent-notes'] });
         queryClient.invalidateQueries({ queryKey: ['parent-note', noteId] });
         if (i === batch.length - 1) inFlightRef.current = false;
-      }, i * SWEEP_STAGGER_MS));
+      }, i * staggerMs));
     });
   }, [queryClient]);
 

@@ -8,6 +8,7 @@ import {
   configureQueryGovernor,
   queryGovernorStats,
   defaultMaxConcurrent,
+  lookupPriority,
   StaleEpochError,
   __resetQueryGovernor,
 } from '@core/queryGovernor';
@@ -234,6 +235,54 @@ describe('queryGovernor', () => {
     expect(defaultMaxConcurrent(1)).toBe(4);
     expect(defaultMaxConcurrent(64)).toBe(24);
     expect(defaultMaxConcurrent(undefined)).toBe(12);
+  });
+
+  it('serves the high-priority lane before earlier-queued normal work', async () => {
+    // The nested-content starvation case: bulk feed chunks queued first must
+    // not run ahead of a targeted lookup that arrives after them.
+    configureQueryGovernor({ maxConcurrent: 1 });
+
+    const order: string[] = [];
+    const blocker = deferred<void>();
+    const inFlight = withQueryBudget(async () => { await blocker.promise; });
+
+    const normal = withQueryBudget(async () => { order.push('bulk'); });
+    const high = withQueryBudget(async () => { order.push('lookup'); }, { priority: 'high' });
+
+    expect(queryGovernorStats().queuedHigh).toBe(1);
+    blocker.resolve();
+    await Promise.all([inFlight, normal, high]);
+    expect(order).toEqual(['lookup', 'bulk']);
+  });
+
+  it('epoch bumps drop stale waiters from BOTH lanes', async () => {
+    configureQueryGovernor({ maxConcurrent: 1 });
+    const blocker = deferred<void>();
+    const inFlight = withQueryBudget(async () => { await blocker.promise; });
+
+    const epoch = getQueryEpoch();
+    const staleHigh = withQueryBudget(async () => 'high', { epoch, priority: 'high' });
+    const staleNormal = withQueryBudget(async () => 'normal', { epoch });
+    bumpQueryEpoch();
+
+    await expect(staleHigh).rejects.toBeInstanceOf(StaleEpochError);
+    await expect(staleNormal).rejects.toBeInstanceOf(StaleEpochError);
+    blocker.resolve();
+    await inFlight;
+  });
+
+  it('classifies targeted lookups high and bulk fan-outs normal', () => {
+    // Nested content: events by id, one author's addressable event.
+    expect(lookupPriority([{ ids: ['a'.repeat(64)], limit: 1 }])).toBe('high');
+    expect(lookupPriority([{ ids: Array.from({ length: 50 }, (_, i) => String(i)) }])).toBe('high');
+    expect(lookupPriority([{ kinds: [30023], authors: ['pk'], '#d': ['slug'] }])).toBe('high');
+    // Bulk work: author-list feeds, profile batches, open-ended kind queries.
+    expect(lookupPriority([{ kinds: [1], authors: Array.from({ length: 500 }, (_, i) => String(i)) }])).toBe('normal');
+    expect(lookupPriority([{ kinds: [0], authors: ['pk'] }])).toBe('normal');
+    expect(lookupPriority([{ ids: Array.from({ length: 100 }, (_, i) => String(i)) }])).toBe('normal');
+    expect(lookupPriority([])).toBe('normal');
+    // Mixed sets take the conservative lane.
+    expect(lookupPriority([{ ids: ['x'] }, { kinds: [1], authors: ['a', 'b'] }])).toBe('normal');
   });
 });
 

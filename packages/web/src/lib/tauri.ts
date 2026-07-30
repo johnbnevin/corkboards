@@ -5,7 +5,7 @@
  * All functions are no-ops when not running inside Tauri.
  */
 
-import { withQueryBudget } from '@core/queryGovernor';
+import { withQueryBudget, lookupPriority } from '@core/queryGovernor';
 
 /** True when running inside the Tauri desktop app.
  * Checks both v1 (__TAURI__) and v2 (__TAURI_INTERNALS__) globals.
@@ -553,8 +553,9 @@ export async function tauriRelayQuery(
   try {
     // Governed alongside every other relay read so per-feature caps can't
     // compose into an unbounded number of concurrent native sockets.
-    const res = await withQueryBudget(() =>
-      invoke<RelayQueryResult>('relay_query', { url, filter, timeoutMs }),
+    const res = await withQueryBudget(
+      () => invoke<RelayQueryResult>('relay_query', { url, filter, timeoutMs }),
+      { priority: lookupPriority([filter]) },
     );
     if (!res) return null;
     return res;

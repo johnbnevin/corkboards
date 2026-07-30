@@ -4,11 +4,12 @@
  *
  * A device checks for newer cloud snapshots on a short interval, but after
  * `CLOUD_SYNC_IDLE_STRIKES` consecutive checks that found nothing new it goes
- * quiet — an unattended tab polling relays forever is exactly the background
- * traffic that has broken working features before. Any sign of life (the app
- * regaining focus, the network returning, a local save creating something for
+ * quiet (callers keep only a slow heartbeat) — an unattended tab polling
+ * relays at full speed forever is exactly the background traffic that has
+ * broken working features before. Any sign of life (the app regaining focus,
+ * user activity, the network returning, a local save creating something for
  * other devices to react to, or a check that actually found something)
- * resets the count and resumes polling.
+ * resets the count and resumes the fast cadence.
  *
  * Failed checks are NOT strikes: a relay outage looks identical to "nothing
  * new" from the caller's side, and mistaking an outage for idleness would
@@ -22,6 +23,7 @@ export type SchedulerResetReason =
   | 'focus'
   | 'online'
   | 'app-active'
+  | 'activity'
   | 'local-save'
   | 'login'
 

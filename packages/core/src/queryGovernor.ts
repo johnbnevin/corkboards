@@ -95,6 +95,20 @@ interface Waiter {
   start: () => void;
   drop: () => void;
 }
+
+/**
+ * Two lanes, FIFO within each; the high lane is always served first.
+ *
+ * Without lanes, a handful of bulk feed chunks (12 relay legs each, up to 15s
+ * apiece) parked ahead of every nested-content lookup in one FIFO — and those
+ * lookups arm their timeouts BEFORE queuing, so by the time a slot arrived
+ * they ran already-aborted, were recorded as misses, and the negative cache
+ * then retired them. That is the "reply parents never fill in and no
+ * background pass fixes them" failure. Targeted lookups are tiny (one event
+ * by id), so letting them jump ahead costs the bulk work milliseconds while
+ * making the visible cards actually resolve.
+ */
+const _queueHigh: Waiter[] = [];
 const _queue: Waiter[] = [];
 
 /** Configure the global ceiling. Call once at app start. */
@@ -122,13 +136,16 @@ export function bumpQueryEpoch(): number {
   // rejecting: `drop()` settles a promise, and a caller's catch handler can
   // synchronously re-enter this module to queue new work.
   const isStale = (w: Waiter) => w.epoch !== null && w.epoch !== _epoch;
-  const stale = _queue.filter(isStale);
-  if (stale.length > 0) {
-    for (let i = _queue.length - 1; i >= 0; i--) {
-      if (isStale(_queue[i])) _queue.splice(i, 1);
+  const stale: Waiter[] = [];
+  for (const queue of [_queueHigh, _queue]) {
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (isStale(queue[i])) {
+        stale.push(queue[i]);
+        queue.splice(i, 1);
+      }
     }
-    for (const w of stale) w.drop();
   }
+  for (const w of stale) w.drop();
   return _epoch;
 }
 
@@ -144,7 +161,7 @@ export function isEpochCurrent(epoch: number): boolean {
 
 function pump(): void {
   while (_active < _maxConcurrent) {
-    const next = _queue.shift();
+    const next = _queueHigh.shift() ?? _queue.shift();
     if (!next) return;
     // A waiter can go stale between being queued and being pumped. `null` opted
     // out of cancellation and always runs.
@@ -176,10 +193,14 @@ function release(): void {
  *   must not be silently dropped because the user changed tabs mid-flight.
  *   Cancellation is opt-in precisely so that a performance optimisation can
  *   never turn into data loss.
+ * @param opts.priority
+ *   'high' queues in the priority lane, served before all normal work. For
+ *   small, latency-sensitive lookups only (an event by id) — the nested
+ *   content of cards the user is looking at. Bulk fan-outs must never claim it.
  */
 export function withQueryBudget<T>(
   fn: () => Promise<T>,
-  opts?: { epoch?: number },
+  opts?: { epoch?: number; priority?: 'high' | 'normal' },
 ): Promise<T> {
   const epoch = opts?.epoch ?? null;
 
@@ -202,7 +223,7 @@ export function withQueryBudget<T>(
   }
 
   return new Promise<T>((resolve, reject) => {
-    _queue.push({
+    (opts?.priority === 'high' ? _queueHigh : _queue).push({
       epoch,
       start: () => {
         _active++;
@@ -240,7 +261,7 @@ export function withQueryBudget<T>(
  * `finally` so an early `break` (the common case — consumers break on EOSE)
  * still frees the slot.
  */
-export function acquireQuerySlot(opts?: { epoch?: number }): Promise<() => void> {
+export function acquireQuerySlot(opts?: { epoch?: number; priority?: 'high' | 'normal' }): Promise<() => void> {
   return new Promise<() => void>((granted, denied) => {
     // Hand withQueryBudget a task that resolves only when the caller releases.
     // That way the slot accounting — including the queue, the epoch check, and
@@ -261,14 +282,50 @@ export function acquireQuerySlot(opts?: { epoch?: number }): Promise<() => void>
   });
 }
 
+/**
+ * Classify a Nostr filter set for the priority lane.
+ *
+ * 'high' = a targeted lookup: specific events by id, or one author's
+ * addressable event by d-tag. These are the nested content of cards already
+ * on screen (reply parents, quoted notes, reaction/repost targets) — one
+ * tiny event each, latency-sensitive, and historically starved behind bulk
+ * feed fan-outs. Everything author-list- or kind-shaped (feed chunks,
+ * profile prefetch batches) stays 'normal'.
+ *
+ * Shared by web, desktop-native and mobile so the three platforms cannot
+ * disagree about what jumps the queue.
+ */
+export function lookupPriority(filters: readonly unknown[]): 'high' | 'normal' {
+  if (filters.length === 0) return 'normal';
+  const targeted = filters.every((raw) => {
+    if (!raw || typeof raw !== 'object') return false;
+    const f = raw as Record<string, unknown>;
+    const ids = f['ids'];
+    if (Array.isArray(ids) && ids.length > 0 && ids.length <= 60) return true;
+    const authors = f['authors'];
+    const d = f['#d'];
+    if (Array.isArray(authors) && authors.length === 1
+      && Array.isArray(d) && d.length > 0 && d.length <= 5) return true;
+    return false;
+  });
+  return targeted ? 'high' : 'normal';
+}
+
 /** Live counters — for the diagnostics panel and tests. */
 export function queryGovernorStats(): {
   active: number;
   queued: number;
+  queuedHigh: number;
   maxConcurrent: number;
   epoch: number;
 } {
-  return { active: _active, queued: _queue.length, maxConcurrent: _maxConcurrent, epoch: _epoch };
+  return {
+    active: _active,
+    queued: _queueHigh.length + _queue.length,
+    queuedHigh: _queueHigh.length,
+    maxConcurrent: _maxConcurrent,
+    epoch: _epoch,
+  };
 }
 
 /** Test-only reset. Not used in app code. */
@@ -276,5 +333,6 @@ export function __resetQueryGovernor(): void {
   _active = 0;
   _epoch = 0;
   _queue.length = 0;
+  _queueHigh.length = 0;
   _maxConcurrent = 12;
 }

@@ -7,7 +7,7 @@ import { useNostrLogin } from '@nostrify/react/login';
 import { Router, getFilterSelections, addMinimalFallbacks } from '@welshman/router';
 import type { TrustedEvent, Filter } from '@welshman/util';
 import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
-import { withQueryBudget, acquireQuerySlot, configureQueryGovernor, defaultMaxConcurrent } from '@core/queryGovernor';
+import { withQueryBudget, acquireQuerySlot, configureQueryGovernor, defaultMaxConcurrent, lookupPriority } from '@core/queryGovernor';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
 import { isTauri, tauriQuery } from '@/lib/tauri';
@@ -390,7 +390,7 @@ class RateLimitedRelay implements NRelay {
     // A generator holds its socket across every yield, so it holds its slot for
     // its whole lifetime — released in `finally` so an early `break` (consumers
     // routinely break on EOSE) still frees it.
-    const releaseSlot = await acquireQuerySlot();
+    const releaseSlot = await acquireQuerySlot({ priority: lookupPriority(filters) });
     try {
       await waitForRateLimit(this.url);
       // Record success on the first EVENT/EOSE message rather than at generator
@@ -425,7 +425,7 @@ class RateLimitedRelay implements NRelay {
         recordRelayFailure(this.url);
         throw e;
       }
-    });
+    }, { priority: lookupPriority(filters) });
   }
 
   async event(event: NostrEvent, opts?: { signal?: AbortSignal }): Promise<void> {
@@ -1086,7 +1086,7 @@ const NostrProvider: React.FC<NostrProviderProps> = (props) => {
             // Aborting now ends the read and keeps the partial page, which is
             // exactly what NRelay1 does on web and what relay.rs does natively.
             return tauriQuery(relays, filter, 5000, opts?.signal) as Promise<NostrEvent[]>;
-          }),
+          }, { priority: lookupPriority([filter]) }),
         ),
       );
       const results = await queries;

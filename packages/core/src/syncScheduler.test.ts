@@ -39,7 +39,7 @@ describe('createSyncScheduler', () => {
   })
 
   it('every reset reason resumes checking immediately', () => {
-    for (const reason of ['visible', 'focus', 'online', 'app-active', 'local-save', 'login'] as const) {
+    for (const reason of ['visible', 'focus', 'online', 'app-active', 'activity', 'local-save', 'login'] as const) {
       const s = createSyncScheduler(1)
       s.recordCheckResult('nothing-new')
       expect(s.isIdle()).toBe(true)

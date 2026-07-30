@@ -170,6 +170,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
 
       // First pass: fast batch query through the pool
       if (uncachedIds.length > 0) {
+        let passCompleted = false;
         try {
           const events = await withPoolQueryLimit(() => {
             if (signal.aborted) return Promise.resolve([] as NostrEvent[]);
@@ -178,6 +179,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
               { signal: AbortSignal.any([signal, AbortSignal.timeout(FIRST_PASS_TIMEOUT_MS)]) }
             );
           });
+          passCompleted = true;
           for (const event of events) {
             cacheParentNote(event.id, event);
           }
@@ -185,12 +187,19 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
           // Pool query failed — all IDs become candidates for second pass
         }
 
-        // Track which IDs are still missing after pool query
+        // Track which IDs are still missing after pool query — but a query
+        // that TIMED OUT or was aborted is evidence of congestion, not of
+        // absence. Recording misses for it advanced each id's exponential
+        // cooldown toward the attempt ceiling, so a busy startup could retire
+        // dozens of reachable parents for up to 15 minutes — the "way too many
+        // notes without their nested content, and no background pass fixes
+        // them" failure. Only a query that actually reached EOSE gets to say
+        // an id wasn't there.
         for (const id of uncachedIds) {
-          if (!parentNoteCache.has(id)) {
-            parentMisses.recordMiss(id);
-          } else {
+          if (parentNoteCache.has(id)) {
             parentMisses.recordHit(id);
+          } else if (passCompleted) {
+            parentMisses.recordMiss(id);
           }
         }
       }

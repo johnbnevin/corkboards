@@ -29,6 +29,7 @@ import {
   CLOUD_SYNC_INTERVAL_MS,
   CLOUD_SYNC_MIN_GAP_MS,
   CLOUD_SYNC_IDLE_STRIKES,
+  CLOUD_SYNC_IDLE_HEARTBEAT_MS,
   AUTO_SAVE_MIN_INTERVAL_MS,
   AUTO_SAVE_DEBOUNCE_MS,
   AUTO_SAVE_POLL_MS,
@@ -97,7 +98,12 @@ export function AutoSaveManager() {
    */
   const syncNow = useCallback((opts?: { resetReason?: SchedulerResetReason; force?: boolean }) => {
     if (opts?.resetReason) _scheduler.reset(opts.resetReason);
-    else if (_scheduler.isIdle()) return;
+    else if (_scheduler.isIdle()) {
+      // A slower cadence, never a full stop — a phone left open on the app
+      // must still converge with the other devices (parity with web).
+      if (Date.now() - lastSyncAtRef.current < CLOUD_SYNC_IDLE_HEARTBEAT_MS) return;
+      if (__DEV__) console.log('[AutoSave] idle heartbeat check');
+    }
     if (syncInFlightRef.current) {
       // Stale-escape: a NIP-46 signer that never answers must not wedge every
       // future check for the rest of the session.

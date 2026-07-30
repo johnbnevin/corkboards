@@ -29,7 +29,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { debugLog } from '@/lib/debug';
 import { getLastCheckSummary } from '@/hooks/useNostrBackup';
-import { CLOUD_SYNC_INTERVAL_MS, CLOUD_SYNC_MIN_GAP_MS, CLOUD_SYNC_IDLE_STRIKES } from '@core/cacheConfig';
+import { CLOUD_SYNC_INTERVAL_MS, CLOUD_SYNC_MIN_GAP_MS, CLOUD_SYNC_IDLE_STRIKES, CLOUD_SYNC_IDLE_HEARTBEAT_MS } from '@core/cacheConfig';
 import { createSyncScheduler, type SchedulerResetReason } from '@core/syncScheduler';
 
 // Cadence lives in @core/cacheConfig so web and mobile cannot drift apart.
@@ -105,9 +105,12 @@ export function useCloudSync({
     if (document.visibilityState === 'hidden') return;
     if (resetReason) _scheduler.reset(resetReason);
     else if (_scheduler.isIdle()) {
-      // Interval tick with nothing to learn: three consecutive checks found
-      // nothing new, so stay quiet until a back-from-idle signal resets us.
-      return;
+      // Idle-stopped: three consecutive checks found nothing new. NOT a full
+      // stop — a device nobody touches still heartbeats every few minutes, or
+      // a desktop window that never blurs would sit dormant forever while the
+      // phone kept saving. Finding something new resets the fast cadence.
+      if (Date.now() - lastSyncAt.current < CLOUD_SYNC_IDLE_HEARTBEAT_MS) return;
+      debugLog('[cloudSync] idle heartbeat check');
     }
     if (inFlight.current) {
       if (Date.now() - inFlightSince.current < SYNC_STALE_MS) return;
@@ -212,6 +215,26 @@ export function useCloudSync({
     const onOnline = () => syncNow('online');
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
+  }, [enabled, syncNow]);
+
+  // User activity wakes an idle-stopped checker. Visibility/focus don't fire
+  // for a window that never blurs — but a person moving the mouse or typing
+  // IS back from idle, and their other device may have new state waiting.
+  // Zero-cost while the fast cadence is active (only acts when idle), and the
+  // check itself still respects the min-gap floor.
+  useEffect(() => {
+    if (!enabled) return;
+    const onActivity = () => {
+      if (_scheduler.isIdle()) syncNow('activity');
+    };
+    window.addEventListener('pointerdown', onActivity, { passive: true });
+    window.addEventListener('keydown', onActivity);
+    window.addEventListener('wheel', onActivity, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', onActivity);
+      window.removeEventListener('keydown', onActivity);
+      window.removeEventListener('wheel', onActivity);
+    };
   }, [enabled, syncNow]);
 
   return { syncNow };

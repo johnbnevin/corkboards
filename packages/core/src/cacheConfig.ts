@@ -39,17 +39,28 @@ export const BACKUP_CHECKED_FLAG_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
  * enough to regress working features — profile resolution slowed, nested-note
  * lookups starved, phone saves erroring mid-upload. What makes 30s safe now
  * is that it no longer runs unconditionally: after CLOUD_SYNC_IDLE_STRIKES
- * consecutive checks that found nothing new, checking STOPS until the app
- * comes back from idle (visible / focus / online / a local save). Steady-state
+ * consecutive checks that found nothing new, checking slows to the
+ * CLOUD_SYNC_IDLE_HEARTBEAT_MS cadence until the app comes back from idle
+ * (visible / focus / online / user activity / a local save). Steady-state
  * background traffic is therefore lower than the old always-on 60s loop, and
  * the push side is event-driven rather than a poll. The strike logic and this
  * interval are a unit — do not flip one without the other.
  */
 export const CLOUD_SYNC_INTERVAL_MS = 30 * 1000;
 
-/** Consecutive nothing-new checks before the pull loop goes quiet until the
- *  next back-from-idle signal. */
+/** Consecutive nothing-new checks before the pull loop slows to the idle
+ *  heartbeat below, until the next back-from-idle signal. */
 export const CLOUD_SYNC_IDLE_STRIKES = 3;
+
+/**
+ * While idle-stopped, still check this often. The idle stop must be a SLOWER
+ * CADENCE, not a full stop: a desktop window that sits visible and focused
+ * never fires any back-from-idle event, and with a full stop it sat dormant
+ * forever while the phone kept saving — "phone→desktop never syncs" with both
+ * sides green. Twelve checks an hour is still a fifth of the old always-on
+ * loop, and user activity (pointer/keys) wakes the fast cadence immediately.
+ */
+export const CLOUD_SYNC_IDLE_HEARTBEAT_MS = 5 * 60 * 1000;
 
 /** Floor between two sync attempts however they were triggered — low enough
  *  that returning to the app feels immediate, high enough that app-switching

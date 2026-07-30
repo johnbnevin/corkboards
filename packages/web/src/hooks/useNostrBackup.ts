@@ -36,6 +36,7 @@ import {
   evaluateMergeHold,
   verifyBlobMatchesManifest,
   pickRichestManifest,
+  retainCheckpoints,
   shouldSuppressSilentSync,
   type ExplicitRestoreRecord,
 } from '@core/backupGuards';
@@ -645,19 +646,14 @@ function getStoredCheckpoints(): RemoteCheckpoint[] {
 }
 
 function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
-  // Dedup by d-tag only — addressable events replace each other, keep newest per tag.
-  // Stats-based dedup was removed: it silently discarded valid checkpoints that
-  // happened to share the same corkboard/dismissed counts.
-  const byDTag = new Map<string, RemoteCheckpoint>();
-  for (const cp of cps) {
-    const key = cp.dTag || cp.eventId;
-    const existing = byDTag.get(key);
-    if (!existing || cp.timestamp > existing.timestamp) {
-      byDTag.set(key, cp);
-    }
-  }
-  const deduped = [...byDTag.values()].sort((a, b) => b.timestamp - a.timestamp);
-  idbSetSync(CHECKPOINTS_KEY, JSON.stringify(deduped));
+  // Dedup by EVENT id and trim via the shared retention rule (named always
+  // survive; newest N unnamed plus the richest-by-content). The old d-tag
+  // dedup deleted every older autosave entry the moment a newer one existed —
+  // all autosaves share the `…:auto` d-tag — so one thin autosave from any
+  // device evicted the only entry still pointing at the corkboard-rich blob,
+  // and every "restore a previous state" path (menu, scan, cold-restore
+  // discovery) silently lost the states it promised to keep.
+  idbSetSync(CHECKPOINTS_KEY, JSON.stringify(retainCheckpoints(cps)));
 }
 
 interface RelayResult {
@@ -1569,12 +1565,10 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
           : c
         );
       }
-      // Keep max 3 total: always preserve named (user-created) checkpoints, fill rest with most recent
-      const updatedSorted = updatedCps.sort((a, b) => b.timestamp - a.timestamp);
-      const namedCpsAuto = updatedSorted.filter(c => c.name);
-      const unnamedCpsAuto = updatedSorted.filter(c => !c.name);
-      const merged = [...namedCpsAuto, ...unnamedCpsAuto.slice(0, Math.max(0, 3 - namedCpsAuto.length))].sort((a, b) => b.timestamp - a.timestamp);
-      setStoredCheckpoints(merged);
+      // Retention (named survive, last-5 unnamed + richest) lives in
+      // setStoredCheckpoints — trimming here first could drop the rich entry
+      // before the shared rule ever saw it.
+      setStoredCheckpoints(updatedCps);
       refreshCheckpointsRef.current();
 
       debugLog('[backup]', 'Auto-save complete');
@@ -2126,20 +2120,13 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         if (thinness !== 'ok') {
           log(`Manifest looks thinner than the stored checkpoint (${thinness}: ${manifest.stats?.corkboards} corkboards/${manifest.stats?.dismissed} dismissed vs stored ${newestStored?.stats?.corkboards}/${newestStored?.stats?.dismissed}) — skipping checkpoint update`, 'warn');
         } else {
-          const nameMap = new Map(stored.filter(c => c.name).map(c => [c.eventId, c.name!]));
-          if (nameMap.has(newCp.eventId)) newCp.name = nameMap.get(newCp.eventId);
-          const dedupMap = new Map<string, RemoteCheckpoint>([[newCp.eventId, newCp]]);
-          for (const cp of stored) {
-            if (!dedupMap.has(cp.eventId)) dedupMap.set(cp.eventId, cp);
-          }
-          const allSorted = [...dedupMap.values()].sort((a, b) => b.timestamp - a.timestamp);
-          // Always preserve named (user-created) checkpoints; fill up to 3 with unnamed
-          const namedCps = allSorted.filter(c => c.name);
-          const unnamedCps = allSorted.filter(c => !c.name);
-          const trimmed = [...namedCps, ...unnamedCps.slice(0, Math.max(0, 3 - namedCps.length))].sort((a, b) => b.timestamp - a.timestamp);
-          setStoredCheckpoints(trimmed);
-          setCheckpoints(getStoredCheckpoints());
-          log(`Checkpoints: ${trimmed.length} in rolling history (${namedCps.length} named)`);
+          // Dedup, name preservation, and retention all live in
+          // setStoredCheckpoints (shared @core rule) — adding the newest
+          // manifest can no longer evict an older, richer entry.
+          setStoredCheckpoints([newCp, ...stored]);
+          const updated = getStoredCheckpoints();
+          setCheckpoints(updated);
+          log(`Checkpoints: ${updated.length} in rolling history (${updated.filter(c => c.name).length} named)`);
         }
       }
 
@@ -2781,8 +2768,8 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
    *               so a merge (which would resurrect everything they are
    *               rolling back past) would be wrong.
    */
-  const loadCheckpointFn = useCallback(async (cp: RemoteCheckpoint, mode: 'merge' | 'replace' = 'merge') => {
-    if (!user) return;
+  const loadCheckpointFn = useCallback(async (cp: RemoteCheckpoint, mode: 'merge' | 'replace' = 'merge'): Promise<{ ok: boolean; restoredCount?: number; error?: string }> => {
+    if (!user) return { ok: false, error: 'Not signed in.' };
     setStatus('restoring');
     setMessage('Saving current state before restoring...');
 
@@ -2869,14 +2856,6 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       }
       persistSnapshotAndHashes(cpSnapshot);
 
-      // Move this checkpoint to the top so it becomes the "most recent" for auto-restore
-      const cps = getStoredCheckpoints();
-      const idx = cps.findIndex(c => c.eventId === cp.eventId);
-      if (idx > 0) {
-        const reordered = [cps[idx], ...cps.slice(0, idx), ...cps.slice(idx + 1)];
-        setStoredCheckpoints(reordered);
-      }
-
       // A MERGE never moves the clock backwards: local state that was already
       // ahead of this checkpoint is still ahead after unioning it in, and
       // lowering the stamp would make the next sync think the cloud is newer
@@ -2911,11 +2890,13 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       log('Restore complete');
       // Resume auto-save after a brief flash of "restored" status
       setTimeout(() => setStatus('idle'), 3000);
+      return { ok: true, restoredCount };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log('Checkpoint restore failed: ' + msg, 'error');
       setStatus('restore-error');
       setMessage('Restore failed: ' + msg);
+      return { ok: false, error: msg };
     } finally {
       // Restore writes are done (or failed) — let auto-save resume. The 3s
       // 'restored'→'idle' status flash above is only cosmetic; data safety is
@@ -3032,7 +3013,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         // Merge discovered with existing checkpoints
         const existing = getStoredCheckpoints();
         const all = [...existing, ...discovered];
-        // setStoredCheckpoints handles d-tag + stats dedup automatically
+        // setStoredCheckpoints dedups by event id and applies retention
         setStoredCheckpoints(all);
         const result = getStoredCheckpoints();
         setCheckpoints(result);

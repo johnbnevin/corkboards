@@ -5273,7 +5273,21 @@ export function MultiColumnClient() {
                   back to (the copy above says "replacing your current
                   settings"). The automatic login/countdown restores stay on
                   the default 'merge', which cannot subtract. */}
-              <Button size="sm" onClick={() => { if (checkpointToRestoreIdx !== null && checkpoints[checkpointToRestoreIdx]) { loadCheckpointFn(checkpoints[checkpointToRestoreIdx], 'replace'); setCheckpointToRestoreIdx(null); } }}>Restore</Button>
+              <Button size="sm" onClick={async () => {
+                if (checkpointToRestoreIdx === null || !checkpoints[checkpointToRestoreIdx]) return;
+                const cp = checkpoints[checkpointToRestoreIdx];
+                setCheckpointToRestoreIdx(null);
+                // The dialog closes before the download/decrypt finishes, so the
+                // outcome MUST be surfaced here — a failed restore used to set a
+                // status nothing rendered, and "nothing happened, no error" was
+                // indistinguishable from success.
+                const result = await loadCheckpointFn(cp, 'replace');
+                if (result.ok) {
+                  toast({ title: 'Checkpoint restored', description: `Restored ${result.restoredCount ?? 0} keys from ${cp.name || new Date(cp.timestamp * 1000).toLocaleString()}.` });
+                } else {
+                  toast({ title: 'Restore failed', description: result.error ?? 'Unknown error.', variant: 'destructive' });
+                }
+              }}>Restore</Button>
             </div>
           </DialogContent>
         </Dialog>

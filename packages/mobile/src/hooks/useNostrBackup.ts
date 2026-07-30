@@ -83,6 +83,7 @@ import {
   evaluateAutoSaveGuard,
   evaluateManifestThinness,
   evaluateMergeHold,
+  retainCheckpoints,
   verifyBlobMatchesManifest,
   shouldSuppressSilentSync,
   type BackupCounts,
@@ -350,21 +351,14 @@ export function getStoredCheckpoints(): RemoteCheckpoint[] {
 }
 
 function setStoredCheckpoints(cps: RemoteCheckpoint[]): void {
-  // Dedup by d-tag only — addressable events replace each other, keep newest per tag.
-  const byDTag = new Map<string, RemoteCheckpoint>();
-  for (const cp of cps) {
-    const key = cp.dTag || cp.eventId;
-    const existing = byDTag.get(key);
-    if (!existing || cp.timestamp > existing.timestamp) {
-      byDTag.set(key, cp);
-    }
-  }
-  const sorted = [...byDTag.values()].sort((a, b) => b.timestamp - a.timestamp);
-  // Keep max 3 total: always preserve named (user-created) checkpoints
-  const named = sorted.filter(c => c.name);
-  const unnamed = sorted.filter(c => !c.name);
-  const trimmed = [...named, ...unnamed.slice(0, Math.max(0, 3 - named.length))].sort((a, b) => b.timestamp - a.timestamp);
-  mobileStorage.setSync(CHECKPOINTS_KEY, JSON.stringify(trimmed));
+  // Dedup by EVENT id and trim via the shared retention rule (named always
+  // survive; newest 5 unnamed plus the richest-by-content). The old d-tag
+  // dedup deleted every older autosave entry the moment a newer one existed —
+  // all autosaves share the `…:auto` d-tag — so one thin autosave from any
+  // device evicted the only entry still pointing at the corkboard-rich blob.
+  // Every entry restores from its own Blossom blob + wrapped key, so a relay
+  // replacing the addressable event does not make an older entry unrestorable.
+  mobileStorage.setSync(CHECKPOINTS_KEY, JSON.stringify(retainCheckpoints(cps)));
 }
 
 // Keys checked for change detection — now the SHARED list in @core/backupKeys.
@@ -970,12 +964,11 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       } else {
         cps.unshift(autoEntry);
       }
-      const allCps = cps.sort((a, b) => b.timestamp - a.timestamp);
-      const namedCps = allCps.filter(c => c.name);
-      const unnamedCps = allCps.filter(c => !c.name);
-      const merged = [...namedCps, ...unnamedCps.slice(0, Math.max(0, 3 - namedCps.length))].sort((a, b) => b.timestamp - a.timestamp);
-      setStoredCheckpoints(merged);
-      setCheckpoints(merged);
+      // Retention (named survive, last-5 unnamed + richest) lives in
+      // setStoredCheckpoints — trimming here first could drop the rich entry
+      // before the shared rule ever saw it.
+      setStoredCheckpoints(cps);
+      setCheckpoints(getStoredCheckpoints());
 
       if (__DEV__) console.log('[backup] Auto-save complete');
       return 'saved';
@@ -1107,13 +1100,10 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     const newestStored = stored.length > 0 ? stored[0] : null;
     const safeCps = cps.filter(cp =>
       evaluateManifestThinness(newestStored?.stats, cp.stats) === 'ok');
-    // Merge: prefer fresh events over stored, preserve named checkpoints
-    const merged = new Map<string, RemoteCheckpoint>();
-    for (const cp of [...safeCps, ...stored]) {
-      const key = cp.dTag || cp.eventId;
-      if (!merged.has(key) || cp.timestamp > merged.get(key)!.timestamp) merged.set(key, cp);
-    }
-    setStoredCheckpoints([...merged.values()]);
+    // Merge fresh events with stored — dedup by event id, name preservation,
+    // and retention all live in setStoredCheckpoints (shared @core rule), so
+    // a fresh thin manifest can no longer evict an older, richer entry.
+    setStoredCheckpoints([...safeCps, ...stored]);
     const deduped = getStoredCheckpoints();
     setCheckpoints(deduped);
 

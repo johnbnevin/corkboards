@@ -198,6 +198,60 @@ export function pickRichestManifest<T extends ManifestCandidate>(candidates: rea
   })
 }
 
+/** The fields checkpoint retention needs — platforms extend this shape. */
+export interface CheckpointEntry {
+  eventId: string
+  timestamp: number
+  name?: string
+  stats?: ManifestStats
+}
+
+/** How many unnamed checkpoints survive a trim (matches the "last 5 autosave states" UI copy). */
+export const CHECKPOINT_UNNAMED_CAP = 5
+
+/**
+ * Dedup and trim the stored checkpoint list — the one rule both platforms use.
+ *
+ * Identity is the EVENT id, not the d-tag. Every entry carries its own Blossom
+ * URL and wrapped key, so it stays restorable even after a newer save replaces
+ * the addressable relay event. The old rule deduped by d-tag, which deleted
+ * every older autosave entry the moment a newer one existed (all autosaves
+ * share `…:auto`) — one thin autosave from any device silently evicted the
+ * only entry still pointing at the corkboard-rich blob, and "restore a
+ * previous state" restored a state indistinguishable from the current one.
+ *
+ * Retention: named (user-created) checkpoints always survive. Unnamed ones
+ * keep the newest `unnamedCap`, PLUS the richest by content whatever its age —
+ * a run of thin autosaves must never age out the one checkpoint that still
+ * has the corkboards.
+ */
+export function retainCheckpoints<T extends CheckpointEntry>(
+  cps: readonly T[],
+  unnamedCap: number = CHECKPOINT_UNNAMED_CAP,
+): T[] {
+  const byId = new Map<string, T>()
+  for (const cp of cps) {
+    const existing = byId.get(cp.eventId)
+    if (!existing) { byId.set(cp.eventId, cp); continue }
+    // Same event seen twice — a user-given name wins over an unnamed copy.
+    if (!existing.name && cp.name) byId.set(cp.eventId, cp)
+  }
+  const sorted = [...byId.values()].sort((a, b) => b.timestamp - a.timestamp)
+  const named = sorted.filter(c => c.name)
+  const unnamed = sorted.filter(c => !c.name)
+  const kept = unnamed.slice(0, unnamedCap)
+  if (unnamed.length > kept.length) {
+    const richest = pickRichestManifest(
+      unnamed.map(c => ({ id: c.eventId, timestamp: c.timestamp, stats: c.stats })),
+    )
+    if (!kept.some(c => c.eventId === richest.id)) {
+      const rich = unnamed.find(c => c.eventId === richest.id)
+      if (rich) kept.push(rich)
+    }
+  }
+  return [...named, ...kept].sort((a, b) => b.timestamp - a.timestamp)
+}
+
 /** A checkpoint the user explicitly (not silently/automatically) restored. */
 export interface ExplicitRestoreRecord {
   id: string

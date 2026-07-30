@@ -5,9 +5,11 @@ import {
   evaluateMergeHold,
   verifyBlobMatchesManifest,
   pickRichestManifest,
+  retainCheckpoints,
   shouldSuppressSilentSync,
   BLOB_MANIFEST_MAX_SKEW_SECS,
   type BackupCounts,
+  type CheckpointEntry,
 } from './backupGuards'
 
 const counts = (over: Partial<BackupCounts> = {}): BackupCounts => ({
@@ -271,5 +273,62 @@ describe('verifyBlobMatchesManifest', () => {
 
   it('rejects a blob claiming to be NEWER than its manifest', () => {
     expect(verifyBlobMatchesManifest(TS + 30, TS)).toBe(false)
+  })
+})
+
+describe('retainCheckpoints', () => {
+  const cp = (
+    eventId: string,
+    timestamp: number,
+    over: Partial<CheckpointEntry> = {},
+  ): CheckpointEntry => ({ eventId, timestamp, ...over })
+
+  it('keeps multiple checkpoints that share a d-tag (autosave history survives)', () => {
+    // Regression: the old d-tag dedup collapsed every `…:auto` entry into one,
+    // deleting the corkboard-rich state the moment a thin autosave happened.
+    const rich = cp('rich', 100, { stats: { corkboards: 4, savedForLater: 10, dismissed: 50 } })
+    const thin = cp('thin', 200, { stats: { corkboards: 0, savedForLater: 10, dismissed: 50 } })
+    const out = retainCheckpoints([thin, rich])
+    expect(out.map(c => c.eventId)).toEqual(['thin', 'rich'])
+  })
+
+  it('dedups identical event ids', () => {
+    const out = retainCheckpoints([cp('a', 100), cp('a', 100), cp('b', 90)])
+    expect(out.map(c => c.eventId)).toEqual(['a', 'b'])
+  })
+
+  it('a named duplicate wins over an unnamed copy of the same event', () => {
+    const out = retainCheckpoints([cp('a', 100), cp('a', 100, { name: 'before-cleanup' })])
+    expect(out).toHaveLength(1)
+    expect(out[0].name).toBe('before-cleanup')
+  })
+
+  it('caps unnamed checkpoints at the cap, newest first', () => {
+    const many = Array.from({ length: 10 }, (_, i) => cp(`e${i}`, 100 + i))
+    const out = retainCheckpoints(many, 5)
+    expect(out).toHaveLength(5)
+    expect(out[0].eventId).toBe('e9')
+    expect(out[4].eventId).toBe('e5')
+  })
+
+  it('always retains the richest unnamed checkpoint even past the cap', () => {
+    const rich = cp('rich', 1, { stats: { corkboards: 3, savedForLater: 0, dismissed: 0 } })
+    const thin = Array.from({ length: 6 }, (_, i) => cp(`t${i}`, 100 + i))
+    const out = retainCheckpoints([...thin, rich], 5)
+    expect(out.some(c => c.eventId === 'rich')).toBe(true)
+    expect(out).toHaveLength(6) // cap + the retained richest
+  })
+
+  it('named checkpoints always survive and do not consume the unnamed cap', () => {
+    const named = cp('n', 1, { name: 'kept' })
+    const unnamed = Array.from({ length: 6 }, (_, i) => cp(`u${i}`, 100 + i))
+    const out = retainCheckpoints([named, ...unnamed], 5)
+    expect(out.some(c => c.eventId === 'n')).toBe(true)
+    expect(out.filter(c => !c.name)).toHaveLength(5)
+  })
+
+  it('sorts the result newest-first', () => {
+    const out = retainCheckpoints([cp('old', 10), cp('new', 30), cp('mid', 20)])
+    expect(out.map(c => c.eventId)).toEqual(['new', 'mid', 'old'])
   })
 })

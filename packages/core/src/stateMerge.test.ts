@@ -4,6 +4,7 @@ import {
   mergeTombstones,
   mergeRemovesLocalData,
   mergeBookmarkSnapshot,
+  snapshotHasBackedUpData,
   type StateSnapshot,
 } from './stateMerge'
 
@@ -266,5 +267,29 @@ describe('mergeBookmarkSnapshot — relay kind-10003 vs local state', () => {
     const out = mergeBookmarkSnapshot(local, ['b', 'a'], 500, {})
     expect(out.ids).toBe(local)
     expect(out.changed).toBe(false)
+  })
+})
+
+describe('snapshotHasBackedUpData', () => {
+  const KEYS = ['nostr-custom-feeds', 'dismissed-notes'] as const
+
+  it('accepts a snapshot carrying at least one backed-up key', () => {
+    const s: StateSnapshot = { keys: { 'dismissed-notes': '["a"]' }, savedAt: 100 }
+    expect(snapshotHasBackedUpData(s, KEYS)).toBe(true)
+  })
+
+  it('rejects the empty envelope a broken serializer writes (no keys field at all)', () => {
+    const s: StateSnapshot = { keys: {}, savedAt: 100, tombstones: { 'dismissed-notes': { a: 50 } } }
+    expect(snapshotHasBackedUpData(s, KEYS)).toBe(false)
+  })
+
+  it('rejects a snapshot whose backed-up keys are all null', () => {
+    const s: StateSnapshot = { keys: { 'nostr-custom-feeds': null }, savedAt: 100 }
+    expect(snapshotHasBackedUpData(s, KEYS)).toBe(false)
+  })
+
+  it('ignores keys that are not in the backed-up list', () => {
+    const s: StateSnapshot = { keys: { unrelated: '"x"' }, savedAt: 100 }
+    expect(snapshotHasBackedUpData(s, KEYS)).toBe(false)
   })
 })

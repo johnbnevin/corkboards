@@ -68,6 +68,7 @@ const MUTEX_STALE_MS = 90_000;
 import {
   mergeState,
   hasLocalContributions,
+  snapshotHasBackedUpData,
   STATE_FORMAT_VERSION,
   type StateSnapshot,
   type MergeResult,
@@ -441,6 +442,10 @@ function serializeBackup(): string {
   return JSON.stringify({
     v: STATE_FORMAT_VERSION,
     savedAt: Math.floor(Date.now() / 1000),
+    // THE DATA. This line was accidentally dropped in a refactor of the line
+    // below it (parity with web) — every backup written until it was noticed
+    // was an empty envelope that restored zero keys.
+    keys,
     // getStoredTombstones, not getTombstones: the log loads lazily on first
     // write, and a save before any local write this session would otherwise
     // upload an EMPTY removal log (parity with web).
@@ -485,7 +490,11 @@ function mergeBackupIntoLocal(
   json: string,
   opts?: { dryRun?: boolean },
 ): { changed: number; removals: MergeResult['removals'] } {
-  const result = mergeState(localSnapshot(), parseBackup(json));
+  const remote = parseBackup(json);
+  if (!snapshotHasBackedUpData(remote, BACKED_UP_KEYS)) {
+    throw new Error('This backup contains no data (saved by a build with a broken serializer) — nothing to merge. Restore an older checkpoint.');
+  }
+  const result = mergeState(localSnapshot(), remote);
 
   // Dry run: answer "would this take anything away?" without touching storage,
   // so a background sync can apply small merges silently and hold a mass

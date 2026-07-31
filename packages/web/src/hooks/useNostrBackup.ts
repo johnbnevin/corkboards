@@ -43,6 +43,7 @@ import {
 import {
   mergeState,
   hasLocalContributions,
+  snapshotHasBackedUpData,
   STATE_FORMAT_VERSION,
   type StateSnapshot,
   type MergeResult,
@@ -679,6 +680,11 @@ function serializeBackup(): string {
   return JSON.stringify({
     v: STATE_FORMAT_VERSION,
     savedAt: Math.floor(Date.now() / 1000),
+    // THE DATA. This line was accidentally dropped in a refactor of the line
+    // below it, and every backup written until it was noticed was an empty
+    // envelope — the manifest advertised real stats (computed separately from
+    // live storage) while the blob restored zero keys.
+    keys,
     // getStoredTombstones, not getTombstones: the log loads lazily on first
     // write, and a manual save before any local write this session would
     // otherwise upload an EMPTY removal log — a fresh device restoring from
@@ -741,6 +747,9 @@ async function mergeBackupIntoLocal(
   opts?: { dryRun?: boolean },
 ): Promise<{ restored: number; removals: MergeResult['removals'] }> {
   const remote = parseBackup(json);
+  if (!snapshotHasBackedUpData(remote, BACKED_UP_KEYS)) {
+    throw new Error('This backup contains no data (saved by a build with a broken serializer) — nothing to merge. Restore an older checkpoint.');
+  }
   const result = mergeState(localSnapshot(), remote);
 
   // Dry run: answer "would this take anything away?" without touching storage,
@@ -792,7 +801,11 @@ async function mergeBackupIntoLocal(
 }
 
 async function deserializeBackup(json: string, log?: (msg: string) => void): Promise<number> {
-  const data: Record<string, string | null> = parseBackup(json).keys;
+  const parsed = parseBackup(json);
+  if (!snapshotHasBackedUpData(parsed, BACKED_UP_KEYS)) {
+    throw new Error('This backup contains no data (saved by a build with a broken serializer) — refusing to restore it. Pick an older checkpoint.');
+  }
+  const data: Record<string, string | null> = parsed.keys;
   const writes: Promise<void>[] = [];
   let restored = 0;
 

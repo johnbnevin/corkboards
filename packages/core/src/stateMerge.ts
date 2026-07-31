@@ -331,6 +331,22 @@ export function mergeRemovesLocalData(result: MergeResult): boolean {
 }
 
 /**
+ * Does this snapshot carry ANY backed-up data at all?
+ *
+ * A backup blob that parses fine but holds no keys is not a state — it is the
+ * empty envelope a broken build writes (the `keys` field was once dropped from
+ * the serializer while its manifest kept advertising real stats). Applying it
+ * as a restore "succeeds" with zero keys written, which reads as success while
+ * restoring nothing; callers must refuse it instead.
+ */
+export function snapshotHasBackedUpData(
+  snapshot: StateSnapshot,
+  backedUpKeys: readonly string[],
+): boolean {
+  return backedUpKeys.some(k => snapshot.keys[k] != null)
+}
+
+/**
  * Merge a relay-fetched NIP-51 bookmark list (kind 10003) into local state.
  *
  * The old rule was a blind union, which made removal impossible: an id

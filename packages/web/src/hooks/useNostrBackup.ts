@@ -266,6 +266,58 @@ async function unwrapAesKey(
   ]);
 }
 
+/** Pubkeys whose remote signer has been permission-warmed this session. */
+const _signerWarmupDone = new Set<string>();
+
+/**
+ * Ask the remote signer (Amber, nsec.app, …) for every permission the backup
+ * pipeline needs AT LOGIN — while the user is present and looking at the app —
+ * instead of when the first autosave fires a minute later. Amber remembers
+ * per-operation approvals, so without this the first background save raised
+ * a permission dialog long after login (or while the phone sat pocketed),
+ * and a missed dialog surfaced as "signer timed out".
+ *
+ * The four operations are exactly the pipeline's: NIP-44 encrypt (blob +
+ * manifest), NIP-44 decrypt (manifest read + key unwrap), sign kind 24242
+ * (Blossom upload auth), sign kind 30078 (backup manifest). Everything here
+ * is throwaway — nothing signed or encrypted ever leaves the device.
+ * Sequential on purpose: bunkers serve one round-trip at a time.
+ */
+async function warmUpSignerPermissions(
+  user: NUser,
+  log: (msg: string, level?: 'log' | 'warn' | 'error') => void,
+): Promise<void> {
+  if (_signerWarmupDone.has(user.pubkey)) return;
+  _signerWarmupDone.add(user.pubkey);
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    log('Warming up signer permissions (encrypt, decrypt, upload auth, manifest)...');
+    if (user.signer.nip44) {
+      const probe = await user.signer.nip44.encrypt(user.pubkey, 'corkboards permission warm-up');
+      await user.signer.nip44.decrypt(user.pubkey, probe);
+    }
+    await user.signer.signEvent({
+      kind: 24242,
+      content: 'Corkboards permission warm-up (never uploaded)',
+      created_at: now,
+      // Already expired, so even a leaked copy authorizes nothing.
+      tags: [['t', 'upload'], ['expiration', String(now)]],
+    });
+    await user.signer.signEvent({
+      kind: 30078,
+      content: '',
+      created_at: now,
+      tags: [['d', `${D_TAG_PREFIX}:warmup`]],
+    });
+    log('Signer permissions granted — autosave and restore will not prompt later');
+  } catch (err) {
+    // Not fatal: the real operation re-asks when it runs. Clearing the guard
+    // lets the next login attempt warm up again.
+    _signerWarmupDone.delete(user.pubkey);
+    log('Signer permission warm-up incomplete: ' + (err instanceof Error ? err.message : err), 'warn');
+  }
+}
+
 // Relay blacklist - persists across sessions
 const BLOCKED_RELAYS_KEY = 'corkboard:blocked-relays';
 
@@ -3020,8 +3072,14 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     if (!user) return;
     if (lastCheckPubkeyRef.current === user.pubkey) return;
     lastCheckPubkeyRef.current = user.pubkey;
+    // Remote signers get their permission prompts NOW, at login, not when the
+    // first autosave fires a minute later. Fire-and-forget: the bunker
+    // serializes its round-trips, so this and the backup check below simply
+    // queue — and the check's own decrypt benefits from the just-granted
+    // permission.
+    if (user.method === 'bunker') void warmUpSignerPermissions(user, log);
     checkRemoteBackup();
-  }, [user, checkRemoteBackup]);
+  }, [user, checkRemoteBackup, log]);
 
   // Refresh checkpoints list after save completes
   useEffect(() => {

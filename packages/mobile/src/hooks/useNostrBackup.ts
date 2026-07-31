@@ -15,7 +15,7 @@
  *   4. Publish NIP-78 kind 30078 manifest with Blossom URL + wrapped AES key
  *   5. Restore: find manifest → unwrap AES key → download + decrypt → write to MMKV
  */
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { NSecSigner, NConnectSigner } from '@nostrify/nostrify';
 
@@ -253,6 +253,55 @@ async function unwrapAesKey(
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('Signer timed out unwrapping the backup key — it may still answer; retry in a moment')), timeoutMs)),
   ]);
+}
+
+/** Pubkeys whose remote signer has been permission-warmed this session. */
+const _signerWarmupDone = new Set<string>();
+
+/**
+ * Ask the remote signer (Amber, nsec.app, …) for every permission the backup
+ * pipeline needs AT LOGIN — while the user is present — instead of when the
+ * first autosave fires a minute later. Amber remembers per-operation
+ * approvals, so without this the first background save raised a permission
+ * dialog long after login, and a missed dialog surfaced as "signer timed
+ * out". The four operations are exactly the pipeline's; everything here is
+ * throwaway and never leaves the device. Sequential on purpose: bunkers
+ * serve one round-trip at a time. Parity with web.
+ */
+async function warmUpSignerPermissions(
+  pubkey: string,
+  signer: BackupSigner,
+  log: (msg: string) => void,
+): Promise<void> {
+  if (_signerWarmupDone.has(pubkey)) return;
+  _signerWarmupDone.add(pubkey);
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    log('Warming up signer permissions (encrypt, decrypt, upload auth, manifest)...');
+    if (signer.nip44) {
+      const probe = await signer.nip44.encrypt(pubkey, 'corkboards permission warm-up');
+      await signer.nip44.decrypt(pubkey, probe);
+    }
+    await signer.signEvent({
+      kind: 24242,
+      content: 'Corkboards permission warm-up (never uploaded)',
+      created_at: now,
+      // Already expired, so even a leaked copy authorizes nothing.
+      tags: [['t', 'upload'], ['expiration', String(now)]],
+    });
+    await signer.signEvent({
+      kind: 30078,
+      content: '',
+      created_at: now,
+      tags: [['d', `${D_TAG_PREFIX}:warmup`]],
+    });
+    log('Signer permissions granted — autosave and restore will not prompt later');
+  } catch (err) {
+    // Not fatal: the real operation re-asks when it runs. Clearing the guard
+    // lets the next login attempt warm up again.
+    _signerWarmupDone.delete(pubkey);
+    log('Signer permission warm-up incomplete: ' + (err instanceof Error ? err.message : err));
+  }
 }
 
 // Relay blacklist — persists across sessions (mirrors web)
@@ -746,6 +795,16 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     const ts = new Date().toLocaleTimeString();
     setLogs(prev => [...prev.slice(-99), `[${ts}] ${msg}`]);
   }, []);
+
+  // Remote signers get their permission prompts NOW, at login, not when the
+  // first autosave fires a minute later. Account type is what AuthContext
+  // recorded at login; the module-level guard keeps this to once per session
+  // even though several components mount this hook.
+  useEffect(() => {
+    if (!pubkey || !signer) return;
+    if (mobileStorage.getSync(`corkboard:account-type:${pubkey}`) !== 'bunker') return;
+    void warmUpSignerPermissions(pubkey, signer, log);
+  }, [pubkey, signer, log]);
 
   const saveBackup = useCallback(async () => {
     if (!pubkey || !signer || isSavingNow()) return;

@@ -616,18 +616,28 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
       try { return new URL(embed.url).hostname } catch { return '' }
     })());
     const openExternally = isTauri && isYouTube;
+    // Deliberately NOT the same strip as "Click to load image/video": that one
+    // stays in the app, this one can leave it (external browser) or start a
+    // third-party player. Identical styling made them accidental-click
+    // hazards — the leave-the-app variant gets a red bordered bar with an
+    // external-link icon, the in-app embed reveal gets a film icon.
     return (
       <div
-        className="w-full h-9 flex items-center justify-center cursor-pointer bg-muted/60 hover:bg-muted border-b border-border/30 transition-colors"
+        className={openExternally
+          ? 'w-full h-9 my-1 flex items-center justify-center gap-1.5 cursor-pointer rounded-md border border-red-500/40 bg-red-500/10 hover:bg-red-500/20 transition-colors'
+          : 'w-full h-9 flex items-center justify-center gap-1.5 cursor-pointer bg-muted/60 hover:bg-muted border-b border-border/30 transition-colors'}
         onClick={(e) => {
           e.stopPropagation();
           if (openExternally) { void tauriOpenExternal(url); return; }
           setEmbedRevealed(true);
         }}
       >
-        <span className="text-xs text-muted-foreground">
+        {openExternally
+          ? <ExternalLink className="w-3.5 h-3.5 text-red-600 dark:text-red-400 shrink-0" />
+          : <Film className="w-3.5 h-3.5 text-muted-foreground shrink-0" />}
+        <span className={openExternally ? 'text-xs font-medium text-red-600 dark:text-red-400' : 'text-xs text-muted-foreground'}>
           {openExternally
-            ? `Open ${getEmbedProviderName(embed.url)} in browser`
+            ? `Open ${getEmbedProviderName(embed.url)} in browser ↗`
             : `Click to load ${getEmbedProviderName(embed.url)}`}
         </span>
       </div>

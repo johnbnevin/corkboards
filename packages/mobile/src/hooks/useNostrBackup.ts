@@ -1275,7 +1275,9 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
     if (silent) {
       const explicit = getLastExplicitRestore();
       const localTsNow = parseInt(mobileStorage.getSync(LAST_BACKUP_TS_KEY) || '0', 10);
-      if (shouldSuppressSilentSync(explicit, checkpoint.eventId, localTsNow)) {
+      // The candidate's own save time: a manifest written AFTER the user's
+      // explicit choice is new work and is exempt from suppression.
+      if (shouldSuppressSilentSync(explicit, checkpoint.eventId, localTsNow, checkpoint.timestamp)) {
         log(`Background sync suppressed: manifest ${checkpoint.eventId.slice(0, 8)} conflicts with your explicit restore of ${explicit!.id.slice(0, 8)}`);
         restoringSince.current = 0;
         return;
@@ -1376,7 +1378,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       // Only a MANUAL restore counts as an explicit choice worth protecting
       // against a later silent override — a silent merge just following the
       // clock is not a deliberate decision to defend.
-      if (!silent) setLastExplicitRestore({ id: checkpoint.eventId, timestamp: checkpoint.timestamp });
+      if (!silent) setLastExplicitRestore({ id: checkpoint.eventId, timestamp: checkpoint.timestamp, decidedAt: Math.floor(Date.now() / 1000) });
       setLastBackupTs(checkpoint.timestamp);
       saveSnapshot(localContributed ? remoteSnapshot.keys : undefined);
       if (localContributed) log('Local content not yet in cloud — auto-save will push the merged state');

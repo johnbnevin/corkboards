@@ -970,7 +970,9 @@ export function MultiColumnClient() {
     backupStatus,
     checkpoints,
     lastBackupTs,
-    loadCheckpoint: loadCheckpointFn,
+    // 'auto': the app's own pick, not a user choice — it must not arm the
+    // explicit-restore suppression that mutes newer saves from other devices.
+    loadCheckpoint: (cp) => loadCheckpointFn(cp, 'merge', 'auto'),
   });
 
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
@@ -1041,7 +1043,7 @@ export function MultiColumnClient() {
   // restore safety logic colocated.
   const { countdown: autoRestoreCountdown } = useAutoRestoreCountdown({
     target: autoRestoreTarget,
-    onElapsed: (t) => loadCheckpointFn(t.checkpoint),
+    onElapsed: (t) => loadCheckpointFn(t.checkpoint, 'merge', 'auto'),
     clearTarget: () => setAutoRestoreTarget(null),
   });
 

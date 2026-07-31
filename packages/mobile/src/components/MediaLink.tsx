@@ -415,12 +415,16 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
   // iframes, so the opt-in tap opens the privacy-friendly youtube-nocookie
   // embed in the browser instead.
   if (embed.type === 'youtube') {
+    // Deliberately NOT styled like the "Tap to load image/video" strips: those
+    // stay in the app, this one leaves it for the browser. Identical styling
+    // made them accidental-tap hazards — this bar is red-bordered and says
+    // where the tap goes (parity with web's external-open treatment).
     return (
       <TouchableOpacity
-        style={styles.blurPlaceholder}
+        style={[styles.blurPlaceholder, styles.externalOpenBar]}
         onPress={() => openExternal(embed.url)}
       >
-        <Text style={styles.blurText}>Tap to load YouTube video</Text>
+        <Text style={styles.externalOpenText}>Open YouTube in browser ↗</Text>
       </TouchableOpacity>
     );
   }
@@ -544,6 +548,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginVertical: 4,
+  },
+  // Leaves the app (external browser) — must not look like the in-app
+  // "Tap to load image/video" strips.
+  externalOpenBar: {
+    backgroundColor: 'rgba(239,68,68,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(239,68,68,0.40)',
+  },
+  externalOpenText: {
+    color: '#ef4444',
+    fontSize: 12,
+    fontWeight: '500',
   },
   blurText: {
     color: '#666',

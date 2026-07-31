@@ -256,6 +256,9 @@ export function retainCheckpoints<T extends CheckpointEntry>(
 export interface ExplicitRestoreRecord {
   id: string
   timestamp: number
+  /** Wall-clock unix seconds when the user made the choice. Records written
+   *  before this field existed lack it — readers treat that as `timestamp`. */
+  decidedAt?: number
 }
 
 /**
@@ -274,6 +277,13 @@ export interface ExplicitRestoreRecord {
  * fresh manual save happened after — the guard would be defending a decision
  * that's already been superseded on this device, which is not its job).
  *
+ * A candidate SAVED AFTER the user's decision is exempt: that is new work
+ * from another device, not the stale clock-winner this guard exists to
+ * block. Without the exemption, one explicit restore muted every future
+ * save from every other device until this one happened to make a local edit
+ * — a passively-read phone or browser "never picks up the desktop's saves"
+ * while a manual sync (which bypasses this on purpose) works every time.
+ *
  * Deliberately does not silence the disagreement forever: a manual sync or
  * the checkpoint review UI still surfaces it so the user can act, rather than
  * the app quietly picking a side either way.
@@ -282,10 +292,14 @@ export function shouldSuppressSilentSync(
   explicit: ExplicitRestoreRecord | null,
   candidateId: string,
   localBackupTs: number,
+  candidateTs?: number,
 ): boolean {
   if (!explicit) return false
   if (explicit.id === candidateId) return false
-  return localBackupTs <= explicit.timestamp
+  if (localBackupTs > explicit.timestamp) return false
+  const decidedAt = explicit.decidedAt ?? explicit.timestamp
+  if (typeof candidateTs === 'number' && candidateTs > decidedAt) return false
+  return true
 }
 
 /**

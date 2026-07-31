@@ -2419,7 +2419,11 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         const candidateId = manifestEventRef.current?.id;
         const explicit = getLastExplicitRestore();
         const localTsNow = parseInt(idbGetSync(LAST_BACKUP_TS_KEY) || '0', 10);
-        if (candidateId && shouldSuppressSilentSync(explicit, candidateId, localTsNow)) {
+        // The candidate's own save time: a manifest written AFTER the user's
+        // explicit choice is new work and is exempt from suppression.
+        const candidateTs = (manifestDataRef.current as { timestamp?: number } | null)?.timestamp
+          || manifestEventRef.current?.created_at;
+        if (candidateId && shouldSuppressSilentSync(explicit, candidateId, localTsNow, candidateTs)) {
           log(`Background sync suppressed: manifest ${candidateId.slice(0, 8)} conflicts with your explicit restore of ${explicit!.id.slice(0, 8)} — review it manually if you want it`, 'warn');
           return { applied: false, error: 'A different backup exists on the relays but conflicts with a restore you chose explicitly. Use Sync from another device to review it.' };
         }
@@ -2918,8 +2922,15 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
    *               Checkpoints dialog. Rolling back is the whole point there,
    *               so a merge (which would resurrect everything they are
    *               rolling back past) would be wrong.
+   *
+   * `origin` says WHO chose this checkpoint. Only 'user' records the
+   * explicit-restore protection: the login auto-restore and the idle
+   * countdown are the app's own picks, and stamping them as "the user's
+   * choice" armed the silent-sync suppression on every login — which then
+   * muted every newer save from other devices until this one made a local
+   * edit ("phone/web never picks up the desktop's saves").
    */
-  const loadCheckpointFn = useCallback(async (cp: RemoteCheckpoint, mode: 'merge' | 'replace' = 'merge'): Promise<{ ok: boolean; restoredCount?: number; error?: string }> => {
+  const loadCheckpointFn = useCallback(async (cp: RemoteCheckpoint, mode: 'merge' | 'replace' = 'merge', origin: 'user' | 'auto' = 'user'): Promise<{ ok: boolean; restoredCount?: number; error?: string }> => {
     if (!user) return { ok: false, error: 'Not signed in.' };
     setStatus('restoring');
     setMessage('Saving current state before restoring...');
@@ -3025,7 +3036,9 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       // choice, regardless of whether its own event id ever gets recorded as
       // "synced".
       if (mode === 'merge') setLastSyncedManifestId(cp.eventId);
-      setLastExplicitRestore({ id: cp.eventId, timestamp: cpNewTs });
+      if (origin === 'user') {
+        setLastExplicitRestore({ id: cp.eventId, timestamp: cpNewTs, decidedAt: Math.floor(Date.now() / 1000) });
+      }
       idbSetSync(LAST_BACKUP_TS_KEY, String(cpNewTs));
       idbSetSync('corkboard:preferred-checkpoint', cp.eventId);
       setLastBackupTs(cpNewTs);

@@ -250,6 +250,31 @@ describe('shouldSuppressSilentSync', () => {
     // is done — it must not keep defending a decision that's been superseded.
     expect(shouldSuppressSilentSync({ id: 'A', timestamp: 100 }, 'B', 150)).toBe(false)
   })
+
+  it('does not suppress a candidate saved AFTER the user decided', () => {
+    // The desktop keeps working after the phone's explicit restore. Its new
+    // save postdates the decision — that is new work, not the stale
+    // clock-winner the guard blocks, and muting it made the phone "never
+    // pick up the desktop's saves" until a local edit happened.
+    const explicit = { id: 'A', timestamp: 100, decidedAt: 200 }
+    expect(shouldSuppressSilentSync(explicit, 'B', 100, 250)).toBe(false)
+  })
+
+  it('still suppresses a candidate that predates the decision', () => {
+    const explicit = { id: 'A', timestamp: 100, decidedAt: 200 }
+    expect(shouldSuppressSilentSync(explicit, 'B', 100, 150)).toBe(true)
+  })
+
+  it('falls back to the restore timestamp for legacy records without decidedAt', () => {
+    // Old records lack decidedAt; a candidate newer than the restored
+    // checkpoint itself is treated as new work.
+    expect(shouldSuppressSilentSync({ id: 'A', timestamp: 100 }, 'B', 100, 150)).toBe(false)
+    expect(shouldSuppressSilentSync({ id: 'A', timestamp: 100 }, 'B', 100, 90)).toBe(true)
+  })
+
+  it('keeps the legacy suppress behavior when no candidate timestamp is known', () => {
+    expect(shouldSuppressSilentSync({ id: 'A', timestamp: 100, decidedAt: 200 }, 'B', 100)).toBe(true)
+  })
 })
 
 describe('verifyBlobMatchesManifest', () => {

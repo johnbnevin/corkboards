@@ -459,7 +459,7 @@ async function uploadBlobWithRedundancy(
   signer: NUser['signer'],
   servers: string[],
   onLog?: (msg: string, level?: 'log' | 'warn' | 'error') => void,
-): Promise<{ url: string | null; hash: string | null; count: number; errors: string[] }> {
+): Promise<{ url: string | null; hash: string | null; count: number; errors: string[]; signerFailed?: boolean }> {
   let url: string | null = null;
   let hash: string | null = null;
   let count = 0;
@@ -500,7 +500,10 @@ async function uploadBlobWithRedundancy(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     onLog?.(`  Could not sign the upload authorization: ${msg}`, 'error');
-    return { url, hash, count, errors: [`signer: ${msg}`] };
+    // No server was contacted — the failure is the SIGNER's, and callers must
+    // say so. Wrapping this in "all N Blossom servers failed" sent users off
+    // to audit storage servers that were never asked anything.
+    return { url, hash, count, errors: [`signer: ${msg}`], signerFailed: true };
   }
 
   for (const server of servers) {
@@ -1212,11 +1215,13 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
 
       const servers = getActiveBlossomServers();
       setMessage(`Uploading to Blossom (${servers.length} server${servers.length === 1 ? '' : 's'})...`);
-      const { url: blossomUrl, hash: blossomHash, count: blossomServerCount, errors: serverErrors } =
+      const { url: blossomUrl, hash: blossomHash, count: blossomServerCount, errors: serverErrors, signerFailed } =
         await uploadBlobWithRedundancy(file, signer, servers, log);
 
       if (!blossomUrl) {
-        throw new Error(`All ${servers.length} Blossom servers failed:\n${serverErrors.join('\n')}`);
+        throw new Error(signerFailed
+          ? `Could not sign the upload authorization — the signer did not respond (${serverErrors.join('; ')}). No storage server was contacted.`
+          : `All ${servers.length} Blossom servers failed:\n${serverErrors.join('\n')}`);
       }
       log(`Backup landed on ${blossomServerCount}/${servers.length} Blossom server(s)`);
 
@@ -1452,16 +1457,22 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
 
       // Redundant, 415-aware upload (skips servers known to reject the blob type).
       const activeServers = getActiveBlossomServers();
-      const { url: blossomUrl, hash: blossomHash, errors: uploadErrors } =
-        await uploadBlobWithRedundancy(file, signer, activeServers);
+      const { url: blossomUrl, hash: blossomHash, errors: uploadErrors, signerFailed } =
+        await uploadBlobWithRedundancy(file, signer, activeServers, log);
       if (!blossomUrl) {
-        // Name the servers and their actual errors — "no servers" alone reads
-        // as "you have none configured" when the truth is "all N refused".
-        _lastAutoSaveError = `All ${activeServers.length} Blossom server(s) failed: ${uploadErrors.join('; ')}`;
+        // Name the actual failure. A signer failure happens BEFORE any server
+        // is contacted — blaming "all N Blossom servers" for it sent the user
+        // off to audit storage servers that were never asked anything.
+        _lastAutoSaveError = signerFailed
+          ? `Could not sign the upload authorization — the signer did not respond (${uploadErrors.join('; ')}). No storage server was contacted; the app keeps retrying.`
+          : `All ${activeServers.length} Blossom server(s) failed: ${uploadErrors.join('; ')}`;
         debugWarn('[backup]', _lastAutoSaveError);
         log('Auto-save: ' + _lastAutoSaveError, 'error');
         endSaving();
-        return 'no-servers';
+        // 'no-servers' drives a "check your Blossom servers" toast — wrong
+        // advice for a signer failure, which gets the generic error toast
+        // carrying the detailed message above.
+        return signerFailed ? 'error' : 'no-servers';
       }
 
       const keysPresent = BACKED_UP_KEYS.filter(k => idbGetSync(k) !== null);

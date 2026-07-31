@@ -284,6 +284,16 @@ describe('queryGovernor', () => {
     // Mixed sets take the conservative lane.
     expect(lookupPriority([{ ids: ['x'] }, { kinds: [1], authors: ['a', 'b'] }])).toBe('normal');
   });
+
+  it('classifies NIP-46 RPC subscriptions (kind 24133) as high priority', () => {
+    // Every signer operation blocks on this one tiny event — starving it
+    // behind feed fan-outs killed bunker signing on the desktop.
+    expect(lookupPriority([{ kinds: [24133], authors: ['bunkerPk'], '#p': ['localPk'] }])).toBe('high');
+    expect(lookupPriority([{ kinds: [24133] }])).toBe('high');
+    // Only a PURE 24133 filter jumps the queue.
+    expect(lookupPriority([{ kinds: [24133, 1] }])).toBe('normal');
+    expect(lookupPriority([{ kinds: [24133] }, { kinds: [1], authors: ['a', 'b'] }])).toBe('normal');
+  });
 });
 
 describe('MissCache', () => {

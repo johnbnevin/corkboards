@@ -306,6 +306,14 @@ export function lookupPriority(filters: readonly unknown[]): 'high' | 'normal' {
     const d = f['#d'];
     if (Array.isArray(authors) && authors.length === 1
       && Array.isArray(d) && d.length > 0 && d.length <= 5) return true;
+    // A NIP-46 RPC response subscription (kind 24133): one tiny event from
+    // one bunker, and EVERY signer operation — sign, encrypt, decrypt —
+    // blocks on it. Left in the normal lane it queued behind bulk feed
+    // fan-outs until NConnectSigner's 60s timeout killed the RPC, which on
+    // desktop surfaced as "all Blossom servers failed" when nothing was
+    // ever uploaded: the auth event was simply never signed.
+    const kinds = f['kinds'];
+    if (Array.isArray(kinds) && kinds.length === 1 && kinds[0] === 24133) return true;
     return false;
   });
   return targeted ? 'high' : 'normal';

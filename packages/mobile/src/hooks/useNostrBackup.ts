@@ -594,7 +594,7 @@ async function blossomUploadWithRedundancy(
   content: string,
   signer: BackupSigner,
   onLog?: (msg: string) => void,
-): Promise<{ url: string | null; hash?: string; count: number }> {
+): Promise<{ url: string | null; hash?: string; count: number; signerFailed?: boolean }> {
   let url: string | null = null;
   let hash: string | undefined;
   let count = 0;
@@ -627,7 +627,10 @@ async function blossomUploadWithRedundancy(
     authHeader = 'Nostr ' + btoa(JSON.stringify(authEvent));
   } catch (err) {
     if (__DEV__) console.warn('[backup] Could not sign upload authorization:', err);
-    return { url, hash, count };
+    onLog?.(`  Could not sign the upload authorization: ${err instanceof Error ? err.message : err}`);
+    // No server was contacted — the failure is the SIGNER's, and callers must
+    // say so instead of blaming the storage servers (parity with web).
+    return { url, hash, count, signerFailed: true };
   }
 
   for (const server of servers) {
@@ -715,10 +718,14 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       setStatus('saving');
       setMessage('Uploading to Blossom…');
 
-      const { url: blossomUrl, hash: blossomHash, count: blossomCount } =
+      const { url: blossomUrl, hash: blossomHash, count: blossomCount, signerFailed } =
         await blossomUploadWithRedundancy(getActiveBlossomServers(), encryptedData, signer, log);
 
-      if (!blossomUrl) throw new Error('All Blossom servers failed');
+      if (!blossomUrl) {
+        throw new Error(signerFailed
+          ? 'Could not sign the upload authorization — the signer did not respond. No storage server was contacted.'
+          : 'All Blossom servers failed');
+      }
       log(`Backup landed on ${blossomCount} Blossom server(s)`);
 
       // Publish manifest (kind 30078). Manual saves rotate through a bounded
@@ -887,9 +894,12 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         await encryptForSelf(json, signer, pubkey);
 
       // Redundant, 415-aware upload (skips servers known to reject the blob type).
-      const { url: blossomUrl, hash: blossomHash } =
+      const { url: blossomUrl, hash: blossomHash, signerFailed } =
         await blossomUploadWithRedundancy(getActiveBlossomServers(), encryptedData, signer);
-      if (!blossomUrl) return 'no-servers';
+      // A signer failure is not a storage-server failure — 'no-servers'
+      // drives "check your Blossom servers" advice, wrong for it (parity
+      // with web).
+      if (!blossomUrl) return signerFailed ? 'error' : 'no-servers';
 
       const now = Math.floor(Date.now() / 1000);
       const dTag = `${D_TAG_PREFIX}:auto`;

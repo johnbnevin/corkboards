@@ -71,6 +71,13 @@ import {
  * unreadable. Reading a legacy ciphertext is not a downgrade; WRITING one would
  * be, which is why the encrypt path (encryptForSelf) is NIP-44 only. (M7a)
  */
+/** In-flight and completed self-payload decrypts, keyed by ciphertext. A
+ *  ciphertext names its own plaintext, so caching for the session is safe —
+ *  same reasoning as `_aesKeyCache`. Session-only: never touches disk. */
+const _selfPayloadInFlight = new Map<string, Promise<string>>();
+const _selfPayloadCache = new Map<string, string>();
+const SELF_PAYLOAD_CACHE_MAX = 40;
+
 async function decryptSelfPayload(
   signer: { nip44?: { decrypt(pk: string, c: string): Promise<string> }; nip04?: { decrypt(pk: string, c: string): Promise<string> } },
   pubkey: string,
@@ -82,25 +89,51 @@ async function decryptSelfPayload(
   // event id (below), so the cost is paid once per manifest.
   timeoutMs = 15000,
 ): Promise<string> {
-  const withTimeout = <T>(p: Promise<T>) => Promise.race([
-    p,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), timeoutMs)),
+  const cached = _selfPayloadCache.get(ciphertext);
+  if (cached) return cached;
+
+  // Single-flight, with the timeout bounding only THE WAIT, not the RPC. The
+  // old per-attempt race abandoned the bunker round-trip at 15s and discarded
+  // its answer, so a slow bunker made every discovery pass "find nothing" —
+  // and the next tick fired yet another RPC at the signer that was already
+  // behind. Now one RPC per ciphertext; a late answer still lands in the
+  // session cache, so the next scan/sync tick succeeds instead of re-asking.
+  // The nip44→nip04 chain lives inside the single flight: with the caller's
+  // wait bounded once at the outside, a slow signer no longer burns the
+  // timeout twice, and the legacy fallback still only runs on a genuine
+  // decrypt error.
+  let pending = _selfPayloadInFlight.get(ciphertext);
+  if (!pending) {
+    pending = (async () => {
+      let firstErr: unknown;
+      if (signer.nip44) {
+        try { return await signer.nip44.decrypt(pubkey, ciphertext); }
+        catch (err) { firstErr = err; }
+      }
+      if (signer.nip04) {
+        return await signer.nip04.decrypt(pubkey, ciphertext);
+      }
+      throw firstErr ?? new Error('Signer supports neither NIP-44 nor NIP-04 decryption');
+    })()
+      .then((json) => {
+        if (_selfPayloadCache.size >= SELF_PAYLOAD_CACHE_MAX) {
+          const oldest = _selfPayloadCache.keys().next();
+          if (!oldest.done) _selfPayloadCache.delete(oldest.value);
+        }
+        _selfPayloadCache.set(ciphertext, json);
+        return json;
+      })
+      .finally(() => { _selfPayloadInFlight.delete(ciphertext); });
+    _selfPayloadInFlight.set(ciphertext, pending);
+    // A rejection after every waiter has timed out must not surface as an
+    // unhandled promise rejection.
+    pending.catch(() => {});
+  }
+  return await Promise.race([
+    pending,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('decrypt_timeout')), timeoutMs)),
   ]);
-  let firstErr: unknown;
-  if (signer.nip44) {
-    try { return await withTimeout(signer.nip44.decrypt(pubkey, ciphertext)); }
-    catch (err) { firstErr = err; }
-  }
-  // Fall back to legacy NIP-04 only on a genuine decrypt ERROR — never on a
-  // timeout. NConnectSigner defines BOTH nip04 and nip44 unconditionally, so a
-  // bunker that is merely slow used to burn the timeout twice (15s + 15s)
-  // before giving up: a signer that cannot answer in time will not answer any
-  // faster for a different algorithm, and the login splash waited for both.
-  const timedOut = firstErr instanceof Error && firstErr.message === 'decrypt_timeout';
-  if (signer.nip04 && !timedOut) {
-    return withTimeout(signer.nip04.decrypt(pubkey, ciphertext));
-  }
-  throw firstErr ?? new Error('Signer supports neither NIP-44 nor NIP-04 decryption');
 }
 
 /**
@@ -187,6 +220,9 @@ function cacheManifestJson(eventId: string, json: string): void {
 const _aesKeyCache = new Map<string, string>();
 const AES_KEY_CACHE_MAX = 16;
 
+/** In-flight unwraps by ciphertext — see unwrapAesKey. */
+const _aesKeyInFlight = new Map<string, Promise<string>>();
+
 async function unwrapAesKey(
   signer: { nip44?: { decrypt(pk: string, c: string): Promise<string> }; nip04?: { decrypt(pk: string, c: string): Promise<string> } },
   pubkey: string,
@@ -198,20 +234,36 @@ async function unwrapAesKey(
   if (cached) return cached;
   const decryptor = signerMethod === 'nip04' ? signer.nip04 : signer.nip44;
   if (!decryptor) throw new Error(`Signer does not support ${signerMethod} decryption`);
-  // Bounded, unlike the bare awaits this replaces — those inherited
-  // NConnectSigner's 60s ceiling, so a stalled bunker froze the restore (and
-  // the splash behind it) for a full minute with no message.
-  const hex = await Promise.race([
-    decryptor.decrypt(pubkey, wrappedKey),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Signer timed out unwrapping the backup key')), timeoutMs)),
-  ]);
-  if (_aesKeyCache.size >= AES_KEY_CACHE_MAX) {
-    const oldest = _aesKeyCache.keys().next();
-    if (!oldest.done) _aesKeyCache.delete(oldest.value);
+
+  // Single-flight, and the timeout bounds only THE WAIT, not the RPC. The old
+  // Promise.race abandoned the bunker round-trip at 20s and discarded its
+  // answer, so a slow bunker made every attempt time out afresh ("sync failed:
+  // signer timed out unwrapping the backup key", forever) — while each retry
+  // fired yet another RPC at the signer that was already struggling. Now the
+  // first call owns one RPC; a late answer still lands in the cache, so the
+  // retry (manual or next sync tick) succeeds instantly instead of re-asking.
+  let pending = _aesKeyInFlight.get(wrappedKey);
+  if (!pending) {
+    pending = decryptor.decrypt(pubkey, wrappedKey)
+      .then((hex) => {
+        if (_aesKeyCache.size >= AES_KEY_CACHE_MAX) {
+          const oldest = _aesKeyCache.keys().next();
+          if (!oldest.done) _aesKeyCache.delete(oldest.value);
+        }
+        _aesKeyCache.set(wrappedKey, hex);
+        return hex;
+      })
+      .finally(() => { _aesKeyInFlight.delete(wrappedKey); });
+    _aesKeyInFlight.set(wrappedKey, pending);
+    // A rejection after every waiter has timed out must not surface as an
+    // unhandled promise rejection.
+    pending.catch(() => {});
   }
-  _aesKeyCache.set(wrappedKey, hex);
-  return hex;
+  return await Promise.race([
+    pending,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Signer timed out unwrapping the backup key — it may still answer; retry in a moment')), timeoutMs)),
+  ]);
 }
 
 // Relay blacklist - persists across sessions
@@ -664,6 +716,29 @@ interface RelayResult {
   url: string;
   success: boolean;
   error?: string;
+}
+
+/**
+ * Per-relay publish target for the fan-out loops.
+ *
+ * On the web a FRESH socket is right — a publish fan-out stays isolated from
+ * the pool's live subscriptions. On the Linux desktop a fresh socket is the
+ * documented failure path (WebKitGTK), so every per-relay publish silently
+ * died and the manifest could land on exactly the ONE relay the pool's
+ * Promise.any publish happened to win first — "desktop says it saved, no
+ * other device can find the backup". There, publish through the pool's
+ * long-lived socket for the url instead; `done` is a no-op because pool
+ * relays must never be closed by a caller.
+ */
+function publishRelayFor(
+  nostr: NPool,
+  url: string,
+): { relay: { event(e: NostrEvent, o?: { signal?: AbortSignal }): Promise<void> }; done(): void } {
+  if (isTauri) {
+    return { relay: nostr.relay(url), done: () => {} };
+  }
+  const fresh = createRelayFresh(url, { backoff: false });
+  return { relay: fresh, done: () => { try { fresh.close(); } catch { /* */ } } };
 }
 
 /**
@@ -1292,7 +1367,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         log(`  pool <- manifest FAILED: ${err instanceof Error ? err.message : err}`, 'warn');
       }
       for (const url of allRelayUrls) {
-        const relay = createRelayFresh(url, { backoff: false });
+        const { relay, done } = publishRelayFor(nostr, url);
         try {
           await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
           log(`  ${url} <- manifest OK`);
@@ -1300,7 +1375,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         } catch (err) {
           log(`  ${url} <- manifest FAILED: ${err instanceof Error ? err.message : err}`, 'warn');
         } finally {
-          try { relay.close(); } catch { /* */ }
+          done();
         }
       }
 
@@ -1316,10 +1391,10 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
             kind: 30078, content: '', tags: [['d', `${D_TAG_PREFIX}:${i}`]], created_at: now,
           });
           for (const r of succeeded) {
-            let relay;
-            try { relay = createRelayFresh(r.url, { backoff: false }); } catch { continue; }
-            try { await relay.event(tombstone, { signal: AbortSignal.timeout(5000) }); } catch { /* ignore */ }
-            finally { try { relay.close(); } catch { /* ignore */ } }
+            let target;
+            try { target = publishRelayFor(nostr, r.url); } catch { continue; }
+            try { await target.relay.event(tombstone, { signal: AbortSignal.timeout(5000) }); } catch { /* ignore */ }
+            finally { target.done(); }
           }
         }
       }
@@ -1524,7 +1599,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         relayErrors.push(`pool: ${err instanceof Error ? err.message : String(err)}`);
       }
       for (const url of relayTargets) {
-        const relay = createRelayFresh(url, { backoff: false });
+        const { relay, done } = publishRelayFor(nostr, url);
         try {
           await relay.event(manifestEvent, { signal: AbortSignal.timeout(8000) });
           manifestPublished++;
@@ -1533,7 +1608,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
           const msg = err instanceof Error ? err.message : String(err);
           try { relayErrors.push(`${new URL(url).hostname}: ${msg}`); } catch { relayErrors.push(msg); }
         }
-        finally { try { relay.close(); } catch { /* */ } }
+        finally { done(); }
       }
 
       // The blob landing on Blossom is NOT a saved backup — other devices find
@@ -2039,10 +2114,10 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         log(`  Manifest differs across relays — mirroring the newest to ${targets.length}`);
         void (async () => {
           for (const url of targets) {
-            const relay = createRelayFresh(normalizeRelay(url), { backoff: false });
+            const { relay, done } = publishRelayFor(nostr, normalizeRelay(url));
             try { await relay.event(bestManifestEvent, { signal: AbortSignal.timeout(8000) }); }
             catch { /* a relay that won't take it is exactly the case we can't fix here */ }
-            finally { try { relay.close(); } catch { /* */ } }
+            finally { done(); }
           }
         })();
       }
@@ -2246,7 +2321,7 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
     }
     return null;
   // eslint-disable-next-line react-hooks/exhaustive-deps -- checkpoints declared after this hook (forward ref); deviceId is stable useState
-  }, [user, queryAll, log, deviceId]);
+  }, [user, queryAll, log, deviceId, nostr]);
 
   // Load remote backup
   /**
@@ -2761,15 +2836,15 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
           });
           const { primary, fallback } = getPublishRelays(user.pubkey);
           for (const url of [...primary, ...fallback].slice(0, 5)) {
-            const relay = createRelayFresh(url, { backoff: false });
+            const { relay, done } = publishRelayFor(nostr, url);
             try { await relay.event(delEvent, { signal: AbortSignal.timeout(5000) }); }
             catch { /* best effort */ }
-            finally { try { relay.close(); } catch { /* */ } }
+            finally { done(); }
           }
         } catch { /* best effort */ }
       })();
     }
-  }, [user]);
+  }, [user, nostr]);
 
   /**
    * Apply a checkpoint.
@@ -3083,12 +3158,12 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         published++;
       } catch { /* fall through to the per-relay loop */ }
       for (const url of [...primary, ...fallback]) {
-        const relay = createRelayFresh(url, { backoff: false });
+        const { relay, done } = publishRelayFor(nostr, url);
         try {
           await relay.event(event, { signal: AbortSignal.timeout(8000) });
           published++;
         } catch { /* continue */ }
-        finally { try { relay.close(); } catch { /* */ } }
+        finally { done(); }
       }
       log(`Debug log published to ${published} relay target(s)`);
       return { published };

@@ -171,6 +171,49 @@ function cacheManifestJson(eventId: string, json: string): void {
  */
 const _aesKeyCache = new Map<string, string>();
 const AES_KEY_CACHE_MAX = 16;
+/** In-flight unwraps by ciphertext — see unwrapAesKey. */
+const _aesKeyInFlight = new Map<string, Promise<string>>();
+
+/** In-flight and completed manifest decrypts, keyed by ciphertext. The
+ *  timeout on a bunker decrypt bounds only THE WAIT, not the RPC — a late
+ *  answer still lands here, so the next check succeeds instead of firing yet
+ *  another round-trip at a signer that was already behind (parity with web's
+ *  decryptSelfPayload). Session-only. */
+const _manifestDecryptInFlight = new Map<string, Promise<string>>();
+const _manifestDecryptCache = new Map<string, string>();
+const MANIFEST_DECRYPT_CACHE_MAX = 40;
+
+async function decryptManifestContent(
+  decryptor: { decrypt(pk: string, c: string): Promise<string> },
+  pubkey: string,
+  ciphertext: string,
+  timeoutMs: number,
+): Promise<string> {
+  const cached = _manifestDecryptCache.get(ciphertext);
+  if (cached) return cached;
+  let pending = _manifestDecryptInFlight.get(ciphertext);
+  if (!pending) {
+    pending = decryptor.decrypt(pubkey, ciphertext)
+      .then((json) => {
+        if (_manifestDecryptCache.size >= MANIFEST_DECRYPT_CACHE_MAX) {
+          const oldest = _manifestDecryptCache.keys().next();
+          if (!oldest.done) _manifestDecryptCache.delete(oldest.value);
+        }
+        _manifestDecryptCache.set(ciphertext, json);
+        return json;
+      })
+      .finally(() => { _manifestDecryptInFlight.delete(ciphertext); });
+    _manifestDecryptInFlight.set(ciphertext, pending);
+    // A rejection after every waiter has timed out must not surface as an
+    // unhandled promise rejection.
+    pending.catch(() => {});
+  }
+  return await Promise.race([
+    pending,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('decrypt_timeout')), timeoutMs)),
+  ]);
+}
 
 async function unwrapAesKey(
   signer: BackupSigner,
@@ -183,17 +226,33 @@ async function unwrapAesKey(
   if (cached) return cached;
   const decryptor = signerMethod === 'nip04' ? signer.nip04 : signer.nip44;
   if (!decryptor) throw new Error(`Signer does not support ${signerMethod} decryption`);
-  const hex = await Promise.race([
-    decryptor.decrypt(pubkey, wrappedKey),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Signer timed out unwrapping the backup key')), timeoutMs)),
-  ]);
-  if (_aesKeyCache.size >= AES_KEY_CACHE_MAX) {
-    const oldest = _aesKeyCache.keys().next();
-    if (!oldest.done) _aesKeyCache.delete(oldest.value);
+
+  // Single-flight, and the timeout bounds only THE WAIT, not the RPC — a late
+  // bunker answer still lands in the cache so the retry succeeds instantly
+  // instead of firing yet another round-trip at a struggling signer (parity
+  // with web).
+  let pending = _aesKeyInFlight.get(wrappedKey);
+  if (!pending) {
+    pending = decryptor.decrypt(pubkey, wrappedKey)
+      .then((hex) => {
+        if (_aesKeyCache.size >= AES_KEY_CACHE_MAX) {
+          const oldest = _aesKeyCache.keys().next();
+          if (!oldest.done) _aesKeyCache.delete(oldest.value);
+        }
+        _aesKeyCache.set(wrappedKey, hex);
+        return hex;
+      })
+      .finally(() => { _aesKeyInFlight.delete(wrappedKey); });
+    _aesKeyInFlight.set(wrappedKey, pending);
+    // A rejection after every waiter has timed out must not surface as an
+    // unhandled promise rejection.
+    pending.catch(() => {});
   }
-  _aesKeyCache.set(wrappedKey, hex);
-  return hex;
+  return await Promise.race([
+    pending,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Signer timed out unwrapping the backup key — it may still answer; retry in a moment')), timeoutMs)),
+  ]);
 }
 
 // Relay blacklist — persists across sessions (mirrors web)
@@ -1081,10 +1140,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         }
         if (!data && signer?.nip44 && !signerTimedOut && !liveDecryptSpent) {
           try {
-            const json = await Promise.race([
-              signer.nip44.decrypt(pubkey, ev.content),
-              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decrypt_timeout')), 10000)),
-            ]);
+            const json = await decryptManifestContent(signer.nip44, pubkey, ev.content, 10000);
             data = JSON.parse(json);
             cacheManifestJson(ev.id, json);
             liveDecryptSpent = true;

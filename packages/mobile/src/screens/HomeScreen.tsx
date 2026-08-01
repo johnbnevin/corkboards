@@ -33,6 +33,8 @@ import {
   noteMatchesHashtags,
   noteMatchesKindFilters,
 } from '@core/noteCategories';
+import { getParentId } from '@core/threadTree';
+import { useParentNotes } from '../hooks/useParentNotes';
 import { useBulkAuthors } from '../hooks/useAuthor';
 import { useNip65Relays } from '../hooks/useNip65Relays';
 import { useMuteList } from '../hooks/useMuteList';
@@ -491,6 +493,29 @@ export function HomeScreen() {
     }
   }, [filteredEvents, prefetchFromNotes]);
 
+  // ── Reply parents ───────────────────────────────────────────────────────────
+  //
+  // This screen never fetched them. NoteCard renders "Replying to a note that
+  // hasn't loaded yet" whenever it has a parent id and no `parentNote` prop, so
+  // EVERY reply in the phone's main feed showed that placeholder permanently —
+  // no amount of retrying could fix it, because nothing was ever asked for.
+  // (SavedScreen has done this correctly all along; this mirrors it.)
+  const parentRequests = useMemo(() => {
+    const requests = new Map<string, { eventId: string; hints: string[]; authorPubkey?: string }>();
+    for (const note of filteredEvents ?? []) {
+      if (note.kind !== 1 && note.kind !== 1111) continue;
+      if (note.kind === 1 && note.tags.some(t => t[0] === 'q')) continue;
+      const parentId = getParentId(note);
+      if (!parentId || requests.has(parentId)) continue;
+      const replyETag = note.tags.find(t => t[0] === 'e' && t[1] === parentId);
+      const hints = replyETag?.[2] ? [replyETag[2]] : [];
+      const authorPubkey = note.tags.find(t => t[0] === 'p')?.[1];
+      requests.set(parentId, { eventId: parentId, hints, authorPubkey });
+    }
+    return Array.from(requests.values());
+  }, [filteredEvents]);
+  const { data: parentNotes } = useParentNotes(parentRequests);
+
   // ── Fresh-note highlighting ─────────────────────────────────────────────────
   /* eslint-disable react-hooks/set-state-in-effect -- fresh set is derived from
      data-arrival over time (diffed against a ref baseline), which needs an effect. */
@@ -622,6 +647,7 @@ export function HomeScreen() {
       return (
         <NoteCard
           event={item}
+          parentNote={parentNotes?.[getParentId(item) ?? ''] ?? undefined}
           onReply={handleReply}
           isBookmarked={isBookmarked(item.id)}
           onToggleBookmark={toggleBookmark}
@@ -637,7 +663,7 @@ export function HomeScreen() {
         />
       );
     },
-    [handleReply, isBookmarked, toggleBookmark, mediaFilterActive, activeHashtags, freshIds, pinnedSet, togglePin],
+    [handleReply, isBookmarked, toggleBookmark, mediaFilterActive, activeHashtags, freshIds, pinnedSet, togglePin, parentNotes],
   );
 
   // ── Loading state ───────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { DeviceEventEmitter } from 'react-native';
 import { mobileStorage } from '../storage/MmkvStorage';
+import { emitStorageSync } from '../lib/storageSync';
 
 // Cross-component sync (parity with web's 'idb-storage-sync' CustomEvent).
 // When one component writes to a key, every other component subscribed to
@@ -53,10 +54,12 @@ export function useLocalStorage<T>(
       } else {
         mobileStorage.setSync(key, serialized);
       }
-      // Broadcast invalidation only — payload is a key + origin id. Subscribers
-      // re-read from MMKV (mmap, near-free). Sending the value across the bridge
-      // would scale poorly for hot keys like nostr-custom-feeds.
-      DeviceEventEmitter.emit(SYNC_EVENT, { key, originId: emitterIdRef.current });
+      // Broadcast through the SHARED bus (lib/storageSync), which fans out to
+      // both subscription styles: this hook's DeviceEventEmitter channel and
+      // the module-listener Set that useBookmarks/useCollapsedNotes and the
+      // backup merge use. Emitting only on the RN channel is why the two buses
+      // used to be one-way — see storageSync.ts.
+      emitStorageSync(key, serialized, emitterIdRef.current);
     } catch (error) {
       console.warn(`[useLocalStorage] Failed to save ${key}:`, error);
     }

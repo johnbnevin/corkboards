@@ -14,7 +14,13 @@ import { registerUnresolved, clearUnresolved } from '@core/failedNotes';
 // until the tab was reloaded. `parentMisses` next to it is already bounded for
 // exactly this reason; the hit cache needs the same treatment, and more so,
 // because it stores whole events rather than counters.
-const MAX_PARENT_NOTE_CACHE = 1500;
+// 1500 was low enough to thrash: the result map is built by READING this cache
+// (see the queryFn), so a parent evicted while still on screen resolves to
+// null → grey placeholder → the sweep refetches it → its re-insert evicts
+// another on-screen parent. Every event in that loop is perfectly fetchable.
+// A long autofetch session passes 1500 distinct parents easily. 4000 events of
+// this shape is a few MB — cheap next to re-querying relays forever.
+const MAX_PARENT_NOTE_CACHE = 4000;
 const parentNoteCache = new Map<string, NostrEvent>();
 
 /** LRU insert: re-inserting moves a key to the end of Map iteration order. */

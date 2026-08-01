@@ -11,7 +11,25 @@ import { fetchEventWithOutbox } from '../lib/fetchEvent';
 import { MissCache } from '@core/missCache';
 import { registerUnresolved, clearUnresolved } from '@core/failedNotes';
 
+// BOUNDED (web's is too). Unbounded, every reply the user ever scrolled past
+// kept a whole event — content, tags, sig — for the life of the process, which
+// on a phone is the kind of growth that ends in a background kill. The cap is
+// generous on purpose: the result map is built by READING this cache, so
+// evicting a parent that is still on screen turns it back into a grey
+// placeholder and invites the retry sweep to refetch it, evicting another.
+const MAX_PARENT_NOTE_CACHE = 4000;
 const parentNoteCache = new Map<string, NostrEvent>();
+
+/** LRU insert: re-inserting moves a key to the end of Map iteration order. */
+function cacheParentNoteLru(id: string, event: NostrEvent): void {
+  parentNoteCache.delete(id);
+  while (parentNoteCache.size >= MAX_PARENT_NOTE_CACHE) {
+    const oldest = parentNoteCache.keys().next().value;
+    if (oldest === undefined) break;
+    parentNoteCache.delete(oldest);
+  }
+  parentNoteCache.set(id, event);
+}
 
 /**
  * Negative cache for IDs the fast batch pass didn't find. (Mirrors web.)
@@ -93,7 +111,7 @@ export function useParentNote(eventId: string | undefined) {
       if (parentNoteCache.has(eventId)) return parentNoteCache.get(eventId)!;
 
       const result = await fetchEventWithOutbox(eventId, nostr);
-      if (result) parentNoteCache.set(eventId, result);
+      if (result) cacheParentNoteLru(eventId, result);
       return result;
     },
     staleTime: 5 * 60 * 1000,
@@ -161,7 +179,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
           });
           passCompleted = true;
           for (const event of events) {
-            parentNoteCache.set(event.id, event);
+            cacheParentNoteLru(event.id, event);
           }
         } catch {
           // Pool query failed
@@ -258,7 +276,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
 
       for (let i = 0; i < missing.length; i++) {
         if (results[i]) {
-          parentNoteCache.set(missing[i].eventId, results[i]!);
+          cacheParentNoteLru(missing[i].eventId, results[i]!);
           parentMisses.recordHit(missing[i].eventId);
           found++;
         } else {
@@ -301,7 +319,7 @@ export function clearParentNoteCache(): void {
 
 /** Store a parent event resolved by an out-of-band lookup (e.g. "Retry now"). */
 export function cacheParentNote(id: string, event: NostrEvent): void {
-  parentNoteCache.set(id, event);
+  cacheParentNoteLru(id, event);
   parentMisses.recordHit(id);
 }
 

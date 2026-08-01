@@ -1713,8 +1713,18 @@ export function MultiColumnClient() {
       ], { signal });
 
       if (events.length === 0) {
-        debugLog('[contacts] No kind-3 events returned — zero contacts or relay miss');
-        return [];
+        // THROW, don't return []. An empty result is a fulfilled query, so
+        // `retry: 3` never engaged — and every consumer read it as "this user
+        // follows nobody". That is how returning from idle wiped the tab bar:
+        // the tab's relay sockets were torn down while backgrounded, this query
+        // came back empty, `isOnboarding` (follows < target) flipped true, and
+        // TabBar hid everything except Discover until a manual reload. A relay
+        // miss and a genuinely empty follow list are NOT the same fact — only
+        // an EOSE-confirmed empty result proves the latter (see
+        // @core/contactList, which makes exactly this distinction for the
+        // publish path), and this query cannot prove it.
+        debugLog('[contacts] No kind-3 events returned — treating as a relay miss, not zero follows');
+        throw new Error('contacts unavailable: no relay returned a kind-3 event');
       }
 
       // Kind 3 is replaceable — use the most recent event
@@ -1727,6 +1737,12 @@ export function MultiColumnClient() {
     enabled: !!user?.pubkey && canLoadNotes,
     retry: 3,
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 8000),
+    // Returning from idle is exactly when the relay sockets are gone and this
+    // query comes back empty, so recover automatically instead of requiring a
+    // manual reload. (The global default disables focus refetching; this one
+    // query is worth the exception — everything downstream keys off it.)
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
 
   // Fetch profile data for follows
@@ -1911,6 +1927,19 @@ export function MultiColumnClient() {
   const isOnboarding = onboardFlagLoaded && !hasOnboardedFlag
     && contacts !== undefined && contacts.length < onboardFollowTarget
     && !onboardingSkipped && !wasRestoredRef.current;
+
+  // Once we have SEEN a real follow list at or above the target, record that
+  // permanently. Without this, an established user's only protection against
+  // the onboarding UI (which hides every tab except Discover) was a live
+  // kind-3 read succeeding on this exact render — so one empty relay answer
+  // stripped their tab bar until they reloaded. Reaching the target is the
+  // definition of "onboarded"; persisting it means a later relay hiccup, or
+  // even unfollowing people, can't retroactively un-onboard them.
+  useEffect(() => {
+    if (!hasOnboardedFlag && onboardFlagLoaded && contacts && contacts.length >= onboardFollowTarget) {
+      markOnboarded();
+    }
+  }, [contacts, hasOnboardedFlag, onboardFlagLoaded, onboardFollowTarget, markOnboarded]);
 
   // Open the edit-profile dialog the first time onboarding completes (contacts reach 10).
   // Skip if onboarding was dismissed via a backup restore (user already set up their profile).

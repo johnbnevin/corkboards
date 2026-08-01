@@ -777,16 +777,19 @@ export const NoteCard = React.memo(function NoteCard({
   const clientTag = useMemo(() => note.tags.find(t => t[0] === 'client')?.[1] || null, [note.tags])
 
   const isReply = useMemo(() => {
-    // Kind 1111 (NIP-22 comment) is by definition a reply to its parent (e/E tags)
-    if (note.kind === 1111) return note.tags.some(t => t[0] === 'e' || t[0] === 'E')
-    if (note.kind !== 1) return false
-    const hasQTags = note.tags.some(t => t[0] === 'q')
-    if (hasQTags) return false
-    // Only e-tags without a marker or with "reply"/"root" markers count as replies.
-    // e-tags with "mention" marker are inline references, not reply threading.
-    const hasReplyETags = note.tags.some(t => t[0] === 'e' && (!t[3] || t[3] === 'reply' || t[3] === 'root'))
-    return hasReplyETags
-  }, [note.kind, note.tags])
+    // Must agree with what the fetch side can actually RESOLVE, or the card
+    // promises a parent nobody ever requested and the placeholder is permanent.
+    // Two shapes used to slip through here and be rejected by `getParentId`:
+    //   - kind 1111 carrying only an uppercase `E` (a NIP-22 comment on an
+    //     ADDRESSABLE root, e.g. a long-form article) — there is no event id to
+    //     fetch, so treat it as a normal note rather than a reply-with-no-parent;
+    //   - a malformed/short `e` id, which `isValidEventId` refuses.
+    // `getParentId` applies both rules, so deferring to it keeps the two sides
+    // in lockstep by construction.
+    if (note.kind !== 1 && note.kind !== 1111) return false
+    if (note.tags.some(t => t[0] === 'q')) return false
+    return getParentId(note) !== null
+  }, [note])
   const isRepost = note.kind === 6 || note.kind === 16
   const isReaction = note.kind === 7 || note.kind === 9735
   const isZap = note.kind === 9735

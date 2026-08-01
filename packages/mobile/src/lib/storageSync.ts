@@ -12,9 +12,26 @@
  * writer skip re-applying its own write.
  */
 
+import { DeviceEventEmitter } from 'react-native'
+
 export type StorageSyncListener = (key: string, value: string | null, origin?: string) => void
 
 const listeners = new Set<StorageSyncListener>()
+
+/**
+ * The DeviceEventEmitter channel `useLocalStorage` listens on.
+ *
+ * There were TWO storage-change buses on mobile that never talked to each
+ * other: this module's listener Set (used by useBookmarks / useCollapsedNotes)
+ * and `useLocalStorage`'s DeviceEventEmitter channel — and the corkboard list
+ * and active tab are read through `useLocalStorage`. So a silent backup merge
+ * wrote the desktop's corkboards into MMKV, emitted on THIS bus, and
+ * HomeScreen kept rendering the state it captured at mount: "the phone didn't
+ * pick up desktop changes until I refreshed the page", while bookmarks (on
+ * this bus) updated live. Both directions are bridged here so there is one
+ * bus with two subscription styles.
+ */
+const RN_SYNC_EVENT = 'mobile-storage-sync'
 
 export function subscribeStorageSync(fn: StorageSyncListener): () => void {
   listeners.add(fn)
@@ -25,4 +42,9 @@ export function emitStorageSync(key: string, value: string | null, origin?: stri
   for (const fn of listeners) {
     try { fn(key, value, origin) } catch { /* one listener must not break the rest */ }
   }
+  // Forward to the hook bus so `useLocalStorage` consumers (corkboards, active
+  // tab, dismissed notes, pins) re-read after an external write.
+  try {
+    DeviceEventEmitter.emit(RN_SYNC_EVENT, { key, originId: origin })
+  } catch { /* emitter unavailable (tests) — Set listeners already ran */ }
 }

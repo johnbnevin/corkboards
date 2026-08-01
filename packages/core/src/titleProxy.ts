@@ -28,18 +28,35 @@
 let _titleProxyTemplate: string | null = null;
 
 /**
- * Validate a title-proxy template for the settings UI. Returns a
+ * The corkboards-operated endpoint, offered as a one-click option in
+ * settings. POST mode (no {url}): the lookup travels in the request body, so
+ * it never appears in web-server access logs — the app's proxy code keeps no
+ * logs of its own, and the host's standard ~7-day access logs record only
+ * that an IP used the title service, never which videos.
+ */
+export const CORKBOARDS_TITLE_PROXY = 'https://corkboards.me/youtube-proxy.php';
+
+/**
+ * Validate a title-proxy endpoint for the settings UI. Returns a
  * human-readable reason it can't be used, or `null` when it's fine
  * (including when empty, which simply means "titles disabled").
- * Same rules and wording as the image proxy so both inputs behave alike.
+ *
+ * Two accepted forms:
+ *   - a template containing `{url}` — GET substitution, for generic
+ *     pass-through proxies (the lookup appears in that host's query logs);
+ *   - a plain URL without `{url}` — POST mode, the lookup goes in the
+ *     request body and stays out of access logs (youtube-proxy.php style).
  */
 export function validateTitleProxyTemplate(template: string): string | null {
   const trimmed = template.trim();
   if (trimmed.length === 0) return null; // empty = disabled
-  if (!trimmed.includes('{url}')) return 'Template must include {url}';
   // Require https — an http:// endpoint would broadcast every video the user
   // sees to any observer on the path, strictly worse than showing no title.
-  if (!/^https:\/\//i.test(trimmed)) return 'Template must start with https://';
+  if (!/^https:\/\//i.test(trimmed)) return 'Endpoint must start with https://';
+  if (!trimmed.includes('{url}')) {
+    // POST mode: must at least parse as a URL.
+    try { new URL(trimmed); } catch { return 'Enter a valid https:// URL (or a template with {url})'; }
+  }
   return null;
 }
 
@@ -86,13 +103,25 @@ export function buildYouTubeOembedUrl(videoUrl: string): string | null {
 }
 
 /**
- * Wrap an oEmbed URL in the active template. Returns `null` when no template
- * is configured — callers MUST treat null as "do not fetch at all".
+ * Resolve the active endpoint for an oEmbed URL. Returns `null` when no
+ * template is configured — callers MUST treat null as "do not fetch at all".
+ *
+ * GET mode (template contains {url}): the request URL with the lookup
+ * substituted in. POST mode (plain URL): the endpoint itself, with the
+ * lookup to be sent as the request body.
  */
-export function applyTitleProxy(oembedUrl: string): string | null {
+export function applyTitleProxy(
+  oembedUrl: string,
+): { url: string; method: 'GET' | 'POST' } | null {
   if (!_titleProxyTemplate) return null;
+  if (!_titleProxyTemplate.includes('{url}')) {
+    return { url: _titleProxyTemplate, method: 'POST' };
+  }
   try {
-    return _titleProxyTemplate.replace('{url}', encodeURIComponent(oembedUrl));
+    return {
+      url: _titleProxyTemplate.replace('{url}', encodeURIComponent(oembedUrl)),
+      method: 'GET',
+    };
   } catch {
     return null;
   }
@@ -123,7 +152,15 @@ export async function fetchYouTubeOembed(
   if (!proxied) return null;
 
   try {
-    const res = await fetchFn(proxied);
+    // POST body is plain text (the oEmbed URL) — a CORS "simple request", no
+    // preflight, and the lookup stays out of web-server access logs.
+    const res = proxied.method === 'POST'
+      ? await fetchFn(proxied.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: oembedUrl,
+        })
+      : await fetchFn(proxied.url);
     if (!res.ok) return null;
     const body: unknown = await res.json();
     if (typeof body !== 'object' || body === null) return null;

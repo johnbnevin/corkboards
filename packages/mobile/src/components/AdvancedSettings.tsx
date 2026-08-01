@@ -20,7 +20,7 @@ import { Platform } from 'react-native';
 import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS, getBlobRejectingServers, clearBlobRejectingServer } from '../hooks/useNostrBackup';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { setImageProxyTemplate, validateImageProxyTemplate } from '@core/imageProxy';
-import { setTitleProxyTemplate, validateTitleProxyTemplate } from '@core/titleProxy';
+import { setTitleProxyTemplate, validateTitleProxyTemplate, CORKBOARDS_TITLE_PROXY } from '@core/titleProxy';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { STORAGE_KEYS } from '../lib/storageKeys';
 import { isRssProxyFallbackEnabled, setRssProxyFallbackEnabled } from '../lib/feedUtils';
@@ -228,8 +228,8 @@ export function AdvancedSettings({
 
       {/* Network privacy (Tor / SOCKS5) */}
       <TouchableOpacity style={styles.settingRow} onPress={() => setSection('network')}>
-        <Text style={styles.settingTitle}>Network Privacy</Text>
-        <Text style={styles.settingHint}>Route traffic through Tor / SOCKS5</Text>
+        <Text style={styles.settingTitle}>Network Privacy &amp; Proxies</Text>
+        <Text style={styles.settingHint}>Tor / SOCKS5 · image proxy · YouTube titles</Text>
       </TouchableOpacity>
 
       <View style={styles.separator} />
@@ -625,12 +625,19 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     Alert.alert(trimmed ? 'Video titles enabled' : 'Video titles off');
   };
 
+  const handleUseCorkboardsTitleProxy = () => {
+    saveTitleProxy(CORKBOARDS_TITLE_PROXY);
+    setTitleProxy(CORKBOARDS_TITLE_PROXY);
+    setSavedTitleProxy(CORKBOARDS_TITLE_PROXY);
+    Alert.alert('Video titles enabled via corkboards.me');
+  };
+
   return (
     <ScrollView style={styles.container}>
       <TouchableOpacity style={styles.backButton} onPress={onBack}>
         <Text style={styles.backText}>&larr; Back</Text>
       </TouchableOpacity>
-      <Text style={styles.sectionTitle}>Network Privacy</Text>
+      <Text style={styles.sectionTitle}>Network Privacy &amp; Proxies</Text>
 
       <View style={{
         marginHorizontal: 12,
@@ -697,17 +704,18 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
       <View style={styles.separator} />
 
       <View style={{ paddingHorizontal: 12, marginBottom: 24 }}>
-        <Text style={styles.settingTitle}>YouTube title proxy URL template</Text>
+        <Text style={styles.settingTitle}>YouTube title proxy</Text>
         <Text style={styles.settingHint}>
           Show video titles on &quot;Open YouTube in browser&quot; bars by fetching them through an endpoint you choose.
           The endpoint you configure sees which videos appear in your feed; your IP never reaches YouTube.
-          Blank = titles off, no request is made. Use {'{url}'} as the placeholder for the oEmbed URL.
-          Self-host rss-proxy.php to be your own endpoint.
+          Blank = titles off, no request is made. Paste a plain URL for POST endpoints like youtube-proxy.php
+          (lookups travel in the request body, out of access logs), or a template with {'{url}'} for GET-style
+          pass-through proxies. Self-host youtube-proxy.php + rss-proxy.php to be your own endpoint.
         </Text>
         <View style={styles.addRow}>
           <TextInput
             style={styles.addInput}
-            placeholder="https://corkboards.me/rss-proxy.php?oembed=1&url={url}"
+            placeholder="https://corkboards.me/youtube-proxy.php"
             placeholderTextColor="#666"
             value={titleProxy}
             onChangeText={setTitleProxy}
@@ -718,6 +726,20 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
             <Text style={styles.addButtonText}>{titleProxy.trim() ? 'Save' : 'Clear'}</Text>
           </TouchableOpacity>
         </View>
+        <TouchableOpacity
+          style={[styles.addButton, { marginTop: 8, alignSelf: 'flex-start' }]}
+          onPress={handleUseCorkboardsTitleProxy}
+          disabled={savedTitleProxy === CORKBOARDS_TITLE_PROXY}
+        >
+          <Text style={styles.addButtonText}>Use corkboards proxy</Text>
+        </TouchableOpacity>
+        <Text style={[styles.settingHint, { marginTop: 8 }]}>
+          Only the corkboards.me server could theoretically see which videos appear in your feed — YouTube/Google
+          never sees you at all. Corkboards&apos; proxy code keeps no logs and stores nothing about lookups, and we
+          will never monitor or retain them. Lookups travel in the request body, so our hosting provider&apos;s
+          standard access logs (kept ~7 days) record only that your IP used the title service — never which videos.
+          If you&apos;d rather trust no one, self-host youtube-proxy.php or leave titles off.
+        </Text>
         {savedTitleProxy ? (
           <Text style={[styles.settingHint, { marginTop: 8, color: '#22c55e' }]}>Active: {savedTitleProxy}</Text>
         ) : null}

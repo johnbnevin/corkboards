@@ -35,7 +35,8 @@ These are inherent to the protocols used, not bugs:
 
 - **NIP-04 DMs** — content is encrypted, but metadata (who is messaging whom, timestamps) is visible to relay operators. NIP-17 sealed DMs solve this, but NIP-04 is still supported for backwards compatibility.
 - **Browser extensions** with access to `window.nostr` can read the user's pubkey and sign events on their behalf. This is by design (NIP-07) but means you should only install trusted Nostr signing extensions.
-- **RSS proxy** — if you self-host `rss-proxy.php`, the proxy server can see which RSS feed URLs are being fetched. The proxy does not log by default.
+- **RSS proxy** — if you self-host `rss-proxy.php`, the proxy server can see which RSS feed URLs are being fetched. The proxy does not log by default — its only persisted state is a rate-limit counter keyed by an MD5 of the client IP, pruned within about an hour — but the web server *in front of* it (Apache/nginx at the hosting provider) keeps standard access logs. Those logs record the client IP and the full request line including query strings, and typical retention is days (DreamHost, corkboards.me's host, retains them ~7 days). RSS fetches use GET, so the feed URL appears there.
+- **YouTube title proxy (`youtube-proxy.php`)** — lookups are sent in the POST request body, which standard access logs never record: the host's logs show only that an IP called the endpoint, never which video. The proxy code itself logs and stores nothing about lookups. YouTube/Google sees the proxy server's IP, never the user's.
 - **Relay metadata** — your IP address is visible to relay operators via the WebSocket connection. Use a VPN or Tor if IP privacy is important to you.
 
 ## Security Implementation

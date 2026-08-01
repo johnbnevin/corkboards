@@ -41,7 +41,7 @@ import { isTauri, tauriGetProxy, tauriSetProxy, tauriGetProxyRequired, tauriSetP
 import { getImageProxyTemplate, saveImageProxyTemplate } from '@/lib/imageProxySettings';
 import { validateImageProxyTemplate } from '@core/imageProxy';
 import { getStoredTitleProxyTemplate, saveTitleProxyTemplate } from '@/lib/titleProxySettings';
-import { validateTitleProxyTemplate } from '@core/titleProxy';
+import { validateTitleProxyTemplate, CORKBOARDS_TITLE_PROXY } from '@core/titleProxy';
 
 interface AdvancedSettingsProps {
   dismissedCount: number;
@@ -238,9 +238,9 @@ export function AdvancedSettings({
         <button type="button" className="w-full text-left rounded-md px-3 py-2 hover:bg-muted transition-colors" onClick={() => setSection('network')}>
           <div className="flex items-center gap-2 text-sm font-medium">
             <Shield className="h-4 w-4 shrink-0" />
-            Network Privacy
+            Network Privacy &amp; Proxies
           </div>
-          <p className="text-xs text-muted-foreground mt-0.5 pl-6">Route relay traffic through Tor / SOCKS5</p>
+          <p className="text-xs text-muted-foreground mt-0.5 pl-6">Tor / SOCKS5 &middot; image proxy &middot; YouTube titles</p>
         </button>
 
         <Separator className="my-2" />
@@ -590,6 +590,13 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     toast({ title: trimmed ? 'Video titles enabled' : 'Video titles off' });
   };
 
+  const handleUseCorkboardsTitleProxy = () => {
+    saveTitleProxyTemplate(CORKBOARDS_TITLE_PROXY);
+    setTitleProxy(CORKBOARDS_TITLE_PROXY);
+    setSavedTitleProxy(CORKBOARDS_TITLE_PROXY);
+    toast({ title: 'Video titles enabled via corkboards.me' });
+  };
+
   useEffect(() => {
     if (!desktop) return;
     tauriGetProxy().then((cur) => {
@@ -678,7 +685,7 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     <div className="space-y-4">
       <button type="button" className="text-xs text-purple-500" onClick={onBack}>← Back</button>
       <div>
-        <p className="text-sm font-medium flex items-center gap-2"><Shield className="h-4 w-4" /> Network Privacy</p>
+        <p className="text-sm font-medium flex items-center gap-2"><Shield className="h-4 w-4" /> Network Privacy &amp; Proxies</p>
         <div className="mt-2 rounded-md border border-yellow-500/30 bg-yellow-500/5 p-2.5 text-[11px] leading-relaxed">
           <p className="font-medium text-yellow-700 dark:text-yellow-400">Tor hides your IP. It does not hide your identity.</p>
           <p className="text-muted-foreground mt-1">
@@ -820,9 +827,9 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
 
       <div className="space-y-3">
         <div>
-          <Label className="text-xs">YouTube title proxy URL template</Label>
+          <Label className="text-xs">YouTube title proxy</Label>
           <Input
-            placeholder="https://corkboards.me/rss-proxy.php?oembed=1&url={url}"
+            placeholder="https://corkboards.me/youtube-proxy.php"
             value={titleProxy}
             onChange={(e) => setTitleProxy(e.target.value)}
             className="h-8 text-xs font-mono mt-1"
@@ -833,13 +840,26 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
           <p className="text-[10px] text-muted-foreground mt-1">
             Show video titles on &quot;Open YouTube in browser&quot; bars by fetching them through an endpoint you choose.
             The endpoint you configure sees which videos appear in your feed; your IP never reaches YouTube.
-            Blank = titles off, no request is made. Use <code>{'{url}'}</code> as the placeholder for the oEmbed URL.
-            Self-host <code>rss-proxy.php</code> to be your own endpoint.
+            Blank = titles off, no request is made. Paste a plain URL for POST endpoints like <code>youtube-proxy.php</code>
+            (lookups travel in the request body, out of access logs), or a template with <code>{'{url}'}</code> for
+            GET-style pass-through proxies. Self-host <code>youtube-proxy.php</code> + <code>rss-proxy.php</code> to be your own endpoint.
           </p>
         </div>
-        <Button size="sm" onClick={handleSaveTitleProxy} disabled={titleProxy === savedTitleProxy}>
-          {titleProxy.trim() ? 'Save' : 'Disable video titles'}
-        </Button>
+        <div className="flex gap-2">
+          <Button size="sm" onClick={handleSaveTitleProxy} disabled={titleProxy === savedTitleProxy}>
+            {titleProxy.trim() ? 'Save' : 'Disable video titles'}
+          </Button>
+          <Button size="sm" variant="outline" onClick={handleUseCorkboardsTitleProxy} disabled={savedTitleProxy === CORKBOARDS_TITLE_PROXY}>
+            Use corkboards proxy
+          </Button>
+        </div>
+        <p className="text-[10px] text-muted-foreground">
+          <strong>Only the corkboards.me server could theoretically see which videos appear in your feed — YouTube/Google never sees you at all.</strong>{' '}
+          Corkboards&apos; proxy code keeps no logs and stores nothing about lookups, and we will never monitor or retain them.
+          Lookups travel in the request body, so our hosting provider&apos;s standard access logs (kept ~7 days) record only
+          that your IP used the title service — never which videos. If you&apos;d rather trust no one, self-host
+          <code> youtube-proxy.php</code> or leave titles off.
+        </p>
         {savedTitleProxy && (
           <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedTitleProxy}</span></p>
         )}

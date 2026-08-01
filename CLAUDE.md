@@ -172,7 +172,7 @@ If the user's prompt is only **`bu`**, it means: run both `stage` and `deploy` (
 If the user's prompt is only **`stage`**, it means:
 1. Commit all changes to git (stage modified/new files, write a concise commit message)
 2. Build the project (`cd packages/web && npm run build`)
-3. Recreate `/home/q4/corkboards/dist_stage` — delete its contents, copy `packages/web/dist/*` into it, then copy ALL non-build server files from `packages/web/`: `rss-proxy.php`, `.htaccess`, and any other standalone server files. **Note:** The user manually uploads `dist_stage` to stage.corkboards.me.
+3. Recreate `/home/q4/corkboards/dist_stage` — delete its contents, copy `packages/web/dist/*` into it, then copy ALL non-build server files from `packages/web/`: `rss-proxy.php`, `youtube-proxy.php`, `.htaccess`, and any other standalone server files. **Note:** The user manually uploads `dist_stage` to stage.corkboards.me.
 
 If the user asks to **backup** or a shorthand includes backup, create a **small source-only zip** (~500KB). Only include authored source files — no `node_modules`, `.git`, `dist*`, build artifacts, Rust `target/`, or binary blobs:
 ```bash
@@ -182,7 +182,7 @@ cd /home/q4/corkboards && zip -r /home/q4/corkboard-backup.zip \
   packages/web/vite.config.ts packages/web/tsconfig*.json \
   packages/web/tailwind.config.ts packages/web/postcss.config.js \
   packages/web/eslint-rules/ packages/web/eslint.config.js \
-  packages/web/rss-proxy.php packages/web/.htaccess \
+  packages/web/rss-proxy.php packages/web/youtube-proxy.php packages/web/.htaccess \
   packages/desktop/src-tauri/src/ packages/desktop/src-tauri/Cargo.toml \
   packages/desktop/src-tauri/tauri.conf.json \
   packages/mobile/src/ packages/mobile/app.json packages/mobile/package.json \
@@ -192,4 +192,4 @@ cd /home/q4/corkboards && zip -r /home/q4/corkboard-backup.zip \
 If the user's prompt is only **`deploy`**, it means:
 1. Commit all changes to git (if any uncommitted changes exist)
 2. Build the project (`cd packages/web && npm run build`)
-3. Recreate `/home/q4/corkboards/dist_deploy` — delete its contents, copy `packages/web/dist/*` into it, then copy ALL non-build server files from `packages/web/`: `rss-proxy.php`, `.htaccess`, and any other standalone server files. **Note:** The user manually uploads `dist_deploy` to corkboards.me production.
+3. Recreate `/home/q4/corkboards/dist_deploy` — delete its contents, copy `packages/web/dist/*` into it, then copy ALL non-build server files from `packages/web/`: `rss-proxy.php`, `youtube-proxy.php`, `.htaccess`, and any other standalone server files. **Note:** The user manually uploads `dist_deploy` to corkboards.me production.

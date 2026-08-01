@@ -26,6 +26,11 @@ export default defineConfig({
         changeOrigin: true,
         secure: true,
       },
+      '/youtube-proxy.php': {
+        target: 'https://corkboards.me',
+        changeOrigin: true,
+        secure: true,
+      },
     },
   },
   build: {

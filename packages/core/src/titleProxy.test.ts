@@ -6,6 +6,7 @@ import {
   buildYouTubeOembedUrl,
   applyTitleProxy,
   fetchYouTubeOembed,
+  CORKBOARDS_TITLE_PROXY,
 } from './titleProxy';
 
 afterEach(() => setTitleProxyTemplate(null));
@@ -17,9 +18,15 @@ describe('validateTitleProxyTemplate', () => {
     expect(validateTitleProxyTemplate('https://example.com/p?u={url}')).toBeNull();
   });
 
-  it('rejects templates without {url} or without https', () => {
-    expect(validateTitleProxyTemplate('https://example.com/p')).toMatch(/\{url\}/);
+  it('accepts a plain https URL without {url} (POST mode)', () => {
+    expect(validateTitleProxyTemplate('https://corkboards.me/youtube-proxy.php')).toBeNull();
+    expect(validateTitleProxyTemplate(CORKBOARDS_TITLE_PROXY)).toBeNull();
+  });
+
+  it('rejects non-https and unparseable plain URLs', () => {
     expect(validateTitleProxyTemplate('http://example.com/p?u={url}')).toMatch(/https/);
+    expect(validateTitleProxyTemplate('http://example.com/p')).toMatch(/https/);
+    expect(validateTitleProxyTemplate('https://')).toMatch(/valid/);
   });
 });
 
@@ -65,10 +72,21 @@ describe('applyTitleProxy', () => {
     expect(applyTitleProxy('https://www.youtube.com/oembed?url=x')).toBeNull();
   });
 
-  it('substitutes the encoded oEmbed URL', () => {
+  it('substitutes the encoded oEmbed URL in GET mode', () => {
     setTitleProxyTemplate('https://p.example/f?u={url}');
     const oembed = 'https://www.youtube.com/oembed?url=abc&format=json';
-    expect(applyTitleProxy(oembed)).toBe(`https://p.example/f?u=${encodeURIComponent(oembed)}`);
+    expect(applyTitleProxy(oembed)).toEqual({
+      url: `https://p.example/f?u=${encodeURIComponent(oembed)}`,
+      method: 'GET',
+    });
+  });
+
+  it('returns the bare endpoint with POST for plain-URL templates', () => {
+    setTitleProxyTemplate(CORKBOARDS_TITLE_PROXY);
+    expect(applyTitleProxy('https://www.youtube.com/oembed?url=x')).toEqual({
+      url: CORKBOARDS_TITLE_PROXY,
+      method: 'POST',
+    });
   });
 });
 
@@ -100,6 +118,20 @@ describe('fetchYouTubeOembed', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
     const calledWith = fetchFn.mock.calls[0][0] as string;
     expect(calledWith.startsWith('https://p.example/f?u=')).toBe(true);
+  });
+
+  it('POST mode: sends the oEmbed URL in the body, never the query string', async () => {
+    setTitleProxyTemplate(CORKBOARDS_TITLE_PROXY);
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ title: 'A Video', author_name: 'Someone' }),
+    });
+    const info = await fetchYouTubeOembed(video, fetchFn as unknown as typeof fetch);
+    expect(info).toEqual({ title: 'A Video', authorName: 'Someone' });
+    const [calledUrl, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(calledUrl).toBe(CORKBOARDS_TITLE_PROXY); // no query string
+    expect(init.method).toBe('POST');
+    expect(init.body).toBe(`https://www.youtube.com/oembed?url=${encodeURIComponent(video)}&format=json`);
   });
 
   it('returns null on non-2xx, bad JSON, and missing title', async () => {

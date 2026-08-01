@@ -128,9 +128,10 @@ header('Cache-Control: no-store');
 header('Content-Type: application/json');
 header('X-Content-Type-Options: nosniff');
 
-// Handle preflight
+// Handle preflight (POST is used by oembed mode — the lookup travels in the
+// request body so it never appears in web-server access logs)
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    header('Access-Control-Allow-Methods: GET');
+    header('Access-Control-Allow-Methods: GET, POST');
     header('Access-Control-Max-Age: 86400');
     exit;
 }
@@ -146,7 +147,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 //
 // The rate limiter and Origin allowlist above have already run.
 if (($_GET['oembed'] ?? '') === '1') {
-    $oembedUrl = $_GET['url'] ?? '';
+    // PREFER the POST body (raw text: the oEmbed URL). Query strings land in
+    // the web server's access logs — which the hosting provider keeps for
+    // ~7 days and we do not control — while request bodies never do. The GET
+    // form still works for generic {url}-template proxies and curl testing,
+    // with that caveat.
+    $oembedUrl = '';
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $oembedUrl = trim((string)file_get_contents('php://input', false, null, 0, 4096));
+    }
+    if ($oembedUrl === '') {
+        $oembedUrl = $_GET['url'] ?? '';
+    }
     $p = parse_url($oembedUrl);
     $oHost = strtolower($p['host'] ?? '');
     if (strtolower($p['scheme'] ?? '') !== 'https'

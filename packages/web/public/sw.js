@@ -30,8 +30,8 @@ self.addEventListener('fetch', (event) => {
   // Skip non-GET requests
   if (request.method !== 'GET') return;
 
-  // Skip rss-proxy.php and API-like requests
-  if (url.pathname.includes('rss-proxy') || url.pathname.startsWith('/api')) return;
+  // Skip rss-proxy.php / youtube-proxy.php and API-like requests
+  if (url.pathname.includes('rss-proxy') || url.pathname.includes('youtube-proxy') || url.pathname.startsWith('/api')) return;
 
   // Navigation requests (HTML): network-first, fall back to cache
   if (request.mode === 'navigate') {

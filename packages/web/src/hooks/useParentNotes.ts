@@ -255,6 +255,24 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
 
+  // Keep the retry sweep's registry in sync with what is ON SCREEN.
+  //
+  // Registration used to happen only inside the queryFn — so when TanStack
+  // served the batch from its 5-minute cache (remount, tab switch, a second
+  // feed column asking for the same ids) the queryFn never ran, the grey
+  // placeholders rendered from cached nulls, and the sweep saw ZERO
+  // unresolved ids: no background retry ever fired for exactly the notes the
+  // user was staring at. The registry must reflect the rendered result, not
+  // the fetch path that produced it. Cleared on unmount so the sweep stays
+  // scoped to the current page (clearUnresolved is idempotent).
+  useEffect(() => {
+    if (!query.data) return;
+    for (const id of uniqueIds) {
+      if (query.data[id]) clearUnresolved(id); else registerUnresolved(id);
+    }
+    return () => { for (const id of uniqueIds) clearUnresolved(id); };
+  }, [query.data, uniqueIds]);
+
   // Second pass: retry failed IDs individually with full outbox discovery
   //
   // Keyed on dataUpdatedAt, NOT data identity. When a retry sweep re-runs the

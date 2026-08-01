@@ -9,6 +9,7 @@ import { useNostr } from '../lib/NostrProvider';
 import { type NostrEvent } from '@nostrify/nostrify';
 import { fetchEventWithOutbox } from '../lib/fetchEvent';
 import { MissCache } from '@core/missCache';
+import { registerUnresolved, clearUnresolved } from '@core/failedNotes';
 
 const parentNoteCache = new Map<string, NostrEvent>();
 
@@ -196,6 +197,21 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
     retry: 2,
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
+
+  // Keep the retry sweep's registry in sync with what is ON SCREEN.
+  //
+  // Mobile never registered reply parents at all — useUnresolvedRetry's sweep
+  // could only see quoted-note failures (NoteLink), so a feed full of grey
+  // reply parents got no background retry, ever. Register from the rendered
+  // result (not the fetch path) so cache-served nulls count too; cleared on
+  // unmount so the sweep stays scoped to the current page. (Parity with web.)
+  useEffect(() => {
+    if (!query.data) return;
+    for (const id of uniqueIds) {
+      if (query.data[id]) clearUnresolved(id); else registerUnresolved(id);
+    }
+    return () => { for (const id of uniqueIds) clearUnresolved(id); };
+  }, [query.data, uniqueIds]);
 
   // Second pass: retry failed IDs individually with full outbox discovery
   //

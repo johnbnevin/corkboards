@@ -597,6 +597,23 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     toast({ title: 'Video titles enabled via corkboards.me' });
   };
 
+  // One-click off. Before this, disabling required KNOWING to clear the input
+  // text so the Save button morphed into "Disable" — once a proxy was active
+  // there was no visible way to turn it off.
+  const handleDisableTitleProxy = () => {
+    saveTitleProxyTemplate('');
+    setTitleProxy('');
+    setSavedTitleProxy('');
+    toast({ title: 'Video titles off' });
+  };
+
+  const handleDisableImgProxy = () => {
+    saveImageProxyTemplate('');
+    setImgProxy('');
+    setSavedImgProxy('');
+    toast({ title: 'Image proxy off' });
+  };
+
   useEffect(() => {
     if (!desktop) return;
     tauriGetProxy().then((cur) => {
@@ -794,6 +811,11 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
           <p className="text-xs">
             Browser networking can&apos;t be proxied from inside the page. To route everything, use <a className="underline" href="https://www.torproject.org/" target="_blank" rel="noreferrer">Tor Browser</a>.
           </p>
+          <p className="text-xs text-muted-foreground">
+            The activity-log and screenshot-protection toggles are desktop-app features: browsers offer no API to
+            block screenshots or write a local log file. The Android app has a &quot;Block screenshots&quot; toggle here;
+            in a browser, your OS screenshot tools always work.
+          </p>
         </div>
       )}
 
@@ -815,9 +837,16 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
             Route every avatar and inline image through an image-proxy so your IP and Referer aren't sent to each random host. Use <code>{'{url}'}</code> as the placeholder for the original URL. Blank by default.
           </p>
         </div>
-        <Button size="sm" onClick={handleSaveImgProxy} disabled={imgProxy === savedImgProxy}>
-          {imgProxy.trim() ? 'Save' : 'Disable image proxy'}
-        </Button>
+        <div className="flex gap-2">
+          <Button size="sm" onClick={handleSaveImgProxy} disabled={imgProxy === savedImgProxy}>
+            {imgProxy.trim() ? 'Save' : 'Disable image proxy'}
+          </Button>
+          {savedImgProxy && (
+            <Button size="sm" variant="outline" onClick={handleDisableImgProxy}>
+              Turn off
+            </Button>
+          )}
+        </div>
         {savedImgProxy && (
           <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedImgProxy}</span></p>
         )}
@@ -847,11 +876,16 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
         </div>
         <div className="flex gap-2">
           <Button size="sm" onClick={handleSaveTitleProxy} disabled={titleProxy === savedTitleProxy}>
-            {titleProxy.trim() ? 'Save' : 'Disable video titles'}
+            Save
           </Button>
           <Button size="sm" variant="outline" onClick={handleUseCorkboardsTitleProxy} disabled={savedTitleProxy === CORKBOARDS_TITLE_PROXY}>
             Use corkboards proxy
           </Button>
+          {savedTitleProxy && (
+            <Button size="sm" variant="outline" onClick={handleDisableTitleProxy}>
+              Turn off
+            </Button>
+          )}
         </div>
         <p className="text-[10px] text-muted-foreground">
           <strong>Only the corkboards.me server could theoretically see which videos appear in your feed</strong> — but

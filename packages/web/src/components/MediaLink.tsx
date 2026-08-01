@@ -664,11 +664,12 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
             — {ytTitle.title}
           </span>
         )}
-        {/* The bar leaves the app, so it gets the same URL affordances links
-            have: a shield that opens the link-options dialog (see the full
-            URL, open clean/original, copy either) and a one-click copy. Both
-            stop propagation so inspecting the URL never opens the browser. */}
-        {openExternally && (
+        {/* YouTube bars get the same URL affordances links have — on BOTH
+            variants (external-open on desktop, click-to-load in the browser):
+            a shield that opens the link-options dialog (see the full URL,
+            open clean/original, copy either) and a one-click copy. Both stop
+            propagation so inspecting the URL never triggers the bar. */}
+        {isYouTubeUrl && (
           <>
             <button
               type="button"

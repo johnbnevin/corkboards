@@ -11,6 +11,7 @@ import { hasWebCryptoSubtle } from './src/webcrypto';
 import { cleanupRetiredNoteCaches } from './src/lib/notesCache';
 import { setImageProxyTemplate } from '@core/imageProxy';
 import { setTitleProxyTemplate } from '@core/titleProxy';
+import * as ScreenCapture from 'expo-screen-capture';
 import { NostrProvider, WelshmanRouterBridge } from './src/lib/NostrProvider';
 import { AuthProvider } from './src/lib/AuthContext';
 import { useNotificationCount } from './src/hooks/useNotificationCount';
@@ -130,6 +131,11 @@ export default function App() {
       // Same for the YouTube title proxy — blank/unset means titles stay off
       // and no oEmbed request is ever made.
       setTitleProxyTemplate(mobileStorage.getSync('corkboard:title-proxy-template'));
+      // Re-apply screenshot blocking if the user turned it on (the OS flag
+      // does not persist across app restarts on its own).
+      if (mobileStorage.getSync('corkboard:block-screenshots') === 'true') {
+        ScreenCapture.preventScreenCaptureAsync().catch(() => {});
+      }
       // One-time reclaim of the retired note-cache rows (see lib/notesCache.ts).
       // After prepareSecureStorage so it operates on the encrypted instance.
       cleanupRetiredNoteCaches();

@@ -28,6 +28,20 @@
 let _titleProxyTemplate: string | null = null;
 
 /**
+ * Change listeners — lets React hooks re-render when the template changes
+ * (useSyncExternalStore). Without this, bars already on screen when the user
+ * enabled titles in settings kept their `enabled: false` queries until a
+ * remount, so "I turned it on and nothing happened".
+ */
+const _titleProxyListeners = new Set<() => void>();
+
+/** Subscribe to template changes. Returns an unsubscribe function. */
+export function subscribeTitleProxy(listener: () => void): () => void {
+  _titleProxyListeners.add(listener);
+  return () => { _titleProxyListeners.delete(listener); };
+}
+
+/**
  * The corkboards-operated endpoint, offered as a one-click option in
  * settings. POST mode (no {url}): the lookup travels in the request body, so
  * it never appears in web-server access logs — the app's proxy code keeps no
@@ -66,11 +80,10 @@ export function validateTitleProxyTemplate(template: string): string | null {
  */
 export function setTitleProxyTemplate(template: string | null | undefined): void {
   const trimmed = template?.trim();
-  if (!trimmed || validateTitleProxyTemplate(trimmed) !== null) {
-    _titleProxyTemplate = null;
-    return;
-  }
-  _titleProxyTemplate = trimmed;
+  const next = (!trimmed || validateTitleProxyTemplate(trimmed) !== null) ? null : trimmed;
+  if (next === _titleProxyTemplate) return;
+  _titleProxyTemplate = next;
+  for (const listener of _titleProxyListeners) listener();
 }
 
 export function getTitleProxyTemplate(): string | null {

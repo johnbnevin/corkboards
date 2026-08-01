@@ -21,6 +21,7 @@ import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS, getBlobR
 import { mobileStorage } from '../storage/MmkvStorage';
 import { setImageProxyTemplate, validateImageProxyTemplate } from '@core/imageProxy';
 import { setTitleProxyTemplate, validateTitleProxyTemplate, CORKBOARDS_TITLE_PROXY } from '@core/titleProxy';
+import * as ScreenCapture from 'expo-screen-capture';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { STORAGE_KEYS } from '../lib/storageKeys';
 import { isRssProxyFallbackEnabled, setRssProxyFallbackEnabled } from '../lib/feedUtils';
@@ -43,6 +44,29 @@ function saveImageProxy(template: string) {
 }
 
 const TITLE_PROXY_KEY = 'corkboard:title-proxy-template';
+
+/**
+ * Screenshot blocking (FLAG_SECURE on Android / capture shield on iOS) via
+ * expo-screen-capture. Off by default — it also blanks the app-switcher
+ * preview, which surprises people who didn't ask for it. Desktop has the
+ * equivalent toggle (Tauri content protection); web browsers have no such
+ * API, so the web build explains that instead of offering a toggle.
+ */
+export const BLOCK_SCREENSHOTS_KEY = 'corkboard:block-screenshots';
+
+export function isBlockScreenshotsEnabled(): boolean {
+  return mobileStorage.getSync(BLOCK_SCREENSHOTS_KEY) === 'true';
+}
+
+async function setBlockScreenshots(enabled: boolean): Promise<void> {
+  mobileStorage.setSync(BLOCK_SCREENSHOTS_KEY, enabled ? 'true' : 'false');
+  try {
+    if (enabled) await ScreenCapture.preventScreenCaptureAsync();
+    else await ScreenCapture.allowScreenCaptureAsync();
+  } catch {
+    // Best effort — some platforms (e.g. web preview) don't support it.
+  }
+}
 
 function getTitleProxy(): string {
   return mobileStorage.getSync(TITLE_PROXY_KEY) ?? '';
@@ -590,7 +614,14 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
   const [savedImgProxy, setSavedImgProxy] = useState(getImageProxy);
   const [titleProxy, setTitleProxy] = useState(getTitleProxy);
   const [savedTitleProxy, setSavedTitleProxy] = useState(getTitleProxy);
+  const [blockScreenshots, setBlockScreenshotsState] = useState(isBlockScreenshotsEnabled);
   const isAndroid = Platform.OS === 'android';
+
+  const handleToggleBlockScreenshots = async () => {
+    const next = !blockScreenshots;
+    await setBlockScreenshots(next);
+    setBlockScreenshotsState(next);
+  };
 
   // Scrub the legacy '__proxy_url__' value: we no longer plan a per-app
   // SOCKS5 module on mobile (an OS-level Tor setup is strictly better and
@@ -630,6 +661,22 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     setTitleProxy(CORKBOARDS_TITLE_PROXY);
     setSavedTitleProxy(CORKBOARDS_TITLE_PROXY);
     Alert.alert('Video titles enabled via corkboards.me');
+  };
+
+  // One-click off. Before this, disabling required KNOWING to clear the input
+  // text — once a proxy was active there was no visible way to turn it off.
+  const handleDisableTitleProxy = () => {
+    saveTitleProxy('');
+    setTitleProxy('');
+    setSavedTitleProxy('');
+    Alert.alert('Video titles off');
+  };
+
+  const handleDisableImgProxy = () => {
+    saveImageProxy('');
+    setImgProxy('');
+    setSavedImgProxy('');
+    Alert.alert('Image proxy off');
   };
 
   return (
@@ -677,6 +724,21 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
 
       <View style={styles.separator} />
 
+      {/* Screenshot blocking — parity with desktop's content protection.
+          (Web browsers expose no such API, so the web build has no toggle.) */}
+      <TouchableOpacity style={styles.settingRow} onPress={handleToggleBlockScreenshots}>
+        <Text style={styles.settingTitle}>
+          {blockScreenshots ? '✓ ' : ''}Block screenshots
+        </Text>
+        <Text style={styles.settingHint}>
+          {blockScreenshots
+            ? 'Screenshots and screen recording are blocked, and the app-switcher preview is blanked'
+            : 'Screenshots are allowed. Turn on to block capture of your feed (also blanks the app-switcher preview)'}
+        </Text>
+      </TouchableOpacity>
+
+      <View style={styles.separator} />
+
       <View style={{ paddingHorizontal: 12 }}>
         <Text style={styles.settingTitle}>Image Proxy URL template</Text>
         <Text style={styles.settingHint}>
@@ -697,7 +759,12 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
           </TouchableOpacity>
         </View>
         {savedImgProxy ? (
-          <Text style={[styles.settingHint, { marginTop: 8, color: '#22c55e' }]}>Active: {savedImgProxy}</Text>
+          <>
+            <TouchableOpacity style={[styles.addButton, { marginTop: 8, alignSelf: 'flex-start' }]} onPress={handleDisableImgProxy}>
+              <Text style={styles.addButtonText}>Turn off</Text>
+            </TouchableOpacity>
+            <Text style={[styles.settingHint, { marginTop: 8, color: '#22c55e' }]}>Active: {savedImgProxy}</Text>
+          </>
         ) : null}
       </View>
 
@@ -726,13 +793,20 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
             <Text style={styles.addButtonText}>{titleProxy.trim() ? 'Save' : 'Clear'}</Text>
           </TouchableOpacity>
         </View>
-        <TouchableOpacity
-          style={[styles.addButton, { marginTop: 8, alignSelf: 'flex-start' }]}
-          onPress={handleUseCorkboardsTitleProxy}
-          disabled={savedTitleProxy === CORKBOARDS_TITLE_PROXY}
-        >
-          <Text style={styles.addButtonText}>Use corkboards proxy</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+          <TouchableOpacity
+            style={styles.addButton}
+            onPress={handleUseCorkboardsTitleProxy}
+            disabled={savedTitleProxy === CORKBOARDS_TITLE_PROXY}
+          >
+            <Text style={styles.addButtonText}>Use corkboards proxy</Text>
+          </TouchableOpacity>
+          {savedTitleProxy ? (
+            <TouchableOpacity style={styles.addButton} onPress={handleDisableTitleProxy}>
+              <Text style={styles.addButtonText}>Turn off</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
         <Text style={[styles.settingHint, { marginTop: 8 }]}>
           Only the corkboards.me server could theoretically see which videos appear in your feed — but we keep no
           logs and store nothing about lookups, and we will never monitor or retain them. YouTube/Google never sees

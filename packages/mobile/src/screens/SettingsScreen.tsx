@@ -39,6 +39,7 @@ import { useImageSizeLimitSetting, useAvatarSizeLimitSetting } from '../hooks/us
 import { usePlatformStorage } from '../hooks/usePlatformStorage';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { formatTimeAgo } from '@core/formatTimeAgo';
+import { genUserName } from '@core/genUserName';
 import type { NSecSigner } from '@nostrify/nostrify';
 
 type ThemeMode = 'dark' | 'light' | 'system';
@@ -305,7 +306,8 @@ export function SettingsScreen() {
   }
 
   const npub = pubkey ? nip19.npubEncode(pubkey) : null;
-  const displayName = author?.metadata?.display_name || author?.metadata?.name || null;
+  const displayName = author?.metadata?.display_name || author?.metadata?.name
+    || (pubkey ? genUserName(pubkey) : null);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>

@@ -45,6 +45,7 @@ import { createRelayDirect } from '@/components/NostrProvider';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { idbSetSync, idbClear, idbKeys } from '@/lib/idb';
 import { IMAGE_PROXY_TEMPLATE_KEY } from '@/lib/imageProxySettings';
+import { TITLE_PROXY_TEMPLATE_KEY } from '@/lib/titleProxySettings';
 import { clearNotesCache } from '@/lib/notesCache';
 import { clearCache as clearProfileCacheDb, clearMemCache as clearProfileMemCache } from '@/lib/cacheStore';
 import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
@@ -582,8 +583,12 @@ export function useLoginActions() {
       // (even logged-out) session. Re-applied right after the clear.
       let preservedImageProxy: string | null = null;
       try { preservedImageProxy = localStorage.getItem(IMAGE_PROXY_TEMPLATE_KEY); } catch { /* */ }
+      // Same reasoning for the title-proxy template — device-level privacy choice.
+      let preservedTitleProxy: string | null = null;
+      try { preservedTitleProxy = localStorage.getItem(TITLE_PROXY_TEMPLATE_KEY); } catch { /* */ }
       localStorage.clear();
       if (preservedImageProxy) { try { localStorage.setItem(IMAGE_PROXY_TEMPLATE_KEY, preservedImageProxy); } catch { /* */ } }
+      if (preservedTitleProxy) { try { localStorage.setItem(TITLE_PROXY_TEMPLATE_KEY, preservedTitleProxy); } catch { /* */ } }
       log('Clearing sessionStorage...');
       sessionStorage.clear();
 

@@ -40,6 +40,8 @@ import {
 import { isTauri, tauriGetProxy, tauriSetProxy, tauriGetProxyRequired, tauriSetProxyRequired, tauriProxyLoadFailed, tauriProxyWebviewUnprotected, isFileLoggingEnabled, setFileLogging as tauriSetFileLogging, getContentProtected as tauriGetContentProtected, setContentProtected as tauriSetContentProtected } from '@/lib/tauri';
 import { getImageProxyTemplate, saveImageProxyTemplate } from '@/lib/imageProxySettings';
 import { validateImageProxyTemplate } from '@core/imageProxy';
+import { getStoredTitleProxyTemplate, saveTitleProxyTemplate } from '@/lib/titleProxySettings';
+import { validateTitleProxyTemplate } from '@core/titleProxy';
 
 interface AdvancedSettingsProps {
   dismissedCount: number;
@@ -554,6 +556,8 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
   const [webviewUnprotected, setWebviewUnprotected] = useState(false);
   const [imgProxy, setImgProxy] = useState(getImageProxyTemplate);
   const [savedImgProxy, setSavedImgProxy] = useState(getImageProxyTemplate);
+  const [titleProxy, setTitleProxy] = useState(getStoredTitleProxyTemplate);
+  const [savedTitleProxy, setSavedTitleProxy] = useState(getStoredTitleProxyTemplate);
   const [fileLogging, setFileLoggingState] = useState(false);
   const [contentProtected, setContentProtectedState] = useState(true);
   const desktop = isTauri;
@@ -571,6 +575,19 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     setImgProxy(trimmed);
     setSavedImgProxy(trimmed);
     toast({ title: trimmed ? 'Image proxy enabled' : 'Image proxy cleared' });
+  };
+
+  const handleSaveTitleProxy = () => {
+    const trimmed = titleProxy.trim();
+    const invalid = validateTitleProxyTemplate(trimmed);
+    if (invalid) {
+      toast({ title: invalid, variant: 'destructive' });
+      return;
+    }
+    saveTitleProxyTemplate(trimmed);
+    setTitleProxy(trimmed);
+    setSavedTitleProxy(trimmed);
+    toast({ title: trimmed ? 'Video titles enabled' : 'Video titles off' });
   };
 
   useEffect(() => {
@@ -796,6 +813,35 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
         </Button>
         {savedImgProxy && (
           <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedImgProxy}</span></p>
+        )}
+      </div>
+
+      <Separator />
+
+      <div className="space-y-3">
+        <div>
+          <Label className="text-xs">YouTube title proxy URL template</Label>
+          <Input
+            placeholder="https://corkboards.me/rss-proxy.php?oembed=1&url={url}"
+            value={titleProxy}
+            onChange={(e) => setTitleProxy(e.target.value)}
+            className="h-8 text-xs font-mono mt-1"
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+          />
+          <p className="text-[10px] text-muted-foreground mt-1">
+            Show video titles on &quot;Open YouTube in browser&quot; bars by fetching them through an endpoint you choose.
+            The endpoint you configure sees which videos appear in your feed; your IP never reaches YouTube.
+            Blank = titles off, no request is made. Use <code>{'{url}'}</code> as the placeholder for the oEmbed URL.
+            Self-host <code>rss-proxy.php</code> to be your own endpoint.
+          </p>
+        </div>
+        <Button size="sm" onClick={handleSaveTitleProxy} disabled={titleProxy === savedTitleProxy}>
+          {titleProxy.trim() ? 'Save' : 'Disable video titles'}
+        </Button>
+        {savedTitleProxy && (
+          <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedTitleProxy}</span></p>
         )}
       </div>
     </div>

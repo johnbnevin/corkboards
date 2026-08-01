@@ -5,6 +5,7 @@ import { LightboxTrigger } from '@/components/ui/lightbox'
 import { SizeGuardedImage } from '@/components/SizeGuardedImage'
 import { ExternalLink, UtensilsCrossed, Film, AlertCircle, Copy, Check, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { useLinkCopy } from '@/hooks/useLinkCopy'
+import { useYouTubeTitle } from '@/hooks/useYouTubeTitle'
 import { TrackerWarningDialog } from '@/components/TrackerWarningDialog'
 import { optimizeMediaUrl, shouldRejectUrl } from '@/lib/imageUtils'
 import { isImageUrl, isCdnHost } from '@/lib/mediaUtils'
@@ -246,6 +247,16 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
   // the app, so the user gets the same inspect/copy affordances links have.
   const [urlOptionsOpen, setUrlOptionsOpen] = useState(false)
   const { cleanUrl, hasTracker, trackingParams, copied, copyClean } = useLinkCopy(url)
+  // Title for the YouTube pre-reveal bars, via the USER-configured title
+  // proxy. Inert (no request) unless a template is configured AND this render
+  // is actually a YouTube bar; `url` is the video URL the author wrote.
+  const isYouTubeUrl = useMemo(() => {
+    try {
+      const h = new URL(url).hostname
+      return /(^|\.)youtube(-nocookie)?\.com$/.test(h) || h === 'youtu.be'
+    } catch { return false }
+  }, [url])
+  const ytTitle = useYouTubeTitle(url, isYouTubeUrl && !embedRevealed)
 
   // Ordered, deduped, SSRF-gated candidate list: [primary, ...author fallbacks,
   // ...blob rebuilt across every known server from its sha256]. Non-Blossom URLs
@@ -641,11 +652,18 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
         {openExternally
           ? <ExternalLink className="w-3.5 h-3.5 text-red-600 dark:text-red-400 shrink-0" />
           : <Film className="w-3.5 h-3.5 text-muted-foreground shrink-0" />}
-        <span className={openExternally ? 'text-xs font-medium text-red-600 dark:text-red-400' : 'text-xs text-muted-foreground'}>
+        <span className={`${openExternally ? 'text-xs font-medium text-red-600 dark:text-red-400' : 'text-xs text-muted-foreground'} shrink-0`}>
           {openExternally
             ? `Open ${getEmbedProviderName(embed.url)} in browser ↗`
             : `Click to load ${getEmbedProviderName(embed.url)}`}
         </span>
+        {/* Video title via the user-configured title proxy — absent unless the
+            user opted in (Settings → Network & Privacy). */}
+        {ytTitle?.title && (
+          <span className="text-xs text-muted-foreground truncate min-w-0">
+            — {ytTitle.title}
+          </span>
+        )}
         {/* The bar leaves the app, so it gets the same URL affordances links
             have: a shield that opens the link-options dialog (see the full
             URL, open clean/original, copy either) and a one-click copy. Both

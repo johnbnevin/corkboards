@@ -19,6 +19,7 @@ import { createRelay } from '../lib/NostrProvider';
 import { nip19 } from 'nostr-tools';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { NIP50_SEARCH_RELAY } from '../lib/relayConstants';
+import { genUserName } from '@core/genUserName';
 
 interface SearchResult {
   pubkey: string;
@@ -117,12 +118,12 @@ export function OnboardSearchWidget({
             const meta = JSON.parse(e.content);
             return {
               pubkey: e.pubkey,
-              name: meta.display_name || meta.name,
+              name: meta.display_name || meta.name || genUserName(e.pubkey),
               picture: meta.picture,
               about: meta.about,
             };
           } catch {
-            return { pubkey: e.pubkey };
+            return { pubkey: e.pubkey, name: genUserName(e.pubkey) };
           }
         });
 
@@ -206,7 +207,7 @@ export function OnboardSearchWidget({
                 )}
                 <View style={styles.resultInfo}>
                   <Text style={styles.resultName} numberOfLines={1}>
-                    {item.name ?? 'Unknown'}
+                    {item.name ?? genUserName(item.pubkey)}
                   </Text>
                   {item.about ? (
                     <Text style={styles.resultAbout} numberOfLines={1}>{item.about}</Text>

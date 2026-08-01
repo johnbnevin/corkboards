@@ -30,6 +30,7 @@ import { NoteContent } from '../components/NoteContent';
 import { NoteActions } from '../components/NoteActions';
 import { ProfileAbout } from '../components/ProfileAbout';
 import { formatTimeAgo } from '@core/formatTimeAgo';
+import { genUserName } from '@core/genUserName';
 import { SizeGuardedImage } from '../components/SizeGuardedImage';
 import { optimizeMediaUrl } from '@core/imageUtils';
 import { openExternal } from '../lib/openExternal';
@@ -130,7 +131,7 @@ export function ProfileScreen({ pubkey, onBack, onViewThread, onCreateCorkboard 
 
   const meta = author?.metadata;
   const npub = nip19.npubEncode(pubkey);
-  const displayName = meta?.display_name || meta?.name || pubkey.slice(0, 12) + '...';
+  const displayName = meta?.display_name || meta?.name || genUserName(pubkey);
 
   const handleCopyNpub = useCallback(async () => {
     try {

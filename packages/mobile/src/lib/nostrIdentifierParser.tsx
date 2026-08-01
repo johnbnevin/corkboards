@@ -2,6 +2,7 @@ import { nip19 } from 'nostr-tools';
 import React from 'react';
 import { Text, StyleSheet } from 'react-native';
 import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr';
+import { genUserName } from '@core/genUserName';
 
 // Decoded identifier types that onPress handlers receive
 export type NostrIdentifierData =
@@ -75,9 +76,11 @@ export function parseNostrIdentifiers(
 
         // Display label
         const label =
-          decoded.type === 'npub' || decoded.type === 'nprofile'
-            ? `@${nostrId.slice(0, 12)}...`
-            : fullMatch;
+          decoded.type === 'npub'
+            ? `@${genUserName(decoded.data)}`
+            : decoded.type === 'nprofile'
+              ? `@${genUserName(decoded.data.pubkey)}`
+              : fullMatch;
 
         parts.push(
           <Text

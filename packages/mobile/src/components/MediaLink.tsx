@@ -23,6 +23,7 @@ import { optimizeMediaUrl } from '@core/imageUtils';
 import { openExternal } from '../lib/openExternal';
 import { isSafeExternalUrl, stripTrackingParams, getTrackingParams } from '@core/sanitizeUtils';
 import { TrackerWarningDialog } from './TrackerWarningDialog';
+import { useYouTubeTitle } from '../hooks/useYouTubeTitle';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56;
@@ -303,6 +304,10 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
   }
 
   const embed = useMemo(() => getEmbedInfo(url, forceVideo), [url, forceVideo]);
+  // Title for the YouTube external-open bar, via the USER-configured title
+  // proxy. Inert (no request) unless a template is configured AND this render
+  // is the YouTube bar; `url` is the video URL the author wrote.
+  const ytTitle = useYouTubeTitle(url, embed?.type === 'youtube');
   // Ordered, deduped, SSRF-gated candidates: primary URL, author fallbacks, then
   // the blob rebuilt on every known Blossom server from its sha256. Single source
   // of truth shared with web + avatars.
@@ -433,7 +438,7 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
     return (
       <>
         <TouchableOpacity
-          style={[styles.blurPlaceholder, styles.externalOpenBar]}
+          style={[styles.blurPlaceholder, styles.externalOpenBar, ytTitle?.title ? styles.externalOpenTall : null]}
           onPress={() => openExternal(embed.url)}
         >
           <View style={styles.externalOpenRow}>
@@ -447,6 +452,11 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
               </Text>
             </TouchableOpacity>
           </View>
+          {/* Video title via the user-configured title proxy — absent unless
+              the user opted in (Settings → Network Privacy). */}
+          {ytTitle?.title ? (
+            <Text style={styles.externalOpenSubtitle} numberOfLines={1}>{ytTitle.title}</Text>
+          ) : null}
         </TouchableOpacity>
         <TrackerWarningDialog
           visible={urlOptionsOpen}
@@ -595,6 +605,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  externalOpenSubtitle: {
+    color: '#999',
+    fontSize: 12,
+    marginTop: 2,
+    maxWidth: '90%',
+  },
+  // blurPlaceholder pins height: 36 — with a title line the bar needs to grow.
+  externalOpenTall: {
+    height: undefined,
+    minHeight: 36,
+    paddingVertical: 6,
   },
   trackerShield: {
     color: '#f59e0b',

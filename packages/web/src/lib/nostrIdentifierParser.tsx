@@ -2,6 +2,7 @@ import { nip19 } from 'nostr-tools';
 import { Link } from 'react-router-dom';
 import React from 'react';
 import { NIP19_IDENTIFIER_PATTERN } from '@core/nostr';
+import { genUserName } from '@core/genUserName';
 
 /**
  * Parses Nostr identifiers (npub1, nprofile1, note1, nevent1, naddr1) in text
@@ -47,7 +48,7 @@ export function parseNostrIdentifiers(text: string): React.ReactNode[] {
               to={`/${nostrId}`}
               className="text-purple-500 hover:underline font-medium"
             >
-              @{nostrId.slice(0, 12)}...
+              @{genUserName(decoded.type === 'npub' ? decoded.data : decoded.data.pubkey)}
             </Link>
           );
         } else if (decoded.type === 'nevent') {

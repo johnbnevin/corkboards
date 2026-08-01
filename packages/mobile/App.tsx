@@ -10,6 +10,7 @@ import { prepareSecureStorage, mmkvInitError, mmkvIsEncrypted, mobileStorage } f
 import { hasWebCryptoSubtle } from './src/webcrypto';
 import { cleanupRetiredNoteCaches } from './src/lib/notesCache';
 import { setImageProxyTemplate } from '@core/imageProxy';
+import { setTitleProxyTemplate } from '@core/titleProxy';
 import { NostrProvider, WelshmanRouterBridge } from './src/lib/NostrProvider';
 import { AuthProvider } from './src/lib/AuthContext';
 import { useNotificationCount } from './src/hooks/useNotificationCount';
@@ -126,6 +127,9 @@ export default function App() {
       // image renders. Settings UI calls setImageProxyTemplate directly on
       // save, so this only matters for cold launches.
       setImageProxyTemplate(mobileStorage.getSync('corkboard:image-proxy-template'));
+      // Same for the YouTube title proxy — blank/unset means titles stay off
+      // and no oEmbed request is ever made.
+      setTitleProxyTemplate(mobileStorage.getSync('corkboard:title-proxy-template'));
       // One-time reclaim of the retired note-cache rows (see lib/notesCache.ts).
       // After prepareSecureStorage so it operates on the encrypted instance.
       cleanupRetiredNoteCaches();

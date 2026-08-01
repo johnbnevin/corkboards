@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Card } from '@/components/ui/card'
+import { genUserName } from '@/lib/genUserName'
 import { isValidMediaUrl } from '@/lib/textareaUtils'
 import { EMOJI_CATEGORIES } from '@core/emojiCategories'
 import {
@@ -495,7 +496,7 @@ export function EmojiSetEditor() {
                   <div className="flex items-center justify-between gap-2 mb-2">
                     <div className="min-w-0">
                       <p className="text-sm font-medium truncate">{set.name}</p>
-                      <p className="text-[10px] text-muted-foreground font-mono truncate">{set.pubkey.slice(0, 12)}...</p>
+                      <p className="text-[10px] text-muted-foreground truncate">{genUserName(set.pubkey)}</p>
                     </div>
                     <div className="flex gap-1 shrink-0">
                       {user && set.pubkey !== user.pubkey && (

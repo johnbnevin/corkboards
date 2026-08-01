@@ -86,9 +86,9 @@ export function AccountSwitcher({ onAddAccount, onLogout }: AccountSwitcherProps
   };
 
   const handleRemove = (pubkey: string) => {
-    const { data: author } = { data: undefined as { metadata?: { name?: string } } | undefined };
-    // Use npub for the alert since we can't call hooks here
-    const label = nip19.npubEncode(pubkey).slice(0, 16) + '...';
+    // Can't call hooks here, but the pet name needs none — it's derived from
+    // the pubkey alone and matches what the account row shows.
+    const label = genUserName(pubkey);
     Alert.alert(
       'Remove account',
       `Remove ${label} from this device? The account still exists on Nostr — you can re-add it later.`,
@@ -104,7 +104,6 @@ export function AccountSwitcher({ onAddAccount, onLogout }: AccountSwitcherProps
         },
       ],
     );
-    void author; // suppress unused
   };
 
   return (

@@ -6,6 +6,7 @@ import { Search, X } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { useProfileModal } from '@/components/ProfileModal'
 import { NIP50_SEARCH_RELAY } from '@/lib/relayConstants'
+import { genUserName } from '@/lib/genUserName'
 
 interface SearchResult {
   pubkey: string
@@ -98,12 +99,12 @@ export function OnboardSearchWidget({ contactCount = 0, followTarget = 10, onSki
             const meta = JSON.parse(e.content)
             return {
               pubkey: e.pubkey,
-              name: meta.display_name || meta.name,
+              name: meta.display_name || meta.name || genUserName(e.pubkey),
               picture: meta.picture,
               about: meta.about,
             }
           } catch {
-            return { pubkey: e.pubkey }
+            return { pubkey: e.pubkey, name: genUserName(e.pubkey) }
           }
         })
 
@@ -183,7 +184,7 @@ export function OnboardSearchWidget({ contactCount = 0, followTarget = 10, onSki
                   </div>
                 )}
                 <div className="min-w-0 flex-1">
-                  <div className="font-medium text-sm truncate">{r.name ?? 'Unknown'}</div>
+                  <div className="font-medium text-sm truncate">{r.name ?? genUserName(r.pubkey)}</div>
                   {r.about && (
                     <div className="text-xs text-muted-foreground truncate">{r.about}</div>
                   )}

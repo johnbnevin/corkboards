@@ -135,6 +135,71 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
+// ─── oEmbed mode (?oembed=1) ────────────────────────────────────────────────
+//
+// Fetches a YouTube video title via the official oEmbed endpoint, so clients
+// can show titles without the user's IP ever reaching Google. Deliberately
+// narrow — this is NOT a general fetch proxy (see the content-laundering note
+// on the favicon fetch below): the only origin ever contacted is
+// www.youtube.com/oembed, and the URL is REBUILT server-side from the inner
+// video URL, discarding everything else the client sent.
+//
+// The rate limiter and Origin allowlist above have already run.
+if (($_GET['oembed'] ?? '') === '1') {
+    $oembedUrl = $_GET['url'] ?? '';
+    $p = parse_url($oembedUrl);
+    $oHost = strtolower($p['host'] ?? '');
+    if (strtolower($p['scheme'] ?? '') !== 'https'
+        || !in_array($oHost, ['www.youtube.com', 'youtube.com'], true)
+        || ($p['path'] ?? '') !== '/oembed') {
+        http_response_code(400);
+        echo json_encode(['error' => 'oembed mode only accepts https://www.youtube.com/oembed URLs']);
+        exit;
+    }
+    parse_str($p['query'] ?? '', $q);
+    $videoUrl = $q['url'] ?? '';
+    $v = parse_url($videoUrl);
+    $vHost = strtolower($v['host'] ?? '');
+    $vScheme = strtolower($v['scheme'] ?? '');
+    $isYt = ($vScheme === 'https' || $vScheme === 'http') && (
+        $vHost === 'youtu.be'
+        || $vHost === 'youtube.com' || str_ends_with($vHost, '.youtube.com')
+        || $vHost === 'youtube-nocookie.com' || str_ends_with($vHost, '.youtube-nocookie.com')
+    );
+    if (!$isYt) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Not a YouTube video URL']);
+        exit;
+    }
+
+    [$oErr, $oBody] = fetchValidated(
+        'https://www.youtube.com/oembed?url=' . rawurlencode($videoUrl) . '&format=json',
+        64 * 1024,           // titles are tiny; 64KB is generous
+        'application/json',
+        5,                   // 5s — a title is not worth a long stall
+        1                    // at most one redirect hop
+    );
+    if ($oErr !== null) {
+        http_response_code(502);
+        echo json_encode(['error' => 'Failed to fetch title']);
+        exit;
+    }
+    $j = json_decode($oBody, true);
+    if (!is_array($j) || !isset($j['title']) || !is_string($j['title'])) {
+        http_response_code(502);
+        echo json_encode(['error' => 'Failed to fetch title']);
+        exit;
+    }
+    // Titles are static — cacheable, unlike the per-user RSS responses.
+    // Vary: Origin is already set above, so the varying ACAO stays cache-safe.
+    header('Cache-Control: public, max-age=86400');
+    echo json_encode([
+        'title' => mb_substr($j['title'], 0, 300),
+        'author_name' => mb_substr(is_string($j['author_name'] ?? null) ? $j['author_name'] : '', 0, 200),
+    ]);
+    exit;
+}
+
 // ─── Input validation ───────────────────────────────────────────────────────
 
 $url = $_GET['url'] ?? '';
@@ -194,8 +259,12 @@ function isBlockedIp(string $ip): bool {
             ['169.254.0.0', 16],  // link-local (incl. cloud metadata 169.254.169.254)
             ['172.16.0.0', 12],   // RFC 1918
             ['192.0.0.0', 24],    // IETF protocol assignments
+            ['192.0.2.0', 24],    // TEST-NET-1
+            ['192.88.99.0', 24],  // 6to4 relay anycast (deprecated)
             ['192.168.0.0', 16],  // RFC 1918
             ['198.18.0.0', 15],   // benchmarking
+            ['198.51.100.0', 24], // TEST-NET-2
+            ['203.0.113.0', 24],  // TEST-NET-3
             ['224.0.0.0', 4],     // multicast
             ['240.0.0.0', 4],     // reserved + broadcast
         ];
@@ -219,6 +288,16 @@ function isBlockedIp(string $ip): bool {
     $zeroTo9 = true;
     for ($i = 0; $i < 10; $i++) { if ($b[$i] !== 0) { $zeroTo9 = false; break; } }
     if ($zeroTo9 && $b[10] === 0xff && $b[11] === 0xff) {
+        return isBlockedIp(implode('.', array_slice($b, 12, 4)));
+    }
+
+    // SIIT IPv4-translated ::ffff:0:a.b.c.d (RFC 6052) — bytes 8-9 hold 0xffff
+    // and 10-11 are zero, so the IPv4-mapped branch above (which wants 0xffff in
+    // bytes 10-11) does NOT catch it, and neither does the all-zero-prefix branch
+    // below. Re-check the embedded IPv4 rather than letting it through.
+    $zeroTo7 = true;
+    for ($i = 0; $i < 8; $i++) { if ($b[$i] !== 0) { $zeroTo7 = false; break; } }
+    if ($zeroTo7 && $b[8] === 0xff && $b[9] === 0xff && $b[10] === 0 && $b[11] === 0) {
         return isBlockedIp(implode('.', array_slice($b, 12, 4)));
     }
 

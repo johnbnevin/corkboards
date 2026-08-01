@@ -20,6 +20,7 @@ import { Platform } from 'react-native';
 import { getBlossomServers, setBlossomServers, DEFAULT_BLOSSOM_SERVERS, getBlobRejectingServers, clearBlobRejectingServer } from '../hooks/useNostrBackup';
 import { mobileStorage } from '../storage/MmkvStorage';
 import { setImageProxyTemplate, validateImageProxyTemplate } from '@core/imageProxy';
+import { setTitleProxyTemplate, validateTitleProxyTemplate } from '@core/titleProxy';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { STORAGE_KEYS } from '../lib/storageKeys';
 import { isRssProxyFallbackEnabled, setRssProxyFallbackEnabled } from '../lib/feedUtils';
@@ -39,6 +40,22 @@ function saveImageProxy(template: string) {
     mobileStorage.setSync(IMAGE_PROXY_KEY, trimmed);
   }
   setImageProxyTemplate(trimmed || null);
+}
+
+const TITLE_PROXY_KEY = 'corkboard:title-proxy-template';
+
+function getTitleProxy(): string {
+  return mobileStorage.getSync(TITLE_PROXY_KEY) ?? '';
+}
+
+function saveTitleProxy(template: string) {
+  const trimmed = template.trim();
+  if (trimmed.length === 0) {
+    mobileStorage.removeSync(TITLE_PROXY_KEY);
+  } else {
+    mobileStorage.setSync(TITLE_PROXY_KEY, trimmed);
+  }
+  setTitleProxyTemplate(trimmed || null);
 }
 
 interface AdvancedSettingsProps {
@@ -571,6 +588,8 @@ function BlossomSection({ onBack }: { onBack: () => void }) {
 function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
   const [imgProxy, setImgProxy] = useState(getImageProxy);
   const [savedImgProxy, setSavedImgProxy] = useState(getImageProxy);
+  const [titleProxy, setTitleProxy] = useState(getTitleProxy);
+  const [savedTitleProxy, setSavedTitleProxy] = useState(getTitleProxy);
   const isAndroid = Platform.OS === 'android';
 
   // Scrub the legacy '__proxy_url__' value: we no longer plan a per-app
@@ -591,6 +610,19 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
     setImgProxy(trimmed);
     setSavedImgProxy(trimmed);
     Alert.alert(trimmed ? 'Image proxy enabled' : 'Image proxy cleared');
+  };
+
+  const handleSaveTitleProxy = () => {
+    const trimmed = titleProxy.trim();
+    const invalid = validateTitleProxyTemplate(trimmed);
+    if (invalid) {
+      Alert.alert('Invalid template', invalid);
+      return;
+    }
+    saveTitleProxy(trimmed);
+    setTitleProxy(trimmed);
+    setSavedTitleProxy(trimmed);
+    Alert.alert(trimmed ? 'Video titles enabled' : 'Video titles off');
   };
 
   return (
@@ -659,6 +691,35 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
         </View>
         {savedImgProxy ? (
           <Text style={[styles.settingHint, { marginTop: 8, color: '#22c55e' }]}>Active: {savedImgProxy}</Text>
+        ) : null}
+      </View>
+
+      <View style={styles.separator} />
+
+      <View style={{ paddingHorizontal: 12, marginBottom: 24 }}>
+        <Text style={styles.settingTitle}>YouTube title proxy URL template</Text>
+        <Text style={styles.settingHint}>
+          Show video titles on &quot;Open YouTube in browser&quot; bars by fetching them through an endpoint you choose.
+          The endpoint you configure sees which videos appear in your feed; your IP never reaches YouTube.
+          Blank = titles off, no request is made. Use {'{url}'} as the placeholder for the oEmbed URL.
+          Self-host rss-proxy.php to be your own endpoint.
+        </Text>
+        <View style={styles.addRow}>
+          <TextInput
+            style={styles.addInput}
+            placeholder="https://corkboards.me/rss-proxy.php?oembed=1&url={url}"
+            placeholderTextColor="#666"
+            value={titleProxy}
+            onChangeText={setTitleProxy}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity style={styles.addButton} onPress={handleSaveTitleProxy} disabled={titleProxy === savedTitleProxy}>
+            <Text style={styles.addButtonText}>{titleProxy.trim() ? 'Save' : 'Clear'}</Text>
+          </TouchableOpacity>
+        </View>
+        {savedTitleProxy ? (
+          <Text style={[styles.settingHint, { marginTop: 8, color: '#22c55e' }]}>Active: {savedTitleProxy}</Text>
         ) : null}
       </View>
     </ScrollView>

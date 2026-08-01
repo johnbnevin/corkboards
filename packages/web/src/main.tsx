@@ -8,6 +8,8 @@ import { prepareLoginStorage } from '@/lib/webKeyStore';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { setImageProxyTemplate } from '@core/imageProxy';
 import { IMAGE_PROXY_TEMPLATE_KEY } from '@/lib/imageProxySettings';
+import { setTitleProxyTemplate } from '@core/titleProxy';
+import { TITLE_PROXY_TEMPLATE_KEY } from '@/lib/titleProxySettings';
 import App from './App.tsx';
 import './index.css';
 
@@ -48,6 +50,14 @@ try {
   setImageProxyTemplate(localStorage.getItem(IMAGE_PROXY_TEMPLATE_KEY));
 } catch {
   /* localStorage unavailable — proxy stays disabled */
+}
+
+// Same for the YouTube title proxy — blank/unset means titles stay off and
+// no oEmbed request is ever made.
+try {
+  setTitleProxyTemplate(localStorage.getItem(TITLE_PROXY_TEMPLATE_KEY));
+} catch {
+  /* localStorage unavailable — titles stay disabled */
 }
 
 // When running inside Tauri, redirect console output to a log file so we can

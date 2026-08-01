@@ -23,6 +23,8 @@ import type { NostrEvent, NPool } from '@nostrify/nostrify';
 import type { NUser } from '@nostrify/react/login';
 import { FALLBACK_RELAYS, getUserRelays, getRelayCache, updateRelayCache, createRelayFresh } from '@/components/NostrProvider';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '@/lib/storageKeys';
+import { saveImageProxyTemplate } from '@/lib/imageProxySettings';
+import { saveTitleProxyTemplate } from '@/lib/titleProxySettings';
 import { fnv1a32 } from '@core/hashCore';
 import { SILENT_REMOVAL_LIMIT } from '@core/cacheConfig';
 import { randomUuid } from '@core/cryptoUtils';
@@ -35,7 +37,7 @@ import {
   evaluateManifestThinness,
   evaluateMergeHold,
   verifyBlobMatchesManifest,
-  pickRichestManifest,
+  pickRestoreCandidate,
   retainCheckpoints,
   shouldSuppressSilentSync,
   type ExplicitRestoreRecord,
@@ -926,6 +928,18 @@ async function mergeBackupIntoLocal(
   }
 
   await Promise.all(writes);
+
+  // Re-activate restored proxy preferences immediately. They boot from
+  // localStorage into module singletons, so a merged idb value alone would
+  // only take effect after a reload; save* writes localStorage + runtime
+  // (and the title proxy notifies its subscribers, so bars update live).
+  if (result.changedKeys.includes(STORAGE_KEYS.IMAGE_PROXY_TEMPLATE)) {
+    saveImageProxyTemplate(result.keys[STORAGE_KEYS.IMAGE_PROXY_TEMPLATE] ?? '');
+  }
+  if (result.changedKeys.includes(STORAGE_KEYS.TITLE_PROXY_TEMPLATE)) {
+    saveTitleProxyTemplate(result.keys[STORAGE_KEYS.TITLE_PROXY_TEMPLATE] ?? '');
+  }
+
   log?.(`Merged: ${restored} keys changed, ${result.removals.length} keys had removals`);
   return { restored, removals: result.removals };
 }
@@ -2057,10 +2071,14 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         return null;
       }
 
-      // Pick the newest manifest by created_at
-      let bestManifestEvent = manifestEvents.reduce((best, ev) =>
-        ev.created_at > best.created_at ? ev : best
-      );
+      // Pick the newest manifest by created_at; equal timestamps tie-break on
+      // the lower event id (deterministic, NIP-01 style) — a bare reduce kept
+      // whichever event happened to arrive first, so two devices saving in
+      // the same second could resolve differently on every check.
+      let bestManifestEvent = manifestEvents.reduce((best, ev) => {
+        if (ev.created_at !== best.created_at) return ev.created_at > best.created_at ? ev : best;
+        return ev.id < best.id ? ev : best;
+      });
       log(`Found backup event (created_at: ${bestManifestEvent.created_at})`);
 
       // ── Cold-restore reconciliation ─────────────────────────────────────
@@ -2103,14 +2121,19 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
           (d): d is { ev: NostrEvent; data: ManifestData } => !!d.data,
         );
         if (withStats.length > 0) {
-          const richest = pickRichestManifest(withStats.map(({ ev, data }) => ({
+          // Newest wins; content is only a data-loss VETO (zero corkboards
+          // when another candidate has some). The old rule ranked content
+          // first, so any older-but-richer checkpoint permanently outranked
+          // the user's newest save — the "keeps loading an older save state"
+          // bug.
+          const picked = pickRestoreCandidate(withStats.map(({ ev, data }) => ({
             id: ev.id,
             timestamp: data.timestamp || ev.created_at,
             stats: data.stats,
           })));
-          if (richest.id !== bestManifestEvent.id) {
-            const winnerEntry = withStats.find(({ ev }) => ev.id === richest.id)!;
-            log(`Content comparison overrides the clock-newest pick: ${richest.id.slice(0, 8)} (${richest.stats?.corkboards ?? 0} corkboards) over ${bestManifestEvent.id.slice(0, 8)} (created_at ${bestManifestEvent.created_at})`, 'warn');
+          if (picked.id !== bestManifestEvent.id) {
+            const winnerEntry = withStats.find(({ ev }) => ev.id === picked.id)!;
+            log(`Restore pick overrides the clock-newest event: ${picked.id.slice(0, 8)} (${picked.stats?.corkboards ?? 0} corkboards, ts ${picked.timestamp}) over ${bestManifestEvent.id.slice(0, 8)} (created_at ${bestManifestEvent.created_at})`, 'warn');
             bestManifestEvent = winnerEntry.ev;
           }
           // Feed every successfully-decrypted candidate into the checkpoint
@@ -2242,6 +2265,17 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
               : `Decrypt failed: ${msg}`, 'warn');
           }
         }
+      }
+
+      // Keep the (event, data) pair ATOMIC. When the chosen event's content
+      // couldn't be read this round, the previous check's decrypted manifest
+      // must not survive in manifestDataRef: loadRemoteBackup would apply
+      // that OLDER blob under this newer event's identity, then record this
+      // id as already-synced — the newer state never applied, never retried.
+      // With the ref cleared, the silent path bails ("unreadable this round")
+      // and the next tick retries the decrypt from scratch.
+      if (!manifest) {
+        manifestDataRef.current = null;
       }
 
       // Update rolling checkpoint list (max 3) with the best manifest.

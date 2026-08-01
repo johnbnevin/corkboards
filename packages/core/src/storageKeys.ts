@@ -48,6 +48,11 @@ export const STORAGE_KEYS = {
   BLOCKED_RELAYS: 'corkboard:blocked-relays',
   BOOKMARK_IDS: 'nostr-bookmark-ids',
   PINNED_NOTE_IDS: 'nostr-pinned-note-ids',
+  // Privacy proxies (shared — a deliberate preference the user expects to
+  // follow their account). Also preserved across the logout wipe, so a
+  // signed-out device keeps its protection.
+  IMAGE_PROXY_TEMPLATE: 'corkboard:image-proxy-template',
+  TITLE_PROXY_TEMPLATE: 'corkboard:title-proxy-template',
 
   // Checkpoint metadata (Blossom backup history — discovered from relays, not backed up)
   REMOTE_CHECKPOINTS: 'corkboard:remote-checkpoints',
@@ -237,6 +242,8 @@ const SHARED_BACKED_UP_KEYS = [
   STORAGE_KEYS.IMAGE_SIZE_LIMIT,
   STORAGE_KEYS.AVATAR_SIZE_LIMIT,
   STORAGE_KEYS.AUTOFETCH_INTERVAL_SECS,
+  STORAGE_KEYS.IMAGE_PROXY_TEMPLATE,
+  STORAGE_KEYS.TITLE_PROXY_TEMPLATE,
 ];
 
 /**

@@ -24,6 +24,8 @@ import type { NSecSigner, NConnectSigner } from '@nostrify/nostrify';
 type BackupSigner = NSecSigner | NConnectSigner;
 import { mobileStorage, isStorageHealthy } from '../storage/MmkvStorage';
 import { BACKED_UP_KEYS, STORAGE_KEYS } from '../lib/storageKeys';
+import { setImageProxyTemplate } from '@core/imageProxy';
+import { setTitleProxyTemplate } from '@core/titleProxy';
 import { FALLBACK_RELAYS, getUserRelays, getRelayCache, createRelayFresh, useNostr } from '../lib/NostrProvider';
 import {
   importAesKey, aesDecrypt, hexToRawKey, encryptForSelf,
@@ -909,7 +911,9 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
 
       if (published === 0) throw new Error('No relays accepted the manifest');
 
-      // Store checkpoint locally
+      // Store checkpoint locally — WITH stats. Without them this entry scored
+      // zero under every content-aware rule (restore veto, retention richness),
+      // so a manual "Save now" was instantly outranked by any older autosave.
       const cp: RemoteCheckpoint = {
         eventId: manifestEvent.id,
         dTag,
@@ -918,6 +922,7 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         ...(blossomHash ? { blossomHash } : {}),
         wrappedKey,
         signerMethod,
+        stats,
       };
       const existing = getStoredCheckpoints();
       const updated = [cp, ...existing];
@@ -1205,8 +1210,12 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
             liveDecryptSpent = true;
           } catch (err) {
             if (err instanceof Error && err.message === 'decrypt_timeout') signerTimedOut = true;
-            liveDecryptSpent = true;
-            /* decrypt failed or timed out — skip */
+            // Budget NOT spent on failure: charging it meant one signer
+            // hiccup excluded the newest manifest from this check while
+            // older cache-served ones still qualified — the newest save got
+            // starved out of the candidate list. A timeout still stops
+            // further attempts via signerTimedOut.
+            /* decrypt failed or timed out — skip this event */
           }
         }
       }
@@ -1216,7 +1225,10 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         cps.push({
           eventId: ev.id,
           dTag,
-          timestamp: ev.created_at,
+          // Manifest's own save time when readable (parity with web) — the
+          // relay event's created_at can trail it by a slow signer round-trip,
+          // which made the same save rank differently on the two platforms.
+          timestamp: (typeof data.timestamp === 'number' && data.timestamp > 0 ? data.timestamp : ev.created_at),
           blossomUrl: data.blossomUrl as string,
           blossomHash: data.blossomHash as string | undefined,
           wrappedKey: data.wrappedKey as string,
@@ -1226,14 +1238,21 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       } catch { /* ignore malformed */ }
     }
 
-    // Safety: merge with stored checkpoints. Only a DISMISSED regression is a
-    // worry (a fresh install autosaving an empty list over a full one) —
-    // fewer saved notes is a legitimate cleanup that must stay visible to
-    // other devices (parity with web; shared rule in @core/backupGuards).
+    // Safety: merge with stored checkpoints. Thinness is a WARNING here, not
+    // a filter — hard-dropping any candidate whose corkboards count regressed
+    // meant one deleted board made every newer manifest invisible to the
+    // automatic path forever (the "phone keeps loading the older save" bug).
+    // The restore pick itself (pickRestoreCandidate) still vetoes the real
+    // danger case: zero corkboards against a non-zero candidate.
     const stored = getStoredCheckpoints();
     const newestStored = stored.length > 0 ? stored[0] : null;
-    const safeCps = cps.filter(cp =>
-      evaluateManifestThinness(newestStored?.stats, cp.stats) === 'ok');
+    for (const cp of cps) {
+      const thinness = evaluateManifestThinness(newestStored?.stats, cp.stats);
+      if (thinness !== 'ok') {
+        log(`Checkpoint ${cp.eventId.slice(0, 8)} looks thinner than stored newest (${thinness}) — kept in the list, restore pick guards the empty case`);
+      }
+    }
+    const safeCps = cps;
     // Merge fresh events with stored — dedup by event id, name preservation,
     // and retention all live in setStoredCheckpoints (shared @core rule), so
     // a fresh thin manifest can no longer evict an older, richer entry.
@@ -1369,17 +1388,31 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       const { changed, removals } = mergeBackupIntoLocal(json);
       log(`Settings merged: ${changed} keys changed, ${removals.length} with removals`);
 
+      // Re-activate restored proxy preferences immediately — they're read
+      // into module singletons at app launch, so a merged storage value
+      // alone would only take effect after a restart.
+      setImageProxyTemplate(mobileStorage.getSync(STORAGE_KEYS.IMAGE_PROXY_TEMPLATE));
+      setTitleProxyTemplate(mobileStorage.getSync(STORAGE_KEYS.TITLE_PROXY_TEMPLATE));
+
       // Record what we're now synced to, or the next sync tick re-merges the
       // same snapshot forever and hasUnsavedChanges() misfires. Baseline is
       // the remote state when local contributed content the cloud lacks, so
       // the auto-save trigger pushes the union (see saveSnapshot).
-      mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(checkpoint.timestamp));
+      //
+      // Math.max (parity with web): merging an OLDER checkpoint must never
+      // move this clock backwards. When it did, the phone believed it was at
+      // the old save's time, hasUnsavedChanges() fired, and autosave
+      // republished the merged/older state as the NEWEST :auto manifest —
+      // spreading a bad older pick to every other device.
+      const localTsNow = parseInt(mobileStorage.getSync(LAST_BACKUP_TS_KEY) || '0', 10);
+      const stampTs = Math.max(checkpoint.timestamp, localTsNow);
+      mobileStorage.setSync(LAST_BACKUP_TS_KEY, String(stampTs));
       setLastSyncedManifestId(checkpoint.eventId);
       // Only a MANUAL restore counts as an explicit choice worth protecting
       // against a later silent override — a silent merge just following the
       // clock is not a deliberate decision to defend.
       if (!silent) setLastExplicitRestore({ id: checkpoint.eventId, timestamp: checkpoint.timestamp, decidedAt: Math.floor(Date.now() / 1000) });
-      setLastBackupTs(checkpoint.timestamp);
+      setLastBackupTs(stampTs);
       saveSnapshot(localContributed ? remoteSnapshot.keys : undefined);
       if (localContributed) log('Local content not yet in cloud — auto-save will push the merged state');
 

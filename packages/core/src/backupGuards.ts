@@ -173,17 +173,55 @@ export interface ManifestCandidate {
 }
 
 /**
- * Choose the most complete candidate among several manifests, for the one
- * moment picking by wall-clock `created_at` alone is unsafe: the FIRST
- * restore on a device with nothing local yet to sanity-check the clock-pick
- * against. A manifest that is merely a later SAVE (clock skew between
- * devices, or a save that raced a richer one) can otherwise permanently
- * outrank a far more complete backup.
+ * Choose the manifest AUTO-restore should apply: the NEWEST by timestamp,
+ * with content demoted to a data-loss veto.
+ *
+ * This replaced `pickRichestManifest` as the restore-selection rule. Ranking
+ * by content first ("older but richer wins") was the bug where a device kept
+ * loading an old save state forever: the moment the user deleted a corkboard
+ * or cleaned up saved/dismissed notes, every NEWER save had "less" than some
+ * older checkpoint, so the older one won every automatic pick — and once
+ * applied, its id was recorded as already-synced and each later tick reported
+ * "nothing new". The newest state the user actually made was visible only in
+ * the manual restore menu (which sorts newest-first and bypasses the rank).
+ *
+ * Rules:
+ *   - Newest `timestamp` wins; equal timestamps tie-break on the lower event
+ *     id (deterministic, NIP-01 style) so relay arrival order never decides.
+ *   - A candidate reporting ZERO corkboards while another candidate has some
+ *     is vetoed — that is the empty-envelope / wiped-storage signal, the one
+ *     regression that must never silently win.
+ *   - Missing stats are NOT penalized (older manifests and legacy mobile
+ *     manual saves lack them; unknown is not evidence of loss).
+ *   - If every candidate is vetoed, fall back to the plain newest.
+ */
+export function pickRestoreCandidate<T extends ManifestCandidate>(candidates: readonly T[]): T {
+  if (candidates.length === 0) throw new Error('pickRestoreCandidate: no candidates')
+  const newestFirst = [...candidates].sort((a, b) =>
+    b.timestamp !== a.timestamp ? b.timestamp - a.timestamp : (a.id < b.id ? -1 : 1),
+  )
+  const anyHasCorkboards = newestFirst.some(c => (c.stats?.corkboards ?? 0) > 0)
+  for (const cand of newestFirst) {
+    const corkboards = cand.stats?.corkboards
+    // Veto only an EXPLICIT zero against a field that is somewhere non-zero.
+    if (anyHasCorkboards && corkboards === 0) continue
+    return cand
+  }
+  return newestFirst[0]
+}
+
+/**
+ * Choose the most complete candidate among several manifests.
+ *
+ * NOT the restore-selection rule — that is `pickRestoreCandidate` above
+ * (newest wins; content-first selection was the "device keeps loading an old
+ * save" bug). This ranking survives for RETENTION only: when trimming stored
+ * checkpoints, the richest old entry is kept from aging out, whatever its
+ * age, so the one copy that still has the corkboards stays restorable.
  *
  * Corkboards weigh most (few, hand-curated, effectively impossible to
  * reconstruct from memory), then combined saved+dismissed count, then
- * recency as the final tiebreaker — so this agrees with the plain
- * newest-by-timestamp pick whenever there is nothing to disagree about.
+ * recency as the final tiebreaker.
  */
 export function pickRichestManifest<T extends ManifestCandidate>(candidates: readonly T[]): T {
   if (candidates.length === 0) throw new Error('pickRichestManifest: no candidates')

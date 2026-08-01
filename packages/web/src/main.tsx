@@ -10,6 +10,7 @@ import { setImageProxyTemplate } from '@core/imageProxy';
 import { IMAGE_PROXY_TEMPLATE_KEY } from '@/lib/imageProxySettings';
 import { setTitleProxyTemplate } from '@core/titleProxy';
 import { TITLE_PROXY_TEMPLATE_KEY } from '@/lib/titleProxySettings';
+import { idbReady, idbGetSync, idbSetSync } from '@/lib/idb';
 import App from './App.tsx';
 import './index.css';
 
@@ -59,6 +60,18 @@ try {
 } catch {
   /* localStorage unavailable — titles stay disabled */
 }
+
+// One-time mirror of the proxy preferences into the idb layer the backup
+// snapshot reads — existing users set them before they were backed up, so
+// their values live only in localStorage. Idempotent; restore writes both.
+void idbReady.then(() => {
+  try {
+    for (const key of [IMAGE_PROXY_TEMPLATE_KEY, TITLE_PROXY_TEMPLATE_KEY]) {
+      const v = localStorage.getItem(key);
+      if (v && idbGetSync(key) === null) idbSetSync(key, v);
+    }
+  } catch { /* mirror is best-effort */ }
+});
 
 // When running inside Tauri, redirect console output to a log file so we can
 // diagnose production issues without a devtools window.

@@ -5,6 +5,7 @@ import {
   evaluateMergeHold,
   verifyBlobMatchesManifest,
   pickRichestManifest,
+  pickRestoreCandidate,
   retainCheckpoints,
   shouldSuppressSilentSync,
   BLOB_MANIFEST_MAX_SKEW_SECS,
@@ -191,7 +192,53 @@ describe('evaluateMergeHold', () => {
   })
 })
 
-describe('pickRichestManifest', () => {
+describe('pickRestoreCandidate', () => {
+  it('newest timestamp wins even when an older candidate is richer', () => {
+    const winner = pickRestoreCandidate([
+      { id: 'rich-but-older', timestamp: 100, stats: { corkboards: 4, savedForLater: 160, dismissed: 1863 } },
+      { id: 'newer-after-cleanup', timestamp: 200, stats: { corkboards: 3, savedForLater: 5, dismissed: 5 } },
+    ])
+    expect(winner.id).toBe('newer-after-cleanup')
+  })
+
+  it('vetoes a zero-corkboards newest when another candidate has corkboards', () => {
+    const winner = pickRestoreCandidate([
+      { id: 'empty-newest', timestamp: 300, stats: { corkboards: 0, savedForLater: 0, dismissed: 0 } },
+      { id: 'good-older', timestamp: 100, stats: { corkboards: 4, savedForLater: 100, dismissed: 500 } },
+    ])
+    expect(winner.id).toBe('good-older')
+  })
+
+  it('does not penalize missing stats — unknown is not evidence of loss', () => {
+    const winner = pickRestoreCandidate([
+      { id: 'no-stats-newest', timestamp: 300 },
+      { id: 'rich-older', timestamp: 100, stats: { corkboards: 4, savedForLater: 50, dismissed: 50 } },
+    ])
+    expect(winner.id).toBe('no-stats-newest')
+  })
+
+  it('falls back to the plain newest when every candidate is vetoed', () => {
+    const winner = pickRestoreCandidate([
+      { id: 'zero-newest', timestamp: 300, stats: { corkboards: 0 } },
+      { id: 'zero-older', timestamp: 100, stats: { corkboards: 0 } },
+    ])
+    // No candidate has corkboards > 0, so no veto applies — newest wins.
+    expect(winner.id).toBe('zero-newest')
+  })
+
+  it('tie-breaks equal timestamps on the lower id, deterministically', () => {
+    const a = { id: 'aaaa', timestamp: 200, stats: { corkboards: 1 } }
+    const b = { id: 'bbbb', timestamp: 200, stats: { corkboards: 1 } }
+    expect(pickRestoreCandidate([a, b]).id).toBe('aaaa')
+    expect(pickRestoreCandidate([b, a]).id).toBe('aaaa')
+  })
+
+  it('throws on an empty candidate list', () => {
+    expect(() => pickRestoreCandidate([])).toThrow()
+  })
+})
+
+describe('pickRichestManifest (retention only)', () => {
   it('prefers more corkboards over a later timestamp', () => {
     const winner = pickRichestManifest([
       { id: 'thin-but-newer', timestamp: 200, stats: { corkboards: 1, savedForLater: 5, dismissed: 5 } },

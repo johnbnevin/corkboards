@@ -13,7 +13,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { idbGet, idbGetSync } from '@/lib/idb';
-import { pickRichestManifest } from '@core/backupGuards';
+import { pickRestoreCandidate } from '@core/backupGuards';
 
 export interface CheckpointSummary {
   timestamp: number;
@@ -66,11 +66,11 @@ export function useAutoRestoreGuard<T extends CheckpointSummary>({
         (cp.stats?.dismissed ?? 0) > 0,
       );
       const pool = withData.length > 0 ? withData : checkpoints;
-      // Richest, not merely newest-by-clock — a clock-skewed device, or a
-      // save that raced a richer one, can otherwise auto-restore a manifest
-      // that is only LATER, not better, on the single highest-stakes read
-      // (a device with nothing local yet to sanity-check the pick against).
-      const best = pickRichestManifest(
+      // Newest wins; content is only a data-loss veto (zero corkboards while
+      // another candidate has some). Ranking content first here was the
+      // "keeps loading an older save state" bug: after any deletion/cleanup,
+      // an older-but-richer checkpoint outranked every newer save forever.
+      const best = pickRestoreCandidate(
         pool.map(cp => ({ id: cp.eventId ?? '', timestamp: cp.timestamp, stats: cp.stats, _cp: cp })),
       )._cp;
       if (lastBackupTs && lastBackupTs >= best.timestamp) return;

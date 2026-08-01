@@ -36,7 +36,7 @@ import {
   AUTO_SAVE_STARTUP_COOLDOWN_MS,
 } from '@core/cacheConfig';
 import { createSyncScheduler, type SchedulerResetReason } from '@core/syncScheduler';
-import { pickRichestManifest } from '@core/backupGuards';
+import { pickRestoreCandidate } from '@core/backupGuards';
 
 /** A sync attempt that has not settled in this long is presumed dead —
  *  without the escape, a hung check wedges every future tick (parity with
@@ -126,16 +126,14 @@ export function AutoSaveManager() {
           _scheduler.recordCheckResult('nothing-new');
           return;
         }
-        // Richest, not merely newest-by-clock: a clock-skewed device (or a
-        // save that raced a richer one) can produce a manifest that is only
-        // LATER, not better — and picking by timestamp let it win forever,
-        // since every tick rediscovers it as "not yet synced" and re-merges
-        // it. Corkboards weigh most (few, hand-curated), then combined
-        // saved+dismissed, then timestamp as the final tiebreaker — so this
-        // agrees with the plain newest pick whenever there's nothing to
-        // disagree about. Cheap: `cps` already carries every candidate's
-        // stats from checkForBackup, no extra decrypt.
-        const newest = pickRichestManifest(
+        // Newest wins; content is only a data-loss veto (zero corkboards
+        // while another candidate has some). The previous richest-first rank
+        // was the "phone keeps loading the older save" bug: run on the WHOLE
+        // stored checkpoint history every 30 s, any older checkpoint with
+        // one more board or more saved/dismissed items outranked the user's
+        // newest save forever — and once merged, its id became the
+        // already-synced id, so every later tick reported "nothing new".
+        const newest = pickRestoreCandidate(
           cps.map(cp => ({ id: cp.eventId, timestamp: cp.timestamp, stats: cp.stats, _cp: cp })),
         )._cp;
 

@@ -1149,6 +1149,13 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
       `${D_TAG_PREFIX}:auto`,
       ...Array.from({ length: MANUAL_BACKUP_SLOTS }, (_, i) => `${D_TAG_PREFIX}:s${i}`),
     ];
+    // Per-relay outcomes, so "6 relays timed out" is distinguishable from "no
+    // backup exists". Swallowing every failure here meant a starved or
+    // unreachable relay set reported the same thing as a genuinely empty
+    // account — and the user was told "No backups found" while their backup
+    // sat safely on relays that never got asked.
+    const answered: string[] = [];
+    const failed: string[] = [];
     for (let i = 0; i < relays.length; i += 4) {
       const batch = relays.slice(i, i + 4);
       await Promise.allSettled(batch.map(async url => {
@@ -1156,13 +1163,21 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
         try {
           const events = await relay.query(
             [{ kinds: [30078], authors: [pubkey], '#d': slotDTags, limit: slotDTags.length }],
-            { signal: AbortSignal.timeout(5000) },
+            // timeoutMs, NOT a pre-armed signal: the governed wrapper arms the
+            // clock once this query actually gets a slot, so time spent queued
+            // behind feed traffic is no longer charged to the relay (which
+            // made every relay "fail" at once without a byte being sent).
+            { timeoutMs: 6000 } as unknown as { signal?: AbortSignal },
           );
+          answered.push(url);
           for (const ev of events) {
             if (!seen.has(ev.id)) { seen.add(ev.id); allEvents.push(ev); }
           }
           log(`  ${url}: ${events.length} backup manifest(s)`);
-        } catch { /* timeout ok */ } finally {
+        } catch (err) {
+          failed.push(url);
+          log(`  ${url}: no answer (${err instanceof Error ? err.message : 'timeout'})`);
+        } finally {
           try { relay.close(); } catch { /* */ }
         }
       }));
@@ -1170,9 +1185,19 @@ export function useNostrBackup(pubkey: string | null, signer: BackupSigner | nul
 
     if (allEvents.length === 0) {
       setStatus('no-backup');
-      setMessage('No backups found');
-      log('No backups found');
+      // Say WHICH it is. An all-silent relay set is a network/starvation
+      // problem the user can retry; a genuinely empty result is not.
+      if (answered.length === 0 && failed.length > 0) {
+        setMessage(`No relay answered (${failed.length}/${relays.length}) — try again`);
+        log(`No relay answered: ${failed.length} of ${relays.length} timed out — this is not proof that no backup exists`);
+      } else {
+        setMessage('No backups found');
+        log(`No backups found (${answered.length}/${relays.length} relays answered)`);
+      }
       return;
+    }
+    if (failed.length > 0) {
+      log(`Note: ${failed.length} of ${relays.length} relays didn't answer — the newest backup may not have been visible`);
     }
 
     // Parse checkpoints from events (plaintext → cached decrypt → live decrypt).

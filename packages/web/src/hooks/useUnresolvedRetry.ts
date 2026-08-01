@@ -77,19 +77,23 @@ export function useUnresolvedRetry(): UseUnresolvedRetryResult {
     queryClient.invalidateQueries({ queryKey: ['parent-notes'] });
 
     // Per-id refetches (quoted notes + singular parents), staggered so they
-    // don't burst — but capped so a full batch always fits INSIDE the sweep
-    // interval. At the old fixed 500ms, 40 ids took 19.5s against a 15s
-    // interval, so the in-flight guard was still held when the next tick
-    // arrived and every other sweep was refused.
+    // don't burst — and sized so a full batch occupies only a fraction of the
+    // interval. With MAX_PER_SWEEP=12 at 500ms over a 30s interval that is ~6s
+    // of activity per 30s (20% duty cycle). The previous 40-ids-per-15s
+    // settings ran at ~85%, which left the shared socket budget permanently
+    // owned by the sweep: cloud-backup discovery timed out behind it, and the
+    // sweep's own outbox lookups starved each other.
     const staggerMs = Math.min(
       SWEEP_STAGGER_MS,
       Math.max(50, Math.floor((SWEEP_INTERVAL_MS - 2000) / batch.length)),
     );
     batch.forEach((noteId, i) => {
       timersRef.current.push(setTimeout(() => {
+        // Both keys, because an id is rendered through EITHER NoteLink
+        // (['note', id]) or useParentNote (['parent-note', id]) — never both.
+        // Invalidating a key with no mounted query is a no-op, so this costs
+        // one refetch per id, not two.
         queryClient.invalidateQueries({ queryKey: ['note', noteId] });
-        // The SINGULAR key (useParentNote) was never invalidated — a stuck
-        // single-parent lookup sat out every sweep.
         queryClient.invalidateQueries({ queryKey: ['parent-note', noteId] });
         // Release the guard after the last one is dispatched.
         if (i === batch.length - 1) inFlightRef.current = false;

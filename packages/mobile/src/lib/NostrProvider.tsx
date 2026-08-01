@@ -12,7 +12,7 @@ import { mobileStorage } from '../storage/MmkvStorage';
 import { isSecureRelay } from '@core/nostrUtils';
 import { RELAY_CACHE_TTL_MS } from '@core/cacheConfig';
 import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
-import { withQueryBudget, configureQueryGovernor, defaultMaxConcurrent, lookupPriority } from '@core/queryGovernor';
+import { withQueryBudget, acquireQuerySlot, armQuerySignal, configureQueryGovernor, defaultMaxConcurrent, lookupPriority } from '@core/queryGovernor';
 import { getSessionSignal } from '../hooks/useSessionAbort';
 import { FALLBACK_RELAYS, READ_ONLY_RELAYS, ZAP_RELAYS } from '@core/relayConstants';
 import { useAuth } from './AuthContext';
@@ -357,24 +357,75 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
   }
 
   const inner = new NRelay1(url, withAuth(url, opts));
+  governRelay(inner, url);
+  _relayCache.set(url, { relay: inner, createdAt: Date.now() });
+  return inner;
+}
+
+/**
+ * Wrap a relay's query/req/event in the global concurrency ceiling and the
+ * per-URL rate limit. Shared by cached and fresh relays so the two can't
+ * drift.
+ *
+ * Three things here are load-bearing, all learned from the "sync from another
+ * device says 6 of 6 relays didn't respond" failure:
+ *
+ * 1. `req` is governed too. It used to be exempt on mobile (web always
+ *    governed it), and `req` is exactly what the outbox/author-relay discovery
+ *    path uses — so the nested-content retry sweep opened ~30 sockets that
+ *    consumed no budget, while the backup manifest query, which IS governed,
+ *    queued behind the load the sweep created. The governor was throttling the
+ *    victim and letting the aggressor run free.
+ * 2. The rate-limit sleep happens BEFORE taking a budget slot, not inside it.
+ *    Holding one of 12 slots while doing nothing but `setTimeout` starved real
+ *    work behind tasks that weren't using the network at all.
+ * 3. Timeouts are armed INSIDE the slot via `armQuerySignal` when the caller
+ *    passes `timeoutMs`. See that function for why a pre-armed signal turns
+ *    queue wait into a fake relay timeout.
+ */
+function governRelay(inner: NRelay1, url: string): void {
   const origQuery = inner.query.bind(inner);
+  const origReq = inner.req.bind(inner);
   const origEvent = inner.event.bind(inner);
-  // Global ceiling first, per-URL rate limit second. The rate limiter is
-  // per-relay and says nothing about total load, so many subsystems each
-  // querying distinct relays sail through it while the device opens dozens of
-  // concurrent TLS connections. The governor is what bounds that.
-  inner.query = async (filters, qOpts) => withQueryBudget(async () => {
+
+  inner.query = async (filters, qOpts) => {
     await waitForRateLimit(url);
-    try { const r = await origQuery(filters, qOpts); recordRelaySuccess(url); return r; }
-    catch (e) { recordRelayFailure(url); throw e; }
-  }, { priority: lookupPriority(filters) });
+    return withQueryBudget(async () => {
+      const signal = armQuerySignal(
+        (qOpts as { timeoutMs?: number } | undefined)?.timeoutMs,
+        qOpts?.signal,
+      );
+      try {
+        const r = await origQuery(filters, signal ? { ...qOpts, signal } : qOpts);
+        recordRelaySuccess(url);
+        return r;
+      } catch (e) { recordRelayFailure(url); throw e; }
+    }, { priority: lookupPriority(filters) });
+  };
+
+  // req returns an async generator, so it can't be wrapped in withQueryBudget
+  // (which resolves when its callback returns — the subscription outlives
+  // that). Rate-limit it and count it against the ceiling for the duration of
+  // the iteration instead: that is what stops the sweep's fan-out from being
+  // invisible to the budget.
+  inner.req = ((filters: Parameters<typeof origReq>[0], rOpts?: Parameters<typeof origReq>[1]) => {
+    async function* governed() {
+      await waitForRateLimit(url);
+      const release = await acquireQuerySlot({ priority: lookupPriority(filters) });
+      try {
+        for await (const msg of origReq(filters, rOpts)) yield msg;
+        recordRelaySuccess(url);
+      } catch (e) { recordRelayFailure(url); throw e; }
+      finally { release(); }
+    }
+    return governed();
+  }) as typeof inner.req;
+
   inner.event = async (event, eOpts) => {
     await waitForRateLimit(url);
     try { await origEvent(event, eOpts); recordRelaySuccess(url); }
     catch (e) { recordRelayFailure(url); throw e; }
   };
-  _relayCache.set(url, { relay: inner, createdAt: Date.now() });
-  return inner;
 }
 
 /**
@@ -385,22 +436,7 @@ export function createRelay(url: string, opts?: ConstructorParameters<typeof NRe
  */
 export function createRelayFresh(url: string, opts?: ConstructorParameters<typeof NRelay1>[1]): NRelay1 {
   const inner = new NRelay1(url, withAuth(url, opts));
-  const origQuery = inner.query.bind(inner);
-  const origEvent = inner.event.bind(inner);
-  // Global ceiling first, per-URL rate limit second. The rate limiter is
-  // per-relay and says nothing about total load, so many subsystems each
-  // querying distinct relays sail through it while the device opens dozens of
-  // concurrent TLS connections. The governor is what bounds that.
-  inner.query = async (filters, qOpts) => withQueryBudget(async () => {
-    await waitForRateLimit(url);
-    try { const r = await origQuery(filters, qOpts); recordRelaySuccess(url); return r; }
-    catch (e) { recordRelayFailure(url); throw e; }
-  }, { priority: lookupPriority(filters) });
-  inner.event = async (event, eOpts) => {
-    await waitForRateLimit(url);
-    try { await origEvent(event, eOpts); recordRelaySuccess(url); }
-    catch (e) { recordRelayFailure(url); throw e; }
-  };
+  governRelay(inner, url);
   return inner;
 }
 

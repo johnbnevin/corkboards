@@ -7,7 +7,7 @@ import { useNostrLogin } from '@nostrify/react/login';
 import { Router, getFilterSelections, addMinimalFallbacks } from '@welshman/router';
 import type { TrustedEvent, Filter } from '@welshman/util';
 import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } from '@core/router';
-import { withQueryBudget, acquireQuerySlot, configureQueryGovernor, defaultMaxConcurrent, lookupPriority } from '@core/queryGovernor';
+import { withQueryBudget, acquireQuerySlot, armQuerySignal, configureQueryGovernor, defaultMaxConcurrent, lookupPriority } from '@core/queryGovernor';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
 import { isTauri, tauriQuery, isPublishBlockedByProxy } from '@/lib/tauri';
@@ -390,9 +390,11 @@ class RateLimitedRelay implements NRelay {
     // A generator holds its socket across every yield, so it holds its slot for
     // its whole lifetime — released in `finally` so an early `break` (consumers
     // routinely break on EOSE) still frees it.
+    // Rate-limit BEFORE taking the slot: sleeping inside one holds a scarce
+    // budget slot while using no network, starving work that would use it.
+    await waitForRateLimit(this.url);
     const releaseSlot = await acquireQuerySlot({ priority: lookupPriority(filters) });
     try {
-      await waitForRateLimit(this.url);
       // Record success on the first EVENT/EOSE message rather than at generator
       // completion — consumers that `break` on EOSE trigger generator return(),
       // which would skip a post-loop recordRelaySuccess entirely.
@@ -414,11 +416,19 @@ class RateLimitedRelay implements NRelay {
     }
   }
 
-  async query(filters: NostrFilter[], opts?: { signal?: AbortSignal }): Promise<NostrEvent[]> {
+  async query(
+    filters: NostrFilter[],
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<NostrEvent[]> {
+    // Rate-limit outside the slot (see req above).
+    await waitForRateLimit(this.url);
     return withQueryBudget(async () => {
-      await waitForRateLimit(this.url);
+      // `timeoutMs` callers get their clock armed HERE, after the slot is
+      // theirs — a pre-armed signal charges queue time to the relay and makes
+      // healthy relays look uniformly dead. See armQuerySignal.
+      const signal = armQuerySignal(opts?.timeoutMs, opts?.signal);
       try {
-        const result = await this.inner.query(filters, opts);
+        const result = await this.inner.query(filters, signal ? { ...opts, signal } : opts);
         recordRelaySuccess(this.url);
         return result;
       } catch (e) {

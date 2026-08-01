@@ -68,9 +68,11 @@ export function useUnresolvedRetry(): UseUnresolvedRetryResult {
     // invalidations re-ran the same query up to 40 times per sweep.
     queryClient.invalidateQueries({ queryKey: ['parent-notes'] });
 
-    // Per-id refetches, staggered but capped so a full batch fits inside the
-    // sweep interval (a fixed 500ms × 40 overran the 15s interval and made
-    // every other sweep refuse as in-flight).
+    // Per-id refetches, staggered and sized so a batch occupies only a
+    // fraction of the interval (~6s per 30s with MAX_PER_SWEEP=12). The old
+    // 40-per-15s settings ran an ~85% duty cycle and owned the shared socket
+    // budget, which starved cloud-backup discovery AND the sweep's own outbox
+    // lookups — a retry loop that prevented its own success.
     const staggerMs = Math.min(
       SWEEP_STAGGER_MS,
       Math.max(50, Math.floor((SWEEP_INTERVAL_MS - 2000) / batch.length)),

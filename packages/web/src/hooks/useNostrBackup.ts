@@ -1810,8 +1810,16 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       try {
         // Bypass backoff — backup queries are critical for login
         const relay = createRelayFresh(normalizeRelay(url), { backoff: false });
-        const signal = AbortSignal.any([AbortSignal.timeout(perRelayTimeoutMs), overallAbort.signal]);
-        const events = await relay.query([filter], { signal });
+        // timeoutMs (armed inside the governor slot), NOT a pre-armed signal:
+        // otherwise queue time behind feed fan-outs is charged to the relay and
+        // every relay "fails" simultaneously without a byte being sent — the
+        // "N of M backup relays didn't respond" report on healthy relays.
+        // The overall abort still applies immediately; that one is a real
+        // deadline for the whole check, not a per-relay budget.
+        const events = await relay.query([filter], {
+          signal: overallAbort.signal,
+          timeoutMs: perRelayTimeoutMs,
+        } as { signal: AbortSignal; timeoutMs: number });
         log(`  ${url}: ${events.length} ${label}`);
         _backupRelaysUsed.add(url);
         report.answered.push(url);
@@ -2870,7 +2878,16 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       }
       return { status: 'merged', remoteTs, localTs };
     } catch (err) {
-      const detail = err instanceof Error ? (err.message || err.name) : String(err);
+      // Translate the same way the auto-save path does. This used to leak the
+      // raw message, so a Promise.any rejection reached the user as
+      // "All promises were rejected" — the literal runtime string for
+      // AggregateError, which says nothing about relays and nothing the user
+      // can act on. (Reported verbatim from a real session.)
+      const detail = err instanceof Error
+        ? (err.name === 'AggregateError' || /all promises were rejected/i.test(err.message)
+            ? 'No relay answered the backup query. Your relays may be slow or unreachable — wait a moment and try again.'
+            : (err.message || err.name))
+        : String(err);
       log('Manual sync failed: ' + detail, 'error');
       return { status: 'error', detail };
     }

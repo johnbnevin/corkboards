@@ -295,6 +295,31 @@ export function acquireQuerySlot(opts?: { epoch?: number; priority?: 'high' | 'n
  * Shared by web, desktop-native and mobile so the three platforms cannot
  * disagree about what jumps the queue.
  */
+/**
+ * Build the AbortSignal for a governed query, arming its timeout ONLY once the
+ * work actually starts.
+ *
+ * `AbortSignal.timeout(n)` passed as an argument starts counting at CALL time,
+ * which for governed work is when the query joins the queue — so queue wait is
+ * charged against the relay's budget. A query that waited 6s behind a feed
+ * fan-out then ran already-aborted and was recorded as "the relay didn't
+ * respond" though nothing was ever sent. That produced the "no backup found,
+ * 6 of 6 relays didn't respond" report while the relays were perfectly healthy.
+ *
+ * Callers pass `timeoutMs` instead of a pre-armed signal; the relay wrapper
+ * calls this INSIDE its `withQueryBudget` callback. Any caller-supplied signal
+ * (a real user cancellation) is still honored, combined with the fresh timeout.
+ */
+export function armQuerySignal(
+  timeoutMs: number | undefined,
+  callerSignal?: AbortSignal,
+): AbortSignal | undefined {
+  if (timeoutMs === undefined) return callerSignal;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  if (!callerSignal) return timeout;
+  return AbortSignal.any([callerSignal, timeout]);
+}
+
 export function lookupPriority(filters: readonly unknown[]): 'high' | 'normal' {
   if (filters.length === 0) return 'normal';
   const targeted = filters.every((raw) => {
@@ -304,8 +329,16 @@ export function lookupPriority(filters: readonly unknown[]): 'high' | 'normal' {
     if (Array.isArray(ids) && ids.length > 0 && ids.length <= 60) return true;
     const authors = f['authors'];
     const d = f['#d'];
+    // Cap is 8, not 5. The BACKUP MANIFEST query asks one author for six
+    // d-tags (`…:auto` plus five manual slots), so a cap of 5 dropped cloud
+    // backup discovery — the most consequential lookup in the app — into the
+    // bulk lane behind feed fan-outs. It then queued long enough that its
+    // per-relay abort (armed before queuing) fired first, and the user saw
+    // "no backup found, 6 of 6 relays didn't respond" when nothing had been
+    // sent. 8 leaves room for a slot or two more without admitting anything
+    // feed-shaped: this is still one author's addressable events.
     if (Array.isArray(authors) && authors.length === 1
-      && Array.isArray(d) && d.length > 0 && d.length <= 5) return true;
+      && Array.isArray(d) && d.length > 0 && d.length <= 8) return true;
     // A NIP-46 RPC response subscription (kind 24133): one tiny event from
     // one bunker, and EVERY signer operation — sign, encrypt, decrypt —
     // blocks on it. Left in the normal lane it queued behind bulk feed

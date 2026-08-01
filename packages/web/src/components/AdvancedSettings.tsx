@@ -854,11 +854,11 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
           </Button>
         </div>
         <p className="text-[10px] text-muted-foreground">
-          <strong>Only the corkboards.me server could theoretically see which videos appear in your feed — YouTube/Google never sees you at all.</strong>{' '}
-          Corkboards&apos; proxy code keeps no logs and stores nothing about lookups, and we will never monitor or retain them.
-          Lookups travel in the request body, so our hosting provider&apos;s standard access logs (kept ~7 days) record only
-          that your IP used the title service — never which videos. If you&apos;d rather trust no one, self-host
-          <code> youtube-proxy.php</code> or leave titles off.
+          <strong>Only the corkboards.me server could theoretically see which videos appear in your feed</strong> — but
+          we keep no logs and store nothing about lookups, and we will never monitor or retain them. YouTube/Google
+          never sees you at all. Lookups travel in the request body, so our hosting provider&apos;s standard access logs
+          (kept ~7 days) record only that your IP used the title service — never which videos. If you&apos;d rather
+          trust no one, self-host <code>youtube-proxy.php</code> or leave titles off.
         </p>
         {savedTitleProxy && (
           <p className="text-[10px] text-green-500">Active: <span className="font-mono">{savedTitleProxy}</span></p>

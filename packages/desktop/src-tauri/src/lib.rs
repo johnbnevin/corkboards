@@ -76,6 +76,22 @@ pub fn run() {
             }
 
             builder.build()?;
+
+            // Reap idle pooled relay sockets. Checkout/checkin only evict
+            // entries for the relay being queried, so without this an app that
+            // goes idle holds every pooled FD until the next query for that
+            // exact relay. Half the idle timeout keeps the worst-case overstay
+            // small; this is a cleanup cadence, not network traffic — no relay
+            // sees anything except a close frame for an already-dead socket.
+            tauri::async_runtime::spawn(async {
+                let mut tick = tokio::time::interval(relay::POOL_IDLE_TIMEOUT / 2);
+                tick.tick().await; // first tick fires immediately — nothing to reap yet
+                loop {
+                    tick.tick().await;
+                    relay::pool_reap().await;
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

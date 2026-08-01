@@ -699,7 +699,20 @@ const MAX_POOLED_PER_URL: usize = 2;
 /// How long a socket may sit idle before we stop trusting it. Relays commonly
 /// drop idle connections around 60–120 s; a stale socket costs a failed query
 /// and a reconnect, so stay well under that.
-const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+pub(crate) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Hard ceiling on pooled sockets across ALL relay URLs.
+///
+/// Pooled sockets sit outside `RELAY_SOCKET_LIMIT` — the permit is released
+/// when the query returns, but the checked-in socket's FD stays open. Without
+/// a global cap, a single `relay_subscribe` fan-out across 50 relays could
+/// leave up to `MAX_POOLED_PER_URL × 50` idle sockets behind, quietly
+/// exceeding the process-wide ceiling the semaphore exists to enforce. Kept
+/// well under the semaphore's floor of 24 so pool + in-flight stays sane on
+/// the 2-core reference machine. Eviction is oldest-idle-first, so the relays
+/// queried most recently — the ones most likely to be queried again — keep
+/// their sockets.
+const MAX_POOLED_TOTAL: usize = 16;
 
 /// A pooled socket. The two variants are the two concrete stream types the
 /// connect paths produce; keeping `run_query` generic over them is simpler than
@@ -712,6 +725,27 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 enum PooledWs {
     Proxied(WebSocketStream<ProxiedStream>),
     Direct(WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>),
+}
+
+impl PooledWs {
+    /// Graceful close: send the WebSocket close frame instead of just dropping
+    /// the stream (a bare `drop` tears down TCP with no close handshake, which
+    /// relays log as an abnormal disconnect).
+    async fn close(self) {
+        match self {
+            PooledWs::Proxied(mut ws) => { let _ = ws.close(None).await; }
+            PooledWs::Direct(mut ws) => { let _ = ws.close(None).await; }
+        }
+    }
+}
+
+/// Close an evicted socket in the background, bounded so a dead peer can't
+/// hold the task forever. Used from the checkout/checkin paths, which must not
+/// stall a live query on a dying socket's close handshake.
+fn spawn_graceful_close(ws: PooledWs) {
+    tauri::async_runtime::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(2), ws.close()).await;
+    });
 }
 
 struct PooledConn {
@@ -736,25 +770,101 @@ async fn pool_checkout(url: &str, want_proxied: bool) -> Option<PooledWs> {
         if fresh && mode_matches {
             return Some(conn.ws);
         }
-        // Stale or wrong proxy mode: drop it (closing the socket) and try the
-        // next one rather than handing back something unusable.
-        drop(conn);
+        // Stale or wrong proxy mode: close it (in the background, so this
+        // checkout isn't stalled) and try the next one rather than handing
+        // back something unusable.
+        spawn_graceful_close(conn.ws);
     }
     None
 }
 
-/// Return a still-healthy socket for reuse. Over-capacity sockets are dropped.
+/// Return a still-healthy socket for reuse. Over-capacity sockets are closed.
 async fn pool_checkin(url: &str, ws: PooledWs) {
-    let mut pool = CONN_POOL.lock().await;
-    let conns = pool.entry(url.to_string()).or_default();
-    // Evict anything that went stale while we were querying, so an idle app
-    // doesn't accumulate dead sockets across relays.
-    let now = Instant::now();
-    conns.retain(|c| now.duration_since(c.idle_since) < POOL_IDLE_TIMEOUT);
-    if conns.len() >= MAX_POOLED_PER_URL {
-        return; // drop `ws` — closes it
+    // Everything evicted under the lock is closed OUTSIDE it, in background
+    // tasks — the checkin must not hold the pool mutex (or the caller's query)
+    // hostage to a close handshake with a possibly-dead peer.
+    let mut evicted: Vec<PooledWs> = Vec::new();
+    {
+        let mut pool = CONN_POOL.lock().await;
+        let now = Instant::now();
+        let conns = pool.entry(url.to_string()).or_default();
+        // Evict anything that went stale while we were querying, so an idle app
+        // doesn't accumulate dead sockets across relays.
+        let mut i = 0;
+        while i < conns.len() {
+            if now.duration_since(conns[i].idle_since) < POOL_IDLE_TIMEOUT {
+                i += 1;
+            } else {
+                evicted.push(conns.swap_remove(i).ws);
+            }
+        }
+        if conns.len() >= MAX_POOLED_PER_URL {
+            evicted.push(ws);
+        } else {
+            conns.push(PooledConn { ws, idle_since: now });
+
+            // Global cap: pooled sockets live outside the socket semaphore, so
+            // this is the only thing bounding idle FDs process-wide. Evict the
+            // oldest-idle socket anywhere in the pool until we're back under.
+            while pool.values().map(Vec::len).sum::<usize>() > MAX_POOLED_TOTAL {
+                let oldest_url = pool
+                    .iter()
+                    .filter_map(|(u, v)| {
+                        v.iter().map(|c| c.idle_since).min().map(|t| (u.clone(), t))
+                    })
+                    .min_by_key(|(_, t)| *t)
+                    .map(|(u, _)| u);
+                let Some(u) = oldest_url else { break };
+                if let Some(v) = pool.get_mut(&u) {
+                    if let Some(idx) = v
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, c)| c.idle_since)
+                        .map(|(i, _)| i)
+                    {
+                        evicted.push(v.swap_remove(idx).ws);
+                    }
+                    if v.is_empty() {
+                        pool.remove(&u);
+                    }
+                }
+            }
+        }
     }
-    conns.push(PooledConn { ws, idle_since: Instant::now() });
+    for ws in evicted {
+        spawn_graceful_close(ws);
+    }
+}
+
+/// Close every pooled socket that has sat idle past `POOL_IDLE_TIMEOUT`.
+///
+/// Checkout/checkin only evict entries for the URL being touched, so an app
+/// that goes idle would otherwise keep every pooled FD (and its `HashMap`
+/// entry) until the NEXT query for that exact relay — possibly forever. The
+/// setup hook runs this on a timer. Sockets are drained under the lock but
+/// closed after it's released; this is a background task, so unlike the
+/// checkin path it can afford to await the close frames directly.
+pub(crate) async fn pool_reap() {
+    let expired: Vec<PooledWs> = {
+        let mut pool = CONN_POOL.lock().await;
+        let now = Instant::now();
+        let mut out = Vec::new();
+        pool.retain(|_, conns| {
+            let mut i = 0;
+            while i < conns.len() {
+                if now.duration_since(conns[i].idle_since) < POOL_IDLE_TIMEOUT {
+                    i += 1;
+                } else {
+                    out.push(conns.swap_remove(i).ws);
+                }
+            }
+            !conns.is_empty()
+        });
+        out
+    };
+    for ws in expired {
+        let _ = tokio::time::timeout(Duration::from_secs(2), ws.close()).await;
+    }
 }
 
 /// Monotonic subscription id source. See the correctness note above.

@@ -91,12 +91,31 @@ function UnresolvedParentContext({ note }: { note: NostrEvent }) {
   const [retryState, setRetryState] = useState<'idle' | 'retrying' | 'notfound'>('idle');
   const parentId = useMemo(() => getParentId(note), [note]);
 
+  // The reply's own tags say where the parent lives: the e-tag's relay hint,
+  // and its author (NIP-10 marked e-tags carry the pubkey in position 4; the
+  // first p-tag is the same fallback the feed's batch requests use). Without
+  // authorPubkey, fetchEventWithOutbox never runs its phase-2 author-relay
+  // discovery — a bare retry re-queried exactly the fallback relays that had
+  // already failed. (Mirrors web.)
+  const { parentHints, parentAuthor } = useMemo(() => {
+    if (!parentId) return { parentHints: undefined, parentAuthor: undefined };
+    const eTag = note.tags.find(t => t[0] === 'e' && t[1] === parentId);
+    return {
+      parentHints: eTag?.[2] ? [eTag[2]] : undefined,
+      parentAuthor: (eTag?.[4] && eTag[4].length === 64 ? eTag[4] : undefined)
+        ?? note.tags.find(t => t[0] === 'p')?.[1],
+    };
+  }, [note, parentId]);
+
   const retryNow = async () => {
     if (!parentId || retryState === 'retrying') return;
     setRetryState('retrying');
     forgetParentMiss(parentId);
     try {
-      const found = await fetchEventWithOutbox(parentId, nostr);
+      const found = await fetchEventWithOutbox(parentId, nostr, {
+        hints: parentHints,
+        authorPubkey: parentAuthor,
+      });
       if (found) {
         cacheParentNote(parentId, found);
         queryClient.invalidateQueries({ queryKey: ['parent-notes'] });

@@ -17,18 +17,17 @@ import { isTauri, tauriRelayQuery } from '@/lib/tauri'
 /**
  * Extra time every relay query gets on desktop.
  *
- * The two builds reach relays very differently. On web, NPool holds persistent
- * sockets open, so a repeat query is one frame on an established connection and
- * a 2.5 s budget is generous. On desktop every query crosses the Rust bridge to
- * `do_query`, which performs a full DNS + TCP + TLS + WebSocket handshake for
- * that one query and then throws the connection away — there is no pool behind
- * it. The same millisecond budget therefore buys far less actual querying, and
- * the shortfall lands exactly where it was reported: "failed to load event" and
- * gray nested-content placeholders appearing far more often on Linux desktop
- * than on web, for events that are perfectly reachable.
- *
- * The right long-term fix is connection reuse in Rust; until then, pay for the
- * handshake explicitly instead of silently spending the query's budget on it.
+ * The two builds reach relays differently. On web, NPool holds persistent
+ * sockets open and multiplexes, so a repeat query is one frame on an
+ * established connection and a 2.5 s budget is generous. On desktop each query
+ * crosses the Rust bridge, which since 0.8.2 POOLS finished sockets
+ * (`relay.rs` CONN_POOL): a query against a relay used in the last ~45 s rides
+ * a warm socket, but first contact with a relay — and any contact after the
+ * pool's idle timeout — still pays the full DNS + TCP + TLS + WebSocket
+ * handshake. Those cold cases are exactly the ones outbox discovery hits
+ * (author relays we've never talked to), so the budget stays: without it the
+ * shortfall lands as "failed to load event" and gray nested-content
+ * placeholders on Linux desktop for events that are perfectly reachable.
  */
 const CONNECT_OVERHEAD_MS = isTauri ? 2500 : 0
 

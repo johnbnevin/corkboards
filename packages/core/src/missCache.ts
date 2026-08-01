@@ -116,6 +116,17 @@ export class MissCache {
     return this.entries.has(key);
   }
 
+  /**
+   * True when the key has spent its whole attempt budget. Unlike `shouldRetry`
+   * this ignores the cooldown — callers with fresh evidence (an escalation pass
+   * that just watched the cheap lookup miss) may retry inside the cooldown, but
+   * never past the ceiling.
+   */
+  isExhausted(key: string): boolean {
+    const entry = this.entries.get(key);
+    return !!entry && entry.attempts >= this.maxAttempts;
+  }
+
   /** Filter a candidate list down to the keys worth retrying now. */
   retryable<T>(items: readonly T[], keyOf: (item: T) => string): T[] {
     return items.filter(item => this.shouldRetry(keyOf(item)));

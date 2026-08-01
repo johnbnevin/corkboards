@@ -283,6 +283,23 @@ function UnresolvedParentContext({ note }: { note: NostrEvent }) {
   const [retryState, setRetryState] = useState<'idle' | 'retrying' | 'notfound'>('idle')
   const parentId = useMemo(() => getParentId(note), [note])
 
+  // The reply's own tags say where the parent lives: the e-tag's relay hint,
+  // and its author (NIP-10 marked e-tags carry the pubkey in position 4; the
+  // first p-tag is the same fallback the feed's batch requests use). Without
+  // authorPubkey, fetchEventWithOutbox never runs its phase-2 author-relay
+  // discovery — so the old bare call re-queried exactly the fallback relays
+  // that had already failed, and "Retry now" could not succeed on any note
+  // that only exists on its author's relays.
+  const { parentHints, parentAuthor } = useMemo(() => {
+    if (!parentId) return { parentHints: undefined, parentAuthor: undefined }
+    const eTag = note.tags.find(t => t[0] === 'e' && t[1] === parentId)
+    return {
+      parentHints: eTag?.[2] ? [eTag[2]] : undefined,
+      parentAuthor: (eTag?.[4] && eTag[4].length === 64 ? eTag[4] : undefined)
+        ?? note.tags.find(t => t[0] === 'p')?.[1],
+    }
+  }, [note, parentId])
+
   const retryNow = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation()
     if (!parentId || retryState === 'retrying') return
@@ -290,7 +307,10 @@ function UnresolvedParentContext({ note }: { note: NostrEvent }) {
     // Clear the negative cache first or the lookup short-circuits to "miss".
     forgetParentMiss(parentId)
     try {
-      const found = await fetchEventWithOutbox(parentId, nostr)
+      const found = await fetchEventWithOutbox(parentId, nostr, {
+        hints: parentHints,
+        authorPubkey: parentAuthor,
+      })
       if (found) {
         cacheParentNote(parentId, found)
         // Wake the feed's batch query — with the event now cached this is an
@@ -304,7 +324,7 @@ function UnresolvedParentContext({ note }: { note: NostrEvent }) {
     } catch {
       setRetryState('notfound')
     }
-  }, [parentId, retryState, nostr, queryClient])
+  }, [parentId, retryState, nostr, queryClient, parentHints, parentAuthor])
 
   return (
     <div className="mb-3 p-2.5 bg-muted/40 rounded-lg border-l-2 border-muted-foreground/30">

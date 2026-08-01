@@ -53,6 +53,25 @@ const parentMisses = new MissCache({
   maxAttempts: 3,
 });
 
+/**
+ * Ids the most recent FIRST pass attempted and did not resolve — the second
+ * pass's actual work queue.
+ *
+ * The second-pass filter used to be `hasMissed(id) && shouldRetry(id)`, which
+ * is self-defeating right after a first pass: a pass that TIMED OUT records no
+ * miss (so `hasMissed` is false), and a pass that reached EOSE and missed just
+ * started a 30s cooldown (so `shouldRetry` is false). Either way the 800ms
+ * escalation found nothing to do, and parents only got author-relay discovery
+ * if some LATER refetch happened after the cooldown — the "second pass
+ * sometimes fixes it, sometimes the whole page stays unresolved" behaviour,
+ * worst on desktop where first passes time out most.
+ *
+ * An id in this set earned exactly one prompt escalation by being attempted by
+ * a first pass (itself gated by the miss cooldown), so draining it does not
+ * recreate the retry storm; the attempt ceiling still applies via isExhausted.
+ */
+const pendingSecondPass = new Set<string>();
+
 // Limit concurrent first-pass pool queries to avoid opening too many relay connections at once.
 const MAX_CONCURRENT_POOL_QUERIES = 6;
 
@@ -198,8 +217,14 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
         for (const id of uncachedIds) {
           if (parentNoteCache.has(id)) {
             parentMisses.recordHit(id);
-          } else if (passCompleted) {
-            parentMisses.recordMiss(id);
+            pendingSecondPass.delete(id);
+          } else {
+            if (passCompleted) parentMisses.recordMiss(id);
+            // Attempted just now and still missing — timed out or genuinely
+            // absent, the second pass escalates either way. This hand-off is
+            // what makes the second pass fire AFTER a first pass instead of
+            // being blocked by the very cooldown that first pass just started.
+            pendingSecondPass.add(id);
           }
         }
       }
@@ -235,11 +260,15 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
     if (secondPassScheduled.current) return;
     if (!query.data) return;
 
-    // Only ids that have actually missed AND are out of cooldown. An id whose
-    // cooldown is still running, or that has exhausted its attempts, is skipped
-    // — that is what stops the standing retry storm.
+    // Two ways in: an id the first pass JUST attempted and left unresolved
+    // (pendingSecondPass — retried now even inside its cooldown, since the
+    // cooldown was started by that same first pass), or an older miss whose
+    // cooldown has elapsed. The attempt ceiling is respected in both branches —
+    // that is what stops the standing retry storm.
     const missing = uniqueRequests
-      .filter(r => parentMisses.hasMissed(r.eventId) && parentMisses.shouldRetry(r.eventId))
+      .filter(r => pendingSecondPass.has(r.eventId)
+        ? !parentMisses.isExhausted(r.eventId)
+        : (parentMisses.hasMissed(r.eventId) && parentMisses.shouldRetry(r.eventId)))
       // Bound a single pass regardless of feed size: a large feed used to fire
       // Promise.all over every missing parent at once, and each of those opens
       // ~a dozen sockets on desktop. Anything beyond the cap is picked up by a
@@ -250,6 +279,9 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
     secondPassScheduled.current = true;
     let mounted = true;
     const timer = setTimeout(async () => {
+      // Consumed exactly when the escalation actually fires. If the timer is
+      // cancelled (unmount, feed change) the ids stay pending for the next run.
+      for (const r of missing) pendingSecondPass.delete(r.eventId);
       let found = 0;
       const results = await Promise.all(
         missing.map(r =>
@@ -310,6 +342,7 @@ export function getCachedParentNote(eventId: string): NostrEvent | undefined {
 export function clearParentNoteCache(): void {
   parentNoteCache.clear();
   parentMisses.clear();
+  pendingSecondPass.clear();
 }
 
 /**

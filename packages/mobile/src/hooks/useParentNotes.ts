@@ -32,6 +32,21 @@ const parentMisses = new MissCache({
   maxAttempts: 3,
 });
 
+/**
+ * Ids the most recent FIRST pass attempted and did not resolve — the second
+ * pass's actual work queue. (Mirrors web.)
+ *
+ * The second-pass filter used to be `hasMissed(id) && shouldRetry(id)`, which
+ * is self-defeating right after a first pass: a pass that TIMED OUT records no
+ * miss (so `hasMissed` is false), and a pass that reached EOSE and missed just
+ * started a 30s cooldown (so `shouldRetry` is false). Either way the 800ms
+ * escalation found nothing to do, and parents only got author-relay discovery
+ * if some later refetch happened after the cooldown. An id in this set earned
+ * exactly one prompt escalation by being attempted by a first pass (itself
+ * gated by the miss cooldown); the attempt ceiling still applies.
+ */
+const pendingSecondPass = new Set<string>();
+
 const MAX_CONCURRENT_POOL_QUERIES = 6;
 /** Max individual outbox lookups fired by one second pass. */
 const MAX_SECOND_PASS_PER_ROUND = 12;
@@ -158,8 +173,12 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
         for (const id of uncachedIds) {
           if (parentNoteCache.has(id)) {
             parentMisses.recordHit(id);
-          } else if (passCompleted) {
-            parentMisses.recordMiss(id);
+            pendingSecondPass.delete(id);
+          } else {
+            if (passCompleted) parentMisses.recordMiss(id);
+            // Attempted just now and still missing — timed out or genuinely
+            // absent, the second pass escalates either way. (Mirrors web.)
+            pendingSecondPass.add(id);
           }
         }
       }
@@ -183,16 +202,24 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
     if (secondPassScheduled.current) return;
     if (!query.data) return;
 
-    // Only ids that have actually missed AND are out of cooldown, capped per
-    // round so a large feed can't fire one lookup per missing parent at once.
+    // Two ways in: an id the first pass JUST attempted and left unresolved
+    // (pendingSecondPass — retried now even inside its cooldown, since the
+    // cooldown was started by that same first pass), or an older miss whose
+    // cooldown has elapsed. Capped per round so a large feed can't fire one
+    // lookup per missing parent at once. (Mirrors web.)
     const missing = uniqueRequests
-      .filter(r => parentMisses.hasMissed(r.eventId) && parentMisses.shouldRetry(r.eventId))
+      .filter(r => pendingSecondPass.has(r.eventId)
+        ? !parentMisses.isExhausted(r.eventId)
+        : (parentMisses.hasMissed(r.eventId) && parentMisses.shouldRetry(r.eventId)))
       .slice(0, MAX_SECOND_PASS_PER_ROUND);
     if (missing.length === 0) return;
 
     secondPassScheduled.current = true;
     let mounted = true;
     const timer = setTimeout(async () => {
+      // Consumed exactly when the escalation actually fires. If the timer is
+      // cancelled (unmount, feed change) the ids stay pending for the next run.
+      for (const r of missing) pendingSecondPass.delete(r.eventId);
       let found = 0;
       const results = await Promise.all(
         missing.map(r =>
@@ -244,6 +271,7 @@ export function getCachedParentNote(eventId: string): NostrEvent | undefined {
 export function clearParentNoteCache(): void {
   parentNoteCache.clear();
   parentMisses.clear();
+  pendingSecondPass.clear();
 }
 
 /** Store a parent event resolved by an out-of-band lookup (e.g. "Retry now"). */

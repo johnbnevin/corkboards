@@ -763,7 +763,7 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
             </span>
             <span className="text-[11px]">
               Require proxy (kill-switch)
-              <span className="block text-[10px] text-muted-foreground">When on, native relay queries FAIL rather than connect directly if the proxy is unset/unreachable — no silent clearnet fallback.</span>
+              <span className="block text-[10px] text-muted-foreground">When on, relay queries AND publishes FAIL rather than go direct if the proxy is unset/unreachable — no silent clearnet fallback. A corrupt proxy config also fails closed. Exception: links you open in your system browser leave this app's proxy entirely.</span>
             </span>
           </button>
 
@@ -834,7 +834,8 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
             autoCorrect="off"
           />
           <p className="text-[10px] text-muted-foreground mt-1">
-            Route every avatar and inline image through an image-proxy so your IP and Referer aren't sent to each random host. Use <code>{'{url}'}</code> as the placeholder for the original URL. Blank by default.
+            Route every avatar, inline image, AND video through a proxy so your IP and Referer aren't sent to each random host. Use <code>{'{url}'}</code> as the placeholder for the original URL. Blank by default.
+            Note: image-only proxies (like wsrv.nl) can't serve video — videos will fail to load rather than leak your IP; use a general-purpose proxy if you watch videos.
           </p>
         </div>
         <div className="flex gap-2">

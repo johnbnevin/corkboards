@@ -12,6 +12,8 @@ import { cleanupRetiredNoteCaches } from './src/lib/notesCache';
 import { setImageProxyTemplate } from '@core/imageProxy';
 import { setTitleProxyTemplate } from '@core/titleProxy';
 import * as ScreenCapture from 'expo-screen-capture';
+import { setBlossomServerListProvider } from '@core/blossom';
+import { getBlossomServers } from './src/hooks/useNostrBackup';
 import { NostrProvider, WelshmanRouterBridge } from './src/lib/NostrProvider';
 import { AuthProvider } from './src/lib/AuthContext';
 import { useNotificationCount } from './src/hooks/useNotificationCount';
@@ -122,8 +124,11 @@ export default function App() {
       if (mmkvInitError) {
         setStorageWarning(mmkvInitError);
       } else if (!mmkvIsEncrypted) {
-        setStorageWarning('Storage is running in unencrypted mode. Sensitive data (backup metadata) is not protected at rest.');
+        setStorageWarning('Storage is running in unencrypted mode. Your account list, signer/bunker metadata, backup checkpoints, and note history are NOT protected at rest on this device. (Your secret key itself stays in the OS keychain and is not affected.)');
       }
+      // Render-time Blossom fallbacks fan out to the servers the USER chose,
+      // not the hard-coded list (each host learns IP + blob hash on failure).
+      setBlossomServerListProvider(getBlossomServers);
       // Activate the persisted image-proxy template (if any) before any
       // image renders. Settings UI calls setImageProxyTemplate directly on
       // save, so this only matters for cold launches.
@@ -132,9 +137,14 @@ export default function App() {
       // and no oEmbed request is ever made.
       setTitleProxyTemplate(mobileStorage.getSync('corkboard:title-proxy-template'));
       // Re-apply screenshot blocking if the user turned it on (the OS flag
-      // does not persist across app restarts on its own).
+      // does not persist across app restarts on its own). A failure here must
+      // not be silent — the user believes the shield is on.
       if (mobileStorage.getSync('corkboard:block-screenshots') === 'true') {
-        ScreenCapture.preventScreenCaptureAsync().catch(() => {});
+        ScreenCapture.preventScreenCaptureAsync().catch(() => {
+          setStorageWarning(prev => prev
+            ? `${prev} Also: screenshot blocking could not be re-applied this session.`
+            : 'Screenshot blocking could not be re-applied this session — screenshots are currently possible despite the setting.');
+        });
       }
       // One-time reclaim of the retired note-cache rows (see lib/notesCache.ts).
       // After prepareSecureStorage so it operates on the encrypted instance.

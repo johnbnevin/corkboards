@@ -499,12 +499,28 @@ export async function tauriProxyLoadFailed(): Promise<boolean> {
  * going out directly, so a Tor-only user needs to be told loudly. Latched at
  * window creation — the WebView proxy can only change on restart.
  */
+/**
+ * Sticky cache of the last successful `proxy_webview_unprotected` answer.
+ *
+ * The IPC call used to fail OPEN (`catch → false`), so a transient invoke
+ * failure showed the kill-switch as off and let signed events out over
+ * clearnet — an availability preference silently overriding a privacy gate.
+ * Now an IPC failure returns the LAST KNOWN verdict instead. `null` = never
+ * answered this session; treated as unprotected=false (a session that has
+ * never successfully asked has also never seen a proxy requirement — blocking
+ * every non-proxy user on a first-call hiccup would brick posting for people
+ * with no proxy at all).
+ */
+let _lastUnprotectedVerdict: boolean | null = null;
+
 export async function tauriProxyWebviewUnprotected(): Promise<boolean> {
   if (!isTauri) return false;
   try {
-    return (await invoke<boolean>('proxy_webview_unprotected')) ?? false;
+    const v = (await invoke<boolean>('proxy_webview_unprotected')) ?? false;
+    _lastUnprotectedVerdict = v;
+    return v;
   } catch {
-    return false;
+    return _lastUnprotectedVerdict ?? false;
   }
 }
 
@@ -521,8 +537,10 @@ export async function tauriProxyWebviewUnprotected(): Promise<boolean> {
  * The answer changes only on restart (the webview's proxy is fixed at window
  * creation) EXCEPT for the `proxy_required` half, which the user can toggle
  * live — so this re-asks each time rather than caching, and one IPC round trip
- * per publish is nothing next to the relay round trip that follows. On error it
- * returns false: this must not become a way to block posting.
+ * per publish is nothing next to the relay round trip that follows. On IPC
+ * error the last successful verdict is used (sticky, see above) — a hiccup no
+ * longer silently reads as "not blocked" for a user whose last known state
+ * was "blocked".
  */
 export async function isPublishBlockedByProxy(): Promise<boolean> {
   return tauriProxyWebviewUnprotected();

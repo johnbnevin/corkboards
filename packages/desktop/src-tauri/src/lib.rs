@@ -53,7 +53,13 @@ pub fn run() {
                 match url::Url::parse(&webview_proxy) {
                     Ok(parsed) => {
                         builder = builder.proxy_url(parsed);
-                        webview_proxied = true;
+                        // macOS: WKWebView proxying is best-effort and cannot be
+                        // verified post-build — reporting it as protected there
+                        // suppressed the red warning AND disarmed the publish
+                        // gate on exactly the platform where the proxy most
+                        // likely didn't apply. Claim protection only where the
+                        // engine honors it (Linux/Windows).
+                        webview_proxied = !cfg!(target_os = "macos");
                     }
                     Err(e) => eprintln!("[setup] invalid proxy URL for webview: {e}"),
                 }
@@ -67,11 +73,15 @@ pub fn run() {
             // unprotected. (We still open the window: refusing to start would leave
             // them no way to fix the setting.)
             proxy::set_webview_proxied(webview_proxied);
-            let unprotected = proxy::proxy_required() && !webview_proxied;
-            if unprotected {
+            // proxy_webview_unprotected() includes load_failed: an unreadable
+            // proxy.json is treated as "assume required" (the file that failed
+            // to parse may have said required=true) — matching relay.rs's
+            // kill-switch instead of silently disarming everything.
+            if proxy::proxy_webview_unprotected() {
                 eprintln!(
-                    "[setup] WARNING: proxy is REQUIRED but the WebView could not be proxied — \
-                     non-relay traffic (images, embeds) will go out directly this session."
+                    "[setup] WARNING: proxy is required (or its config failed to load) but the \
+                     WebView could not be proxied — non-relay traffic (images, embeds, JS relay \
+                     sockets) would go out directly this session; publishes are blocked."
                 );
             }
 

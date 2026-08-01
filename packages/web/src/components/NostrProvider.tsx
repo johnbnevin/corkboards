@@ -10,7 +10,7 @@ import { recordHit, recordMiss, scoreToWeight, decayScore, type RelayScore } fro
 import { withQueryBudget, acquireQuerySlot, configureQueryGovernor, defaultMaxConcurrent, lookupPriority } from '@core/queryGovernor';
 import { idbGetSync, idbSetSync, idbReady } from '@/lib/idb';
 import { isSecureRelay } from '@core/nostrUtils';
-import { isTauri, tauriQuery } from '@/lib/tauri';
+import { isTauri, tauriQuery, isPublishBlockedByProxy } from '@/lib/tauri';
 import { getOrCreateUser } from '@/hooks/useCurrentUser';
 // Re-exported for backwards compatibility — canonical source is @/lib/relayConstants
 export { FALLBACK_RELAYS, READ_ONLY_RELAYS } from '@/lib/relayConstants';
@@ -429,6 +429,17 @@ class RateLimitedRelay implements NRelay {
   }
 
   async event(event: NostrEvent, opts?: { signal?: AbortSignal }): Promise<void> {
+    // Proxy kill-switch, enforced at the ONE chokepoint every publish passes.
+    // It used to live only in useNostrPublish (the compose path), which left
+    // ~a dozen other publish sites — backup manifests, relay lists, bookmarks,
+    // pins, dismissed/feeds sync, NWC requests — emitting SIGNED events over
+    // the webview's clearnet socket while a Tor-required user's reads were
+    // correctly blocked. The write is the identity-bearing half; it must fail
+    // closed everywhere, including background syncs that fire with no user
+    // action at all.
+    if (isTauri && await isPublishBlockedByProxy()) {
+      throw new Error('Publishing is blocked: you require a proxy, but this window is not routed through one. Restart the app after fixing the proxy in Settings → Network Privacy & Proxies.');
+    }
     await waitForRateLimit(this.url);
     try {
       await this.inner.event(event, opts);

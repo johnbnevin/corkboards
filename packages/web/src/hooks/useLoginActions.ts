@@ -57,6 +57,7 @@ import {
   storeNsec, deleteNsec, wipeKeyStore,
   storeSecret, loadSecret, deleteSecret,
   AMBER_CLIENT_SECRET_ID, bunkerClientSecretId,
+  emitKeystoreWarning,
 } from '@/lib/webKeyStore';
 import { NOSTRCONNECT_RELAYS, NSEC_APP_RELAY } from '@/lib/relayConstants';
 
@@ -84,7 +85,7 @@ async function persistBunkerClientKey(login: { pubkey: string; data?: unknown })
   if (!data || typeof data.clientNsec !== 'string' || data.clientNsec === '') return;
   const stored = await storeSecret(bunkerClientSecretId(login.pubkey), data.clientNsec);
   if (stored) data.clientNsec = '';
-  else console.error('[login] Failed to encrypt NIP-46 client key — falling back to login-state persistence');
+  else emitKeystoreWarning('The NIP-46 client key could not be encrypted at rest — it is stored unprotected in this browser until storage recovers.');
 }
 
 export function useLoginActions() {
@@ -110,7 +111,7 @@ export function useLoginActions() {
         if (isTauri) {
           const stored = await keychainStore(`nsec:${pubkey}`, nsec);
           if (!stored) {
-            console.error('[login] Failed to store nsec in OS keychain — key may not persist across restarts');
+            emitKeystoreWarning('Your key could not be stored in the OS keychain — it is stored unprotected on disk until the keychain recovers.');
           } else if (login.data && typeof login.data === 'object') {
             (login.data as { nsec?: string }).nsec = '';
           }
@@ -125,7 +126,7 @@ export function useLoginActions() {
           // (fall back to the in-login key, mirroring the Tauri path).
           const stored = await storeNsec(pubkey, nsec);
           if (!stored) {
-            console.error('[login] Failed to store encrypted nsec in IndexedDB — falling back to login-state persistence');
+            emitKeystoreWarning('Your key could not be encrypted at rest (IndexedDB unavailable) — it is stored unprotected in this browser until storage recovers.');
           } else if (login.data && typeof login.data === 'object') {
             (login.data as { nsec?: string }).nsec = '';
           }

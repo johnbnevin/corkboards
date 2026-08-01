@@ -493,6 +493,21 @@ async fn do_query(url: String, filter: Value, deadline: Instant, lane: Lane) -> 
         };
     }
 
+    // A .onion is only reachable through a SOCKS proxy. Dialing one directly
+    // hands the hidden-service hostname to the system resolver (leaking WHICH
+    // onion the user talks to, to the local network/ISP) before failing anyway.
+    // Refuse rather than leak-and-fail.
+    if !want_proxied {
+        let is_onion = url::Url::parse(&url).ok().and_then(|u| u.host().map(|h| matches!(h,
+            url::Host::Domain(d) if d.to_ascii_lowercase().trim_end_matches('.').ends_with(".onion")))).unwrap_or(false);
+        if is_onion {
+            return RelayQueryResult {
+                events: vec![],
+                error: Some(".onion relay requires a SOCKS proxy — refusing direct resolution".to_string()),
+            };
+        }
+    }
+
     // Try a pooled socket first, then fall back to a fresh connection.
     //
     // A pooled socket can have been closed by the relay while it sat idle, and
@@ -865,6 +880,28 @@ pub(crate) async fn pool_reap() {
     for ws in expired {
         let _ = tokio::time::timeout(Duration::from_secs(2), ws.close()).await;
     }
+}
+
+/// Flush the ENTIRE pool. Called when the proxy endpoint changes: pooled
+/// sockets only record proxied-vs-direct, not WHICH proxy carried them, so a
+/// socket opened through proxy A would keep serving queries after the user
+/// switched to proxy B (up to POOL_IDLE_TIMEOUT) — traffic through an endpoint
+/// the user just abandoned. Spawned fire-and-forget from the sync IPC command.
+pub(crate) fn pool_flush_spawn() {
+    tauri::async_runtime::spawn(async {
+        let drained: Vec<PooledWs> = {
+            let mut pool = CONN_POOL.lock().await;
+            let mut out = Vec::new();
+            for (_, conns) in pool.iter_mut() {
+                out.extend(conns.drain(..).map(|c| c.ws));
+            }
+            pool.clear();
+            out
+        };
+        for ws in drained {
+            let _ = tokio::time::timeout(Duration::from_secs(2), ws.close()).await;
+        }
+    });
 }
 
 /// Monotonic subscription id source. See the correctness note above.

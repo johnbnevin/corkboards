@@ -168,13 +168,15 @@ const renderApp = () => {
 
 // On plain web, migrate any plaintext nsec out of localStorage['corkboard:login']
 // into the encrypted IndexedDB key store and warm the decrypt cache for existing
-// logins BEFORE the first render (lib/webKeyStore). This must finish before
-// NostrLoginProvider mounts — its reducer snapshots localStorage at mount and
-// re-persists that snapshot on every state change, so a plaintext nsec seen at
-// mount would keep being rewritten. The plaintext is blanked synchronously at
-// call time; only the encrypt/decrypt work is awaited, bounded by a timeout so a
-// hung IndexedDB can never block boot. Tauri is untouched (nsec lives in the OS
-// keychain there).
+// logins BEFORE the first render (lib/webKeyStore). NostrLoginProvider's reducer
+// snapshots localStorage at mount and re-persists that snapshot on every state
+// change — so the plaintext is moved SYNCHRONOUSLY (before any await) out of the
+// login entry into a separate pending-migration key the provider never reads.
+// Even when the bounded wait below expires and the app mounts mid-migration, the
+// provider's snapshot is already clean, and a crash mid-persist is resumed from
+// the pending key on the next boot. Only the encrypt/decrypt work is awaited,
+// bounded by a timeout so a hung IndexedDB can never block boot. Tauri is
+// untouched (nsec lives in the OS keychain there).
 if (isTauri) {
   renderApp();
 } else {

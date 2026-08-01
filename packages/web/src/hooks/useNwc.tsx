@@ -51,6 +51,12 @@ async function detectEncryption(relay: NRelay1, walletPubkey: string): Promise<E
     )) {
       if (msg[0] === 'EOSE') break;
       if (msg[0] === 'EVENT') {
+        // Only the WALLET may downgrade our encryption. Without this check a
+        // hostile wallet relay could substitute anyone's tagless 13194 and
+        // force every payment payload onto deprecated NIP-04. (The default on
+        // absence/error is nip44_v2 — the stronger side — so ignoring a
+        // foreign event keeps the fail-closed direction.)
+        if (msg[2].pubkey !== walletPubkey) continue;
         const encTag = msg[2].tags?.find((t: string[]) => t[0] === 'encryption');
         if (encTag && encTag[1]?.includes('nip44_v2')) {
           debugLog('[nwc] Wallet supports NIP-44');

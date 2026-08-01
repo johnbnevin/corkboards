@@ -55,6 +55,11 @@ async function detectEncryption(relay: NRelay1, walletPubkey: string): Promise<E
     )) {
       if (msg[0] === 'EOSE') break;
       if (msg[0] === 'EVENT') {
+        // Only the WALLET may downgrade our encryption — a hostile relay could
+        // otherwise substitute a tagless 13194 and force NIP-04 for payment
+        // payloads. Default on absence stays nip44_v2 (fail closed). Parity
+        // with web.
+        if (msg[2].pubkey !== walletPubkey) continue;
         const encTag = msg[2].tags?.find((t: string[]) => t[0] === 'encryption');
         if (encTag && encTag[1]?.includes('nip44_v2')) return 'nip44_v2';
         const vTag = msg[2].tags?.find((t: string[]) => t[0] === 'v');

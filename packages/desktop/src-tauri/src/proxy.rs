@@ -117,7 +117,14 @@ fn save_to_disk(cfg: &ProxyConfig) -> Result<(), String> {
     let body =
         serde_json::json!({ "url": cfg.url.as_deref().unwrap_or(""), "required": cfg.required })
             .to_string();
-    fs::write(&path, body).map_err(|e| format!("write: {e}"))?;
+    // Atomic write (temp + rename): a crash or full disk mid-write must not
+    // leave truncated JSON. A truncated config sets `load_failed` on the next
+    // launch, which now fails CLOSED (see proxy_webview_unprotected) — but the
+    // user would be stuck blocked until they re-saved; better to never corrupt.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, body).map_err(|e| format!("write: {e}"))?;
+    restrict_perms(&tmp);
+    fs::rename(&tmp, &path).map_err(|e| format!("rename: {e}"))?;
     restrict_perms(&path);
     Ok(())
 }
@@ -149,7 +156,12 @@ pub fn set_proxy(url: Option<String>) -> Result<(), String> {
     let mut cfg = lock(&CONFIG);
     cfg.url = normalized;
     cfg.load_failed = false;
-    save_to_disk(&cfg)
+    let saved = save_to_disk(&cfg);
+    drop(cfg);
+    // Pooled sockets only record proxied-vs-direct, not WHICH proxy — flush so
+    // no query rides a socket opened through the endpoint the user just left.
+    crate::relay::pool_flush_spawn();
+    saved
 }
 
 #[tauri::command]
@@ -185,11 +197,44 @@ pub fn set_webview_proxied(proxied: bool) {
     *lock(&WEBVIEW_PROXIED) = proxied;
 }
 
-/// True when `proxy_required` is on but this session's WebView is NOT routed
-/// through a proxy — the UI must warn that non-relay traffic is going direct.
-/// Computed live so enabling "require proxy" after launch surfaces the warning,
-/// even though the WebView's actual proxy state is fixed until restart.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Coldcard lesson: a config that FAILED TO LOAD must be treated as
+    /// "assume the strictest setting", not as "no setting". A corrupt
+    /// proxy.json used to leave required=false → no warning, publish gate
+    /// disarmed, webview clearnet.
+    #[test]
+    fn load_failed_counts_as_required_for_webview_protection() {
+        INIT.call_once(|| {}); // consume the Once so disk state can't interfere
+        {
+            let mut cfg = lock(&CONFIG);
+            cfg.required = false;
+            cfg.load_failed = true;
+        }
+        set_webview_proxied(false);
+        assert!(proxy_webview_unprotected());
+        // A proxied webview satisfies the contract even under load_failed.
+        set_webview_proxied(true);
+        assert!(!proxy_webview_unprotected());
+        // Clean state for any test that runs after.
+        lock(&CONFIG).load_failed = false;
+        set_webview_proxied(false);
+    }
+}
+
+/// True when the proxy contract may be violated for WebView traffic: the user
+/// requires a proxy (or their proxy config FAILED TO LOAD — an unreadable
+/// `proxy.json` must be treated as "assume required", exactly like
+/// relay.rs's kill-switch, because the file that failed to parse may well have
+/// said `required=true`) and this session's WebView is not routed through one.
+/// The UI must warn, and the JS publish gate blocks on this. Computed live so
+/// enabling "require proxy" after launch surfaces the warning, even though the
+/// WebView's actual proxy state is fixed until restart.
 #[tauri::command]
 pub fn proxy_webview_unprotected() -> bool {
-    proxy_required() && !*lock(&WEBVIEW_PROXIED)
+    INIT.call_once(load_from_disk);
+    let cfg = lock(&CONFIG);
+    (cfg.required || cfg.load_failed) && !*lock(&WEBVIEW_PROXIED)
 }

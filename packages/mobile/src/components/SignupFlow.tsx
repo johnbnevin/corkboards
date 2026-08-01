@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
+import { assertSecureRandom } from '../lib/assertSecureRandom';
 import { useNostr } from '../lib/NostrProvider';
 import { useAuth } from '../lib/AuthContext';
 
@@ -41,7 +42,13 @@ export function SignupFlow({ onComplete, onCancel }: SignupFlowProps) {
       return;
     }
 
-    // Generate keys
+    // Generate keys. Guard first: a dev session under remote debugging has a
+    // Math.random()-backed getRandomValues (Coldcard-shaped hazard) — refuse
+    // to mint an identity from it. No-op in release builds.
+    try { assertSecureRandom(); } catch (e) {
+      Alert.alert('Insecure random source', e instanceof Error ? e.message : String(e));
+      return;
+    }
     const sk = generateSecretKey();
     const pk = getPublicKey(sk);
     const generatedNsec = nip19.nsecEncode(sk);

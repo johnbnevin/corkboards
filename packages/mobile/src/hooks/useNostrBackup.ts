@@ -683,11 +683,14 @@ async function blossomUpload(
     }
 
     const result = await response.json().catch(() => null);
-    const url = result?.url || result?.nip94_event?.tags?.find((t: string[]) => t[0] === 'url')?.[1]
-      || `${server.replace(/\/+$/, '')}/${hashHex}`;
-    const hash = result?.sha256 || hashHex;
-    if (!url) return null;
-    return { url, hash };
+    // OUR locally computed hash is authoritative — never the server's. The
+    // restore-time integrity check verifies against the manifest hash; a
+    // server-reported sha256 (or URL) anchored that check on a value the
+    // storage server chose, defeating it. (Parity with web.)
+    if (result?.sha256 && result.sha256 !== hashHex && __DEV__) {
+      console.warn(`[backup] ${server} reported sha256 != locally computed — using ours`);
+    }
+    return { url: `${server.replace(/\/+$/, '')}/${hashHex}`, hash: hashHex };
   } catch (err) {
     if (__DEV__) console.warn(`[backup] ${server} upload error:`, err);
     return null;

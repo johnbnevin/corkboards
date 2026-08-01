@@ -633,8 +633,15 @@ async function uploadBlobWithRedundancy(
         continue;
       }
       const result = await response.json().catch(() => null) as { url?: string; sha256?: string } | null;
-      const blobUrl = result?.url || `${server.replace(/\/+$/, '')}/${x}`;
-      if (!url) { url = blobUrl; hash = result?.sha256 || x; }
+      // OUR locally computed hash is authoritative — never the server's. The
+      // manifest hash is what restore-time integrity checks verify against;
+      // recording a server-reported sha256 (or URL) anchored that check on a
+      // value the storage server chose, defeating it. A server that reports a
+      // different hash is misbehaving and worth a log line.
+      if (result?.sha256 && result.sha256 !== x) {
+        onLog?.(`  ${server} reported sha256 ${result.sha256.slice(0, 12)}… != locally computed ${x.slice(0, 12)}… — using OURS`, 'warn');
+      }
+      if (!url) { url = `${server.replace(/\/+$/, '')}/${x}`; hash = x; }
       count++;
       onLog?.(`  Uploaded to ${server} (${count}/${REDUNDANT_COPIES})`);
     } catch (err) {
@@ -3017,6 +3024,17 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
         }
       }
       if (!encryptedData) throw new Error('Could not download backup from any Blossom server');
+
+      // Integrity check — same rule as the silent-sync path (this checkpoint
+      // path skipped it, an asymmetry: the hash was right there in cp).
+      if (cp.blossomHash) {
+        const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(encryptedData));
+        const computed = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+        if (computed !== cp.blossomHash) {
+          throw new Error('Checkpoint integrity check failed — downloaded data does not match its stored hash.');
+        }
+        log('Blossom hash verified');
+      }
 
       log('Decrypting...');
       const aesRaw = hexToRawKey(

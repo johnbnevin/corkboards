@@ -18,6 +18,15 @@ import { NwcProvider } from '@/hooks/useNwc';
 import { CollapsedNotesProvider } from '@/hooks/useCollapsedNotes';
 import AppRouter from './AppRouter';
 import { installDesktopLinkInterceptor } from '@/lib/openExternal';
+import { KEYSTORE_WARNING_EVENT } from '@/lib/webKeyStore';
+import { toast } from '@/hooks/useToast';
+import { setBlossomServerListProvider } from '@core/blossom';
+import { getBlossomServers } from '@/hooks/useNostrBackup';
+
+// Render-time Blossom fallbacks must fan out to the servers the USER chose,
+// not a hard-coded list — each candidate host learns the viewer's IP + blob
+// hash on any media load failure. Module scope so it's set before first render.
+setBlossomServerListProvider(getBlossomServers);
 
 const head = createHead({
   plugins: [
@@ -53,6 +62,19 @@ export function App() {
   // app is inert (or, for untargeted anchors, navigates the app away from
   // itself). No-op in a normal browser.
   useEffect(() => installDesktopLinkInterceptor(), []);
+
+  // Key-at-rest failures must be LOUD. When the encrypted key store (IDB) or
+  // the OS keychain can't take the nsec, the app deliberately keeps the
+  // plaintext so the account isn't lost — but a console.error was the only
+  // signal, so users ran indefinitely with an unprotected key without knowing.
+  useEffect(() => {
+    const onWarning = (e: Event) => {
+      const message = (e as CustomEvent<string>).detail || 'Key storage degraded — your signing key may be unprotected at rest.';
+      toast({ title: 'Key storage warning', description: message, variant: 'destructive', duration: 30_000 });
+    };
+    window.addEventListener(KEYSTORE_WARNING_EVENT, onWarning);
+    return () => window.removeEventListener(KEYSTORE_WARNING_EVENT, onWarning);
+  }, []);
 
   return (
     <UnheadProvider head={head}>

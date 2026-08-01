@@ -29,6 +29,28 @@ const DB_NAME = 'corkboard-keys';
 const STORE_NAME = 'nsec';
 const DB_VERSION = 1;
 
+/**
+ * Plaintext keys mid-migration live here, NOT in the login entry. The login
+ * provider snapshots and re-persists its own entry, so plaintext left there at
+ * mount gets rewritten all session; this key is invisible to it. Removed the
+ * moment every key's encrypted record commits.
+ */
+const PENDING_MIGRATION_KEY = 'corkboard:login-pending-migration';
+
+/**
+ * Fired (on window) when key material could NOT be encrypted at rest and is
+ * sitting unprotected — the UI must tell the user loudly instead of the old
+ * console-only signal. detail: human-readable message.
+ */
+export const KEYSTORE_WARNING_EVENT = 'corkboard:keystore-warning';
+
+export function emitKeystoreWarning(message: string): void {
+  console.error(`[keystore] ${message}`);
+  try {
+    window.dispatchEvent(new CustomEvent(KEYSTORE_WARNING_EVENT, { detail: message }));
+  } catch { /* non-window context */ }
+}
+
 interface KeyRecord {
   key: CryptoKey;
   iv: Uint8Array<ArrayBuffer>;
@@ -279,44 +301,86 @@ interface PersistedLogin {
  *    logged-out (signing fails with a clear error) instead of crashing.
  */
 export async function prepareLoginStorage(storageKey: string): Promise<void> {
-  // ── Synchronous phase: get plaintext out of localStorage NOW ──
-  let raw: string | null = null;
-  try { raw = localStorage.getItem(storageKey); } catch { return; }
-  if (!raw) return;
-  let state: unknown;
-  try { state = JSON.parse(raw); } catch { return; }
-  if (!Array.isArray(state)) return;
-
+  // ── Synchronous phase: get plaintext out of the LOGIN ENTRY now ──
+  //
+  // The plaintext is moved into a separate pending-migration key and the login
+  // entry is blanked SYNCHRONOUSLY, before any await. This matters because
+  // main.tsx only bounded-waits for this function: on a slow IndexedDB the app
+  // mounts mid-migration, and NostrLoginProvider snapshots the login entry at
+  // mount and re-persists that snapshot on every state change — so a plaintext
+  // nsec still sitting in the entry at mount kept being rewritten for the rest
+  // of the session, even after this function later blanked it. The pending key
+  // is one the provider never reads, so the snapshot is clean no matter when
+  // the mount happens, while the plaintext still survives a crash mid-persist
+  // (next boot resumes the migration from the pending key).
   const plaintext: Array<{ pubkey: string; nsec: string }> = [];
   const blanked: string[] = [];
-  for (const entry of state as PersistedLogin[]) {
-    if (!entry || typeof entry.pubkey !== 'string') continue;
-    const data = entry.data && typeof entry.data === 'object' ? entry.data : undefined;
 
-    // NIP-46 bunker logins persist an ephemeral CLIENT key. Same treatment as
-    // the identity key: capture it into the session cache, encrypt it, and
-    // blank the localStorage copy only once the encrypted record commits.
-    if (entry.type === 'bunker') {
-      const id = bunkerClientSecretId(entry.pubkey);
-      const clientNsec = data?.clientNsec;
-      if (typeof clientNsec === 'string' && clientNsec !== '') {
-        memNsec.set(id, clientNsec);
-        plaintext.push({ pubkey: id, nsec: clientNsec });
-      } else {
-        blanked.push(id);
+  // Resume any migration a previous boot didn't finish.
+  try {
+    const pendingRaw = localStorage.getItem(PENDING_MIGRATION_KEY);
+    if (pendingRaw) {
+      const pending: unknown = JSON.parse(pendingRaw);
+      if (Array.isArray(pending)) {
+        for (const p of pending as Array<{ pubkey?: string; nsec?: string }>) {
+          if (typeof p?.pubkey === 'string' && typeof p?.nsec === 'string' && p.nsec !== '') {
+            memNsec.set(p.pubkey, p.nsec);
+            plaintext.push({ pubkey: p.pubkey, nsec: p.nsec });
+          }
+        }
       }
-      continue;
     }
+  } catch { /* unreadable pending state — fall through to the entry scan */ }
 
-    if (entry.type !== 'nsec') continue;
-    const nsec = data?.nsec;
-    if (typeof nsec === 'string' && nsec !== '') {
-      memNsec.set(entry.pubkey, nsec); // keep the session alive regardless of persist outcome
-      plaintext.push({ pubkey: entry.pubkey, nsec });
-    } else {
-      blanked.push(entry.pubkey);
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(storageKey); } catch { return; }
+  if (raw) {
+    let state: unknown;
+    try { state = JSON.parse(raw); } catch { state = null; }
+    if (Array.isArray(state)) {
+      let entryChanged = false;
+      for (const entry of state as PersistedLogin[]) {
+        if (!entry || typeof entry.pubkey !== 'string') continue;
+        const data = entry.data && typeof entry.data === 'object' ? entry.data : undefined;
+
+        // NIP-46 bunker logins persist an ephemeral CLIENT key. Same treatment
+        // as the identity key.
+        if (entry.type === 'bunker') {
+          const id = bunkerClientSecretId(entry.pubkey);
+          const clientNsec = data?.clientNsec;
+          if (typeof clientNsec === 'string' && clientNsec !== '') {
+            memNsec.set(id, clientNsec);
+            if (!plaintext.some(p => p.pubkey === id)) plaintext.push({ pubkey: id, nsec: clientNsec });
+            if (data) { data.clientNsec = ''; entryChanged = true; }
+          } else {
+            blanked.push(id);
+          }
+          continue;
+        }
+
+        if (entry.type !== 'nsec') continue;
+        const nsec = data?.nsec;
+        if (typeof nsec === 'string' && nsec !== '') {
+          memNsec.set(entry.pubkey, nsec); // keep the session alive regardless of persist outcome
+          if (!plaintext.some(p => p.pubkey === entry.pubkey)) plaintext.push({ pubkey: entry.pubkey, nsec });
+          if (data) { data.nsec = ''; entryChanged = true; }
+        } else {
+          blanked.push(entry.pubkey);
+        }
+      }
+      // Move-then-blank, atomically from the provider's point of view: write
+      // the pending copy FIRST, then the blanked entry. A crash between the
+      // two leaves both copies (safe); the reverse order could leave neither.
+      if (entryChanged) {
+        try {
+          localStorage.setItem(PENDING_MIGRATION_KEY, JSON.stringify(plaintext));
+          localStorage.setItem(storageKey, JSON.stringify(state));
+        } catch { /* storage failed — entry unchanged, plaintext stays where it was */ }
+      }
     }
   }
+
+  if (plaintext.length === 0 && blanked.length === 0) return;
 
   // ── Async phase ──
   // Scrub the stale kv-store copy of the login state (see docblock, step 2).
@@ -325,39 +389,23 @@ export async function prepareLoginStorage(storageKey: string): Promise<void> {
     await idbRemove(storageKey);
   } catch { /* best-effort */ }
 
-  // Persist THEN blank. Encrypt each nsec into IndexedDB and only blank the
-  // plaintext localStorage copy once its encrypted record has committed. The
-  // previous order (blank synchronously, persist afterward) left a window where a
-  // crash between the localStorage write and the IDB commit destroyed the ONLY
-  // remaining copy of the key. main.tsx awaits this before mounting the login
-  // provider — and on timeout leaves the plaintext in place for this boot — so
-  // persisting first costs nothing and never risks the account. memNsec already
-  // holds every key for the session, so a not-yet-committed account still signs,
-  // and next boot retries the migration.
-  const committed = new Set<string>();
+  // Encrypt each pending nsec into IndexedDB; drop it from the pending key only
+  // once its encrypted record committed. memNsec already holds every key for
+  // the session, so a not-yet-committed account still signs, and the next boot
+  // retries whatever remains pending.
+  const remaining: Array<{ pubkey: string; nsec: string }> = [];
   for (const { pubkey, nsec } of plaintext) {
-    if (await storeNsec(pubkey, nsec)) committed.add(pubkey);
-    else console.error(`[keystore] Could not encrypt nsec for ${pubkey.slice(0, 8)}… — leaving the legacy localStorage entry in place so the account survives reload`);
+    if (!(await storeNsec(pubkey, nsec))) {
+      remaining.push({ pubkey, nsec });
+      console.error(`[keystore] Could not encrypt nsec for ${pubkey.slice(0, 8)}… — kept in pending migration so the account survives reload`);
+    }
   }
-
-  // Rewrite localStorage once, blanking only the entries whose encrypted record
-  // committed. On failure the plaintext simply remains for the next boot to retry.
-  if (committed.size > 0) {
-    try {
-      const cur = localStorage.getItem(storageKey);
-      const curState: unknown = cur ? JSON.parse(cur) : state;
-      if (Array.isArray(curState)) {
-        for (const entry of curState as PersistedLogin[]) {
-          if (typeof entry?.pubkey !== 'string' || !entry.data || typeof entry.data !== 'object') continue;
-          if (entry.type === 'nsec' && committed.has(entry.pubkey)) {
-            entry.data.nsec = '';
-          } else if (entry.type === 'bunker' && committed.has(bunkerClientSecretId(entry.pubkey))) {
-            entry.data.clientNsec = '';
-          }
-        }
-        localStorage.setItem(storageKey, JSON.stringify(curState));
-      }
-    } catch { /* best-effort — plaintext remains and is retried next boot */ }
+  try {
+    if (remaining.length === 0) localStorage.removeItem(PENDING_MIGRATION_KEY);
+    else localStorage.setItem(PENDING_MIGRATION_KEY, JSON.stringify(remaining));
+  } catch { /* best-effort */ }
+  if (remaining.length > 0) {
+    emitKeystoreWarning('Your signing key could not be encrypted at rest on this device — it is stored unprotected until storage recovers. Consider a bunker login if this persists.');
   }
 
   await Promise.all(blanked.map((pubkey) => loadNsec(pubkey)));

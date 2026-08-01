@@ -20,6 +20,7 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import { SizeGuardedImage } from './SizeGuardedImage';
 import { resolveMediaSources } from '@core/blossom';
 import { optimizeMediaUrl } from '@core/imageUtils';
+import { applyImageProxy } from '@core/imageProxy';
 import { openExternal } from '../lib/openExternal';
 import { isSafeExternalUrl, stripTrackingParams, getTrackingParams } from '@core/sanitizeUtils';
 import { TrackerWarningDialog } from './TrackerWarningDialog';
@@ -37,7 +38,12 @@ const MEDIA_WIDTH = SCREEN_WIDTH - 56;
  * next on error before declaring failure — so a dead mirror doesn't produce a
  * spurious "Failed to load video". Parity with web's VideoPlayer.
  */
-function InlineVideo({ sources }: { sources: string[] }) {
+function InlineVideo({ sources: rawSources }: { sources: string[] }) {
+  // Video sources go through the user's proxy like posters/images do — a
+  // configured proxy is a promise the user's IP stays away from media hosts,
+  // and the player fetches on mount. An image-only proxy will fail for video;
+  // that fails CLOSED (error shown, nothing leaks). Parity with web.
+  const sources = useMemo(() => rawSources.map(s => applyImageProxy(s)), [rawSources]);
   // Index into [canonical url, ...blossom mirror URLs]; advanced when the
   // current source errors so we retry the same hash on another Blossom server.
   const [srcIdx, setSrcIdx] = useState(0);

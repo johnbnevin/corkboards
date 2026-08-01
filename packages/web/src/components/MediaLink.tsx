@@ -8,6 +8,7 @@ import { useLinkCopy } from '@/hooks/useLinkCopy'
 import { useYouTubeTitle } from '@/hooks/useYouTubeTitle'
 import { TrackerWarningDialog } from '@/components/TrackerWarningDialog'
 import { optimizeMediaUrl, shouldRejectUrl } from '@/lib/imageUtils'
+import { applyImageProxy } from '@core/imageProxy'
 import { isImageUrl, isCdnHost } from '@/lib/mediaUtils'
 import { resolveMediaSources } from '@core/blossom'
 
@@ -17,8 +18,16 @@ import { resolveMediaSources } from '@core/blossom'
 function VideoPlayer({ sources: rawSources, poster: rawPoster }: { sources: string[]; poster?: string }) {
   // Run video + poster URLs through the same unsafe-host/SSRF gate images get —
   // drop private/localhost/credentialed URLs before they reach the <video>
-  // element. The poster is an image, so it also goes through the user's proxy.
-  const sources = useMemo(() => rawSources.filter(s => !shouldRejectUrl(s, 'media')), [rawSources])
+  // element. Video sources ALSO go through the user's proxy (not just the
+  // poster): a user who configured a proxy expects their IP hidden from media
+  // hosts, and <video preload="metadata"> fetches on mount. An image-only
+  // proxy (e.g. wsrv.nl) will fail for video — that fails CLOSED (no leak,
+  // player shows an error); the settings copy tells users to pick a
+  // general-purpose proxy if they watch video.
+  const sources = useMemo(
+    () => rawSources.filter(s => !shouldRejectUrl(s, 'media')).map(s => applyImageProxy(s)),
+    [rawSources],
+  )
   const poster = rawPoster ? optimizeMediaUrl(rawPoster, true) || undefined : undefined
   const videoRef = useRef<HTMLVideoElement>(null)
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')

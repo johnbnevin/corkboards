@@ -39,6 +39,17 @@ These are inherent to the protocols used, not bugs:
 - **YouTube title proxy (`youtube-proxy.php`)** — lookups are sent in the POST request body, which standard access logs never record: the host's logs show only that an IP called the endpoint, never which video. The proxy code itself logs and stores nothing about lookups. YouTube/Google sees the proxy server's IP, never the user's.
 - **Relay metadata** — your IP address is visible to relay operators via the WebSocket connection. Use a VPN or Tor if IP privacy is important to you.
 
+### Deliberate fail-open trade-offs (audited 2026-08)
+
+An audit for Coldcard-style flaws (failures silently choosing a weaker fallback) closed several fail-opens — the desktop proxy kill-switch now covers every publish path and treats an unreadable proxy config as "assume required"; key-at-rest failures warn loudly instead of logging to the console; auto-restore integrity checks are symmetric — and left these as documented, deliberate trade-offs:
+
+- **rss-proxy.php rate limiter fails open** when its lock file can't be taken: the request proceeds unmetered. Availability-only — no privacy consequence for clients.
+- **Requests with no `Origin` header are allowed** on rss-proxy.php / youtube-proxy.php — required, because the mobile and desktop apps send no browser Origin. Cross-site browser abuse is still blocked (exact-match allowlist), and the SSRF gate bounds what the endpoint will fetch.
+- **`open_external` (desktop) hands URLs to the system browser**, which is outside any configured proxy. With "Require proxy" on, clicking an external link deanonymizes via the browser — the settings copy says so; there is no way to proxy another application's traffic from inside this one.
+- **Web `localStorage`/IndexedDB are unencrypted at rest** by platform nature. The nsec itself is additionally encrypted (non-extractable AES-GCM CryptoKey); when that encryption is unavailable the app now warns loudly rather than failing silently.
+- **`keychainHasKey` reports "present" on an IPC error** — this suppresses a scary "your signing key is gone" warning on transient hiccups; the failure mode is a visible signing error, not a security downgrade.
+- **Dev builds under remote JS debugging have a `Math.random()`-backed RNG** (React Native platform behavior). The app refuses to generate identity keys in that state; release builds are unaffected.
+
 ## Security Implementation
 
 For details on the HTML sanitization strategy, content security policy, and XSS prevention, see [SECURITY_IMPLEMENTATION.md](./SECURITY_IMPLEMENTATION.md).

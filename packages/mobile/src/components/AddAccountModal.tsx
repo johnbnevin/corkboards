@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { nip19, generateSecretKey } from 'nostr-tools';
+import { assertSecureRandom } from '../lib/assertSecureRandom';
 // Import-only: NIP-06 is `unrecommended` upstream, so we no longer GENERATE
 // seed phrases — but people who made an account when we did (or in another
 // client) must always be able to get back in.
@@ -90,6 +91,12 @@ export function AddAccountModal({ visible, onClose }: AddAccountModalProps) {
     // to walk, the words were only a second encoding of the same key, so they
     // doubled the number of secrets to store and leak for no gain. Logging in
     // WITH a seed phrase still works below — this only stops minting new ones.
+    // Refuse to mint an identity from a Math.random()-backed RNG (dev builds
+    // under remote debugging — see lib/assertSecureRandom). No-op in release.
+    try { assertSecureRandom(); } catch (e) {
+      Alert.alert('Insecure random source', e instanceof Error ? e.message : String(e));
+      return;
+    }
     const sk = generateSecretKey();
     setNewNsec(nip19.nsecEncode(sk));
     setView('create-backup');

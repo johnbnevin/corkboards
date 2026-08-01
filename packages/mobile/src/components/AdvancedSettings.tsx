@@ -58,13 +58,20 @@ export function isBlockScreenshotsEnabled(): boolean {
   return mobileStorage.getSync(BLOCK_SCREENSHOTS_KEY) === 'true';
 }
 
-async function setBlockScreenshots(enabled: boolean): Promise<void> {
-  mobileStorage.setSync(BLOCK_SCREENSHOTS_KEY, enabled ? 'true' : 'false');
+/**
+ * Returns whether the OS call actually succeeded — the UI must not show the
+ * shield as ON when FLAG_SECURE / the iOS capture shield failed to apply
+ * (that would be a security toggle lying about the protection it provides).
+ * The stored flag is only written on success for the same reason.
+ */
+async function setBlockScreenshots(enabled: boolean): Promise<boolean> {
   try {
     if (enabled) await ScreenCapture.preventScreenCaptureAsync();
     else await ScreenCapture.allowScreenCaptureAsync();
+    mobileStorage.setSync(BLOCK_SCREENSHOTS_KEY, enabled ? 'true' : 'false');
+    return true;
   } catch {
-    // Best effort — some platforms (e.g. web preview) don't support it.
+    return false;
   }
 }
 
@@ -619,7 +626,14 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
 
   const handleToggleBlockScreenshots = async () => {
     const next = !blockScreenshots;
-    await setBlockScreenshots(next);
+    const ok = await setBlockScreenshots(next);
+    if (!ok) {
+      Alert.alert(
+        'Could not change screenshot blocking',
+        'The system call failed — the setting was NOT applied.',
+      );
+      return; // state unchanged: the UI must reflect the real protection
+    }
     setBlockScreenshotsState(next);
   };
 
@@ -742,7 +756,8 @@ function NetworkPrivacySection({ onBack }: { onBack: () => void }) {
       <View style={{ paddingHorizontal: 12 }}>
         <Text style={styles.settingTitle}>Image Proxy URL template</Text>
         <Text style={styles.settingHint}>
-          Route every avatar and inline image through an image-proxy so your IP and Referer aren&apos;t sent to each host. Use {'{url}'} as the placeholder.
+          Route every avatar, inline image, AND video through a proxy so your IP and Referer aren&apos;t sent to each host. Use {'{url}'} as the placeholder.
+          Image-only proxies (like wsrv.nl) can&apos;t serve video — videos will fail rather than leak your IP; use a general-purpose proxy if you watch videos.
         </Text>
         <View style={styles.addRow}>
           <TextInput

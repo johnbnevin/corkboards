@@ -36,6 +36,29 @@ export const KNOWN_BLOSSOM_SERVERS = [
   'https://blossom.ditto.pub/',
 ] as const;
 
+/**
+ * Injectable source of the USER'S Blossom server list for render-time
+ * fallbacks. Every candidate here receives the user's IP plus the exact blob
+ * hash they're viewing whenever a load fails — trivially attacker-triggerable
+ * by posting a dead imeta hash — so the fan-out set must be the servers the
+ * user actually chose, not a hard-coded list. Platforms call
+ * `setBlossomServerListProvider(getBlossomServers)` at startup; unset (tests,
+ * early boot) falls back to KNOWN_BLOSSOM_SERVERS.
+ */
+let _serverListProvider: (() => readonly string[]) | null = null;
+
+export function setBlossomServerListProvider(fn: () => readonly string[]): void {
+  _serverListProvider = fn;
+}
+
+function defaultFallbackServers(): readonly string[] {
+  try {
+    const list = _serverListProvider?.();
+    if (list && list.length >= 0) return list; // empty = user chose no fan-out
+  } catch { /* provider failure → conservative default below */ }
+  return KNOWN_BLOSSOM_SERVERS;
+}
+
 /** A blossom path is a bare 64-char sha256, optionally with a file extension. */
 const BLOSSOM_HASH_RE = /^([0-9a-f]{64})(\.[a-z0-9]+)?$/i;
 
@@ -223,7 +246,7 @@ export function resolveMediaSources(input: {
     url,
     sha256,
     fallbacks = [],
-    servers = KNOWN_BLOSSOM_SERVERS,
+    servers = defaultFallbackServers(),
     rejectType = 'media',
     rejectUnsafe = true,
   } = input;

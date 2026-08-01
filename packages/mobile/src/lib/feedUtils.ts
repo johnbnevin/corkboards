@@ -153,6 +153,17 @@ async function fetchRssDirect(feedUrl: string, maxItems: number, feedDomain: str
     if (__DEV__) console.warn('[rss] HTTP', response.status, 'for', feedUrl);
     return null;
   }
+  // fetch() followed redirects automatically, so the INITIAL https/SSRF gate
+  // above says nothing about where we ended up: a feed could 302 to http://
+  // (cleartext downgrade) or a LAN/metadata address. RN fetch can't do
+  // manual per-hop validation like rss-proxy.php does, so validate the FINAL
+  // URL and discard the body if it landed anywhere the gate would have
+  // refused. (The request already happened — this can't unsend it — but the
+  // downgraded/SSRF'd content is never used and the feed reads as failed.)
+  if (response.url && !isFetchableFeedUrl(response.url)) {
+    if (__DEV__) console.warn('[rss] Redirect landed on a refused URL:', response.url);
+    return null;
+  }
   const text = (await response.text()).slice(0, MAX_FEED_BYTES);
   return parseFeedXml(text, maxItems, feedDomain);
 }

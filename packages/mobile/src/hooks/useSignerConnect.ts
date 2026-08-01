@@ -15,6 +15,7 @@
 import { useState, useRef, useCallback } from 'react';
 import { Linking, Platform } from 'react-native';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
+import { assertSecureRandom } from '../lib/assertSecureRandom';
 import type { NRelay1 } from '@nostrify/nostrify';
 import { NSecSigner, NConnectSigner } from '@nostrify/nostrify';
 import { useAuth } from '../lib/AuthContext';
@@ -54,6 +55,9 @@ export function useSignerConnect(_type: 'amber') {
     setError(null);
 
     try {
+      // The NIP-46 client key + connect secret are security material too —
+      // refuse a Math.random()-backed RNG (dev + remote debugging).
+      assertSecureRandom();
       const sk = generateSecretKey();
       const clientPubkey = getPublicKey(sk);
       const clientNsec = nip19.nsecEncode(sk);

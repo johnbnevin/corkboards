@@ -227,6 +227,18 @@ describe('mergeState — undo after dismiss (the grave must be erased)', () => {
     expect(mergeRemovesLocalData(out)).toBe(false)
   })
 
+  it('a NEWER snapshot\'s grave removes a saved id the local snapshot still holds', () => {
+    // The reported bug: another device removed saved notes and saved; this
+    // device had saved at some point too, so `local.savedAt` (a stand-in for
+    // "when each local id was added") outranked the incoming grave and the
+    // merge applied nothing while reporting success. A grave from a snapshot
+    // NEWER than ours is the later fact for routine-churn keys.
+    const local = snap({ [SAVED]: JSON.stringify(['x', 'y']) }, 100, {})
+    const remote = snap({ [SAVED]: JSON.stringify(['y']) }, 300, { [SAVED]: { x: 90 } })
+    const out = mergeState(local, remote)
+    expect(JSON.parse(out.keys[SAVED]!)).toEqual(['y'])
+  })
+
   it('a remote-carried grave cannot delete an id re-added after it', () => {
     // Another device may still carry the old grave in its snapshot. The undo
     // is safe as long as the re-adding side's snapshot is newer than the grave.

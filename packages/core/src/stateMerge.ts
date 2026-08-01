@@ -152,6 +152,34 @@ export function mergeTombstones(a: TombstoneMap = {}, b: TombstoneMap = {}): Tom
  * the add-time is the conservative reading: we know the id was present when
  * that snapshot was taken, so a removal recorded after it is genuinely later.
  */
+/**
+ * Keys where a recorded REMOVAL outranks mere local presence.
+ *
+ * For every other key the local snapshot's `savedAt` stands in for "when each
+ * local id was added", which is deliberately conservative: it keeps anything
+ * the local snapshot still holds. But that proxy is a lie about individual
+ * ids — they were added whenever the user added them, not when the snapshot
+ * happened to be written. So one local autosave after another device's
+ * deletion made EVERY local id look freshly re-added, every incoming grave was
+ * outranked, and the merge applied zero changes while reporting success. That
+ * is why "I removed a lot of saved notes on the desktop and the other device
+ * never caught up (until a reload, which read the values the merge had already
+ * written)".
+ *
+ * These three keys are the ones the repo already treats as routine churn —
+ * `SAVED_CLEANUP_KEYS` in backupGuards never holds a merge for them, on the
+ * stated grounds that people clean out Save for Later all the time. Letting a
+ * removal win here costs at worst a re-save of something the user re-added on
+ * another device between the two snapshots; blocking it costs cross-device
+ * cleanup entirely. Dismissed notes, corkboards and pins keep the
+ * conservative reading, where an accidental deletion is the worse outcome.
+ */
+const REMOVAL_WINS_KEYS = new Set([
+  'collapsed-notes',
+  'nostr-bookmark-ids',
+  'saved-minimized-notes',
+])
+
 function mergeIdSet(
   key: string,
   local: StateSnapshot,
@@ -184,7 +212,19 @@ function mergeIdSet(
   }
 
   // Local first so local ordering is preserved for the ids both sides share.
-  consider(localIds, local.savedAt)
+  //
+  // For the routine-churn keys, a grave carried by a snapshot NEWER than ours
+  // outranks mere local presence. `local.savedAt` is a stand-in for "when each
+  // local id was added" and it is a lie about individual ids: one local save
+  // after another device's cleanup made every local id look freshly re-added,
+  // so incoming removals were outranked and the merge changed nothing while
+  // reporting success. Requiring the remote snapshot to be newer keeps the
+  // genuine re-add case safe (a stale grave from an older snapshot still
+  // loses), which is what stateMerge.test.ts's re-add case asserts.
+  const localAddedAt = REMOVAL_WINS_KEYS.has(key) && remote.savedAt > local.savedAt
+    ? 0
+    : local.savedAt
+  consider(localIds, localAddedAt)
   consider(remoteIds, remote.savedAt)
 
   return { value: JSON.stringify(out), removed }

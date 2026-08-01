@@ -2747,7 +2747,20 @@ export function useNostrBackup(user: NUser | undefined, nostr: NPool) {
       idbSetSync(LAST_CHUNK_COUNT_KEY, isV4Blossom ? '0' : String(backup.chunks));
       setLastBackupTs(backup.timestamp);
       // We now hold this manifest's state; don't merge it again.
+      //
+      // A merge that changed NOTHING is reported here too, and that used to be
+      // a permanent dead end: the id was recorded as synced, so every later
+      // check short-circuited at "already synced — skipping decrypt", which
+      // useCloudSync scores as 'nothing-new' → three strikes → a 5-minute
+      // heartbeat that also returns null forever. Nothing but a brand-new save
+      // on the other device could dislodge it. Record the id (re-merging the
+      // same snapshot every tick is its own bug) but say so loudly in the log,
+      // because "applied, 0 keys changed" against a NEWER remote manifest means
+      // the merge rules declined the change — the one case worth investigating.
       if (manifestEventRef.current) setLastSyncedManifestId(manifestEventRef.current.id);
+      if (restoredCount === 0 && removals.length === 0) {
+        log(`Merge applied no changes (remote ts ${backup.timestamp}) — local already matches, or the merge rules kept local values`, 'warn');
+      }
       const wasSilent = silent;
 
       // Change-detection baseline. When local contributed nothing, baseline is

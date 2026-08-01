@@ -194,6 +194,13 @@ export function useLoginActions() {
       for (const r of connectRelays) params.append('relay', r);
       params.append('secret', secret);
       params.append('name', 'corkboards.me');
+      // Ask for every permission the session will need IN the connect request,
+      // so Amber's connect dialog covers them all in one approval. Without this
+      // the connect grant was bare, and the signer warm-up a few seconds later
+      // (encrypt/decrypt/sign for the backup pipeline) raised a SECOND dialog —
+      // the "auth Amber twice during login" complaint. Same set amberConnect
+      // and mobile already request.
+      params.append('perms', 'get_public_key,sign_event,nip44_encrypt,nip44_decrypt');
 
       const uri = `nostrconnect://${clientPubkey}?${params.toString()}`;
       tauriLog(`[nip46] nostrconnect URI generated, relays: ${connectRelays.join(', ')}`);

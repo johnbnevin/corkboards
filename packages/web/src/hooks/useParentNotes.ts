@@ -256,6 +256,14 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
   });
 
   // Second pass: retry failed IDs individually with full outbox discovery
+  //
+  // Keyed on dataUpdatedAt, NOT data identity. When a retry sweep re-runs the
+  // batched query and every id misses again, the result map is deep-equal to
+  // the previous one, so structural sharing hands back the SAME object — an
+  // effect keyed on `query.data` never re-fires, and the escalation below (the
+  // lookup that actually finds these events) ran once at mount and never
+  // again. dataUpdatedAt advances on every completed fetch regardless.
+  const dataUpdatedAt = query.dataUpdatedAt;
   useEffect(() => {
     if (secondPassScheduled.current) return;
     if (!query.data) return;
@@ -317,7 +325,8 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
       clearTimeout(timer);
       secondPassScheduled.current = false;
     };
-  }, [query.data, uniqueRequests, nostr, queryClient, queryKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dataUpdatedAt stands in for query.data (see above)
+  }, [dataUpdatedAt, uniqueRequests, nostr, queryClient, queryKey]);
 
   return query;
 }

@@ -3,7 +3,9 @@ import { Iframe } from '@/components/ui/iframe'
 import { isTauri, tauriOpenExternal } from '@/lib/tauri'
 import { LightboxTrigger } from '@/components/ui/lightbox'
 import { SizeGuardedImage } from '@/components/SizeGuardedImage'
-import { ExternalLink, UtensilsCrossed, Film, AlertCircle } from 'lucide-react'
+import { ExternalLink, UtensilsCrossed, Film, AlertCircle, Copy, Check, ShieldAlert, ShieldCheck } from 'lucide-react'
+import { useLinkCopy } from '@/hooks/useLinkCopy'
+import { TrackerWarningDialog } from '@/components/TrackerWarningDialog'
 import { optimizeMediaUrl, shouldRejectUrl } from '@/lib/imageUtils'
 import { isImageUrl, isCdnHost } from '@/lib/mediaUtils'
 import { resolveMediaSources } from '@core/blossom'
@@ -240,6 +242,10 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
   const [srcIndex, setSrcIndex] = useState(0)
   const [revealed, setRevealed] = useState(false)
   const [embedRevealed, setEmbedRevealed] = useState(false)
+  // URL options for the external-open bar (desktop YouTube): the bar leaves
+  // the app, so the user gets the same inspect/copy affordances links have.
+  const [urlOptionsOpen, setUrlOptionsOpen] = useState(false)
+  const { cleanUrl, hasTracker, trackingParams, copied, copyClean } = useLinkCopy(url)
 
   // Ordered, deduped, SSRF-gated candidate list: [primary, ...author fallbacks,
   // ...blob rebuilt across every known server from its sha256]. Non-Blossom URLs
@@ -640,6 +646,41 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
             ? `Open ${getEmbedProviderName(embed.url)} in browser ↗`
             : `Click to load ${getEmbedProviderName(embed.url)}`}
         </span>
+        {/* The bar leaves the app, so it gets the same URL affordances links
+            have: a shield that opens the link-options dialog (see the full
+            URL, open clean/original, copy either) and a one-click copy. Both
+            stop propagation so inspecting the URL never opens the browser. */}
+        {openExternally && (
+          <>
+            <button
+              type="button"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); setUrlOptionsOpen(true) }}
+              title={hasTracker ? `Contains tracking parameters: ${trackingParams.join(', ')}` : 'No known trackers — link options'}
+              aria-label={hasTracker ? 'Link contains trackers' : 'Link options'}
+              className={hasTracker
+                ? 'inline-flex items-center text-amber-500 hover:text-amber-600'
+                : 'inline-flex items-center text-muted-foreground hover:text-foreground'}
+            >
+              {hasTracker ? <ShieldAlert className="h-3.5 w-3.5" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+            </button>
+            <button
+              type="button"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); copyClean() }}
+              title={copied ? 'Copied' : hasTracker ? 'Copy link without trackers' : 'Copy link'}
+              aria-label="Copy link"
+              className="inline-flex items-center text-muted-foreground hover:text-foreground"
+            >
+              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            </button>
+            <TrackerWarningDialog
+              open={urlOptionsOpen}
+              onOpenChange={setUrlOptionsOpen}
+              rawUrl={url}
+              cleanUrl={cleanUrl}
+              trackingParams={trackingParams}
+            />
+          </>
+        )}
       </div>
     )
   }

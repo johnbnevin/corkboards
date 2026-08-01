@@ -21,7 +21,8 @@ import { SizeGuardedImage } from './SizeGuardedImage';
 import { resolveMediaSources } from '@core/blossom';
 import { optimizeMediaUrl } from '@core/imageUtils';
 import { openExternal } from '../lib/openExternal';
-import { isSafeExternalUrl } from '@core/sanitizeUtils';
+import { isSafeExternalUrl, stripTrackingParams, getTrackingParams } from '@core/sanitizeUtils';
+import { TrackerWarningDialog } from './TrackerWarningDialog';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const MEDIA_WIDTH = SCREEN_WIDTH - 56;
@@ -293,6 +294,9 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
   // React-recommended "adjust state on prop change" pattern) rather than an
   // effect, which would cause an extra render + a lint warning.
   const [prevUrl, setPrevUrl] = useState(url);
+  // URL options for the external-open bar (YouTube): the bar leaves the app,
+  // so the user gets the same inspect/copy affordances links have.
+  const [urlOptionsOpen, setUrlOptionsOpen] = useState(false);
   if (url !== prevUrl) {
     setPrevUrl(url);
     setSrcIndex(0);
@@ -419,13 +423,39 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
     // stay in the app, this one leaves it for the browser. Identical styling
     // made them accidental-tap hazards — this bar is red-bordered and says
     // where the tap goes (parity with web's external-open treatment).
+    // The bar leaves the app, so it gets the same URL affordances links have:
+    // a shield that opens the link-options sheet (see the full URL, open
+    // clean/original, copy either). Copy/open act on the URL the author wrote,
+    // not the rewritten nocookie embed.
+    const cleanUrl = stripTrackingParams(url);
+    const trackingParams = getTrackingParams(url);
+    const hasTracker = cleanUrl !== url;
     return (
-      <TouchableOpacity
-        style={[styles.blurPlaceholder, styles.externalOpenBar]}
-        onPress={() => openExternal(embed.url)}
-      >
-        <Text style={styles.externalOpenText}>Open YouTube in browser ↗</Text>
-      </TouchableOpacity>
+      <>
+        <TouchableOpacity
+          style={[styles.blurPlaceholder, styles.externalOpenBar]}
+          onPress={() => openExternal(embed.url)}
+        >
+          <View style={styles.externalOpenRow}>
+            <Text style={styles.externalOpenText}>Open YouTube in browser ↗</Text>
+            <TouchableOpacity
+              onPress={() => setUrlOptionsOpen(true)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={hasTracker ? styles.trackerShield : styles.cleanShield}>
+                {hasTracker ? '⚠' : '🛡'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+        <TrackerWarningDialog
+          visible={urlOptionsOpen}
+          onClose={() => setUrlOptionsOpen(false)}
+          rawUrl={url}
+          cleanUrl={cleanUrl}
+          trackingParams={trackingParams}
+        />
+      </>
     );
   }
 
@@ -560,6 +590,19 @@ const styles = StyleSheet.create({
     color: '#ef4444',
     fontSize: 12,
     fontWeight: '500',
+  },
+  externalOpenRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  trackerShield: {
+    color: '#f59e0b',
+    fontSize: 12,
+  },
+  cleanShield: {
+    color: '#999',
+    fontSize: 12,
   },
   blurText: {
     color: '#666',

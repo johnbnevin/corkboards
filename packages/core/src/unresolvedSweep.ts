@@ -52,6 +52,20 @@ export const MAX_PER_SWEEP = 12
 /** Gap between individual retries within a sweep, so they don't burst. */
 export const SWEEP_STAGGER_MS = 500
 
+/**
+ * Sweep attempts per id before the registry gives up on it.
+ *
+ * Without a ceiling, a reference that is genuinely unreachable (deleted event,
+ * relay that no longer exists) is retried every round for as long as it stays
+ * on screen — a desktop session left open for days ran the sweep thousands of
+ * times against the same dead ids, churning sockets and allocations the whole
+ * time. Ten attempts at the 30s interval gives a flaky relay ~5 minutes of
+ * chances, which covers every transient failure the sweep exists for. The
+ * record is unmount-scoped: navigating away and back starts the count fresh,
+ * so "given up" means "for this sitting", not forever.
+ */
+export const MAX_SWEEP_ATTEMPTS = 10
+
 export interface SweepDecisionInput {
   /** How many references are unresolved on screen right now. */
   unresolvedCount: number

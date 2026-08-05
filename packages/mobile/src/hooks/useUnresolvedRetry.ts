@@ -25,7 +25,7 @@ import {
   SWEEP_INTERVAL_MS,
   SWEEP_STAGGER_MS,
 } from '@core/unresolvedSweep';
-import { getUnresolvedIds, unresolvedCount } from '@core/failedNotes';
+import { getUnresolvedIds, unresolvedCount, recordSweepAttempts } from '@core/failedNotes';
 import { forgetParentMiss } from './useParentNotes';
 
 export interface UseUnresolvedRetryResult {
@@ -56,6 +56,11 @@ export function useUnresolvedRetry(): UseUnresolvedRetryResult {
 
     inFlightRef.current = true;
     lastSweepAtRef.current = Date.now();
+    // Count the attempt BEFORE the refetches run: ids that keep failing climb
+    // toward MAX_SWEEP_ATTEMPTS and drop out of future batches, and the
+    // fewest-attempts-first ordering of getUnresolvedIds rotates the batch
+    // instead of retrying the same first N forever.
+    recordSweepAttempts(batch);
 
     // Drop the NEGATIVE cache for the whole batch BEFORE any refetch — ids
     // still inside their miss cooldown are otherwise skipped by the parent

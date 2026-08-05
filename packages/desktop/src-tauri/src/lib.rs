@@ -1,5 +1,6 @@
 mod keychain;
 mod logger;
+mod memlog;
 mod opener;
 mod proxy;
 mod relay;
@@ -101,6 +102,11 @@ pub fn run() {
                     relay::pool_reap().await;
                 }
             });
+
+            // Memory telemetry: RSS of the app + WebKit process tree into
+            // debug.log every 5 minutes (see memlog.rs for why). Honors the
+            // file-logging opt-in via logger::write_log.
+            memlog::spawn_sampler();
 
             Ok(())
         })

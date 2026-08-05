@@ -533,8 +533,15 @@ function useCollapsedNotesState() {
     _setSoftDismissedIds([..._softDismissedSet])
     persistSoftDismissed()
     notifySoftDismissChange()
-    // Track the batch so undoing the trigger undoes all
+    // Track the batch so undoing the trigger undoes all. A batch is only
+    // actionable while its trigger's undo window is open, so prune entries
+    // past the window here — otherwise every never-undone batch lingers until
+    // logout, and a days-long session accumulates them without bound.
     if (triggerId && noteIds.length > 1) {
+      for (const id of _dismissBatchMap.keys()) {
+        const at = _dismissedUndoMap.get(id)
+        if (at === undefined || now - at > UNDO_WINDOW_MS) _dismissBatchMap.delete(id)
+      }
       _dismissBatchMap.set(triggerId, new Set(noteIds))
     }
     setUndoMapVersion(v => v + 1)

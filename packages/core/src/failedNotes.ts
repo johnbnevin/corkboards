@@ -19,43 +19,81 @@
  * unmount is what keeps it about the current page rather than about everything
  * the session has ever seen. So entries live until the reference resolves or
  * leaves the screen, and reads are non-destructive.
+ *
+ * ## Attempts and giving up
+ *
+ * Each entry carries how many sweeps have tried it. Reads sort by attempts
+ * (fewest first) so a batch-capped sweep rotates through everything instead of
+ * hammering the first N registered forever, and an id past MAX_SWEEP_ATTEMPTS
+ * stops being reported at all — a session left open for days must not retry
+ * the same dead reference every 30 seconds for its whole lifetime. Giving up
+ * is unmount-scoped: `clearUnresolved` deletes the record, so the count starts
+ * fresh when the reference next appears on screen.
  */
 
-const unresolvedIds = new Set<string>()
+import { MAX_SWEEP_ATTEMPTS } from './unresolvedSweep'
+
+/** id → sweep attempts so far. Insertion order is registration order. */
+const unresolved = new Map<string, number>()
 
 /**
- * Bound on tracked ids. The set is unmount-scoped, so it should stay near the
+ * Bound on tracked ids. The map is unmount-scoped, so it should stay near the
  * count of on-screen references — but a leak here would be silent and would feed
  * an ever-growing retry sweep, so cap it and drop the oldest.
  */
 const MAX_UNRESOLVED = 500
 
-/** Mark a note reference as on screen and unresolved. Idempotent. */
+/** Mark a note reference as on screen and unresolved. Idempotent — a
+ *  re-registration keeps the existing attempt count. */
 export function registerUnresolved(noteId: string): void {
-  if (!noteId || unresolvedIds.has(noteId)) return
-  if (unresolvedIds.size >= MAX_UNRESOLVED) {
-    const oldest = unresolvedIds.values().next().value
-    if (oldest !== undefined) unresolvedIds.delete(oldest)
+  if (!noteId || unresolved.has(noteId)) return
+  if (unresolved.size >= MAX_UNRESOLVED) {
+    const oldest = unresolved.keys().next().value
+    if (oldest !== undefined) unresolved.delete(oldest)
   }
-  unresolvedIds.add(noteId)
+  unresolved.set(noteId, 0)
 }
 
 /** Mark a reference as resolved, or gone from the screen. Idempotent. */
 export function clearUnresolved(noteId: string): void {
-  unresolvedIds.delete(noteId)
+  unresolved.delete(noteId)
 }
 
-/** Ids currently unresolved on screen. Non-destructive — safe to poll. */
+/**
+ * Ids still worth retrying, fewest attempts first (ties keep registration
+ * order). Non-destructive — safe to poll. Exhausted ids are omitted, so a
+ * caller taking the first N gets rotation and give-up for free.
+ */
 export function getUnresolvedIds(): string[] {
-  return Array.from(unresolvedIds)
+  return Array.from(unresolved.entries())
+    .filter(([, attempts]) => attempts < MAX_SWEEP_ATTEMPTS)
+    .sort((a, b) => a[1] - b[1])
+    .map(([id]) => id)
 }
 
-/** How many references are unresolved right now. */
+/** How many references are unresolved and still worth retrying. */
 export function unresolvedCount(): number {
-  return unresolvedIds.size
+  let count = 0
+  for (const attempts of unresolved.values()) {
+    if (attempts < MAX_SWEEP_ATTEMPTS) count++
+  }
+  return count
+}
+
+/** How many references have been given up on (still on screen, out of tries). */
+export function exhaustedCount(): number {
+  return unresolved.size - unresolvedCount()
+}
+
+/** Record that a sweep just tried these ids. Unknown ids are ignored. */
+export function recordSweepAttempts(noteIds: readonly string[]): void {
+  for (const id of noteIds) {
+    const attempts = unresolved.get(id)
+    if (attempts !== undefined) unresolved.set(id, attempts + 1)
+  }
 }
 
 /** Drop everything (logout, data wipe, feed replaced). */
 export function clearAllUnresolved(): void {
-  unresolvedIds.clear()
+  unresolved.clear()
 }

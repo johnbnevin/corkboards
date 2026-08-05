@@ -5,12 +5,15 @@ import {
   MAX_PER_SWEEP,
   MIN_UNRESOLVED_TO_SWEEP,
   SWEEP_INTERVAL_MS,
+  MAX_SWEEP_ATTEMPTS,
 } from './unresolvedSweep'
 import {
   registerUnresolved,
   clearUnresolved,
   getUnresolvedIds,
   unresolvedCount,
+  exhaustedCount,
+  recordSweepAttempts,
   clearAllUnresolved,
 } from './failedNotes'
 
@@ -102,5 +105,40 @@ describe('unresolved registry', () => {
     expect(unresolvedCount()).toBeLessThanOrEqual(500)
     // The newest registration survives; the oldest is what gets dropped.
     expect(getUnresolvedIds()).toContain('id699')
+  })
+
+  it('rotates: swept ids sink behind never-swept ones', () => {
+    // 20 ids, one batch-capped sweep. The next read must lead with the ids the
+    // first sweep did NOT touch — slice(0, MAX_PER_SWEEP) over registration
+    // order retried the same first 12 every round while the rest starved.
+    for (let i = 0; i < 20; i++) registerUnresolved(`id${i}`)
+    const first = selectSweepBatch(getUnresolvedIds())
+    recordSweepAttempts(first)
+    const second = selectSweepBatch(getUnresolvedIds())
+    for (let i = MAX_PER_SWEEP; i < 20; i++) expect(second).toContain(`id${i}`)
+    expect(second).not.toEqual(first)
+  })
+
+  it('gives up on an id after MAX_SWEEP_ATTEMPTS and stops counting it', () => {
+    registerUnresolved('dead')
+    registerUnresolved('alive')
+    for (let i = 0; i < MAX_SWEEP_ATTEMPTS; i++) recordSweepAttempts(['dead'])
+    expect(getUnresolvedIds()).toEqual(['alive'])
+    expect(unresolvedCount()).toBe(1)
+    expect(exhaustedCount()).toBe(1)
+    // A duplicate registration while still on screen must not revive it.
+    registerUnresolved('dead')
+    expect(getUnresolvedIds()).toEqual(['alive'])
+    // Leaving the screen and coming back starts the count fresh.
+    clearUnresolved('dead')
+    registerUnresolved('dead')
+    expect(getUnresolvedIds()).toContain('dead')
+    expect(exhaustedCount()).toBe(0)
+  })
+
+  it('ignores attempt records for unknown ids', () => {
+    recordSweepAttempts(['never-registered'])
+    expect(unresolvedCount()).toBe(0)
+    expect(exhaustedCount()).toBe(0)
   })
 })

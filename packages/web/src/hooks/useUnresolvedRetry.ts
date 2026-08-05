@@ -23,7 +23,7 @@ import {
   SWEEP_INTERVAL_MS,
   SWEEP_STAGGER_MS,
 } from '@core/unresolvedSweep';
-import { getUnresolvedIds, unresolvedCount } from '@/lib/failedNotes';
+import { getUnresolvedIds, unresolvedCount, exhaustedCount, recordSweepAttempts } from '@/lib/failedNotes';
 import { forgetParentMiss } from '@/hooks/useParentNotes';
 import { debugLog } from '@/lib/debug';
 
@@ -53,7 +53,13 @@ export function useUnresolvedRetry(): UseUnresolvedRetryResult {
 
     inFlightRef.current = true;
     lastSweepAtRef.current = Date.now();
-    debugLog(`[unresolvedRetry] sweeping ${batch.length} of ${unresolvedCount()} unresolved`);
+    // Count the attempt BEFORE the refetches run: ids that keep failing climb
+    // toward MAX_SWEEP_ATTEMPTS and drop out of future batches, and the
+    // fewest-attempts-first ordering of getUnresolvedIds rotates the batch
+    // instead of retrying the same first N forever.
+    recordSweepAttempts(batch);
+    const givenUp = exhaustedCount();
+    debugLog(`[unresolvedRetry] sweeping ${batch.length} of ${unresolvedCount()} unresolved${givenUp > 0 ? ` (${givenUp} given up)` : ''}`);
 
     // Drop the NEGATIVE cache for the whole batch up front. `forgetParentMiss`
     // clears the decayed miss record so lookups actually go back out to the

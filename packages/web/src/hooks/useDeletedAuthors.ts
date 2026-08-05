@@ -6,6 +6,18 @@ import { useNostr } from '@/hooks/useNostr';
 const deletedAuthors = new Set<string>();  // pubkeys confirmed deleted/vanished
 const checkedAuthors = new Set<string>();   // pubkeys we've already queried
 
+// checkedAuthors grows by every author the session ever renders, which in a
+// days-long sitting is unbounded. FIFO-evict past the cap: an evicted author
+// merely becomes eligible for one more best-effort deletion query later.
+const MAX_CHECKED_AUTHORS = 5000;
+function rememberChecked(pubkey: string): void {
+  if (checkedAuthors.size >= MAX_CHECKED_AUTHORS) {
+    const oldest = checkedAuthors.values().next().value;
+    if (oldest !== undefined) checkedAuthors.delete(oldest);
+  }
+  checkedAuthors.add(pubkey);
+}
+
 /**
  * Does this event mark its author's account as deleted/vanished?
  *  - NIP-62 (kind 62): request to vanish.
@@ -37,7 +49,7 @@ export function useDeletedAuthors(pubkeys: string[]): Set<string> {
     if (unchecked.length === 0) return;
     let cancelled = false;
     // Mark upfront so overlapping renders don't re-query the same authors.
-    unchecked.forEach(p => checkedAuthors.add(p));
+    unchecked.forEach(p => rememberChecked(p));
     (async () => {
       let found = false;
       try {

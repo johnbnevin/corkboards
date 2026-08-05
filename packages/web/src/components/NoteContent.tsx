@@ -329,7 +329,17 @@ export function NoteContent({ event, className, inModalContext = false, onViewTh
   // params — or by host entirely, when the blob has been mirrored to a second
   // Blossom server. Any of those rendered the image twice.
   const { missingImages, missingVideos } = useMemo(() => {
-    const contentKeys = new Set(content.filter(p => p.type === 'media').map(p => mediaKey(p.value)))
+    // Resolve a content URL's sha256 through its imeta twin before keying.
+    // imetaMeta is keyed by the exact imeta URL string, so a content URL —
+    // even an IDENTICAL one — got no sha here and keyed by canonical URL,
+    // while the imeta side keyed by its `x` hash. The two keys never matched
+    // and the image rendered twice, inline and again as an attachment.
+    const shaByCanonical = new Map<string, string>()
+    for (const [url, meta] of imetaMeta) {
+      if (meta.sha256) shaByCanonical.set(canonicalMediaUrl(url), meta.sha256)
+    }
+    const contentKeys = new Set(content.filter(p => p.type === 'media').map(p =>
+      mediaKey(p.value, shaByCanonical.get(canonicalMediaUrl(p.value)))))
     const notInContent = (url: string) => !contentKeys.has(mediaKey(url, imetaMeta.get(url)?.sha256))
     return {
       missingImages: imetaImageUrls.filter(notInContent),

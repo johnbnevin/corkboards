@@ -284,11 +284,20 @@ export function useCustomFeedNotesCache({
         if (__DEV__) console.log(`[customFeedCache] Got ${events.length} events for feed ${feedId}`);
       }
 
-      // Save to custom feed cache
-      await saveCustomFeedNotes(feedId, events);
+      // A fetch that returned nothing must not touch the persisted board:
+      // after idle it usually means dead sockets, not an empty board. Serve
+      // what's on disk. (Mirrors web.)
+      if (events.length === 0) {
+        return await getCustomFeedNotes(feedId);
+      }
+
+      // MERGE with the persisted cache rather than overwrite — a partial
+      // post-idle fetch used to destroy the board's accumulated notes both on
+      // screen and on disk. (Mirrors web.)
+      await mergeCustomFeedNotes(feedId, events);
       await setCustomFeedMetadata(feedId, { lastSync: Date.now(), pubkeyCount: pubkeys.length });
 
-      return events;
+      return await getCustomFeedNotes(feedId);
     },
     enabled: enabled && pubkeys.length > 0,
     retry: 0,

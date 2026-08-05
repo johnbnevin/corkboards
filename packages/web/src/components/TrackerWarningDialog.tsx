@@ -21,6 +21,8 @@ interface TrackerWarningDialogProps {
   cleanUrl: string
   /** Names of the tracking params detected (utm_source, fbclid, …). Empty when clean. */
   trackingParams: string[]
+  /** Human title for the link target (e.g. the YouTube video title), when known. */
+  linkTitle?: string
 }
 
 function openInNewTab(url: string) {
@@ -35,7 +37,7 @@ function openInNewTab(url: string) {
  * original, so it just offers open/copy. We never rewrite the note — the link
  * renders exactly as the author wrote it.
  */
-export function TrackerWarningDialog({ open, onOpenChange, rawUrl, cleanUrl, trackingParams }: TrackerWarningDialogProps) {
+export function TrackerWarningDialog({ open, onOpenChange, rawUrl, cleanUrl, trackingParams, linkTitle }: TrackerWarningDialogProps) {
   const [copiedWhich, setCopiedWhich] = useState<'clean' | 'original' | null>(null)
   const hasTracker = cleanUrl !== rawUrl
 
@@ -66,6 +68,9 @@ export function TrackerWarningDialog({ open, onOpenChange, rawUrl, cleanUrl, tra
           </AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div className="space-y-2 text-sm">
+              {linkTitle && (
+                <p className="font-medium text-foreground">{linkTitle}</p>
+              )}
               {hasTracker && (
                 <p>
                   Tracking parameter{trackingParams.length === 1 ? '' : 's'} detected:{' '}

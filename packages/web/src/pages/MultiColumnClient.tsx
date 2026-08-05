@@ -3138,10 +3138,16 @@ export function MultiColumnClient() {
       const c = classifyNote(note);
       classifications.set(note.id, c);
       if (c.isReply && c.parentEventId && !parentRequests.has(c.parentEventId)) {
-        // Extract relay hints from e-tags and author from p-tags
+        // Relay hints from the e-tag; parent author from the e-tag's pubkey
+        // field (NIP-10 `["e", id, relay, marker, pubkey]`) when present. The
+        // first p-tag is only a fallback: in a thread it names the ROOT
+        // author, so the outbox second pass was querying the wrong author's
+        // relays for every nested reply — NoteCard's manual "Retry now" uses
+        // the e-tag pubkey and resolves notes this path never could.
         const replyETag = note.tags.find(t => t[0] === 'e' && t[1] === c.parentEventId);
         const hints = replyETag?.[2] ? [replyETag[2]] : [];
-        const authorPubkey = note.tags.find(t => t[0] === 'p')?.[1];
+        const authorPubkey = (replyETag?.[4] && replyETag[4].length === 64 ? replyETag[4] : undefined)
+          ?? note.tags.find(t => t[0] === 'p')?.[1];
         parentRequests.set(c.parentEventId, { eventId: c.parentEventId, hints, authorPubkey });
       }
     }
@@ -5018,6 +5024,29 @@ export function MultiColumnClient() {
               </ul>
               <p className="text-xs text-muted-foreground italic mt-4">
                 Stay tuned for updates!
+              </p>
+              <Separator />
+              <p className="text-sm">
+                Get the apps (desktop &amp; mobile) at{' '}
+                <a
+                  href="https://get.corkboards.me"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-orange-500 hover:text-orange-600 underline font-medium"
+                >
+                  get.corkboards.me
+                </a>
+              </p>
+              <p className="text-xs text-muted-foreground">
+                by{' '}
+                <a
+                  href="https://noobstr.me"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-foreground underline"
+                >
+                  Noobstr.me
+                </a>
               </p>
             </div>
           </DialogContent>

@@ -73,6 +73,14 @@ const MAX_SECOND_PASS_PER_ROUND = 12;
 // batch query missed appear quickly instead of seconds later. (Mirrors web.)
 const FIRST_PASS_TIMEOUT_MS = 6000;
 const SECOND_PASS_DELAY_MS = 800;
+/**
+ * How long the id lookup keeps listening after the FIRST relay EOSEs.
+ * NPool.query hard-codes 1s (and overrides any per-call value) — for an id
+ * lookup that cuts off the slow archive relay that actually has an old parent
+ * the moment a fast relay answers empty. Sits inside FIRST_PASS_TIMEOUT_MS.
+ * (Mirrors web.)
+ */
+const ID_LOOKUP_EOSE_TIMEOUT_MS = 4000;
 let _activePoolQueries = 0;
 const _poolQueryQueue: Array<() => void> = [];
 
@@ -167,22 +175,34 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
         id => !parentNoteCache.has(id) && parentMisses.shouldRetry(id),
       );
 
+      // Age out exhausted miss entries whose final cooldown has long elapsed —
+      // nothing ever called prune(), so an id that spent its 3 attempts during
+      // one congested startup stayed retired for the session. (Mirrors web.)
+      parentMisses.prune();
+
+      // First pass, driven through nostr.req() rather than nostr.query():
+      // query() swallows aborts (a TIMED OUT pass looked "completed" and
+      // recorded authoritative misses during plain congestion) and it
+      // force-overrides the per-call eoseTimeout with the 1s pool default —
+      // see ID_LOOKUP_EOSE_TIMEOUT_MS above. (Mirrors web.)
       if (uncachedIds.length > 0) {
         let passCompleted = false;
         try {
-          const events = await withPoolQueryLimit(() => {
-            if (signal.aborted) return Promise.resolve([] as NostrEvent[]);
-            return nostr.query(
+          await withPoolQueryLimit(async () => {
+            if (signal.aborted) return;
+            const combined = AbortSignal.any([signal, AbortSignal.timeout(FIRST_PASS_TIMEOUT_MS)]);
+            for await (const msg of nostr.req(
               [{ ids: uncachedIds }],
-              { signal: AbortSignal.any([signal, AbortSignal.timeout(FIRST_PASS_TIMEOUT_MS)]) }
-            );
+              { signal: combined, eoseTimeout: ID_LOOKUP_EOSE_TIMEOUT_MS },
+            )) {
+              if (msg[0] === 'EVENT') cacheParentNoteLru(msg[2].id, msg[2]);
+              else if (msg[0] === 'EOSE') { passCompleted = true; break; }
+              else if (msg[0] === 'CLOSED') break;
+            }
           });
-          passCompleted = true;
-          for (const event of events) {
-            cacheParentNoteLru(event.id, event);
-          }
         } catch {
-          // Pool query failed
+          // Aborted or transport failure — congestion, not absence;
+          // passCompleted stays false so no misses are recorded.
         }
 
         // A query that timed out or aborted is evidence of congestion, not of

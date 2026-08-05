@@ -34,9 +34,18 @@ export function ThreadTree({
 }: ThreadTreeProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  // Key the virtualizer's measurement cache by EVENT ID, not by index (the
+  // default). The thread re-indexes rows constantly while it streams in —
+  // ancestors arriving above the target re-root the tree, collapses remove
+  // rows, a posted reply inserts one — and with index keys every measured
+  // height stays glued to its old position while the DOM rows (React-keyed by
+  // event id) move. Offsets computed from mismatched heights stacked comments
+  // on top of each other until a close/reopen rebuilt the cache from scratch.
+  const getItemKey = useCallback((index: number) => rows[index].node.event.id, [rows])
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
+    getItemKey,
     estimateSize: () => 120,
     overscan: 5,
   })

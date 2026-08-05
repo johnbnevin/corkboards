@@ -760,7 +760,17 @@ export function NoteContent({ event, numberOfLines, onViewThread }: NoteContentP
         // content and an imeta tag may differ by trailing slash, http/https —
         // or by host entirely, when the blob is mirrored to a second Blossom
         // server. Any of those rendered the image twice.
-        const contentKeys = new Set(mediaParts.map(p => mediaKey(p.value)));
+        // Resolve a content URL's sha256 through its imeta twin before keying.
+        // imetaMeta is keyed by the exact imeta URL string, so a content URL —
+        // even an IDENTICAL one — got no sha here and keyed by canonical URL,
+        // while the imeta side keyed by its `x` hash. The two keys never
+        // matched and the image rendered twice.
+        const shaByCanonical = new Map<string, string>();
+        for (const [url, meta] of imetaMeta) {
+          if (meta.sha256) shaByCanonical.set(canonicalMediaUrl(url), meta.sha256);
+        }
+        const contentKeys = new Set(mediaParts.map(p =>
+          mediaKey(p.value, shaByCanonical.get(canonicalMediaUrl(p.value)))));
         const notInContent = (url: string) => !contentKeys.has(mediaKey(url, imetaMeta.get(url)?.sha256));
         return (
           <>

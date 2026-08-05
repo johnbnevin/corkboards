@@ -246,7 +246,7 @@ export function WelcomePage({ onComplete }: WelcomePageProps) {
         <Text style={styles.brandTagline}>No email needed. Just pick a name and you're in.</Text>
         {loginView === 'main' && (
           <TouchableOpacity onPress={() => Linking.openURL('https://get.corkboards.me')}>
-            <Text style={styles.learnMoreLink}>Learn more or try it before signing up →</Text>
+            <Text style={styles.learnMoreLink}>Log in below — or test drive it or download the app here →</Text>
           </TouchableOpacity>
         )}
       </View>

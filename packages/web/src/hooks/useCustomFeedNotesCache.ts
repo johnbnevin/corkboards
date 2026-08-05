@@ -149,11 +149,21 @@ export function useCustomFeedNotesCache({
         debugLog(`[customFeedCache] Newest: ${new Date(newest * 1000).toISOString()}`);
       }
       
-      // Save to custom feed cache (separate from global notes cache)
-      await saveCustomFeedNotes(feedId, events);
+      // A fetch that returned nothing (even after the anchor rescue) must not
+      // touch the persisted board: after idle it usually means dead sockets,
+      // not an empty board. Serve what's on disk.
+      if (events.length === 0) {
+        return await getCustomFeedNotes(feedId);
+      }
+
+      // MERGE with the persisted cache rather than overwrite. saveCustomFeedNotes
+      // here replaced the blob with whatever this one fetch returned — so a
+      // partial post-idle fetch (only the relays that reconnected first)
+      // destroyed the board's accumulated notes both on screen and on disk.
+      await mergeCustomFeedNotes(feedId, events);
       await setCustomFeedMetadata(feedId, { lastSync: Date.now(), pubkeyCount: pubkeys.length });
-      
-      return events;
+
+      return await getCustomFeedNotes(feedId);
     },
     enabled: enabled && pubkeys.length > 0,
     retry: 0, // No retry on failure

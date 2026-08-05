@@ -84,6 +84,17 @@ const MAX_CONCURRENT_POOL_QUERIES = 6;
 // First-pass pool query ceiling. EOSE usually resolves well before this; the
 // ceiling just bounds the worst case before missing IDs fall to the second pass.
 const FIRST_PASS_TIMEOUT_MS = 6000;
+/**
+ * How long the id lookup keeps listening after the FIRST relay EOSEs.
+ *
+ * NPool.query hard-codes 1s here (and overrides any per-call value), which for
+ * an id lookup is exactly backwards: the fast relay that answers first is the
+ * one that DOESN'T have an old parent, and the slow archive relay that does
+ * have it gets cut off 1s later. That deterministic truncation is why a
+ * missing parent failed the same way on every retry. 4s still sits inside
+ * FIRST_PASS_TIMEOUT_MS, so the worst case is unchanged.
+ */
+const ID_LOOKUP_EOSE_TIMEOUT_MS = 4000;
 // Delay before the second (outbox-discovery) pass. Kept short so reply parents
 // that the first pass missed appear quickly instead of seconds later.
 const SECOND_PASS_DELAY_MS = 800;
@@ -193,23 +204,43 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
         id => !parentNoteCache.has(id) && parentMisses.shouldRetry(id),
       );
 
-      // First pass: fast batch query through the pool
+      // Age out exhausted miss entries whose final cooldown has long elapsed.
+      // Nothing ever called prune(), so an id that spent its 3 attempts during
+      // one congested startup stayed retired for the LIFETIME of the session —
+      // no sweep, no refetch, nothing could ever revive it.
+      parentMisses.prune();
+
+      // First pass: fast batch query through the pool.
+      //
+      // Driven through nostr.req(), not nostr.query(), for two reasons that
+      // are each sufficient on their own:
+      //  1. query() swallows aborts and returns partial results as if the
+      //     relays had answered — so a TIMED OUT pass looked "completed" and
+      //     recorded authoritative misses for every id, advancing reachable
+      //     parents toward the 3-attempt ceiling during plain congestion.
+      //     req() lets us see whether EOSE actually arrived.
+      //  2. query() force-overrides the per-call eoseTimeout with the pool
+      //     default (1s after the first relay EOSEs) — see
+      //     ID_LOOKUP_EOSE_TIMEOUT_MS above.
       if (uncachedIds.length > 0) {
         let passCompleted = false;
         try {
-          const events = await withPoolQueryLimit(() => {
-            if (signal.aborted) return Promise.resolve([] as NostrEvent[]);
-            return nostr.query(
+          await withPoolQueryLimit(async () => {
+            if (signal.aborted) return;
+            const combined = AbortSignal.any([signal, AbortSignal.timeout(FIRST_PASS_TIMEOUT_MS)]);
+            for await (const msg of nostr.req(
               [{ ids: uncachedIds }],
-              { signal: AbortSignal.any([signal, AbortSignal.timeout(FIRST_PASS_TIMEOUT_MS)]) }
-            );
+              { signal: combined, eoseTimeout: ID_LOOKUP_EOSE_TIMEOUT_MS },
+            )) {
+              if (msg[0] === 'EVENT') cacheParentNote(msg[2].id, msg[2]);
+              else if (msg[0] === 'EOSE') { passCompleted = true; break; }
+              else if (msg[0] === 'CLOSED') break;
+            }
           });
-          passCompleted = true;
-          for (const event of events) {
-            cacheParentNote(event.id, event);
-          }
         } catch {
-          // Pool query failed — all IDs become candidates for second pass
+          // Aborted or transport failure — evidence of congestion, not of
+          // absence. passCompleted stays false so no misses are recorded, and
+          // all IDs become candidates for the second pass.
         }
 
         // Track which IDs are still missing after pool query — but a query

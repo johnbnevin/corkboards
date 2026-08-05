@@ -635,15 +635,18 @@ export function WelcomePage({ onClose }: WelcomePageProps = {}) {
           </div>
           <p className="text-muted-foreground">No email needed. Just pick a name and you're in.</p>
           {loginView === 'main' && (
-            <a
-              href="https://get.corkboards.me"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs text-purple-600 dark:text-purple-400 hover:underline"
-            >
-              Learn more or try it before signing up
-              <ExternalLink className="h-3 w-3" />
-            </a>
+            <p className="text-sm text-muted-foreground">
+              Log in below — or{' '}
+              <a
+                href="https://get.corkboards.me"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-purple-600 dark:text-purple-400 hover:underline"
+              >
+                test drive it or download the app here
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </p>
           )}
         </div>
 

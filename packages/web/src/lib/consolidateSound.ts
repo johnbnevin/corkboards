@@ -31,8 +31,17 @@ const MAX_BURST_SECONDS = 1.5;
  *  noise anyway, and each one is a handful of Web Audio nodes. */
 const MAX_VOICES = 96;
 
-/** How long to wait for a suspended context to resume before giving up. */
-const RESUME_TIMEOUT_MS = 250;
+/** How long to wait for a suspended context to resume before giving up.
+ *
+ *  Was 250 ms, which is comfortable when resume() is a state flip but not when
+ *  it has to reopen the output device: the idle-suspend below releases the
+ *  device between bursts, and on Linux (WebKitGTK → PipeWire/PulseAudio) the
+ *  reopen routinely takes several hundred ms. Every burst that lost that race
+ *  was silently dropped — the desktop's "shuffle sound sometimes doesn't play".
+ *  1s keeps the never-unlocked case bounded while giving a real device reopen
+ *  room to finish; MAX_SCHEDULING_LAG_MS still guarantees nothing plays late
+ *  enough to feel detached from its cause. */
+const RESUME_TIMEOUT_MS = 1000;
 
 /** A burst that waited longer than this is no longer feedback for the action
  *  that caused it, so it is dropped rather than played late. */
@@ -68,9 +77,16 @@ function getContext(): AudioContext | null {
  * auto-consolidate toggle, which is most of them.
  *
  * Having a gesture happen *earlier* in the session isn't enough either: the
- * context has to be resumed DURING one. So resume once, on the first pointer or
- * key event, and from then on the context is `running` and timer-driven bursts
- * schedule normally. Listeners are `once` and passive — this costs one event.
+ * context has to be resumed DURING one. So resume on pointer/key events, and
+ * from then on the context is `running` and timer-driven bursts schedule
+ * normally.
+ *
+ * The listeners are PERSISTENT, not `once`. The idle-suspend in
+ * `scheduleSuspend` puts the context back to `suspended` after every burst,
+ * and engines that gate resume() on a gesture (WebKitGTK in particular) then
+ * need the NEXT gesture to unlock it again — with `once` listeners already
+ * consumed, every later timer-driven burst raced its own resume and the sound
+ * went permanently inconsistent. A no-op state check per pointerdown is free.
  */
 let unlockArmed = false;
 function armAudioUnlock(): void {
@@ -81,7 +97,7 @@ function armAudioUnlock(): void {
     if (c && c.state === 'suspended') void c.resume().catch(() => {});
   };
   for (const evt of ['pointerdown', 'keydown', 'touchstart'] as const) {
-    window.addEventListener(evt, unlock, { once: true, passive: true, capture: true });
+    window.addEventListener(evt, unlock, { passive: true, capture: true });
   }
 }
 

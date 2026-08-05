@@ -74,8 +74,11 @@ function InlineVideo({ sources: rawSources }: { sources: string[] }) {
   });
 
   useEffect(() => {
-    const sub = player.addListener('statusChange', ({ status }) => {
+    const sub = player.addListener('statusChange', ({ status, error }) => {
       if (status !== 'error') return;
+      // Log WHY and which source — "Failed to load video" alone is
+      // undiagnosable (codec vs network vs rate-limited CDN). Parity with web.
+      if (__DEV__) console.warn(`[video] source failed: ${sourcesRef.current[srcIdxRef.current]}`, error?.message);
       // Try the next mirror (same blob, different Blossom server) before giving
       // up — only show the error once every source has failed.
       if (srcIdxRef.current < sourcesRef.current.length - 1) {
@@ -470,6 +473,7 @@ export function MediaLink({ url, blurMedia = false, poster: _poster, isVideo: fo
           rawUrl={url}
           cleanUrl={cleanUrl}
           trackingParams={trackingParams}
+          linkTitle={ytTitle?.title}
         />
       </>
     );

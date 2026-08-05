@@ -11,6 +11,7 @@ import {
   Modal,
   ScrollView,
   Alert,
+  Linking,
 } from 'react-native';
 import { HashtagActionContext } from '../contexts/hashtagAction';
 import { DeletedAuthorsContext } from '../contexts/deletedAuthors';
@@ -147,6 +148,7 @@ export function HomeScreen() {
 
   // ── UI state ────────────────────────────────────────────────────────────────
   const [composing, setComposing] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [replyTarget, setReplyTarget] = useState<NostrEvent | null>(null);
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
   const [viewingProfile, setViewingProfile] = useState<string | null>(null);
@@ -509,7 +511,11 @@ export function HomeScreen() {
       if (!parentId || requests.has(parentId)) continue;
       const replyETag = note.tags.find(t => t[0] === 'e' && t[1] === parentId);
       const hints = replyETag?.[2] ? [replyETag[2]] : [];
-      const authorPubkey = note.tags.find(t => t[0] === 'p')?.[1];
+      // Parent author from the e-tag's pubkey field (NIP-10) when present —
+      // the first p-tag names the thread ROOT author, which sent the outbox
+      // second pass to the wrong author's relays for nested replies.
+      const authorPubkey = (replyETag?.[4] && replyETag[4].length === 64 ? replyETag[4] : undefined)
+        ?? note.tags.find(t => t[0] === 'p')?.[1];
       requests.set(parentId, { eventId: parentId, hints, authorPubkey });
     }
     return Array.from(requests.values());
@@ -711,6 +717,15 @@ export function HomeScreen() {
               <Image source={require('../../assets/corky-wordmark.png')} style={styles.headerLogo} resizeMode="contain" />
               <Text style={styles.subtitle}>{feedLabel}</Text>
             </View>
+            {/* "?" help/about — parity with the web header's question-mark
+                button (Future Features + get.corkboards.me + credit). */}
+            <TouchableOpacity
+              style={styles.helpBtn}
+              onPress={() => setHelpOpen(true)}
+              accessibilityLabel="About corkboards.me"
+            >
+              <Text style={styles.helpBtnText}>?</Text>
+            </TouchableOpacity>
             <TouchableOpacity
               style={styles.composeBtn}
               onPress={() => { setReplyTarget(null); setComposing(true); }}
@@ -719,6 +734,42 @@ export function HomeScreen() {
             </TouchableOpacity>
           </View>
         </View>
+
+        {/* ── Help / About modal ─────────────────────────────────────── */}
+        <Modal visible={helpOpen} animationType="fade" transparent onRequestClose={() => setHelpOpen(false)}>
+          <View style={styles.helpOverlay}>
+            <View style={styles.helpCard}>
+              <Text style={styles.helpTitle}>Future Features</Text>
+              <Text style={styles.helpBody}>
+                Here are some features we're planning for corkboards.me:
+              </Text>
+              <Text style={styles.helpHighlight}>• Much more coming soon!</Text>
+              <Text style={styles.helpBodyItalic}>Stay tuned for updates!</Text>
+              <View style={styles.helpDivider} />
+              <Text style={styles.helpBody}>
+                Get the apps (desktop &amp; mobile) at{' '}
+                <Text
+                  style={styles.helpLink}
+                  onPress={() => Linking.openURL('https://get.corkboards.me')}
+                >
+                  get.corkboards.me
+                </Text>
+              </Text>
+              <Text style={styles.helpCredit}>
+                by{' '}
+                <Text
+                  style={styles.helpCreditLink}
+                  onPress={() => Linking.openURL('https://noobstr.me')}
+                >
+                  Noobstr.me
+                </Text>
+              </Text>
+              <TouchableOpacity style={styles.helpCloseBtn} onPress={() => setHelpOpen(false)}>
+                <Text style={styles.helpCloseText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
 
         {/* ── Tab bar ────────────────────────────────────────────────── */}
         <View style={styles.tabBarContainer}>
@@ -903,6 +954,35 @@ const styles = StyleSheet.create({
     backgroundColor: '#f97316', alignItems: 'center', justifyContent: 'center',
   },
   composeBtnText: { color: '#fff', fontSize: 22, fontWeight: '300', marginTop: -1 },
+  helpBtn: {
+    width: 36, height: 36, borderRadius: 18, marginRight: 8,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  helpBtnText: { color: '#f97316', fontSize: 18, fontWeight: 'bold' },
+  helpOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center', justifyContent: 'center', padding: 24,
+  },
+  helpCard: {
+    backgroundColor: '#262626', borderRadius: 12, padding: 20,
+    width: '100%', maxWidth: 400,
+  },
+  helpTitle: {
+    fontSize: 20, fontWeight: '600', color: '#f97316',
+    textAlign: 'center', marginBottom: 12,
+  },
+  helpBody: { fontSize: 14, color: '#b3b3b3', marginBottom: 8 },
+  helpHighlight: { fontSize: 14, color: '#f97316', fontWeight: '500', marginBottom: 8 },
+  helpBodyItalic: { fontSize: 12, color: '#b3b3b3', fontStyle: 'italic', marginBottom: 12 },
+  helpDivider: { height: 1, backgroundColor: '#404040', marginVertical: 12 },
+  helpLink: { color: '#f97316', fontWeight: '500', textDecorationLine: 'underline' },
+  helpCredit: { fontSize: 12, color: '#808080', marginTop: 4 },
+  helpCreditLink: { color: '#808080', textDecorationLine: 'underline' },
+  helpCloseBtn: {
+    marginTop: 16, alignSelf: 'center', paddingVertical: 8, paddingHorizontal: 24,
+    borderRadius: 8, backgroundColor: '#404040',
+  },
+  helpCloseText: { color: '#f2f2f2', fontSize: 14, fontWeight: '500' },
 
   // Tab bar
   tabBarContainer: {

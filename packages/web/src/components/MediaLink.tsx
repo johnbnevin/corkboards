@@ -31,6 +31,7 @@ function VideoPlayer({ sources: rawSources, poster: rawPoster }: { sources: stri
   const poster = rawPoster ? optimizeMediaUrl(rawPoster, true) || undefined : undefined
   const videoRef = useRef<HTMLVideoElement>(null)
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [errorDetail, setErrorDetail] = useState<string | null>(null)
   const [buffered, setBuffered] = useState(0)
   const [srcIdx, setSrcIdx] = useState(0)
   const playIntentRef = useRef(false)
@@ -68,6 +69,20 @@ function VideoPlayer({ sources: rawSources, poster: rawPoster }: { sources: stri
     }
 
     const handleError = () => {
+      // Surface WHY. "Failed to load video" with no cause is undiagnosable —
+      // a decode/src-not-supported error means missing codecs (WebKitGTK
+      // without the right GStreamer plugins) or an image-only proxy mangling
+      // video URLs, while a network error means CDN/rate-limit trouble
+      // (nostr.build throttles hotlinking). Log every failed source so the
+      // desktop debug.log shows which it was.
+      const mediaErr = video.error
+      const detail =
+        mediaErr?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? 'format not supported'
+        : mediaErr?.code === MediaError.MEDIA_ERR_DECODE ? 'decode failed'
+        : mediaErr?.code === MediaError.MEDIA_ERR_NETWORK ? 'network error'
+        : mediaErr?.code === MediaError.MEDIA_ERR_ABORTED ? 'load aborted'
+        : 'unknown error'
+      console.warn(`[video] source failed (${detail}${mediaErr?.message ? `: ${mediaErr.message}` : ''}): ${video.currentSrc || sourcesRef.current[srcIdxRef.current]}`)
       // Try the next mirror (same blob, different Blossom server) before giving
       // up — only show the error once every source has failed.
       if (srcIdxRef.current < sourcesRef.current.length - 1) {
@@ -75,6 +90,7 @@ function VideoPlayer({ sources: rawSources, poster: rawPoster }: { sources: stri
         setSrcIdx(srcIdxRef.current)
         setLoadState('loading')
       } else {
+        setErrorDetail(detail)
         setLoadState('error')
       }
     }
@@ -85,6 +101,7 @@ function VideoPlayer({ sources: rawSources, poster: rawPoster }: { sources: stri
       // succeed on a second pass.
       srcIdxRef.current = 0
       setSrcIdx(0)
+      setErrorDetail(null)
       setLoadState('loading')
       video.load()
     }
@@ -116,6 +133,7 @@ function VideoPlayer({ sources: rawSources, poster: rawPoster }: { sources: stri
   useEffect(() => {
     srcIdxRef.current = 0
     setSrcIdx(0)
+    setErrorDetail(null)
     setLoadState('loading')
   }, [primarySrc])
 
@@ -135,7 +153,9 @@ function VideoPlayer({ sources: rawSources, poster: rawPoster }: { sources: stri
       {loadState === 'error' && (
         <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-10 rounded-lg">
           <AlertCircle className="h-8 w-8 text-red-400 mb-2" />
-          <span className="text-white/70 text-sm">Failed to load video</span>
+          <span className="text-white/70 text-sm">
+            Failed to load video{errorDetail ? ` (${errorDetail})` : ''}
+          </span>
           <div className="flex items-center gap-3 mt-2">
             <button
               type="button"
@@ -669,7 +689,7 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
         {/* Video title via the user-configured title proxy — absent unless the
             user opted in (Settings → Network & Privacy). */}
         {ytTitle?.title && (
-          <span className="text-xs text-muted-foreground truncate min-w-0">
+          <span className="text-xs text-muted-foreground truncate min-w-0" title={ytTitle.title}>
             — {ytTitle.title}
           </span>
         )}
@@ -706,6 +726,7 @@ export function MediaLink({ url, blurMedia = false, poster, isVideo: forceVideo,
               rawUrl={url}
               cleanUrl={cleanUrl}
               trackingParams={trackingParams}
+              linkTitle={ytTitle?.title}
             />
           </>
         )}

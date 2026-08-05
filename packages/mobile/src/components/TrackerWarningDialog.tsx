@@ -27,9 +27,11 @@ interface TrackerWarningDialogProps {
   cleanUrl: string;
   /** Names of the tracking params detected (utm_source, fbclid, …). */
   trackingParams: string[];
+  /** Human title for the link target (e.g. the YouTube video title), when known. */
+  linkTitle?: string;
 }
 
-export function TrackerWarningDialog({ visible, onClose, rawUrl, cleanUrl, trackingParams }: TrackerWarningDialogProps) {
+export function TrackerWarningDialog({ visible, onClose, rawUrl, cleanUrl, trackingParams, linkTitle }: TrackerWarningDialogProps) {
   const [copiedWhich, setCopiedWhich] = useState<'clean' | 'original' | null>(null);
   const hasTracker = cleanUrl !== rawUrl;
 
@@ -60,6 +62,9 @@ export function TrackerWarningDialog({ visible, onClose, rawUrl, cleanUrl, track
             <Text style={hasTracker ? styles.shield : styles.shieldClean}>{hasTracker ? '⚠' : '🛡'}</Text>
             <Text style={styles.title}>{hasTracker ? 'This link contains trackers' : 'Link options'}</Text>
           </View>
+          {linkTitle ? (
+            <Text style={styles.linkTitle}>{linkTitle}</Text>
+          ) : null}
           {hasTracker && (
             <Text style={styles.description}>
               Tracking parameter{trackingParams.length === 1 ? '' : 's'} detected:{' '}
@@ -129,6 +134,7 @@ const styles = StyleSheet.create({
   shieldClean: { color: '#999', fontSize: 18 },
   title: { color: '#f2f2f2', fontSize: 15, fontWeight: '600', flex: 1 },
   description: { color: '#b3b3b3', fontSize: 13, lineHeight: 18 },
+  linkTitle: { color: '#f2f2f2', fontSize: 14, fontWeight: '500', marginBottom: 8 },
   mono: { fontFamily: 'monospace', fontSize: 11, color: '#b3b3b3' },
   urlBox: {
     backgroundColor: '#1f1f1f',

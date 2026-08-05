@@ -128,6 +128,20 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
         ? [...events, ...cachedExtras].sort((a, b) => b.created_at - a.created_at)
         : events;
 
+      // NOTHING back for a whole follow list is failure, not feed state.
+      // batchFetchByAuthors resolves [] on total relay failure (nostr.query
+      // swallows errors), which after an idle period — dead sockets, every
+      // relay in fail-fast backoff — is the LIKELY outcome. Caching that [] as
+      // a success latched the feed: no refetch trigger exists (focus/reconnect
+      // refetches are off), so the Follows board showed only the user's own
+      // notes (which arrive via separate single-author paths) until a manual
+      // page refresh. Throwing keeps any previous data, lets React Query
+      // retry after the sockets recover, and leaves the query in an honest
+      // error state instead of an empty "success".
+      if (merged.length === 0) {
+        throw new Error('[notesCache] follows fetch returned nothing — relays unreachable?');
+      }
+
       // Save to cache
       await saveNotesToCache(merged);
       await setCacheMetadata({ lastSync: Date.now(), authorCount: allAuthors.length });
@@ -135,7 +149,8 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
       return merged;
     },
     enabled: enabled && allAuthors.length > 0,
-    retry: 0, // No retry on failure - user can manually load more
+    retry: 2, // Empty/failed fetches retry — after idle the first attempt races relay reconnection
+    retryDelay: (attempt) => 2000 * (attempt + 1),
     staleTime: 5 * 60 * 1000, // 5 min — marks data stale but won't auto-refetch (refetchOnWindowFocus is off)
     gcTime: 30 * 60 * 1000, // 30 min — keep in memory well past stale so navigation doesn't trigger refetch
     refetchOnReconnect: false, // Don't refetch on reconnect
@@ -146,6 +161,11 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
   // leaking into the follow cache. Without this filter, the me tab could show notes from
   // non-followed authors that accumulated in IDB across tab switches.
   useEffect(() => {
+    // Wait for the contact list: hydrating while contacts are still loading
+    // meant allAuthors = [self], so the cache was seeded with ONLY the user's
+    // own notes — and the queryFn's existing-data short-circuit then returned
+    // that self-only list forever without touching a relay.
+    if (contacts.length === 0) return;
     if (!hasInitialized.current && isCacheLoaded()) {
       const cached = getNotesFromMemory();
       if (cached.length > 0) {
@@ -156,7 +176,7 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
       }
       hasInitialized.current = true;
     }
-  }, [queryClient, queryKey, limit, allAuthors]);
+  }, [queryClient, queryKey, limit, allAuthors, contacts.length]);
 
   // Track how far back we've loaded (in seconds) for load older
   const loadMoreOffsetRef = useRef(0);
@@ -207,7 +227,16 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
 
   const loadNewer = useCallback(async () => {
     const cached = query.data ?? [];
-    if (cached.length === 0) return;
+    // An empty cache means the base load failed or latched empty — a "newer
+    // than newest" query is meaningless AND the early-return made this path
+    // (which fires on return-to-visible) useless for recovery. Re-run the base
+    // query instead: this is what un-sticks the Follows board after idle
+    // without adding any new polling cadence.
+    if (cached.length === 0) {
+      debugLog('[notesCache] loadNewer with empty cache — refetching base query');
+      await queryClient.refetchQueries({ queryKey });
+      return;
+    }
 
     const newestTimestamp = cached.reduce((max, e) => e.created_at > max ? e.created_at : max, cached[0].created_at);
     const events = await batchFetchByAuthors({

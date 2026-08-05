@@ -36,9 +36,11 @@ export function authorsCacheKey(authors: string[]): string {
  */
 export function useFeed(authors: string[] = []) {
   const { nostr } = useNostr();
+  const queryClient = useQueryClient();
+  const feedKey = useMemo(() => ['mobile-feed', authorsCacheKey(authors)] as const, [authors]);
 
   return useQuery<NostrEvent[]>({
-    queryKey: ['mobile-feed', authorsCacheKey(authors)],
+    queryKey: feedKey,
     queryFn: async () => {
       const filter = {
         kinds: FEED_KINDS.filter(k => k === 1 || k === 6) as number[],
@@ -79,7 +81,23 @@ export function useFeed(authors: string[] = []) {
       }
 
       // Sort newest first
-      return events.sort((a, b) => b.created_at - a.created_at).slice(0, FEED_PAGE_SIZE_MOBILE);
+      const fetched = events.sort((a, b) => b.created_at - a.created_at).slice(0, FEED_PAGE_SIZE_MOBILE);
+
+      // MERGE into what the feed already shows — never wholesale-replace.
+      // The resume path (AppState → refetch) runs on cold sockets, so the
+      // fetch often returns a partial result: only the relays that
+      // reconnected first, which prominently include the user's own write
+      // relay. Replacing the previous feed with that partial result is the
+      // "come back from idle and see only my own notes" bug. Merging keeps
+      // everything already loaded (including paged-in older notes, which the
+      // slice above silently dropped on every refetch) and an empty result
+      // leaves the feed exactly as it was.
+      const existing = (queryClient.getQueryData(feedKey) as NostrEvent[] | undefined) ?? [];
+      if (fetched.length === 0) return existing;
+      if (existing.length === 0) return fetched;
+      const seen = new Set(fetched.map(e => e.id));
+      return [...fetched, ...existing.filter(e => !seen.has(e.id))]
+        .sort((a, b) => b.created_at - a.created_at);
     },
     staleTime: 2 * 60_000,
     retry: 1,
@@ -184,9 +202,18 @@ export function useContacts(pubkey: string | undefined) {
         [{ kinds: [3], authors: [pubkey], limit: 1 }],
         { signal: AbortSignal.timeout(8000) }
       );
-      if (!event) return [];
+      // A relay miss is NOT an empty follow list. Returning [] here silently
+      // flipped the Following tab into GLOBAL mode (different cache key,
+      // different notes) whenever a post-idle fetch raced dead sockets —
+      // and [] was then cached as truth for staleTime. Throw instead: React
+      // Query keeps the last good contact list and retries. (Web got this
+      // fix in a064a10; this ports it.)
+      if (!event) {
+        throw new Error('contact list fetch returned nothing — relays unreachable?');
+      }
       return event.tags.filter(t => t[0] === 'p' && t[1]).map(t => t[1]);
     },
+    retry: 3,
     enabled: !!pubkey,
     staleTime: 5 * 60_000,
   });

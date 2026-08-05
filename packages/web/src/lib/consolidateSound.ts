@@ -94,7 +94,15 @@ function armAudioUnlock(): void {
   unlockArmed = true;
   const unlock = () => {
     const c = getContext();
-    if (c && c.state === 'suspended') void c.resume().catch(() => {});
+    if (c && c.state === 'suspended') {
+      void c.resume().catch(() => {});
+      // Re-suspend shortly if no burst claims the context. Without this, the
+      // persistent listener resurrects the render thread on EVERY click and
+      // nothing ever puts it back to sleep — the exact always-running CPU
+      // drain the idle-suspend exists to prevent. A burst arriving within the
+      // window cancels/reschedules this via its own scheduleSuspend call.
+      scheduleSuspend(5);
+    }
   };
   for (const evt of ['pointerdown', 'keydown', 'touchstart'] as const) {
     window.addEventListener(evt, unlock, { passive: true, capture: true });

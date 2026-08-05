@@ -78,9 +78,10 @@ const SECOND_PASS_DELAY_MS = 800;
  * NPool.query hard-codes 1s (and overrides any per-call value) — for an id
  * lookup that cuts off the slow archive relay that actually has an old parent
  * the moment a fast relay answers empty. Sits inside FIRST_PASS_TIMEOUT_MS.
- * (Mirrors web.)
+ * Kept at 2.5s: the fan-out holds shared governor slots for the window, so
+ * it's paid from the same budget as feed/profile queries. (Mirrors web.)
  */
-const ID_LOOKUP_EOSE_TIMEOUT_MS = 4000;
+const ID_LOOKUP_EOSE_TIMEOUT_MS = 2500;
 let _activePoolQueries = 0;
 const _poolQueryQueue: Array<() => void> = [];
 
@@ -191,13 +192,25 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
           await withPoolQueryLimit(async () => {
             if (signal.aborted) return;
             const combined = AbortSignal.any([signal, AbortSignal.timeout(FIRST_PASS_TIMEOUT_MS)]);
-            for await (const msg of nostr.req(
-              [{ ids: uncachedIds }],
-              { signal: combined, eoseTimeout: ID_LOOKUP_EOSE_TIMEOUT_MS },
-            )) {
-              if (msg[0] === 'EVENT') cacheParentNoteLru(msg[2].id, msg[2]);
-              else if (msg[0] === 'EOSE') { passCompleted = true; break; }
-              else if (msg[0] === 'CLOSED') break;
+            try {
+              for await (const msg of nostr.req(
+                [{ ids: uncachedIds }],
+                { signal: combined, eoseTimeout: ID_LOOKUP_EOSE_TIMEOUT_MS },
+              )) {
+                if (msg[0] === 'EVENT') cacheParentNoteLru(msg[2].id, msg[2]);
+                else if (msg[0] === 'EOSE') { passCompleted = true; break; }
+                else if (msg[0] === 'CLOSED') break;
+              }
+            } catch (err) {
+              // The pool only yields the merged EOSE when EVERY routed relay
+              // EOSEs; its own eoseTimeout ABORTS instead — and it only arms
+              // after the first relay EOSEs. So an abort that our combined
+              // signal did NOT cause means every relay that was going to
+              // answer had answered: completion, not failure. Without this,
+              // one dead relay in the read list disables miss recording for
+              // the session. (Mirrors web.)
+              if (!combined.aborted) passCompleted = true;
+              else throw err;
             }
           });
         } catch {

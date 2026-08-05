@@ -149,7 +149,7 @@ export function SavedScreen() {
       // Parent author from the e-tag's pubkey field (NIP-10) when present —
       // the first p-tag names the thread ROOT author, which sent the outbox
       // second pass to the wrong author's relays for nested replies.
-      const authorPubkey = (replyETag?.[4] && replyETag[4].length === 64 ? replyETag[4] : undefined)
+      const authorPubkey = (replyETag?.[4] && /^[0-9a-f]{64}$/.test(replyETag[4]) ? replyETag[4] : undefined)
         ?? note.tags.find(t => t[0] === 'p')?.[1];
       requests.set(parentId, { eventId: parentId, hints, authorPubkey });
     }

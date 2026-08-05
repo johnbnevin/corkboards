@@ -3146,7 +3146,7 @@ export function MultiColumnClient() {
         // the e-tag pubkey and resolves notes this path never could.
         const replyETag = note.tags.find(t => t[0] === 'e' && t[1] === c.parentEventId);
         const hints = replyETag?.[2] ? [replyETag[2]] : [];
-        const authorPubkey = (replyETag?.[4] && replyETag[4].length === 64 ? replyETag[4] : undefined)
+        const authorPubkey = (replyETag?.[4] && /^[0-9a-f]{64}$/.test(replyETag[4]) ? replyETag[4] : undefined)
           ?? note.tags.find(t => t[0] === 'p')?.[1];
         parentRequests.set(c.parentEventId, { eventId: c.parentEventId, hints, authorPubkey });
       }

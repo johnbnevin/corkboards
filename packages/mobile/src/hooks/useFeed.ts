@@ -3,7 +3,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useNostr } from '../lib/NostrProvider';
 import { FALLBACK_RELAYS } from '../lib/NostrProvider';
-import { FEED_PAGE_SIZE_MOBILE, FEED_KINDS } from '@core/feedConstants';
+import { FEED_PAGE_SIZE_MOBILE, FEED_KINDS, MAX_RETAINED_NOTES } from '@core/feedConstants';
 import { dedupBatch, initialUntilCursor, PAGINATION_MAX_ITERATIONS } from '@core/paginationCore';
 import { fnv1a32 } from '@core/hashCore';
 
@@ -96,8 +96,14 @@ export function useFeed(authors: string[] = []) {
       if (fetched.length === 0) return existing;
       if (existing.length === 0) return fetched;
       const seen = new Set(fetched.map(e => e.id));
+      // CAP the merge. The old wholesale-replace was the de-facto memory
+      // bound (every refetch reset the cache to one page); merging without a
+      // cap would grow the query cache by up to a page per autofetch tick,
+      // forever. Keep the newest MAX_RETAINED_NOTES — same bound web applies
+      // to its prepend path.
       return [...fetched, ...existing.filter(e => !seen.has(e.id))]
-        .sort((a, b) => b.created_at - a.created_at);
+        .sort((a, b) => b.created_at - a.created_at)
+        .slice(0, MAX_RETAINED_NOTES);
     },
     staleTime: 2 * 60_000,
     retry: 1,
@@ -169,10 +175,11 @@ export function useFeedLoadMore({ authors, isDismissed, onLoaded }: UseFeedLoadM
       if (allTrulyNew.length > 0) {
         // Merge and re-sort newest-first. Intentionally NOT truncated to
         // MAX_RETAINED_NOTES: these are older notes the user explicitly paged
-        // for, and a newest-first cap would slice them straight back off. The
-        // growth-over-time source is autofetch (which replaces this cache
-        // wholesale rather than appending), and FlatList virtualizes rendering,
-        // so the live cost here stays bounded. Mirrors web's MultiColumnClient.
+        // for, and a newest-first cap would slice them straight back off.
+        // NOTE: useFeed's queryFn DOES cap its merge at MAX_RETAINED_NOTES,
+        // so paged-in notes beyond that bound are released on the next
+        // refetch — an explicit trade: bounded memory over infinite scroll
+        // history. FlatList virtualizes rendering either way.
         const merged = [...existing, ...allTrulyNew].sort((a, b) => b.created_at - a.created_at);
         queryClient.setQueryData(cacheKey, merged);
       }

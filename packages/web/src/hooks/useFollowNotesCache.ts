@@ -17,6 +17,7 @@ import {
   saveNotesToCache,
   mergeNotesToCache,
   setCacheMetadata,
+  getCacheMetadata,
   isCacheLoaded,
 } from '@/lib/notesCache';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -128,18 +129,25 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
         ? [...events, ...cachedExtras].sort((a, b) => b.created_at - a.created_at)
         : events;
 
-      // NOTHING back for a whole follow list is failure, not feed state.
-      // batchFetchByAuthors resolves [] on total relay failure (nostr.query
-      // swallows errors), which after an idle period — dead sockets, every
-      // relay in fail-fast backoff — is the LIKELY outcome. Caching that [] as
-      // a success latched the feed: no refetch trigger exists (focus/reconnect
-      // refetches are off), so the Follows board showed only the user's own
-      // notes (which arrive via separate single-author paths) until a manual
-      // page refresh. Throwing keeps any previous data, lets React Query
-      // retry after the sockets recover, and leaves the query in an honest
-      // error state instead of an empty "success".
+      // NOTHING back for a follow list that has synced before is failure, not
+      // feed state. batchFetchByAuthors resolves [] on total relay failure
+      // (nostr.query swallows errors), which after an idle period — dead
+      // sockets, every relay in fail-fast backoff — is the LIKELY outcome.
+      // Caching that [] as a success latched the feed: the Follows board
+      // showed only the user's own notes (which arrive via separate
+      // single-author paths) until a manual page refresh. Throwing keeps any
+      // previous data and lets React Query retry after the sockets recover.
+      //
+      // The prior-sync gate is what separates that from a LEGITIMATELY empty
+      // feed (brand-new user, one quiet follow, nothing in the 1h window):
+      // with no successful sync on record, [] is cached as the plain success
+      // it always was — otherwise those users would pay the 3-attempt retry
+      // cycle on every visit, forever.
       if (merged.length === 0) {
-        throw new Error('[notesCache] follows fetch returned nothing — relays unreachable?');
+        const meta = await getCacheMetadata().catch(() => ({ lastSync: 0, authorCount: 0 }));
+        if (meta.lastSync > 0) {
+          throw new Error('[notesCache] follows fetch returned nothing — relays unreachable?');
+        }
       }
 
       // Save to cache
@@ -151,9 +159,16 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
     enabled: enabled && allAuthors.length > 0,
     retry: 2, // Empty/failed fetches retry — after idle the first attempt races relay reconnection
     retryDelay: (attempt) => 2000 * (attempt + 1),
-    staleTime: 5 * 60 * 1000, // 5 min — marks data stale but won't auto-refetch (refetchOnWindowFocus is off)
+    staleTime: 5 * 60 * 1000, // 5 min — marks data stale; focus refetch below is a no-op while data exists
     gcTime: 30 * 60 * 1000, // 30 min — keep in memory well past stale so navigation doesn't trigger refetch
     refetchOnReconnect: false, // Don't refetch on reconnect
+    // The recovery trigger for the empty/error latch above. This is NOT a new
+    // polling cadence: it fires only on window focus, and while the query
+    // holds data the queryFn's existing-data short-circuit returns
+    // immediately without touching a relay. Only a query stuck empty or
+    // errored (the post-idle case) actually refetches — which is exactly
+    // when recovery is needed and exactly when the user is looking.
+    refetchOnWindowFocus: true,
   });
 
   // Initialize from cache on first load (shows cached data immediately while fetching)
@@ -228,10 +243,10 @@ export function useFollowNotesCache({ contacts, selfPubkey, enabled = true, limi
   const loadNewer = useCallback(async () => {
     const cached = query.data ?? [];
     // An empty cache means the base load failed or latched empty — a "newer
-    // than newest" query is meaningless AND the early-return made this path
-    // (which fires on return-to-visible) useless for recovery. Re-run the base
-    // query instead: this is what un-sticks the Follows board after idle
-    // without adding any new polling cadence.
+    // than newest" query is meaningless there, so re-run the base query
+    // instead. (Recovery for the mounted feed itself is refetchOnWindowFocus
+    // on the query above — this hook's loadNewer currently has no callers,
+    // but any future caller gets sane empty-cache behavior for free.)
     if (cached.length === 0) {
       debugLog('[notesCache] loadNewer with empty cache — refetching base query');
       await queryClient.refetchQueries({ queryKey });

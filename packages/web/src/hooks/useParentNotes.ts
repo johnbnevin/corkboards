@@ -91,10 +91,15 @@ const FIRST_PASS_TIMEOUT_MS = 6000;
  * an id lookup is exactly backwards: the fast relay that answers first is the
  * one that DOESN'T have an old parent, and the slow archive relay that does
  * have it gets cut off 1s later. That deterministic truncation is why a
- * missing parent failed the same way on every retry. 4s still sits inside
- * FIRST_PASS_TIMEOUT_MS, so the worst case is unchanged.
+ * missing parent failed the same way on every retry. Sits inside
+ * FIRST_PASS_TIMEOUT_MS, so the worst case is unchanged. Kept at 2.5s (not
+ * higher): each first pass fans out to up to 8 relays that each hold a
+ * global governor slot for the subscription's lifetime, so this window is
+ * paid from the SAME shared budget as feed/profile/backup queries — long
+ * enough to stop truncating slow archives, short enough not to own the
+ * governor.
  */
-const ID_LOOKUP_EOSE_TIMEOUT_MS = 4000;
+const ID_LOOKUP_EOSE_TIMEOUT_MS = 2500;
 // Delay before the second (outbox-discovery) pass. Kept short so reply parents
 // that the first pass missed appear quickly instead of seconds later.
 const SECOND_PASS_DELAY_MS = 800;
@@ -228,13 +233,29 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
           await withPoolQueryLimit(async () => {
             if (signal.aborted) return;
             const combined = AbortSignal.any([signal, AbortSignal.timeout(FIRST_PASS_TIMEOUT_MS)]);
-            for await (const msg of nostr.req(
-              [{ ids: uncachedIds }],
-              { signal: combined, eoseTimeout: ID_LOOKUP_EOSE_TIMEOUT_MS },
-            )) {
-              if (msg[0] === 'EVENT') cacheParentNote(msg[2].id, msg[2]);
-              else if (msg[0] === 'EOSE') { passCompleted = true; break; }
-              else if (msg[0] === 'CLOSED') break;
+            try {
+              for await (const msg of nostr.req(
+                [{ ids: uncachedIds }],
+                { signal: combined, eoseTimeout: ID_LOOKUP_EOSE_TIMEOUT_MS },
+              )) {
+                if (msg[0] === 'EVENT') cacheParentNote(msg[2].id, msg[2]);
+                else if (msg[0] === 'EOSE') { passCompleted = true; break; }
+                else if (msg[0] === 'CLOSED') break;
+              }
+            } catch (err) {
+              // The pool only yields the merged EOSE when EVERY routed relay
+              // EOSEs; when its per-call eoseTimeout expires first it ABORTS
+              // the iterator instead. One dead relay in the read list (a very
+              // common topology) would therefore make every pass look
+              // incomplete and disable miss recording for the whole session.
+              // Disambiguate by who aborted: if OUR combined signal did not
+              // fire, the abort was the pool's own eoseTimeout — which only
+              // arms after the FIRST relay EOSEs — so every relay that was
+              // going to answer had answered, plus a grace window. That is
+              // completion. Our own signal firing (outer timeout, unmount)
+              // stays incomplete.
+              if (!combined.aborted) passCompleted = true;
+              else throw err;
             }
           });
         } catch {

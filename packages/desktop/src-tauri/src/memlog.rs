@@ -29,6 +29,12 @@ pub fn spawn_sampler() {
             // First tick fires immediately — that startup sample is the
             // baseline every later reading is compared against.
             tick.tick().await;
+            // Gate the /proc scan itself, not just the write — otherwise the
+            // sampler does its collection work every 5 minutes to feed a
+            // write_log that discards it when file logging is off.
+            if !crate::settings::file_logging_enabled() {
+                continue;
+            }
             if let Some(line) = sample_line() {
                 let _ = crate::logger::write_log(line);
             }

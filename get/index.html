@@ -240,6 +240,15 @@
     .btn-warn { background: var(--orange); color: #fff; }
     .btn-warn:hover { background: var(--orange-hover); color: #fff; }
 
+    /* Older-versions modal */
+    .older-link { color: var(--muted-foreground); font-size: 0.75rem; }
+    .older-version { text-align: left; margin-bottom: 1rem; }
+    .older-version h4 { font-size: 0.95rem; font-weight: 700; margin-bottom: 0.35rem; }
+    .older-version h4 span { font-weight: 400; font-size: 0.8rem; color: var(--muted-foreground); }
+    .older-links { display: flex; gap: 0.5rem; }
+    .older-links .btn { flex: 1; justify-content: center; padding: 0.4rem 0.5rem; font-size: 0.85rem; }
+    .older-note { font-size: 0.8rem; color: var(--muted-foreground); margin-top: 0.25rem; }
+
     /* Status bar — fixed bottom */
     .status-bar {
       background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
@@ -362,6 +371,7 @@
                 <a href="https://get.corkboards.me/linux-latest.rpm" class="btn btn-outline" download onclick="event.stopPropagation()">.rpm</a>
               </div>
               <p class="dl-note">AppImage: <code>chmod +x</code> then run. Debian/Ubuntu &rarr; .deb, Fedora/RHEL &rarr; .rpm</p>
+              <p class="dl-note"><a href="#" class="older-link" onclick="event.stopPropagation(); openOlderVersions(); return false;">Older versions</a></p>
               <p class="dl-warn">&#x26A0;&#xFE0F; Windows &amp; macOS builds are untested</p>
               <a href="https://git.jbnco.co/npub1v89nr2zax8ef0ceyu9te0sjyqv3newa3e82m0rd4kye3ekeyhv2sqf30cc/corkboards#desktop" class="btn btn-outline" target="_blank" rel="noopener" onclick="event.stopPropagation(); return confirmUntested(this);">Windows / macOS &mdash; Build from Source</a>
             </div>
@@ -485,6 +495,45 @@
   <!-- Toast notification -->
   <div class="toast" id="toast"></div>
 
+  <!-- Older versions -->
+  <div class="modal-backdrop" id="olderModal" role="dialog" aria-modal="true" aria-labelledby="olderTitle" onclick="if(event.target===this) closeOlderVersions()">
+    <div class="modal">
+      <h3 id="olderTitle">&#x1F4E6; Older versions</h3>
+      <p style="margin-bottom:1rem;">Previous Linux desktop releases. The buttons on the main page always give you the latest.</p>
+      <!-- Newest old version first. When a new release ships: the outgoing
+           linux-latest.* files are renamed to corkboards-linux-<version>.* on
+           the server and a block like this one is added at the top of this
+           list. -->
+      <div class="older-version">
+        <h4>0.8.2 <span>&mdash; August 2026</span></h4>
+        <div class="older-links">
+          <a href="https://get.corkboards.me/corkboards-linux-0.8.2.AppImage" class="btn btn-outline" download onclick="event.stopPropagation()">AppImage</a>
+          <a href="https://get.corkboards.me/corkboards-linux-0.8.2.deb" class="btn btn-outline" download onclick="event.stopPropagation()">.deb</a>
+          <a href="https://get.corkboards.me/corkboards-linux-0.8.2.rpm" class="btn btn-outline" download onclick="event.stopPropagation()">.rpm</a>
+        </div>
+      </div>
+      <div class="older-version">
+        <h4>0.8.1 <span>&mdash; July 2026 &middot; .deb / .rpm only</span></h4>
+        <div class="older-links">
+          <a href="https://get.corkboards.me/corkboards-linux-0.8.1.deb" class="btn btn-outline" download onclick="event.stopPropagation()">.deb</a>
+          <a href="https://get.corkboards.me/corkboards-linux-0.8.1.rpm" class="btn btn-outline" download onclick="event.stopPropagation()">.rpm</a>
+        </div>
+      </div>
+      <div class="older-version">
+        <h4>0.8.0 <span>&mdash; July 2026</span></h4>
+        <div class="older-links">
+          <a href="https://get.corkboards.me/corkboards-linux-0.8.0.AppImage" class="btn btn-outline" download onclick="event.stopPropagation()">AppImage</a>
+          <a href="https://get.corkboards.me/corkboards-linux-0.8.0.deb" class="btn btn-outline" download onclick="event.stopPropagation()">.deb</a>
+          <a href="https://get.corkboards.me/corkboards-linux-0.8.0.rpm" class="btn btn-outline" download onclick="event.stopPropagation()">.rpm</a>
+        </div>
+      </div>
+      <p class="older-note">Older releases don't receive fixes &mdash; use the latest unless you have a reason not to.</p>
+      <div class="modal-actions" style="margin-top:1rem;">
+        <button type="button" class="btn btn-outline" onclick="closeOlderVersions()">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Untested-build confirmation -->
   <div class="modal-backdrop" id="untestedModal" role="dialog" aria-modal="true" aria-labelledby="untestedTitle" aria-describedby="untestedBody" onclick="if(event.target===this) closeUntested()">
     <div class="modal">
@@ -607,8 +656,25 @@
       if (href) window.open(href, '_blank', 'noopener');
     }
 
+    // ── Older-versions modal ───────────────────────────────────────────────
+    var olderModal = document.getElementById('olderModal');
+    var olderLastFocus = null;
+
+    function openOlderVersions() {
+      olderLastFocus = document.activeElement;
+      olderModal.classList.add('show');
+      olderModal.querySelector('.btn').focus();
+    }
+
+    function closeOlderVersions() {
+      olderModal.classList.remove('show');
+      if (olderLastFocus) { olderLastFocus.focus(); olderLastFocus = null; }
+    }
+
     document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape' && untestedModal.classList.contains('show')) closeUntested();
+      if (e.key !== 'Escape') return;
+      if (untestedModal.classList.contains('show')) closeUntested();
+      if (olderModal.classList.contains('show')) closeOlderVersions();
     });
 
     function shuffle(arr) {

@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.3] - 2026-08-07
+
+### Fixed
+- **Consolidate sound over Bluetooth:** bursts scheduled right after waking the
+  audio context played into the sink's spin-up window (PipeWire live streams
+  drop, not buffer) and were truncated or silent on Bluetooth outputs. Now a
+  0.3 s wake lead + a 30 s idle grace keep the sink hot between sounds.
+- **Nested reply-to notes:** manual retry escalates through the whole ladder —
+  candidate thread authors' outbox relays (NIP-10 p-tags), then a parallel
+  sweep of last-resort lookup relays (web + mobile).
+- **Emoji pack strips:** native horizontal scrollbar no longer covers the pack
+  icons; wheel/drag scrolling via a shared manualScroll helper.
+
+### Included since the 0.8.2 deployment
+- Nine-bug sweep: idle-return feed latch, unresolved parents, thread overlap,
+  duplicate images, video errors, help modal, login copy, YouTube titles.
+- Regression-audit fixes: EOSE-abort completion, mobile feed cap, legit-empty
+  gate, focus recovery, strict pubkey hex, gated memlog.
+- Memory-leak defenses after the silent desktop crash: RSS telemetry, sweep
+  rotation + give-up, cache caps.
+- Cross-device saved-note cleanup actually applies; new optimized logos.
+- get.corkboards.me: "Older versions" modal (0.8.0/0.8.1/0.8.2), sha256
+  checksums published as `linux-latest.sha256`.
+
 ## [0.8.2] - 2026-07-25
 
 ### Security & privacy (cross-platform)

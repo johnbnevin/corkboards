@@ -10,6 +10,7 @@ import { getRelayCache, updateRelayCache, FALLBACK_RELAYS, READ_ONLY_RELAYS } fr
 import { isSecureRelay } from '@core/nostrUtils';
 import { nip65OutboxRelays } from './nip65';
 import { FETCH_EVENT_CACHE_TTL_MS as CACHE_TTL_MS } from '@core/cacheConfig';
+import { LAST_RESORT_LOOKUP_RELAYS } from '@core/relayConstants';
 
 const MAX_CONCURRENT_OUTBOX_FETCHES = 4;
 let _activeOutboxFetches = 0;
@@ -136,6 +137,8 @@ async function _fetchEventWithOutboxImpl(
   opts?: {
     hints?: string[];
     authorPubkey?: string;
+    /** Other pubkeys that might be the event's author (e.g. a reply's p-tags). */
+    candidateAuthors?: string[];
   },
 ): Promise<NostrEvent | null> {
   const cached = getCachedEvent(eventId);
@@ -173,20 +176,31 @@ async function _fetchEventWithOutboxImpl(
 
   if (result) { setCachedEvent(eventId, result); return result; }
 
-  // Phase 2: Discover author's outbox relays
-  if (authorPubkey) {
-    const authorRelays = await fetchAuthorRelays(authorPubkey);
-    if (authorRelays.length > 0) {
-      const outboxResults = await Promise.all(
-        authorRelays.slice(0, 3).map(relay =>
-          queryRelay(relay, { ids: [eventId], limit: 1 })
-            .then(events => events[0] || null)
-            .catch(() => null)
-        )
-      );
-      result = outboxResults.find(e => e !== null) || null;
-      if (result) { setCachedEvent(result.id, result); return result; }
-    }
+  // Phase 2: Discover outbox relays — the tagged author first, then other
+  // thread participants. A reply's e-tag often omits the parent author and
+  // its first p-tag is frequently the wrong person; NIP-10 only guarantees
+  // the parent's author is SOMEWHERE in the p-tags, so when the primary
+  // author's relays miss, walk the others. Bounded: 3 authors total, primary
+  // gets 3 relays, candidates 2 each, phase-1 relays skipped. (Mirrors web.)
+  const candidates = [authorPubkey, ...(opts?.candidateAuthors ?? [])]
+    .filter((p, i, arr): p is string => !!p && arr.indexOf(p) === i)
+    .slice(0, 3);
+  const tried = new Set<string>([...poolRelays, ...hints]);
+  for (const author of candidates) {
+    const authorRelays = (await fetchAuthorRelays(author))
+      .filter(r => !tried.has(r))
+      .slice(0, author === authorPubkey ? 3 : 2);
+    if (authorRelays.length === 0) continue;
+    authorRelays.forEach(r => tried.add(r));
+    const outboxResults = await Promise.all(
+      authorRelays.map(relay =>
+        queryRelay(relay, { ids: [eventId], limit: 1 })
+          .then(events => events[0] || null)
+          .catch(() => null)
+      )
+    );
+    result = outboxResults.find(e => e !== null) || null;
+    if (result) { setCachedEvent(result.id, result); return result; }
   }
 
   return null;
@@ -195,9 +209,38 @@ async function _fetchEventWithOutboxImpl(
 export function fetchEventWithOutbox(
   eventId: string,
   nostr: NostrLike,
-  opts?: { hints?: string[]; authorPubkey?: string },
+  opts?: { hints?: string[]; authorPubkey?: string; candidateAuthors?: string[] },
 ): Promise<NostrEvent | null> {
   return withOutboxLimit(() => _fetchEventWithOutboxImpl(eventId, nostr, opts));
+}
+
+/**
+ * The full escalation ladder for a USER-INITIATED retry: the normal outbox
+ * lookup, and if that still misses, a parallel sweep of
+ * LAST_RESORT_LOOKUP_RELAYS — archives, indexers and the big general relays.
+ * Never used by automatic paths: a human clicked, so one burst of extra
+ * sockets is proportionate. (Mirrors web.)
+ */
+export async function fetchEventLastResort(
+  eventId: string,
+  nostr: NostrLike,
+  opts?: { hints?: string[]; authorPubkey?: string; candidateAuthors?: string[] },
+): Promise<NostrEvent | null> {
+  const viaOutbox = await fetchEventWithOutbox(eventId, nostr, opts);
+  if (viaOutbox) return viaOutbox;
+
+  const alreadyTried = new Set<string>([...FALLBACK_RELAYS, ...READ_ONLY_RELAYS, ...(opts?.hints ?? [])]);
+  const sweep = LAST_RESORT_LOOKUP_RELAYS.filter(r => !alreadyTried.has(r));
+  const results = await Promise.all(
+    sweep.map(relay =>
+      queryRelay(relay, { ids: [eventId], limit: 1 }, 8000)
+        .then(events => events[0] || null)
+        .catch(() => null)
+    )
+  );
+  const found = results.find(e => e !== null) || null;
+  if (found) setCachedEvent(found.id, found);
+  return found;
 }
 
 export async function fetchNaddrWithOutbox(

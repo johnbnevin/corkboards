@@ -3133,7 +3133,7 @@ export function MultiColumnClient() {
     });
 
     const classifications = new Map<string, NoteClassification>();
-    const parentRequests = new Map<string, { eventId: string; hints: string[]; authorPubkey?: string }>();
+    const parentRequests = new Map<string, { eventId: string; hints: string[]; authorPubkey?: string; candidateAuthors?: string[] }>();
     for (const note of deduped) {
       const c = classifyNote(note);
       classifications.set(note.id, c);
@@ -3148,7 +3148,13 @@ export function MultiColumnClient() {
         const hints = replyETag?.[2] ? [replyETag[2]] : [];
         const authorPubkey = (replyETag?.[4] && /^[0-9a-f]{64}$/.test(replyETag[4]) ? replyETag[4] : undefined)
           ?? note.tags.find(t => t[0] === 'p')?.[1];
-        parentRequests.set(c.parentEventId, { eventId: c.parentEventId, hints, authorPubkey });
+        // All thread participants except the replier — NIP-10 guarantees the
+        // parent's author is among them, so the outbox pass can walk them
+        // when the primary guess is wrong (or the e-tag omitted the pubkey).
+        const candidateAuthors = note.tags
+          .filter(t => t[0] === 'p' && t[1] && t[1] !== note.pubkey && /^[0-9a-f]{64}$/.test(t[1]))
+          .map(t => t[1]);
+        parentRequests.set(c.parentEventId, { eventId: c.parentEventId, hints, authorPubkey, candidateAuthors });
       }
     }
 
@@ -4148,7 +4154,7 @@ export function MultiColumnClient() {
                 size="sm"
                 onClick={() => setFeaturesModalOpen(true)}
                 className="h-8 w-8 p-0 text-orange-500 hover:text-orange-600 font-bold rounded-full"
-                title="Future features"
+                title="About Corkboards.Me"
               >
                 ?
               </Button>
@@ -5007,24 +5013,46 @@ export function MultiColumnClient() {
         {/* Toast Messages */}
         <ToastBar messages={feedToastMessages} />
 
-        {/* Future Features Modal */}
+        {/* About modal (the "?" button) */}
         <Dialog open={featuresModalOpen} onOpenChange={setFeaturesModalOpen}>
-          <DialogContent className="max-w-[95vw] sm:max-w-md" aria-describedby={undefined}>
+          <DialogContent className="max-w-[95vw] sm:max-w-md max-h-[85vh] overflow-y-auto" aria-describedby={undefined}>
             <DialogHeader>
               <DialogTitle className="text-xl font-semibold text-center text-orange-500">
-                Future Features
+                About Corkboards.Me
               </DialogTitle>
             </DialogHeader>
             <div className="space-y-3 py-4">
+              <h3 className="font-semibold">Default corkboards get you started:</h3>
               <p className="text-sm text-muted-foreground">
-                Here are some features we're planning for corkboards.me:
+                <em>The 'Me' corkboard</em> has all the notes that you've posted publicly,
+                starting with your pinned notes. This is where your visitors land — your
+                profile information shows at the top.
               </p>
-              <ul className="space-y-2 text-sm list-disc list-inside">
-                <li className="text-orange-500 font-medium">Much more coming soon!</li>
+              <p className="text-sm text-muted-foreground">
+                <em>The 'Follows' corkboard</em> shows a chronological feed of the notes
+                from all your friends/follows.
+              </p>
+              <p className="text-sm text-muted-foreground">
+                <em>The 'Discovery' corkboard</em> shows interesting notes from friends
+                of friends.
+              </p>
+              <p className="text-sm text-muted-foreground">
+                <em>The 'Notifications' corkboard</em> shows all the replies and
+                reactions to your notes.
+              </p>
+              <p className="text-sm text-muted-foreground">
+                <em>The 'Saved' corkboard</em> shows all the notes you've saved for
+                future reference.
+              </p>
+              <h3 className="font-semibold">There's so much more you can do with custom corkboards:</h3>
+              <ul className="space-y-2 text-sm text-muted-foreground list-disc list-outside pl-5">
+                <li>Build a newspaper or magazine from trusted or interesting sources.</li>
+                <li>Create a group feed of associates and hashtags that post about a common topic or project.</li>
+                <li>Make arbitrary aggregates, like lists.</li>
+                <li>Easily view a portfolio of a friend, or your own without logging into your artist account.</li>
+                <li>Combine feeds from musicians, video feeds, or podcasts so you have an always fresh playlist.</li>
+                <li>Customize what others see when they land on your 'Me' corkboard. Need a portfolio or business landing? Want to feature your favorite notes, your friends, your favorite books, articles, songs, videos, podcasts, memes, photos... or....</li>
               </ul>
-              <p className="text-xs text-muted-foreground italic mt-4">
-                Stay tuned for updates!
-              </p>
               <Separator />
               <p className="text-sm">
                 Get the apps (desktop &amp; mobile) at{' '}

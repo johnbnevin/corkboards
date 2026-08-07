@@ -25,7 +25,7 @@ import { visibleLength, findVisibleCutoff } from '@core/textTruncation';
 import { verifyEmbeddedEvent } from '../lib/embeddedEvent';
 import { useNoteCollapsedState, useCollapsedNotesActions } from '../hooks/useCollapsedNotes';
 import { useNostr } from '../lib/NostrProvider';
-import { fetchEventWithOutbox } from '../lib/fetchEvent';
+import { fetchEventLastResort } from '../lib/fetchEvent';
 import { forgetParentMiss, cacheParentNote } from '../hooks/useParentNotes';
 import { getParentId } from '@core/threadTree';
 
@@ -102,7 +102,7 @@ function UnresolvedParentContext({ note }: { note: NostrEvent }) {
     const eTag = note.tags.find(t => t[0] === 'e' && t[1] === parentId);
     return {
       parentHints: eTag?.[2] ? [eTag[2]] : undefined,
-      parentAuthor: (eTag?.[4] && eTag[4].length === 64 ? eTag[4] : undefined)
+      parentAuthor: (eTag?.[4] && /^[0-9a-f]{64}$/.test(eTag[4]) ? eTag[4] : undefined)
         ?? note.tags.find(t => t[0] === 'p')?.[1],
     };
   }, [note, parentId]);
@@ -112,9 +112,15 @@ function UnresolvedParentContext({ note }: { note: NostrEvent }) {
     setRetryState('retrying');
     forgetParentMiss(parentId);
     try {
-      const found = await fetchEventWithOutbox(parentId, nostr, {
+      // Last-resort ladder: outbox lookup (author + every thread participant's
+      // relays), then a direct sweep of archives/indexers/large relays. The
+      // user clicked, so the widest net is proportionate here. (Mirrors web.)
+      const found = await fetchEventLastResort(parentId, nostr, {
         hints: parentHints,
         authorPubkey: parentAuthor,
+        candidateAuthors: note.tags
+          .filter(t => t[0] === 'p' && t[1] && t[1] !== note.pubkey && /^[0-9a-f]{64}$/.test(t[1]))
+          .map(t => t[1]),
       });
       if (found) {
         cacheParentNote(parentId, found);

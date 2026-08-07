@@ -47,6 +47,30 @@ const RESUME_TIMEOUT_MS = 1000;
  *  that caused it, so it is dropped rather than played late. */
 const MAX_SCHEDULING_LAG_MS = 2000;
 
+/** Lead time added when the context had to be woken for this burst.
+ *
+ *  PipeWire treats the WebKit stream as live (`stream.is-live = true`): samples
+ *  the sink can't consume yet are DROPPED, not buffered. An ALSA sink starts
+ *  consuming near-instantly, but a Bluetooth A2DP sink takes hundreds of ms to
+ *  spin up from suspend — a sub-second burst scheduled at `currentTime` right
+ *  after resume() plays partly or entirely into that drop window. Measured on
+ *  the desktop build over BT: half a second of truncated audio, or nothing at
+ *  all, while the very same code was clean through the wired sink. Scheduling
+ *  the first voice slightly in the future costs nothing audible and gives a
+ *  slow sink time to actually be listening. */
+const WAKE_LEAD_SECONDS = 0.3;
+
+/** How long the context stays running after the last voice before the
+ *  idle-suspend kicks in.
+ *
+ *  This used to be effectively the voice tail (~0.4 s), which meant EVERY burst
+ *  suspended the context — and over Bluetooth, every next burst then paid the
+ *  full sink spin-up again (see WAKE_LEAD_SECONDS), turning back-to-back sounds
+ *  into a glitch lottery. Thirty seconds keeps the sink hot across a run of
+ *  consolidates while still putting the render thread to sleep once the user
+ *  has actually gone quiet, which is all the CPU-drain fix ever needed. */
+const SUSPEND_IDLE_GRACE_SECONDS = 30;
+
 export type ConsolidateSoundStyle = 'off' | 'solitaire' | 'chimes' | (string & {});
 
 let ctx: AudioContext | null = null;
@@ -96,11 +120,12 @@ function armAudioUnlock(): void {
     const c = getContext();
     if (c && c.state === 'suspended') {
       void c.resume().catch(() => {});
-      // Re-suspend shortly if no burst claims the context. Without this, the
-      // persistent listener resurrects the render thread on EVERY click and
-      // nothing ever puts it back to sleep — the exact always-running CPU
-      // drain the idle-suspend exists to prevent. A burst arriving within the
-      // window cancels/reschedules this via its own scheduleSuspend call.
+      // Re-suspend (after the idle grace) if no burst claims the context.
+      // Without this, the persistent listener resurrects the render thread on
+      // EVERY click and nothing ever puts it back to sleep — the exact
+      // always-running CPU drain the idle-suspend exists to prevent. A burst
+      // arriving within the window cancels/reschedules this via its own
+      // scheduleSuspend call.
       scheduleSuspend(5);
     }
   };
@@ -117,9 +142,10 @@ function armAudioUnlock(): void {
  * alternative is queueing it against a frozen clock so it ambushes the user
  * later.
  */
-async function readyContext(): Promise<AudioContext | null> {
+async function readyContext(): Promise<{ c: AudioContext; wakeLead: number } | null> {
   const c = getContext();
   if (!c) return null;
+  let wakeLead = 0;
   if (c.state === 'suspended') {
     // BOUND the resume.
     //
@@ -143,8 +169,11 @@ async function readyContext(): Promise<AudioContext | null> {
     ]);
     clearTimeout(timer);
     if (!resumed) return null;
+    // The context is running, but a Bluetooth sink woken by this resume is not
+    // necessarily consuming yet — pad the schedule so the burst isn't dropped.
+    wakeLead = WAKE_LEAD_SECONDS;
   }
-  return c.state === 'running' ? c : null;
+  return c.state === 'running' ? { c, wakeLead } : null;
 }
 
 /**
@@ -250,7 +279,7 @@ function scheduleSuspend(afterSeconds: number): void {
     suspendTimer = null;
     // Re-check state: another burst may have resumed it while we waited.
     if (ctx && ctx.state === 'running') void ctx.suspend().catch(() => {});
-  }, (afterSeconds + VOICE_TAIL_SECONDS) * 1000);
+  }, (afterSeconds + VOICE_TAIL_SECONDS + SUSPEND_IDLE_GRACE_SECONDS) * 1000);
 }
 
 /**
@@ -279,8 +308,9 @@ export async function playConsolidateSound(
   if (Date.now() < burstEndsAt) return;
 
   const requestedAt = Date.now();
-  const c = await readyContext();
-  if (!c) return;
+  const ready = await readyContext();
+  if (!ready) return;
+  const { c, wakeLead } = ready;
   // Belt and braces on the same failure mode: if getting here took long enough
   // that this is no longer feedback for the consolidate that caused it, play
   // nothing. Silence beats a sound with no cause.
@@ -293,7 +323,7 @@ export async function playConsolidateSound(
     : Math.min(Math.max(1, Math.ceil(blanks / 3)), MAX_VOICES);
   const offsets = buildOffsets(voices, accelerate, 0.04);
 
-  const start = c.currentTime;
+  const start = c.currentTime + wakeLead;
   for (let i = 0; i < voices; i++) {
     const t = start + offsets[i];
     if (style === 'chimes') {
@@ -305,7 +335,7 @@ export async function playConsolidateSound(
     }
   }
 
-  const span = offsets[offsets.length - 1] ?? 0;
+  const span = wakeLead + (offsets[offsets.length - 1] ?? 0);
   burstEndsAt = Date.now() + span * 1000;
   scheduleSuspend(span);
 }
@@ -313,17 +343,18 @@ export async function playConsolidateSound(
 /** Preview used by the sound picker: three voices, starting slow. */
 export async function previewConsolidateSound(style: ConsolidateSoundStyle): Promise<void> {
   if (style === 'off') return;
-  const c = await readyContext();
-  if (!c) return;
+  const ready = await readyContext();
+  if (!ready) return;
+  const { c, wakeLead } = ready;
   // Gaps: 0.25 s then 0.15 s — starts slow, gets faster, like a real cascade.
   const gaps = [0, 0.25, 0.4];
   const scale = [523, 659, 880];
   for (let i = 0; i < 3; i++) {
-    const t = c.currentTime + gaps[i];
+    const t = c.currentTime + wakeLead + gaps[i];
     if (style === 'chimes') chime(c, t, scale[i]);
     else swoosh(c, t);
   }
-  scheduleSuspend(gaps[gaps.length - 1]);
+  scheduleSuspend(wakeLead + gaps[gaps.length - 1]);
 }
 
 /** Test seam — resets the module singletons between cases. */

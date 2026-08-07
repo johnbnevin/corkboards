@@ -503,7 +503,7 @@ export function HomeScreen() {
   // no amount of retrying could fix it, because nothing was ever asked for.
   // (SavedScreen has done this correctly all along; this mirrors it.)
   const parentRequests = useMemo(() => {
-    const requests = new Map<string, { eventId: string; hints: string[]; authorPubkey?: string }>();
+    const requests = new Map<string, { eventId: string; hints: string[]; authorPubkey?: string; candidateAuthors?: string[] }>();
     for (const note of filteredEvents ?? []) {
       if (note.kind !== 1 && note.kind !== 1111) continue;
       if (note.kind === 1 && note.tags.some(t => t[0] === 'q')) continue;
@@ -516,7 +516,12 @@ export function HomeScreen() {
       // second pass to the wrong author's relays for nested replies.
       const authorPubkey = (replyETag?.[4] && /^[0-9a-f]{64}$/.test(replyETag[4]) ? replyETag[4] : undefined)
         ?? note.tags.find(t => t[0] === 'p')?.[1];
-      requests.set(parentId, { eventId: parentId, hints, authorPubkey });
+      // Thread participants minus the replier — fallback outbox candidates
+      // for when the primary author guess is wrong. (Mirrors web.)
+      const candidateAuthors = note.tags
+        .filter(t => t[0] === 'p' && t[1] && t[1] !== note.pubkey && /^[0-9a-f]{64}$/.test(t[1]))
+        .map(t => t[1]);
+      requests.set(parentId, { eventId: parentId, hints, authorPubkey, candidateAuthors });
     }
     return Array.from(requests.values());
   }, [filteredEvents]);
@@ -739,12 +744,38 @@ export function HomeScreen() {
         <Modal visible={helpOpen} animationType="fade" transparent onRequestClose={() => setHelpOpen(false)}>
           <View style={styles.helpOverlay}>
             <View style={styles.helpCard}>
-              <Text style={styles.helpTitle}>Future Features</Text>
-              <Text style={styles.helpBody}>
-                Here are some features we're planning for corkboards.me:
-              </Text>
-              <Text style={styles.helpHighlight}>• Much more coming soon!</Text>
-              <Text style={styles.helpBodyItalic}>Stay tuned for updates!</Text>
+              <Text style={styles.helpTitle}>About Corkboards.Me</Text>
+              <ScrollView style={styles.helpScroll}>
+                <Text style={styles.helpHeading}>Default corkboards get you started:</Text>
+                <Text style={styles.helpBody}>
+                  <Text style={styles.helpItalic}>The 'Me' corkboard</Text> has all the notes
+                  that you've posted publicly, starting with your pinned notes. This is where
+                  your visitors land — your profile information shows at the top.
+                </Text>
+                <Text style={styles.helpBody}>
+                  <Text style={styles.helpItalic}>The 'Follows' corkboard</Text> shows a
+                  chronological feed of the notes from all your friends/follows.
+                </Text>
+                <Text style={styles.helpBody}>
+                  <Text style={styles.helpItalic}>The 'Discovery' corkboard</Text> shows
+                  interesting notes from friends of friends.
+                </Text>
+                <Text style={styles.helpBody}>
+                  <Text style={styles.helpItalic}>The 'Notifications' corkboard</Text> shows
+                  all the replies and reactions to your notes.
+                </Text>
+                <Text style={styles.helpBody}>
+                  <Text style={styles.helpItalic}>The 'Saved' corkboard</Text> shows all the
+                  notes you've saved for future reference.
+                </Text>
+                <Text style={styles.helpHeading}>There's so much more you can do with custom corkboards:</Text>
+                <Text style={styles.helpBody}>• Build a newspaper or magazine from trusted or interesting sources.</Text>
+                <Text style={styles.helpBody}>• Create a group feed of associates and hashtags that post about a common topic or project.</Text>
+                <Text style={styles.helpBody}>• Make arbitrary aggregates, like lists.</Text>
+                <Text style={styles.helpBody}>• Easily view a portfolio of a friend, or your own without logging into your artist account.</Text>
+                <Text style={styles.helpBody}>• Combine feeds from musicians, video feeds, or podcasts so you have an always fresh playlist.</Text>
+                <Text style={styles.helpBody}>• Customize what others see when they land on your 'Me' corkboard. Need a portfolio or business landing? Want to feature your favorite notes, your friends, your favorite books, articles, songs, videos, podcasts, memes, photos... or....</Text>
+              </ScrollView>
               <View style={styles.helpDivider} />
               <Text style={styles.helpBody}>
                 Get the apps (desktop &amp; mobile) at{' '}
@@ -971,9 +1002,10 @@ const styles = StyleSheet.create({
     fontSize: 20, fontWeight: '600', color: '#f97316',
     textAlign: 'center', marginBottom: 12,
   },
+  helpScroll: { maxHeight: 420 },
+  helpHeading: { fontSize: 15, fontWeight: '600', color: '#f2f2f2', marginTop: 8, marginBottom: 8 },
   helpBody: { fontSize: 14, color: '#b3b3b3', marginBottom: 8 },
-  helpHighlight: { fontSize: 14, color: '#f97316', fontWeight: '500', marginBottom: 8 },
-  helpBodyItalic: { fontSize: 12, color: '#b3b3b3', fontStyle: 'italic', marginBottom: 12 },
+  helpItalic: { fontStyle: 'italic' },
   helpDivider: { height: 1, backgroundColor: '#404040', marginVertical: 12 },
   helpLink: { color: '#f97316', fontWeight: '500', textDecorationLine: 'underline' },
   helpCredit: { fontSize: 12, color: '#808080', marginTop: 4 },

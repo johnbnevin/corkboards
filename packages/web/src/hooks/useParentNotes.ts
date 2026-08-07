@@ -131,6 +131,10 @@ interface ParentRequest {
   eventId: string;
   hints?: string[];
   authorPubkey?: string;
+  /** Other thread participants (p-tags) — fallback outbox candidates when
+   *  authorPubkey is wrong or missing; the parent's author is guaranteed by
+   *  NIP-10 to be among them. */
+  candidateAuthors?: string[];
 }
 
 /**
@@ -372,6 +376,7 @@ export function useParentNotes(requests: (ParentRequest | string)[]) {
           fetchEventWithOutbox(r.eventId, nostr, {
             hints: r.hints,
             authorPubkey: r.authorPubkey,
+            candidateAuthors: r.candidateAuthors,
           }).catch(() => null)
         )
       );

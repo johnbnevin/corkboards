@@ -178,7 +178,7 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
   // the shared batch query completes that circuit and registers still-missing
   // parents with the background retry sweep.
   const parentRequests = useMemo(() => {
-    const requests = new Map<string, { eventId: string; hints: string[]; authorPubkey?: string }>();
+    const requests = new Map<string, { eventId: string; hints: string[]; authorPubkey?: string; candidateAuthors?: string[] }>();
     for (const note of notes) {
       if (note.kind !== 1 && note.kind !== 1111) continue;
       if (note.kind === 1 && note.tags.some(t => t[0] === 'q')) continue;
@@ -191,7 +191,12 @@ export const SavedForLaterCorkboard = memo(function SavedForLaterCorkboard({
       // second pass to the wrong author's relays for nested replies.
       const authorPubkey = (replyETag?.[4] && /^[0-9a-f]{64}$/.test(replyETag[4]) ? replyETag[4] : undefined)
         ?? note.tags.find(t => t[0] === 'p')?.[1];
-      requests.set(parentId, { eventId: parentId, hints, authorPubkey });
+      // Thread participants minus the replier — fallback outbox candidates
+      // for when the primary author guess is wrong (see MultiColumnClient).
+      const candidateAuthors = note.tags
+        .filter(t => t[0] === 'p' && t[1] && t[1] !== note.pubkey && /^[0-9a-f]{64}$/.test(t[1]))
+        .map(t => t[1]);
+      requests.set(parentId, { eventId: parentId, hints, authorPubkey, candidateAuthors });
     }
     return Array.from(requests.values());
   }, [notes]);

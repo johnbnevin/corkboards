@@ -31,6 +31,23 @@ export const READ_ONLY_RELAYS = [
 ];
 
 /**
+ * The widest net the app ever casts for a single event id, used ONLY by the
+ * user's explicit "Retry now" on an unresolved reference — never by any
+ * automatic path, so it costs the shared socket budget nothing until a human
+ * clicks. Deep-history archives first (per references/relays.md they exist for
+ * exactly this), then the big general relays where a stray event most likely
+ * landed. An event findable nowhere in this union plus the authors' outboxes
+ * is genuinely unreachable.
+ */
+export const LAST_RESORT_LOOKUP_RELAYS = [
+  ...READ_ONLY_RELAYS,           // archives: deep history
+  'wss://relay.nostr.band',      // indexer/archive with broad event coverage
+  ...FALLBACK_RELAYS,            // large general relays
+  'wss://relay.primal.net',      // large caching service
+  'wss://theforest.nostr1.com',
+];
+
+/**
  * Profile/relay-list indexers — aggregators that hold kind-0 (profile) and
  * kind-10002 (NIP-65 relay list) for essentially everyone. Queried to resolve a
  * profile when it isn't on the author's own/known relays (fixes stuck

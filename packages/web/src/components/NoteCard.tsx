@@ -7,7 +7,7 @@ import { useNostr } from '@nostrify/react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuthor } from '@/hooks/useAuthor'
 import { useNoteCollapsedState, useCollapsedNotesActions } from '@/hooks/useCollapsedNotes'
-import { fetchEventWithOutbox } from '@/lib/fetchEvent'
+import { fetchEventWithOutbox, fetchEventLastResort } from '@/lib/fetchEvent'
 import { forgetParentMiss, cacheParentNote } from '@/hooks/useParentNotes'
 import { getParentId } from '@core/threadTree'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
@@ -186,7 +186,11 @@ function ExpandableContent({ event, className, blurMedia, inModalContext, onView
   if (expanded) {
     return (
       <div>
-        <SmartNoteContent event={resolvedEvent} className={className} blurMedia={blurMedia} inModalContext={inModalContext} onViewThread={onViewThread} />
+        {/* forceExpand: the user JUST clicked "Show more" — without it,
+            SmartNoteContent's own long-post spoiler immediately re-clamps the
+            note to a fixed height, which hid the image that was visible in
+            the collapsed preview and demanded a SECOND "Show more" click. */}
+        <SmartNoteContent event={resolvedEvent} className={className} blurMedia={blurMedia} inModalContext={inModalContext} onViewThread={onViewThread} forceExpand />
         <button type="button" className="text-xs text-primary mt-1 hover:underline" onClick={(e) => { e.stopPropagation(); expandedEventIds.delete(event.id); setExpanded(false) }}>Show less</button>
       </div>
     )
@@ -295,7 +299,7 @@ function UnresolvedParentContext({ note }: { note: NostrEvent }) {
     const eTag = note.tags.find(t => t[0] === 'e' && t[1] === parentId)
     return {
       parentHints: eTag?.[2] ? [eTag[2]] : undefined,
-      parentAuthor: (eTag?.[4] && eTag[4].length === 64 ? eTag[4] : undefined)
+      parentAuthor: (eTag?.[4] && /^[0-9a-f]{64}$/.test(eTag[4]) ? eTag[4] : undefined)
         ?? note.tags.find(t => t[0] === 'p')?.[1],
     }
   }, [note, parentId])
@@ -307,9 +311,16 @@ function UnresolvedParentContext({ note }: { note: NostrEvent }) {
     // Clear the negative cache first or the lookup short-circuits to "miss".
     forgetParentMiss(parentId)
     try {
-      const found = await fetchEventWithOutbox(parentId, nostr, {
+      // Last-resort ladder: outbox lookup (author + every thread participant's
+      // relays — NIP-10 puts the parent's author somewhere in the p-tags),
+      // then a direct sweep of the archive/indexer/large relays. The user
+      // clicked, so the widest net is proportionate here and only here.
+      const found = await fetchEventLastResort(parentId, nostr, {
         hints: parentHints,
         authorPubkey: parentAuthor,
+        candidateAuthors: note.tags
+          .filter(t => t[0] === 'p' && t[1] && t[1] !== note.pubkey && /^[0-9a-f]{64}$/.test(t[1]))
+          .map(t => t[1]),
       })
       if (found) {
         cacheParentNote(parentId, found)
@@ -324,7 +335,7 @@ function UnresolvedParentContext({ note }: { note: NostrEvent }) {
     } catch {
       setRetryState('notfound')
     }
-  }, [parentId, retryState, nostr, queryClient, parentHints, parentAuthor])
+  }, [parentId, retryState, nostr, queryClient, parentHints, parentAuthor, note.pubkey, note.tags])
 
   return (
     <div className="mb-3 p-2.5 bg-muted/40 rounded-lg border-l-2 border-muted-foreground/30">

@@ -18,6 +18,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Card } from '@/components/ui/card'
 import { genUserName } from '@/lib/genUserName'
 import { isValidMediaUrl } from '@/lib/textareaUtils'
+import { attachManualScroll } from '@/lib/manualScroll'
 import { EMOJI_CATEGORIES } from '@core/emojiCategories'
 import {
   Plus,
@@ -95,6 +96,21 @@ export function EmojiSetEditor() {
   const [isDeleting, setIsDeleting] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // The horizontal tab strips hide their native scrollbar (it renders on top of
+  // the icons in a row this short), so wheel/drag scrolling is attached
+  // manually. Callback refs, not effects: the strips live inside conditional
+  // panels that mount and unmount as the user switches tools.
+  const emojiCatStripCleanup = useRef<(() => void) | null>(null)
+  const emojiCatStripRef = useCallback((el: HTMLDivElement | null) => {
+    emojiCatStripCleanup.current?.()
+    emojiCatStripCleanup.current = el ? attachManualScroll(el, 'x') : null
+  }, [])
+  const mySetsStripCleanup = useRef<(() => void) | null>(null)
+  const mySetsStripRef = useCallback((el: HTMLDivElement | null) => {
+    mySetsStripCleanup.current?.()
+    mySetsStripCleanup.current = el ? attachManualScroll(el, 'x') : null
+  }, [])
 
   // Delete confirmation from list view
   const [confirmDeleteSet, setConfirmDeleteSet] = useState<EmojiSet | null>(null)
@@ -738,7 +754,7 @@ export function EmojiSetEditor() {
         {/* Standard emoji picker panel */}
         {activePanel === 'emoji' && (
           <Card className="p-2">
-            <div className="flex gap-0.5 overflow-x-auto pb-1">
+            <div ref={emojiCatStripRef} className="flex gap-0.5 overflow-x-auto scrollbar-hide pb-1">
               {EMOJI_CATEGORIES.map((cat, i) => (
                 <button
                   key={cat.name}
@@ -782,7 +798,7 @@ export function EmojiSetEditor() {
           return (
             <Card className="p-2">
               {availableSets.length > 1 && (
-                <div className="flex gap-1 overflow-x-auto pb-1 mb-1">
+                <div ref={mySetsStripRef} className="flex gap-1 overflow-x-auto scrollbar-hide pb-1 mb-1">
                   {availableSets.map((s, i) => (
                     <button
                       key={s.dTag}

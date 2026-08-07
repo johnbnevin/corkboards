@@ -332,10 +332,15 @@ export function isRelayBlocked(url: string): boolean {
 // skipped by getActiveBlossomServers.
 export const DEFAULT_BLOSSOM_SERVERS = [
   'https://blossom.primal.net/',
-  'https://blossom.nostr.build/',
   'https://blossom.yakihonne.com/',
   'https://blossom.ditto.pub/',
 ];
+
+// Servers dropped from the roster entirely — filtered out of STORED lists too,
+// not just defaults, because the server list syncs across devices and an entry
+// added by an old default lives on in storage forever. blossom.nostr.build
+// answered HTTP 400 to every backup upload. (Mirrors web.)
+const RETIRED_BLOSSOM_SERVERS = new Set(['https://blossom.nostr.build/']);
 
 const BLOSSOM_SERVERS_KEY = STORAGE_KEYS.BLOSSOM_SERVERS;
 const BLOSSOM_BLOB_REJECTS_KEY = STORAGE_KEYS.BLOSSOM_BLOB_REJECTS;
@@ -352,7 +357,10 @@ export function getBlossomServers(): string[] {
   if (stored) {
     try {
       const servers = JSON.parse(stored);
-      if (Array.isArray(servers) && servers.length > 0) return servers;
+      if (Array.isArray(servers)) {
+        const active = servers.filter(s => !RETIRED_BLOSSOM_SERVERS.has(normalizeServer(s)));
+        if (active.length > 0) return active;
+      }
     } catch { /* fall through */ }
   }
   return [...DEFAULT_BLOSSOM_SERVERS];

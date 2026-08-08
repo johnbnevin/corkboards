@@ -41,7 +41,7 @@
 import { useNostr } from '@nostrify/react';
 import { NLogin, useNostrLogin } from '@nostrify/react/login';
 import { NConnectSigner, NSecSigner } from '@nostrify/nostrify';
-import { createRelayDirect } from '@/components/NostrProvider';
+import { createRelayDirect, createRelayFresh } from '@/components/NostrProvider';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { idbSetSync, idbClear, idbKeys } from '@/lib/idb';
 import { IMAGE_PROXY_TEMPLATE_KEY } from '@/lib/imageProxySettings';
@@ -239,7 +239,15 @@ export function useLoginActions() {
       signal.addEventListener('abort', () => connectAbort.abort());
 
       // Open direct relay connections (not through NPool, backoff:false)
-      const relays = connectRelays.map(url => createRelayDirect(url, { backoff: false, idleTimeout: false }));
+      // FRESH instances, not the shared createRelayDirect cache. Cached direct
+      // relays are built with backoff:false — one dead socket (server idle
+      // close while the login screen sits open, a phone network blip, an
+      // earlier attempt's teardown) poisons the cache entry until its TTL, and
+      // every later connect attempt then waits on relays that will never
+      // answer ("Could not reach any signer relay" with the network fine).
+      // Each attempt opens its own sockets and closes them when it ends.
+      const relays = connectRelays.map(url => createRelayFresh(url, { backoff: false, idleTimeout: false }));
+      const closeRelays = () => { for (const r of relays) void r.close().catch(() => { /* already closed */ }); };
       const subs = relays.map(relay =>
         relay.req(
           [{ kinds: [24133], '#p': [clientPubkey] }],
@@ -373,6 +381,7 @@ export function useLoginActions() {
         clientNsec,
         relays: connectRelays,
       });
+      closeRelays();
       await persistBunkerClientKey(login);
       await addLogin(login);
     },
@@ -471,7 +480,15 @@ export function useLoginActions() {
       signal?.addEventListener('abort', () => connectAbort.abort());
 
       // Open direct relay connections (not through NPool)
-      const relays = connectRelays.map(url => createRelayDirect(url, { backoff: false, idleTimeout: false }));
+      // FRESH instances, not the shared createRelayDirect cache. Cached direct
+      // relays are built with backoff:false — one dead socket (server idle
+      // close while the login screen sits open, a phone network blip, an
+      // earlier attempt's teardown) poisons the cache entry until its TTL, and
+      // every later connect attempt then waits on relays that will never
+      // answer ("Could not reach any signer relay" with the network fine).
+      // Each attempt opens its own sockets and closes them when it ends.
+      const relays = connectRelays.map(url => createRelayFresh(url, { backoff: false, idleTimeout: false }));
+      const closeRelays = () => { for (const r of relays) void r.close().catch(() => { /* already closed */ }); };
       const subs = relays.map(relay =>
         relay.req(
           [{ kinds: [24133], '#p': [clientPubkey] }],
@@ -609,6 +626,7 @@ export function useLoginActions() {
         clientNsec,
         relays: connectRelays,
       });
+      closeRelays();
       await persistBunkerClientKey(login);
       await addLogin(login);
     },

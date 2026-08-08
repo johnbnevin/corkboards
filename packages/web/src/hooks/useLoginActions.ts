@@ -400,9 +400,22 @@ export function useLoginActions() {
         } catch { return undefined; }
       };
 
-      sk = decodeNsec(await loadSecret(AMBER_CLIENT_SECRET_ID).catch(() => null));
+      // Reuse the stored client key ONLY when no bunker login exists. The
+      // reuse exists so a re-login of the SAME account doesn't re-prompt — but
+      // when an account is already connected through this client pubkey,
+      // asking Amber to connect AGAIN from the same pubkey (to add a second
+      // account) reads as already-connected on Amber's side: it never
+      // publishes a fresh connect response and the login hangs forever on
+      // "opening Amber". A second account must arrive as a NEW client
+      // identity; its key is then persisted per-account by
+      // persistBunkerClientKey like any other bunker session. (Mobile always
+      // generates a fresh key per connect, which is why it never hung.)
+      const hasBunkerLogin = logins.some((l) => l.type === 'bunker');
+      if (!hasBunkerLogin) {
+        sk = decodeNsec(await loadSecret(AMBER_CLIENT_SECRET_ID).catch(() => null));
+      }
 
-      if (!sk) {
+      if (!sk && !hasBunkerLogin) {
         // One-time migration of the legacy plaintext localStorage copy.
         let legacy: string | null = null;
         try { legacy = localStorage.getItem(AMBER_CLIENT_KEY); } catch { /* unavailable */ }
@@ -424,7 +437,13 @@ export function useLoginActions() {
         // the cost is only that Amber re-prompts next session, which is a
         // usability wrinkle, not a lost account. Trading key confidentiality for
         // one fewer tap is not a trade to make silently.
-        await storeSecret(AMBER_CLIENT_SECRET_ID, nip19.nsecEncode(sk)).catch(() => false);
+        //
+        // Don't overwrite the stored first-login seed when this fresh key was
+        // generated because another bunker account is live — that seed still
+        // belongs to the single-login fast path.
+        if (!hasBunkerLogin) {
+          await storeSecret(AMBER_CLIENT_SECRET_ID, nip19.nsecEncode(sk)).catch(() => false);
+        }
       }
       const clientPubkey = getPublicKey(sk);
       const clientNsec = nip19.nsecEncode(sk);
@@ -507,8 +526,27 @@ export function useLoginActions() {
         document.body.removeChild(a);
       }
 
-      // Wait for signer's response
-      const { pubkey: bunkerPubkey, relayIndex } = await responsePromise;
+      // Wait for signer's response — BOUNDED. A connect response that never
+      // comes (signer treats us as already-connected, sockets died while the
+      // app was backgrounded behind Amber, response published before our subs
+      // were live) used to park this await forever, wedging the login screen
+      // on "opening Amber". Two minutes is comfortably beyond any real
+      // approve-and-return round trip; past it, fail with an actionable error.
+      let responseTimer: ReturnType<typeof setTimeout> | undefined;
+      let bunkerPubkey: string, relayIndex: number;
+      try {
+        ({ pubkey: bunkerPubkey, relayIndex } = await Promise.race([
+          responsePromise,
+          new Promise<never>((_, reject) => {
+            responseTimer = setTimeout(
+              () => reject(new Error('No response from Amber — switch back to Amber, approve the connection, and try again.')),
+              120_000,
+            );
+          }),
+        ]));
+      } finally {
+        clearTimeout(responseTimer);
+      }
 
       // Get the user's actual pubkey via NIP-46 over the relay that actually
       // delivered Amber's response (proven reachable) — not a hardcoded relays[0]

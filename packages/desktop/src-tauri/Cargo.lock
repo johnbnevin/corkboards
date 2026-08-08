@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "corkboards-desktop"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "dirs 5.0.1",
  "futures-util",

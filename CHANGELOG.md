@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.4] - 2026-08-08
+
+### Fixed
+- **Multi-account finally works end to end.** New logins actually become the
+  active account (they were appended behind the current one, so adding an
+  account looked like a failed login); the switcher waits for the login list
+  to persist before reloading (switching could resurrect a logged-out
+  account or come up as the wrong user); logging out decides
+  "switch vs. wipe" from the credential list, never a still-loading profile
+  query (a slow relay could nuclear-wipe a surviving account); the departing
+  account's pending cloud backup is flushed before any switch.
+- **Sign-in reliability (QR and Amber):** connect flows open fresh relay
+  sockets per attempt (a dead cached socket silently ate every retry); the
+  Amber deep-link fires only after a relay confirms our subscription is live
+  (the ephemeral connect response could be published into the void while
+  Android had the page frozen — the "hangs on opening Amber" bug); a second
+  account presents a fresh NIP-46 client identity so Amber doesn't treat it
+  as already connected; all waits are bounded with real error messages.
+- **Desktop login roulette:** on a slow IndexedDB the app could mount before
+  the encrypted signer keys were readable and dump a validly-logged-in user
+  on the login screen; bunker signers now resolve their key on first use.
+- **Consolidate sound:** the Bluetooth wake lead now also covers a sink that
+  went idle while the audio context stayed hot (desktop only — browsers keep
+  the old instant playback), and a quick second consolidate plays again.
+- **Emoji strips:** the horizontal scrollbar is back — thin, in its own
+  gutter below the icons instead of painted over them.
+- **Dark mode:** tab-bar and status-bar buttons are white with dark text
+  (hover included); the "hide posts with…" filter input is readable.
+
 ## [0.8.3] - 2026-08-07
 
 ### Fixed

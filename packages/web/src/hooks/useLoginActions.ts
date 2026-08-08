@@ -479,6 +479,16 @@ export function useLoginActions() {
         )
       );
 
+      // Readiness signals, mirroring nostrconnect(): subsLive resolves once ANY
+      // relay has answered our REQ; allDead resolves only if EVERY subscription
+      // ends without a single frame.
+      let markSubsLive: () => void = () => {};
+      const subsLive = new Promise<void>((resolve) => { markSubsLive = resolve; });
+      let markAllDead: () => void = () => {};
+      const allDead = new Promise<void>((resolve) => { markAllDead = resolve; });
+      let liveCount = 0;
+      let deadCount = 0;
+
       // Listen for signer's connect response — race all relays. Track WHICH
       // relay delivered the response so we reuse that (proven-reachable, fastest)
       // relay for the NConnectSigner below, instead of blindly using relays[0].
@@ -490,6 +500,9 @@ export function useLoginActions() {
           (async () => {
             try {
               for await (const msg of sub) {
+                // Any frame means this relay processed our REQ.
+                liveCount++;
+                markSubsLive();
                 if (resolved) return;
                 if (msg[0] === 'EVENT') {
                   const event = msg[2];
@@ -505,10 +518,40 @@ export function useLoginActions() {
                   } catch { /* not our response */ }
                 }
               }
-            } catch { /* subscription closed or errored */ }
+            } catch { /* subscription closed or errored */
+            } finally {
+              if (++deadCount === subs.length && liveCount === 0) markAllDead();
+            }
           })();
         });
       });
+      // A relay failure before the await below must not surface as unhandled.
+      responsePromise.catch(() => {});
+
+      // Only NOW trigger Amber — after a relay has actually answered our REQ.
+      //
+      // Same bug class as the nostrconnect QR ("scan it twice"): kind 24133 is
+      // EPHEMERAL, so a connect response published into relays not yet carrying
+      // our REQ is gone for good. On Android this was near-deterministic for
+      // any prompt approval: the intent BACKGROUNDS the page immediately,
+      // Chrome freezes its JS before the three cold TLS+WebSocket handshakes
+      // finish, Amber publishes into the void while we're frozen, and the tab
+      // comes back to an await that can never resolve — the "hangs on
+      // 'opening Amber'" report. Waiting for EOSE first costs well under a
+      // second on a warm network and moves the handshakes into time the page
+      // is still foregrounded and running.
+      let amberSubsTimer: ReturnType<typeof setTimeout> | undefined;
+      const amberOutcome = await Promise.race([
+        subsLive.then(() => 'live' as const),
+        allDead.then(() => 'dead' as const),
+        new Promise<'stalled'>((resolve) => { amberSubsTimer = setTimeout(() => resolve('stalled'), 30000); }),
+      ]);
+      clearTimeout(amberSubsTimer);
+      if (signal?.aborted) throw new Error('aborted');
+      if (amberOutcome !== 'live') {
+        connectAbort.abort();
+        throw new Error('Could not reach any signer relay. Check your connection and try again.');
+      }
 
       // Trigger Amber — use Intent URI on Android, link click on desktop
       const isAndroid = /Android/i.test(navigator.userAgent);

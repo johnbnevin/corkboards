@@ -54,7 +54,11 @@ export function useAccountSwitchEffect({
       // switchToAccount triggers the pubkey change.
       const alreadySwitched = pubkey && pubkey !== prevPubkey && prevPubkey;
       if (!alreadySwitched) {
-        const newestLogin = allLogins[allLogins.length - 1];
+        // useLoginActions.addLogin activates every new login by moving it to
+        // the FRONT of the list — the newest login is allLogins[0], not the
+        // last element (which is now the OLDEST credential; switching to it
+        // here deactivated the account the user just added).
+        const newestLogin = allLogins[0];
         if (newestLogin) switchToAccount(newestLogin.id);
       }
     }

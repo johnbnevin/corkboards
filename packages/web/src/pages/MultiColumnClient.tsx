@@ -853,11 +853,17 @@ export function MultiColumnClient() {
     setLogoutStep('Preparing logout...');
     const forceReload = setTimeout(() => window.location.reload(), 20000);
 
-    if (otherUsers.length > 0) {
+    // Decide single-logout vs nuclear wipe from the CREDENTIAL list, never
+    // from otherUsers: that array derives from the kind-0 profile query, which
+    // is empty for ~1.5s after any login change re-keys it (or indefinitely
+    // offline) — and an empty answer here would nuclear-wipe an account that
+    // still exists.
+    const remainingLogins = allLogins.filter(l => l.pubkey !== user.pubkey);
+    if (remainingLogins.length > 0) {
       try {
         await loginActions.logoutAccount(user.pubkey);
         clearTimeout(forceReload);
-        switchToAccount(otherUsers[0].id);
+        switchToAccount(remainingLogins[0].id);
       } catch (e) {
         logLogout('Logout error: ' + (e instanceof Error ? e.message : String(e)));
         clearTimeout(forceReload);
@@ -874,7 +880,7 @@ export function MultiColumnClient() {
       clearTimeout(forceReload);
       window.location.reload();
     }
-  }, [user?.pubkey, otherUsers, loginActions, logLogout, switchToAccount]);
+  }, [user?.pubkey, allLogins, loginActions, logLogout, switchToAccount]);
 
   const handleLogout = useCallback(async () => {
     if (!user?.pubkey) return;
@@ -916,15 +922,17 @@ export function MultiColumnClient() {
       logLogout('Continuing with logout...');
     }
 
-    // Single-account logout: remove only this account, switch to next if any
-    if (otherUsers.length > 0) {
+    // Single-account logout: remove only this account, switch to next if any.
+    // Branch on the credential list, not otherUsers — see doLogout.
+    const remainingLogins = allLogins.filter(l => l.pubkey !== user.pubkey);
+    if (remainingLogins.length > 0) {
       logLogout('Logging out active account...');
       try {
         await loginActions.logoutAccount(user.pubkey);
         logLogout('Switching to next account...');
         // Switch to the next account (triggers reload internally)
         clearTimeout(forceReload);
-        switchToAccount(otherUsers[0].id);
+        switchToAccount(remainingLogins[0].id);
       } catch (e) {
         logLogout('Logout error: ' + (e instanceof Error ? e.message : String(e)));
         clearTimeout(forceReload);
@@ -942,7 +950,7 @@ export function MultiColumnClient() {
       clearTimeout(forceReload);
       window.location.reload();
     }
-  }, [user?.pubkey, otherUsers, autoSaveBackup, loginActions, hasUnsavedChanges, lastBackupTs, logLogout, switchToAccount]);
+  }, [user?.pubkey, allLogins, autoSaveBackup, loginActions, hasUnsavedChanges, lastBackupTs, logLogout, switchToAccount]);
 
   // Expose the backup flush to the account-switch choke point so switching
   // accounts (header switcher / mobile menu) flushes pending cloud backup for

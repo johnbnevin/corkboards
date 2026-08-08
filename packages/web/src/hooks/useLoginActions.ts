@@ -52,6 +52,7 @@ import { clearCollapsedNotesModuleState } from '@/hooks/useCollapsedNotes';
 import { clearBookmarksModuleState } from '@/hooks/useBookmarks';
 import { clearNoteCardCache } from '@/components/NoteCard';
 import { handleLogoutStorageAsync } from '@/lib/storageKeys';
+import { flushBackupBeforeSwitch } from '@/lib/backupFlush';
 import { isTauri, keychainStore, keychainDelete, tauriLog } from '@/lib/tauri';
 import {
   storeNsec, deleteNsec, wipeKeyStore,
@@ -90,7 +91,30 @@ async function persistBunkerClientKey(login: { pubkey: string; data?: unknown })
 
 export function useLoginActions() {
   const { nostr } = useNostr();
-  const { logins, addLogin, removeLogin } = useNostrLogin();
+  const { logins, addLogin: rawAddLogin, setLogin, removeLogin } = useNostrLogin();
+
+  // @nostrify's addLogin APPENDS to the login list, but the entire app treats
+  // logins[0] as the active account (useCurrentUser, useLoggedInAccounts). A
+  // bare addLogin therefore never activated the account it just created:
+  // adding a second account left the UI on the first one (so the QR scan
+  // looked like it failed and users scanned again), and logging back in as an
+  // existing account put the credential at the END of the list while the
+  // switcher chip kept showing whoever happened to be first. Every login here
+  // must end with the new login moved to the front.
+  //
+  // Activating a DIFFERENT pubkey is an account switch, and this path bypasses
+  // useLoggedInAccounts.setLogin (the switcher's choke point) — so it must
+  // provide the same safety itself: flush the departing account's pending
+  // cloud backup BEFORE the swap, or its last edits never reach the cloud
+  // (useAccountIsolation, which owns the storage swap + reload, doesn't flush).
+  const addLogin = async (login: Parameters<typeof rawAddLogin>[0]): Promise<void> => {
+    const departing = logins[0];
+    if (departing && departing.pubkey !== login.pubkey) {
+      await flushBackupBeforeSwitch();
+    }
+    rawAddLogin(login);
+    setLogin(login.id);
+  };
 
   return {
     async nsec(nsec: string, opts?: { isNewUser?: boolean }): Promise<void> {
@@ -132,18 +156,18 @@ export function useLoginActions() {
           }
         }
       }
-      addLogin(login);
+      await addLogin(login);
     },
 
     async bunker(uri: string): Promise<void> {
       const login = await NLogin.fromBunker(uri, nostr);
       await persistBunkerClientKey(login);
-      addLogin(login);
+      await addLogin(login);
     },
 
     async extension(): Promise<void> {
       const login = await NLogin.fromExtension();
-      addLogin(login);
+      await addLogin(login);
     },
 
     /**
@@ -350,7 +374,7 @@ export function useLoginActions() {
         relays: connectRelays,
       });
       await persistBunkerClientKey(login);
-      addLogin(login);
+      await addLogin(login);
     },
 
     // Login via nostrconnect:// deep link (Amber on Android)
@@ -505,7 +529,7 @@ export function useLoginActions() {
         relays: connectRelays,
       });
       await persistBunkerClientKey(login);
-      addLogin(login);
+      await addLogin(login);
     },
 
     /**

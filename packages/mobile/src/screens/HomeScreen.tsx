@@ -1027,18 +1027,20 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     gap: 6,
   },
+  // Inactive pills are white with dark text (matches the web/desktop tab bar
+  // in dark mode); the active pill keeps the purple fill.
   tab: {
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 16,
-    backgroundColor: '#333',
+    backgroundColor: '#fff',
   },
   tabActive: {
     backgroundColor: '#a855f7',
   },
   tabText: {
     fontSize: 13,
-    color: '#b3b3b3',
+    color: '#404040',
     fontWeight: '500',
   },
   tabTextActive: {
@@ -1046,9 +1048,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   tabAdd: {
-    backgroundColor: 'transparent',
+    backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: '#555',
+    borderColor: '#d1d5db',
     borderStyle: 'dashed',
   },
   tabAddText: {

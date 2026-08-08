@@ -13,7 +13,7 @@ import {
   __testables,
 } from './consolidateSound';
 
-const { buildOffsets, MAX_BURST_SECONDS, MAX_VOICES } = __testables;
+const { buildOffsets, MAX_BURST_SECONDS, MAX_VOICES, WAKE_LEAD_SECONDS } = __testables;
 
 describe('buildOffsets', () => {
   it('starts at zero and increases monotonically', () => {
@@ -122,7 +122,12 @@ describe('playConsolidateSound', () => {
     // Solitaire is one swoosh per 3 notes; each swoosh starts exactly one node.
     expect(started.length).toBeLessThanOrEqual(MAX_VOICES);
     expect(started.length).toBeGreaterThan(0);
-    expect(Math.max(...started)).toBeLessThanOrEqual(MAX_BURST_SECONDS + 1e-9);
+    // Two bounds: the cascade itself must fit the burst budget, AND the whole
+    // thing must start promptly — a cold output sink may shift the burst by at
+    // most one wake lead, never more. Dropping the absolute bound would let an
+    // arbitrarily large scheduling delay pass CI.
+    expect(Math.max(...started) - Math.min(...started)).toBeLessThanOrEqual(MAX_BURST_SECONDS + 1e-9);
+    expect(Math.max(...started)).toBeLessThanOrEqual(MAX_BURST_SECONDS + WAKE_LEAD_SECONDS + 1e-9);
   });
 
   it('does nothing when the style is off or there is nothing to consolidate', async () => {

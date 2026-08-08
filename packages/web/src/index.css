@@ -115,6 +115,25 @@
     display: none;
   }
 
+  /* Thin, visible horizontal scrollbar for the emoji strips. Styling
+     ::-webkit-scrollbar opts the element out of overlay scrollbars, so the
+     bar gets its own gutter below the content instead of painting over the
+     icons (the original problem scrollbar-hide was solving too bluntly). */
+  .scrollbar-thin-x {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.4) transparent;
+  }
+  .scrollbar-thin-x::-webkit-scrollbar {
+    height: 6px;
+  }
+  .scrollbar-thin-x::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin-x::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.4);
+    border-radius: 3px;
+  }
+
   @keyframes floatUp {
     0% {
       opacity: 0;

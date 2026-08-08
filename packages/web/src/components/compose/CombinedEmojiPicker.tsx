@@ -159,7 +159,7 @@ export function CombinedEmojiPicker({ onSelectEmoji, onSelectCustomEmoji, onOpen
 
       {/* Tabs: Corkboards Default | Favorites | Emoji categories | Custom sets */}
       {!search && (
-        <div ref={tabStripRef} className="flex border-b px-1 py-1 gap-0.5 overflow-x-auto scrollbar-hide shrink-0 [touch-action:pan-x]">
+        <div ref={tabStripRef} className="flex border-b px-1 py-1 gap-0.5 overflow-x-auto scrollbar-thin-x shrink-0 [touch-action:pan-x]">
           {/* Favorites */}
           {favorites.length > 0 && (
             <button

@@ -23,6 +23,8 @@
  * so the sounds themselves are identical.
  */
 
+import { isTauri } from '@/lib/tauri';
+
 /** No burst may span longer than this. Past ~1.5 s the cascade stops reading as
  *  feedback for the action and starts reading as a stuck sound. */
 const MAX_BURST_SECONDS = 1.5;
@@ -57,8 +59,30 @@ const MAX_SCHEDULING_LAG_MS = 2000;
  *  the desktop build over BT: half a second of truncated audio, or nothing at
  *  all, while the very same code was clean through the wired sink. Scheduling
  *  the first voice slightly in the future costs nothing audible and gives a
- *  slow sink time to actually be listening. */
-const WAKE_LEAD_SECONDS = 0.3;
+ *  slow sink time to actually be listening.
+ *
+ *  Was 0.3 s, which covered the common case but still lost the head of the
+ *  burst on slower BT sinks whose A2DP wake runs longer — the residual
+ *  "inconsistent over Bluetooth" report. 0.45 s is still well inside what
+ *  reads as immediate feedback. */
+const WAKE_LEAD_SECONDS = 0.45;
+
+/** How long after the last scheduled voice the output sink is assumed to still
+ *  be hot.
+ *
+ *  The wake lead used to be applied only when the AudioContext itself had to
+ *  be resumed. But SUSPEND_IDLE_GRACE_SECONDS keeps the context `running` for
+ *  30 s after a burst, and PipeWire suspends an idle Bluetooth sink much
+ *  sooner than that — so a burst arriving, say, 15 s after the previous one
+ *  found a running context, took the no-lead path, and played its head into
+ *  the sink's spin-up drop window anyway. That gap is why the sound stayed
+ *  inconsistent over BT after the 0.8.2 fix. PipeWire's default node suspend
+ *  is 5 s of idle; assume cold after 4 s to stay on the safe side.
+ *
+ *  Desktop (Tauri/WebKitGTK) only: that is where the drop was measured, and
+ *  padding every >4s-apart burst in ordinary browsers would trade a verified
+ *  desktop bug for a universal 0.45 s lag nobody reported. */
+const SINK_HOT_WINDOW_MS = 4000;
 
 /** How long the context stays running after the last voice before the
  *  idle-suspend kicks in.
@@ -172,6 +196,12 @@ async function readyContext(): Promise<{ c: AudioContext; wakeLead: number } | n
     // The context is running, but a Bluetooth sink woken by this resume is not
     // necessarily consuming yet — pad the schedule so the burst isn't dropped.
     wakeLead = WAKE_LEAD_SECONDS;
+  } else if (isTauri && Date.now() > lastAudioEndsAt + SINK_HOT_WINDOW_MS) {
+    // Context never suspended (idle grace), but the SINK may have: PipeWire
+    // suspends an idle BT node after ~5 s of silence, and samples scheduled
+    // into its spin-up are dropped, not buffered. Pad exactly as if we had
+    // resumed. Desktop-only — see SINK_HOT_WINDOW_MS.
+    wakeLead = WAKE_LEAD_SECONDS;
   }
   return c.state === 'running' ? { c, wakeLead } : null;
 }
@@ -251,6 +281,11 @@ const CHIME_SCALE = [523, 587, 659, 784, 880, 1047, 1175, 1319, 1568, 1760];
  *  second burst that would land on top of the first — back-to-back consolidates
  *  otherwise stack into a smear. */
 let burstEndsAt = 0;
+
+/** Wall-clock time (ms) the last scheduled audio (burst OR preview) rang out —
+ *  drives the sink-cold check in `readyContext`. Separate from `burstEndsAt`,
+ *  which is a throttle and deliberately ignores previews. */
+let lastAudioEndsAt = 0;
 
 /** Longest any single voice can ring for after its start offset (chime osc1 is
  *  0.35 s; a little slack so we never cut a tail off). */
@@ -336,7 +371,13 @@ export async function playConsolidateSound(
   }
 
   const span = wakeLead + (offsets[offsets.length - 1] ?? 0);
-  burstEndsAt = Date.now() + span * 1000;
+  // The overlap throttle deliberately EXCLUDES the wake lead: it exists to
+  // stop cascades stacking into a smear, and folding the lead in silently
+  // dropped a second short consolidate arriving within ~half a second of the
+  // first — a case that has always played. A burst that overlaps another's
+  // lead-in merely starts during its silence, which is not a smear.
+  burstEndsAt = Date.now() + (offsets[offsets.length - 1] ?? 0) * 1000;
+  lastAudioEndsAt = Date.now() + (span + VOICE_TAIL_SECONDS) * 1000;
   scheduleSuspend(span);
 }
 
@@ -354,6 +395,7 @@ export async function previewConsolidateSound(style: ConsolidateSoundStyle): Pro
     if (style === 'chimes') chime(c, t, scale[i]);
     else swoosh(c, t);
   }
+  lastAudioEndsAt = Date.now() + (wakeLead + gaps[gaps.length - 1] + VOICE_TAIL_SECONDS) * 1000;
   scheduleSuspend(wakeLead + gaps[gaps.length - 1]);
 }
 
@@ -363,7 +405,8 @@ export function __resetConsolidateSoundForTests(): void {
   suspendTimer = null;
   ctx = null;
   burstEndsAt = 0;
+  lastAudioEndsAt = 0;
 }
 
 /** Exposed for tests: the offset schedule is the part with real logic in it. */
-export const __testables = { buildOffsets, MAX_BURST_SECONDS, MAX_VOICES };
+export const __testables = { buildOffsets, MAX_BURST_SECONDS, MAX_VOICES, WAKE_LEAD_SECONDS };

@@ -2,6 +2,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { RotateCcw, Layers, Check, Image, ArrowUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { LIGHT_BTN } from '@/lib/buttonStyles';
 
 interface StatusBarProps {
   onLoadNewer: () => void;
@@ -274,7 +275,7 @@ export function StatusBar({
                 size="sm"
                 variant="outline"
                 onClick={() => onLoadMoreNotifications(25 * multiplier)}
-                className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors`}
                 title={`Load ${25 * multiplier} more notifications`}
               >
                 +{25 * multiplier}
@@ -283,7 +284,7 @@ export function StatusBar({
                 size="sm"
                 variant="outline"
                 onClick={() => onLoadMoreNotifications(100 * multiplier)}
-                className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors`}
                 title={`Load ${100 * multiplier} more notifications`}
               >
                 +{100 * multiplier}
@@ -295,7 +296,7 @@ export function StatusBar({
                 variant="outline"
                 onClick={onLoadNewerNotifications}
                 disabled={isLoading}
-                className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors gap-0.5"
+                className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors gap-0.5`}
                 title="Load newer notifications"
               >
                 <RotateCcw className={`h-3 w-3 ${isLoading ? 'animate-spin' : ''}`} />
@@ -308,7 +309,7 @@ export function StatusBar({
             variant="outline"
             onClick={() => handleCountClick(25)}
             disabled={isLoading || isSavedTab}
-            className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
             title={`Load ${25 * multiplier} more notes`}
           >
             +{25 * multiplier}
@@ -318,7 +319,7 @@ export function StatusBar({
             variant="outline"
             onClick={() => handleCountClick(100)}
             disabled={isLoading || isSavedTab}
-            className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
             title={`Load ${100 * multiplier} more notes`}
           >
             +{100 * multiplier}
@@ -329,7 +330,7 @@ export function StatusBar({
             variant="outline"
             onClick={onLoadNewer}
             disabled={isLoading || isSavedTab}
-            className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed gap-0.5"
+            className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors disabled:opacity-50 disabled:cursor-not-allowed gap-0.5`}
             title="Load all newer notes"
           >
             <RotateCcw className={`h-3 w-3 ${isLoading ? 'animate-spin' : ''}`} />
@@ -345,7 +346,7 @@ export function StatusBar({
             className={`h-5 px-2 text-xs transition-colors gap-0.5 ${
               autofetch
                 ? 'bg-green-600 hover:bg-green-700 text-white border-green-600'
-                : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                : LIGHT_BTN
             }`}
             title={`Autofetch newer notes every ${autofetchIntervalSecs}s`}
           >
@@ -359,7 +360,7 @@ export function StatusBar({
             className={`h-5 px-1.5 text-[10px] transition-colors gap-0.5 ${
               autoConsolidate
                 ? 'bg-green-600 hover:bg-green-700 text-white border-green-600'
-                : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                : LIGHT_BTN
             }`}
             title="Auto-consolidate blank spaces when new notes arrive (autofetch or manual)"
           >
@@ -373,7 +374,7 @@ export function StatusBar({
             className={`h-5 px-1.5 text-[10px] transition-colors gap-0.5 ${
               autoScrollTop
                 ? 'bg-green-600 hover:bg-green-700 text-white border-green-600'
-                : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                : LIGHT_BTN
             }`}
             title="Scroll to top when new notes arrive"
           >
@@ -387,7 +388,7 @@ export function StatusBar({
             className={`h-5 px-2 text-xs transition-colors gap-0.5 ${
               loadAllMedia
                 ? 'bg-blue-600 hover:bg-blue-700 text-white border-blue-600'
-                : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                : LIGHT_BTN
             }`}
             title={loadAllMedia ? "Loading all images & video thumbnails" : "Only loading media for top row — click to load all"}
           >
@@ -400,17 +401,17 @@ export function StatusBar({
             variant="outline"
             onClick={onConsolidate}
             disabled={blankSpaceCount === 0 || isLoading || isSavedTab}
-            className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed gap-1"
+            className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors disabled:opacity-50 disabled:cursor-not-allowed gap-1`}
             title={`Consolidate blank spaces${blankSpaceCount > 0 ? ` (${blankSpaceCount})` : ''}`}
           >
             <Layers className="h-3 w-3" />
             Consolidate{blankSpaceCount > 0 ? ` (${blankSpaceCount})` : ''}
           </Button>
           {columnCount !== undefined && onColumnCountChange && (
-            <div className={`flex items-center gap-0.5 bg-accent rounded px-0.5 transition-opacity ${isColumnPending ? 'opacity-50' : ''}`}>
-              <Button variant="ghost" size="sm" onClick={() => onColumnCountChange(Math.max(1, columnCount - 1))} disabled={columnCount <= 1} className="h-5 w-5 p-0 text-xs">-</Button>
-              <span className="text-[10px] font-medium px-0.5">{columnCount}col</span>
-              <Button variant="ghost" size="sm" onClick={() => onColumnCountChange(Math.min(9, columnCount + 1))} disabled={columnCount >= 9} className="h-5 w-5 p-0 text-xs">+</Button>
+            <div className={`flex items-center gap-0.5 bg-white border border-gray-300 rounded px-0.5 transition-opacity ${isColumnPending ? 'opacity-50' : ''}`}>
+              <Button variant="ghost" size="sm" onClick={() => onColumnCountChange(Math.max(1, columnCount - 1))} disabled={columnCount <= 1} className="h-5 w-5 p-0 text-xs text-gray-700 hover:bg-gray-100 hover:text-gray-700">-</Button>
+              <span className="text-[10px] font-medium px-0.5 text-gray-700">{columnCount}col</span>
+              <Button variant="ghost" size="sm" onClick={() => onColumnCountChange(Math.min(9, columnCount + 1))} disabled={columnCount >= 9} className="h-5 w-5 p-0 text-xs text-gray-700 hover:bg-gray-100 hover:text-gray-700">+</Button>
             </div>
           )}
         </div>
@@ -470,7 +471,7 @@ export function StatusBar({
                   size="sm"
                   variant="outline"
                   onClick={() => onLoadMoreNotifications(25 * multiplier)}
-                  className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                  className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors`}
                   title={`Load ${25 * multiplier} more notifications`}
                 >
                   +{25 * multiplier}
@@ -479,7 +480,7 @@ export function StatusBar({
                   size="sm"
                   variant="outline"
                   onClick={() => onLoadMoreNotifications(100 * multiplier)}
-                  className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                  className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors`}
                   title={`Load ${100 * multiplier} more notifications`}
                 >
                   +{100 * multiplier}
@@ -491,7 +492,7 @@ export function StatusBar({
                   variant="outline"
                   onClick={onLoadNewerNotifications}
                   disabled={isLoading}
-                  className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors gap-0.5"
+                  className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors gap-0.5`}
                   title="Load newer notifications"
                 >
                   <RotateCcw className={`h-3 w-3 ${isLoading ? 'animate-spin' : ''}`} />
@@ -504,7 +505,7 @@ export function StatusBar({
               variant="outline"
               onClick={() => handleCountClick(25)}
               disabled={isLoading || isSavedTab}
-              className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
               title={`Load ${25 * multiplier} more notes`}
             >
               +{25 * multiplier}
@@ -514,7 +515,7 @@ export function StatusBar({
               variant="outline"
               onClick={() => handleCountClick(100)}
               disabled={isLoading || isSavedTab}
-              className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
               title={`Load ${100 * multiplier} more notes`}
             >
               +{100 * multiplier}
@@ -525,7 +526,7 @@ export function StatusBar({
               variant="outline"
               onClick={onLoadNewer}
               disabled={isLoading || isSavedTab}
-              className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed gap-0.5"
+              className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors disabled:opacity-50 disabled:cursor-not-allowed gap-0.5`}
               title="Load all newer notes"
             >
               <RotateCcw className={`h-3 w-3 ${isLoading ? 'animate-spin' : ''}`} />
@@ -536,9 +537,9 @@ export function StatusBar({
           </div>
           {columnCount !== undefined && onColumnCountChange && (
             <div className={`flex items-center gap-0 transition-opacity ${isColumnPending ? 'opacity-50' : ''}`}>
-              <Button variant="outline" size="sm" onClick={() => onColumnCountChange(Math.max(1, columnCount - 1))} disabled={columnCount <= 1} className="h-5 w-5 p-0 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 rounded-r-none">-</Button>
-              <span className="h-5 px-1 text-[10px] font-medium border-y border-gray-300 flex items-center text-gray-700">{columnCount}col</span>
-              <Button variant="outline" size="sm" onClick={() => onColumnCountChange(Math.min(9, columnCount + 1))} disabled={columnCount >= 9} className="h-5 w-5 p-0 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 rounded-l-none">+</Button>
+              <Button variant="outline" size="sm" onClick={() => onColumnCountChange(Math.max(1, columnCount - 1))} disabled={columnCount <= 1} className={`h-5 w-5 p-0 text-xs ${LIGHT_BTN} rounded-r-none`}>-</Button>
+              <span className="h-5 px-1 text-[10px] font-medium border-y border-gray-300 bg-white flex items-center text-gray-700">{columnCount}col</span>
+              <Button variant="outline" size="sm" onClick={() => onColumnCountChange(Math.min(9, columnCount + 1))} disabled={columnCount >= 9} className={`h-5 w-5 p-0 text-xs ${LIGHT_BTN} rounded-l-none`}>+</Button>
             </div>
           )}
 
@@ -585,7 +586,7 @@ export function StatusBar({
               className={`h-5 px-2 text-xs transition-colors gap-0.5 ${
                 autofetch
                   ? 'bg-green-600 hover:bg-green-700 text-white border-green-600'
-                  : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                  : LIGHT_BTN
               }`}
               title={`Autofetch newer notes every ${autofetchIntervalSecs}s`}
             >
@@ -599,7 +600,7 @@ export function StatusBar({
               className={`h-5 px-1.5 text-[10px] transition-colors gap-0.5 ${
                 autoConsolidate
                   ? 'bg-green-600 hover:bg-green-700 text-white border-green-600'
-                  : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                  : LIGHT_BTN
               }`}
               title="Auto-consolidate blank spaces when new notes arrive (autofetch or manual)"
             >
@@ -613,7 +614,7 @@ export function StatusBar({
               className={`h-5 px-1.5 text-[10px] transition-colors gap-0.5 ${
                 autoScrollTop
                   ? 'bg-green-600 hover:bg-green-700 text-white border-green-600'
-                  : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                  : LIGHT_BTN
               }`}
               title="Scroll to top when new notes arrive"
             >
@@ -627,7 +628,7 @@ export function StatusBar({
               className={`h-5 px-2 text-xs transition-colors gap-0.5 ${
                 loadAllMedia
                   ? 'bg-blue-600 hover:bg-blue-700 text-white border-blue-600'
-                  : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                  : LIGHT_BTN
               }`}
               title={loadAllMedia ? "Loading all media" : "Load all media"}
             >
@@ -640,7 +641,7 @@ export function StatusBar({
               variant="outline"
               onClick={onConsolidate}
               disabled={blankSpaceCount === 0 || isLoading || isSavedTab}
-              className="h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed gap-1"
+              className={`h-5 px-2 text-xs ${LIGHT_BTN} transition-colors disabled:opacity-50 disabled:cursor-not-allowed gap-1`}
               title={`Consolidate blank spaces${blankSpaceCount > 0 ? ` (${blankSpaceCount})` : ''}`}
             >
               <Layers className="h-3 w-3" />

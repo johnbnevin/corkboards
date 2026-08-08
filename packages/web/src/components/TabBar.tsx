@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { genUserName } from '@/lib/genUserName';
 import { optimizeAvatarUrl } from '@/lib/imageUtils';
+import { LIGHT_BTN, TAB_TRIGGER_CLS } from '@/lib/buttonStyles';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -503,7 +504,7 @@ export function TabBar({
                   {/* New corkboard button */}
                   <button
                     onClick={() => setShowAddFriendDialog(true)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-medium whitespace-nowrap border border-dashed border-muted-foreground/30 text-muted-foreground hover:border-purple-400 hover:text-purple-500 transition-colors shrink-0"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-medium whitespace-nowrap border border-dashed border-gray-300 bg-white text-gray-600 hover:border-purple-400 hover:text-purple-500 transition-colors shrink-0"
                   >
                     <PlusIcon className="h-3.5 w-3.5" />
                     New
@@ -568,13 +569,13 @@ export function TabBar({
         }}>
           <TabsList className="flex space-x-1 p-0 h-auto bg-transparent">
             {!isOnboarding && (
-              <TabsTrigger value="me" className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600">
+              <TabsTrigger value="me" className={TAB_TRIGGER_CLS}>
                 <UserIcon className="h-3 w-3" />
                 <span>Me</span>
               </TabsTrigger>
             )}
             {!isOnboarding && userPubkey && (
-              <TabsTrigger value="notifications" className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600">
+              <TabsTrigger value="notifications" className={TAB_TRIGGER_CLS}>
                 <Bell className="h-3 w-3 text-purple-500" />
                 <span>Notifications</span>
                 {newNotificationCount > 0 && (
@@ -585,20 +586,20 @@ export function TabBar({
               </TabsTrigger>
             )}
             {!isOnboarding && (userPubkey || activeTab === 'all-follows') && (
-              <TabsTrigger value="all-follows" className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600">
+              <TabsTrigger value="all-follows" className={TAB_TRIGGER_CLS}>
                 <Users className="h-3 w-3 text-purple-500" />
                 <span>All Follows</span>
               </TabsTrigger>
             )}
             {(userPubkey || activeTab === 'discover') && (
-              <TabsTrigger value="discover" className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600">
+              <TabsTrigger value="discover" className={TAB_TRIGGER_CLS}>
                 <Compass className="h-3 w-3 text-amber-500" />
                 <span>Discover</span>
               </TabsTrigger>
             )}
             {!isOnboarding && (
               <>
-                <TabsTrigger value="saved" className="group/saved flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600">
+                <TabsTrigger value="saved" className={`group/saved ${TAB_TRIGGER_CLS}`}>
                   <Save className="h-3 w-3 text-green-500 group-data-[state=active]/saved:text-white" />
                   <span>Saved</span>
                   {collapsedCount > 0 && (
@@ -615,7 +616,7 @@ export function TabBar({
               <Button
                 variant="outline"
                 size="sm"
-                className="ml-1 h-5 px-2 text-xs border-gray-300 text-gray-700 hover:bg-gray-50 gap-1"
+                className={`ml-1 h-5 px-2 text-xs ${LIGHT_BTN} gap-1`}
                 onClick={() => { setEditingFeedId(null); setFeedTitle(''); setFeedPubkeys(new Set()); setFeedRelays(''); setFeedRssUrls(new Set()); setShowAddFriendDialog(true); }}
               >
                 <PlusIcon className="h-3 w-3" />
@@ -629,7 +630,7 @@ export function TabBar({
               <TabsTrigger
                 key={`feed:${feed.id}`}
                 value={`feed:${feed.id}`}
-                className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600"
+                className={TAB_TRIGGER_CLS}
                 draggable
                 onDragStart={(e) => { e.dataTransfer.setData('text/plain', String(index)); e.dataTransfer.setData('drag-group', 'corkboards'); e.dataTransfer.effectAllowed = 'move'; }}
                 onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
@@ -657,7 +658,7 @@ export function TabBar({
                 <TabsTrigger
                   key={relayUrl}
                   value={relayUrl}
-                  className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600"
+                  className={TAB_TRIGGER_CLS}
                   draggable
                   onDragStart={(e) => { e.dataTransfer.setData('text/plain', String(index)); e.dataTransfer.setData('drag-group', 'relays'); e.dataTransfer.effectAllowed = 'move'; }}
                   onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
@@ -685,7 +686,7 @@ export function TabBar({
                 <TabsTrigger
                   key={`rss:${feedUrl}`}
                   value={`rss:${feedUrl}`}
-                  className="flex items-center gap-1 h-5 px-2 text-xs border border-gray-300 text-gray-700 rounded-md data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:border-purple-600"
+                  className={TAB_TRIGGER_CLS}
                   draggable
                   onDragStart={(e) => { e.dataTransfer.setData('text/plain', String(index)); e.dataTransfer.setData('drag-group', 'rss'); e.dataTransfer.effectAllowed = 'move'; }}
                   onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
@@ -824,7 +825,7 @@ function MobilePill({
     <button
       onClick={onClick}
       className={`inline-flex items-center gap-1 h-5 px-2 rounded-md text-xs font-medium whitespace-nowrap transition-colors shrink-0 border ${
-        active ? activeClass : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+        active ? activeClass : LIGHT_BTN
       }`}
     >
       {children}

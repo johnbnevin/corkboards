@@ -48,8 +48,11 @@ export function useLoggedInAccounts() {
     return { metadata: {}, ...author, id: login.id, pubkey: login.pubkey };
   })();
 
-  // Other users are all logins except the current one
-  const otherUsers = (authors || []).slice(1) as Account[];
+  // Other users are all logins except the current one. Match by id — the
+  // authors array is a react-query result whose ORDER can lag the login list
+  // (stale cache while the fresh query is in flight), so slice(1) could show
+  // the current account as "other" and hide a real one.
+  const otherUsers = (authors || []).filter((a) => a.id !== logins[0]?.id) as Account[];
 
   // Wrap removeLogin so removing an nsec account also deletes its stored key
   // material (OS keychain on Tauri, encrypted IndexedDB entry on web). The
@@ -69,7 +72,15 @@ export function useLoggedInAccounts() {
   // same safety the logout path has (switchActiveUser already stashes local
   // data per-pubkey, so this only guards the last edits reaching the cloud).
   const setLogin = useCallback(async (loginId: string) => {
-    const oldPubkey = currentUser?.pubkey ?? getActiveUserPubkey();
+    // The active-user marker — NOT React state — is the authority on who we
+    // are switching FROM. The logout flow removes the departing login and then
+    // calls this through a closure captured BEFORE the removal, so
+    // currentUser?.pubkey could still name the departed account here; passing
+    // it to switchActiveUser re-stashed that account with its live keys
+    // already cleared, which DELETED the authoritative stash logoutAccount had
+    // just written. After a logout the marker is null, and switchActiveUser
+    // correctly skips the stash step entirely.
+    const oldPubkey = getActiveUserPubkey();
     const newLogin = logins.find(l => l.id === loginId);
     const isSwitch = !!newLogin && oldPubkey !== newLogin.pubkey;
     if (isSwitch) {
@@ -79,9 +90,33 @@ export function useLoggedInAccounts() {
     rawSetLogin(loginId);
     // Reload to ensure all React state picks up the new localStorage values
     if (isSwitch) {
-      window.location.reload();
+      // The provider persists the login order from a useEffect, and reloading
+      // synchronously here could beat that write — the reorder then never
+      // reached localStorage['corkboard:login'], so the app came back up on
+      // the OLD account while the per-user storage was already swapped to the
+      // new one (the mixed-identity state that looked like a double logout).
+      //
+      // Wait for the provider's OWN write rather than serializing the list
+      // here: a manual write both hard-codes @nostrify's storage format and
+      // resurrects just-removed logins (this closure's `logins` predates the
+      // logout flow's removeLogin). Poll until the persisted head matches the
+      // chosen login, with a bounded fallback so a wedged effect can't block
+      // the switch forever.
+      const deadline = Date.now() + 1000;
+      const reloadWhenPersisted = () => {
+        try {
+          const raw = localStorage.getItem('corkboard:login');
+          const head = raw ? (JSON.parse(raw) as Array<{ id?: string }>)[0]?.id : undefined;
+          if (head !== loginId && Date.now() < deadline) {
+            setTimeout(reloadWhenPersisted, 25);
+            return;
+          }
+        } catch { /* unreadable — reload now, no worse than before */ }
+        window.location.reload();
+      };
+      reloadWhenPersisted();
     }
-  }, [currentUser?.pubkey, logins, rawSetLogin]);
+  }, [logins, rawSetLogin]);
 
   return {
     logins,

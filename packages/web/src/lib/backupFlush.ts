@@ -20,12 +20,30 @@ export function registerBackupFlush(fn: FlushFn | null): void {
   flushFn = fn;
 }
 
+/** Upper bound on the pre-switch flush.
+ *
+ *  The flush encrypts with the DEPARTING account's signer, and for a NIP-46
+ *  account that is a remote round trip needing its own approval. During an
+ *  Amber add-account on Android the app has just been backgrounded by the
+ *  signer app and its relay sockets may be dead — awaiting the flush
+ *  unbounded left the login stuck on "opening amber, approve the connection…"
+ *  forever. A missed cloud flush only delays the backup (the local per-user
+ *  stash is untouched and the next autosave retries); a wedged login loses
+ *  the user. */
+const FLUSH_TIMEOUT_MS = 15_000;
+
 /** Await the registered backup flush (best-effort — never blocks a switch). */
 export async function flushBackupBeforeSwitch(): Promise<void> {
   if (!flushFn) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await flushFn();
+    await Promise.race([
+      flushFn(),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, FLUSH_TIMEOUT_MS); }),
+    ]);
   } catch {
     /* best-effort: a failed/absent backup must never block account switching */
+  } finally {
+    clearTimeout(timer);
   }
 }

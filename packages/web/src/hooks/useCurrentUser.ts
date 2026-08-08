@@ -7,6 +7,7 @@ import { useAuthor } from './useAuthor.ts';
 import { isTauri } from '@/lib/tauri';
 import { createTauriNsecSigner } from '@/lib/tauriSigner';
 import { createWebNsecSigner } from '@/lib/webNsecSigner';
+import { createLazyBunkerUser } from '@/lib/bunkerUser';
 import { peekSecret, bunkerClientSecretId } from '@/lib/webKeyStore';
 
 /**
@@ -85,7 +86,12 @@ function buildUser(login: NLoginType, nostr: NPool): NUser {
       if (!bunkerData?.clientNsec) {
         const clientNsec = peekSecret(bunkerClientSecretId(login.pubkey));
         if (!clientNsec) {
-          throw new Error('Bunker client key unavailable — please reconnect your remote signer');
+          // Cache not warm yet — main.tsx only bounded-waits for
+          // prepareLoginStorage, and on a slow IndexedDB (WebKitGTK) the app
+          // mounts first. Throwing here skipped every bunker login and booted
+          // a validly-logged-in user to the login screen; hand back a lazy
+          // user that resolves the key on first signer use instead.
+          return createLazyBunkerUser(login, nostr);
         }
         return NUser.fromBunkerLogin(
           { ...login, data: { ...login.data, clientNsec } } as typeof login,

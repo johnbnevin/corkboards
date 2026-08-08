@@ -71,7 +71,7 @@ export const ContentFilters = memo(function ContentFilters({
               value={config.hideMinChars}
               onChange={e => onChange('hideMinChars', Math.max(0, Number(e.target.value)))}
               placeholder="0"
-              className="h-8 w-16 px-2 border rounded text-xs text-center"
+              className="h-8 w-16 px-2 border rounded text-xs text-center bg-background text-foreground"
             />
             <span className="text-xs text-muted-foreground">or fewer characters</span>
           </div>
